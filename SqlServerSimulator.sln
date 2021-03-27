@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.31112.23
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlServerSimulator", "SqlServerSimulator\SqlServerSimulator.csproj", "{CF5684B4-08DF-4CD3-8342-5B627155B40A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests", "SqlServerSimulator.Tests\SqlServerSimulator.Tests.csproj", "{25DCB2FC-636F-4442-9662-894F2CA075A0}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{527F1E6C-BCEE-442F-96C4-B0ED5E47B5EE}"
+	ProjectSection(SolutionItems) = preProject
+		.editorconfig = .editorconfig
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CF5684B4-08DF-4CD3-8342-5B627155B40A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CF5684B4-08DF-4CD3-8342-5B627155B40A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CF5684B4-08DF-4CD3-8342-5B627155B40A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CF5684B4-08DF-4CD3-8342-5B627155B40A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{25DCB2FC-636F-4442-9662-894F2CA075A0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{25DCB2FC-636F-4442-9662-894F2CA075A0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{25DCB2FC-636F-4442-9662-894F2CA075A0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{25DCB2FC-636F-4442-9662-894F2CA075A0}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {7D515F78-501F-4281-B045-D91206221FA8}
+	EndGlobalSection
+EndGlobal
