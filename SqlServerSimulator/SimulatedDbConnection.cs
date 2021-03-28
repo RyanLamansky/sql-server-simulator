@@ -7,7 +7,6 @@ namespace SqlServerSimulator
     sealed class SimulatedDbConnection : DbConnection
     {
         internal readonly Simulation simulation;
-        internal readonly bool quotedIdentifier;
 
         public SimulatedDbConnection(Simulation simulation)
         {

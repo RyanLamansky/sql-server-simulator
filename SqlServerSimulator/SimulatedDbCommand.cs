@@ -8,7 +8,7 @@ namespace SqlServerSimulator
     {
         internal Simulation simulation;
         internal SimulatedDbConnection connection;
-        internal SimulatedDbTransaction transaction;
+        internal SimulatedDbTransaction? transaction;
 
         public SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
         {
@@ -23,7 +23,7 @@ namespace SqlServerSimulator
             this.transaction = transaction;
         }
 
-        public override string CommandText { get; set; }
+        public override string? CommandText { get; set; }
         public override int CommandTimeout { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
         public override CommandType CommandType { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
         public override bool DesignTimeVisible { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
@@ -32,7 +32,7 @@ namespace SqlServerSimulator
 
         protected override DbParameterCollection DbParameterCollection { get; } = new SimulatedDbParameterCollection();
 
-        protected override DbTransaction DbTransaction
+        protected override DbTransaction? DbTransaction
         {
             get => this.transaction;
             set 
