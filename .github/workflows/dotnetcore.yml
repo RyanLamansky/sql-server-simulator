@@ -1,0 +1,28 @@
+name: Build and Test
+
+on: [push, pull_request]
+
+jobs:
+  Build_and_Test:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Setup .NET Core 3.1
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 3.1.x
+    - name: Setup .NET 5
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 5.0.x
+    - name: Install dependencies
+      run: dotnet restore
+    # Debug and Release mighht be different due to conditional compilation, so validate both.
+    - name: Build (Debug)
+      run: dotnet build --configuration Debug --no-restore
+    - name: Build (Release)
+      run: dotnet build --configuration Release --no-restore
+    - name: Test (Release)
+      run: dotnet test --configuration Release --no-build --verbosity normal
