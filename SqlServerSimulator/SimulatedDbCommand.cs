@@ -83,7 +83,7 @@ namespace SqlServerSimulator
 
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
-            return new SimulatedDbDataReader();
+            return new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this));
         }
     }
 }

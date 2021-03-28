@@ -1,11 +1,24 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 
 namespace SqlServerSimulator
 {
-    class SimulatedDbDataReader : DbDataReader
+    sealed class SimulatedDbDataReader : DbDataReader
     {
+        internal readonly Simulation simulation;
+        internal readonly IEnumerator<SimulatedResultSet> results;
+        internal IEnumerator<object[]> records;
+
+        public SimulatedDbDataReader(Simulation simulation, IEnumerable<SimulatedResultSet> results)
+        {
+            this.simulation = simulation;
+            this.results = results.GetEnumerator();
+            this.records = (this.results.MoveNext() ? this.results.Current.records : Enumerable.Empty<object[]>()).GetEnumerator();
+        }
+
         public override object this[int ordinal] => throw new NotImplementedException();
 
         public override object this[string name] => throw new NotImplementedException();
@@ -18,7 +31,7 @@ namespace SqlServerSimulator
 
         public override bool IsClosed => throw new NotImplementedException();
 
-        public override int RecordsAffected => 1;
+        public override int RecordsAffected => throw new NotImplementedException();
 
         public override bool GetBoolean(int ordinal)
         {
@@ -92,7 +105,7 @@ namespace SqlServerSimulator
 
         public override int GetInt32(int ordinal)
         {
-            return 5;
+            throw new NotImplementedException();
         }
 
         public override long GetInt64(int ordinal)
@@ -132,20 +145,20 @@ namespace SqlServerSimulator
 
         public override bool NextResult()
         {
-            throw new NotImplementedException();
+            var hasNext = this.results.MoveNext();
+
+            this.records = this.results.Current.GetEnumerator();
+
+            return hasNext;
         }
 
-        bool read;
+        public override bool Read() => this.records.MoveNext();
 
-        public override bool Read()
+        protected override void Dispose(bool disposing)
         {
-            if (!read)
-            {
-                read = true;
-                return true;
-            }
+            base.Dispose(disposing);
 
-            return false;
+            this.results.Dispose();
         }
     }
 }

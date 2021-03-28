@@ -23,6 +23,7 @@ namespace SqlServerSimulator.EFCore
         }
 
         [TestMethod]
+        [Ignore("Requires basic command text parsing.")]
         public void InsertAndRetrieveRowSync()
         {
             using var context = new TestContext();
