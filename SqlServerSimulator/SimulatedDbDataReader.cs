@@ -123,10 +123,7 @@ namespace SqlServerSimulator
             throw new NotImplementedException();
         }
 
-        public override string GetString(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+        public override string GetString(int ordinal) => (string)records.Current[ordinal];
 
         public override object GetValue(int ordinal)
         {
