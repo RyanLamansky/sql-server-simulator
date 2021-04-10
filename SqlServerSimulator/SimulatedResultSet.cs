@@ -8,7 +8,12 @@ namespace SqlServerSimulator
         internal readonly IEnumerable<object[]> records;
         internal readonly Dictionary<string, int> columnIndexes;
 
-        public SimulatedResultSet(IEnumerable<object[]> records, Dictionary<string, int> columnIndexes)
+        public SimulatedResultSet(Dictionary<string, int> columnIndexes, params object[][] records)
+            : this(columnIndexes, (IEnumerable<object[]>)records)
+        {
+        }
+
+        public SimulatedResultSet(Dictionary<string, int> columnIndexes, IEnumerable<object[]> records)
         {
             this.records = records;
             this.columnIndexes = columnIndexes;

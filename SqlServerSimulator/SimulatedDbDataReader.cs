@@ -115,6 +115,9 @@ namespace SqlServerSimulator
 
         public override string GetName(int ordinal)
         {
+            if (ordinal >= this.FieldCount)
+                throw new IndexOutOfRangeException();
+
             throw new NotImplementedException();
         }
 

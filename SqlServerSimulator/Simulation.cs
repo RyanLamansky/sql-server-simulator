@@ -4,6 +4,9 @@ using System.Data.Common;
 
 namespace SqlServerSimulator
 {
+    using Parser;
+    using Parser.Tokens;
+
     /// <summary>
     /// Defines and controls the simulated scenario.
     /// </summary>
@@ -34,38 +37,106 @@ namespace SqlServerSimulator
 
             IEnumerable<SimulatedResultSet> ProduceResultSets()
             {
-                var selectVersion = false;
-                using (var enumerator = command.CommandText.GetEnumerator())
-                {
-#if DEBUG
-                    var tokens = new List<Parser.Token>();
-#endif
-                    foreach (var token in Parser.Tokenizer.Tokenize(enumerator))
-                    {
-#if DEBUG
-                        tokens.Add(token);
-#endif
+                using var enumerator = command.CommandText.GetEnumerator();
+                using var tokens = Tokenizer.Tokenize(enumerator).GetEnumerator();
 
-                        if (token is Parser.Tokens.Comment)
+                while (tokens.TryMoveNext(out var token))
+                {
+                    switch (token)
+                    {
+                        case Comment:
                             continue;
 
-                        if (token is Parser.Tokens.UnquotedString unquotedString)
-                        {
-                            if (unquotedString.value != "SELECT")
-                                throw new NotSupportedException($"Simulated command processor doesn't know what to do with {unquotedString}.");
-                        }
-                        else if (token is Parser.Tokens.DoubleAtPrefixedString doubleAtPrefixedString)
-                        {
-                            if (doubleAtPrefixedString.value != "VERSION")
-                                throw new NotSupportedException($"Simulated command processor doesn't know what to do with {doubleAtPrefixedString}.");
+                        case StatementTerminator:
+                            continue;
 
-                            selectVersion = true;
-                        }
+                        case UnquotedString unquotedString:
+                            switch (unquotedString.value)
+                            {
+                                case "SET":
+                                    switch (token = tokens.RequireNext())
+                                    {
+                                        case UnquotedString setTarget:
+                                            switch (setTarget.value)
+                                            {
+                                                case "NOCOUNT":
+                                                    switch (token = tokens.RequireNext())
+                                                    {
+                                                        case UnquotedString noCountMode:
+                                                            switch (noCountMode.value)
+                                                            {
+                                                                case "ON":
+                                                                case "OFF":
+                                                                    continue;
+                                                            }
+                                                            break;
+                                                    }
+                                                    break;
+                                            }
+                                            break;
+                                    }
+                                    break;
+
+                                case "SELECT":
+                                    switch (token = tokens.RequireNext())
+                                    {
+                                        case DoubleAtPrefixedString selected:
+                                            switch (selected.value)
+                                            {
+                                                case "VERSION":
+                                                    if (tokens.TryMoveNext(out token))
+                                                        break;
+
+                                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), new object[] { this.Version });
+                                                    continue;
+                                            }
+                                            break;
+                                    }
+                                    break;
+
+                                case "INSERT":
+                                    if ((token = tokens.RequireNext()) is UnquotedString maybeInto && maybeInto.value == "INTO")
+                                        token = tokens.RequireNext();
+
+                                    switch (token)
+                                    {
+                                        case StringToken destinationTable:
+                                            if ((token = tokens.RequireNext()) is not OpenParentheses)
+                                                break;
+
+                                            var destinationColumns = new List<string>();
+                                            while ((token = tokens.RequireNext()) is StringToken column)
+                                            {
+                                                destinationColumns.Add(column.value);
+                                            }
+
+                                            if (token is not CloseParentheses)
+                                                break;
+
+                                            if ((token = tokens.RequireNext()) is not UnquotedString expectValues || expectValues.value != "VALUES")
+                                                break;
+
+                                            if ((token = tokens.RequireNext()) is not OpenParentheses)
+                                                break;
+
+                                            var sourceValues = new List<string>();
+                                            while ((token = tokens.RequireNext()) is StringToken column)
+                                            {
+                                                sourceValues.Add(column.value);
+                                            }
+
+                                            if (token is not CloseParentheses)
+                                                break;
+                                            continue;
+                                    }
+
+                                    break;
+                            }
+                            break;
                     }
-                }
 
-                if (selectVersion)
-                    yield return new SimulatedResultSet(new object[][] { new object[] { this.Version } }, new Dictionary<string, int>());
+                    throw new NotSupportedException($"Simulated command processor doesn't know what to do with {token}.");
+                }
             }
 
             return ProduceResultSets();

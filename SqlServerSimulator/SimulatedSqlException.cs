@@ -8,7 +8,7 @@ namespace SqlServerSimulator
     public sealed class SimulatedSqlException : Exception
     {
         internal SimulatedSqlException(string? message)
-            : base(message)
+            : base(message ?? "Simulated exception with no message.")
         {
         }
     }
