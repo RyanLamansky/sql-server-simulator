@@ -19,13 +19,15 @@ namespace SqlServerSimulator.Parser
             DoubleAtPrefixedString,
         }
 
-        public static IEnumerable<Token> Tokenize(CharEnumerator commandEnumerator)
+        public static IEnumerable<Token> Tokenize(string command)
         {
+            using var commandEnumerator = command.GetEnumerator();
+
             var state = State.None;
             var index = -1;
             var buffer = new StringBuilder();
 
-            while (commandEnumerator.TryGetNext(out char c, ref index))
+            while (commandEnumerator.TryGetNext(out var c, ref index))
             {
                 switch (c)
                 {

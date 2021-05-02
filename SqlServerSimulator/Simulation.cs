@@ -20,7 +20,7 @@ namespace SqlServerSimulator
         }
 
         /// <summary>
-        /// The value for the `@@VERSION` system-defined value.
+        /// The value for the `@@VERSION` system-defined value, defaults to "SQL Server Simulator".
         /// </summary>
         public string Version { get; set; } = "SQL Server Simulator";
 
@@ -37,8 +37,7 @@ namespace SqlServerSimulator
 
             IEnumerable<SimulatedResultSet> ProduceResultSets()
             {
-                using var enumerator = command.CommandText.GetEnumerator();
-                using var tokens = Tokenizer.Tokenize(enumerator).GetEnumerator();
+                using var tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
 
                 while (tokens.TryMoveNext(out var token))
                 {
@@ -51,22 +50,22 @@ namespace SqlServerSimulator
                             continue;
 
                         case UnquotedString unquotedString:
-                            switch (unquotedString.value)
+                            switch (unquotedString.Parse())
                             {
-                                case "SET":
+                                case Keyword.Set:
                                     switch (token = tokens.RequireNext())
                                     {
                                         case UnquotedString setTarget:
-                                            switch (setTarget.value)
+                                            switch (setTarget.Parse())
                                             {
-                                                case "NOCOUNT":
+                                                case Keyword.NoCount:
                                                     switch (token = tokens.RequireNext())
                                                     {
                                                         case UnquotedString noCountMode:
-                                                            switch (noCountMode.value)
+                                                            switch (noCountMode.Parse())
                                                             {
-                                                                case "ON":
-                                                                case "OFF":
+                                                                case Keyword.On:
+                                                                case Keyword.Off:
                                                                     continue;
                                                             }
                                                             break;
@@ -77,7 +76,7 @@ namespace SqlServerSimulator
                                     }
                                     break;
 
-                                case "SELECT":
+                                case Keyword.Select:
                                     switch (token = tokens.RequireNext())
                                     {
                                         case DoubleAtPrefixedString selected:
@@ -94,7 +93,7 @@ namespace SqlServerSimulator
                                     }
                                     break;
 
-                                case "INSERT":
+                                case Keyword.Insert:
                                     if ((token = tokens.RequireNext()) is UnquotedString maybeInto && maybeInto.value == "INTO")
                                         token = tokens.RequireNext();
 
