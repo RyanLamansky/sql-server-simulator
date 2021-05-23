@@ -6,6 +6,7 @@ namespace SqlServerSimulator
 {
     using Parser;
     using Parser.Tokens;
+    using Schema;
 
     /// <summary>
     /// Defines and controls the simulated scenario.
@@ -71,6 +72,42 @@ namespace SqlServerSimulator
                                                             break;
                                                     }
                                                     break;
+                                            }
+                                            break;
+                                    }
+                                    break;
+
+                                case Keyword.Create:
+                                    switch (token = tokens.RequireNext())
+                                    {
+                                        case UnquotedString whatToCreate:
+                                            switch (whatToCreate.Parse())
+                                            {
+                                                case Keyword.Table:
+                                                    if (tokens.RequireNext() is not Name tableName)
+                                                        break;
+
+                                                    if ((token = tokens.RequireNext()) is not OpenParentheses)
+                                                        break;
+
+                                                    var table = new Table(tableName.value);
+
+                                                    var columns = table.Columns;
+                                                    do
+                                                    {
+                                                        if (tokens.RequireNext() is not Name columnName)
+                                                            throw new SimulatedSqlException("Simulated table creation requires named columns.");
+
+                                                        if (tokens.RequireNext() is not Name type)
+                                                            throw new SimulatedSqlException("Simulated table creation requires columns to have a type.");
+
+                                                        columns.Add(new Column(columnName.value, type.value));
+                                                    } while ((token = tokens.RequireNext()) is Comma);
+
+                                                    if (token is not CloseParentheses)
+                                                        break;
+
+                                                    continue;
                                             }
                                             break;
                                     }

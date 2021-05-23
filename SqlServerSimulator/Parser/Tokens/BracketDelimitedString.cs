@@ -2,7 +2,7 @@
 
 namespace SqlServerSimulator.Parser.Tokens
 {
-    class BracketDelimitedString : StringToken
+    class BracketDelimitedString : Name
     {
         public BracketDelimitedString(StringBuilder buffer)
             : base(buffer)

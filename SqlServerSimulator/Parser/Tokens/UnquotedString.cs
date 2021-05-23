@@ -3,7 +3,7 @@ using System.Text;
 
 namespace SqlServerSimulator.Parser.Tokens
 {
-    class UnquotedString : StringToken
+    class UnquotedString : Name
     {
         public UnquotedString(StringBuilder buffer)
             : base(buffer)
