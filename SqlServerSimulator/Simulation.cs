@@ -149,7 +149,7 @@ public sealed class Simulation
                                         if (token is not CloseParentheses)
                                             break;
 
-                                        if ((token = tokens.RequireNext()) is not UnquotedString expectValues || expectValues.value != "VALUES")
+                                        if ((token = tokens.RequireNext()) is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
                                             break;
 
                                         if ((token = tokens.RequireNext()) is not OpenParentheses)

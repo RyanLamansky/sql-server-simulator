@@ -4,7 +4,6 @@ namespace SqlServerSimulator;
 
 [TestClass]
 public class CreateTableTests
-
 {
     [TestMethod]
     public void CreateTableMinimal()
@@ -15,6 +14,6 @@ public class CreateTableTests
         using var command = connection.CreateCommand("create table t ( v int )");
 
         connection.Open();
-        using var reader = command.ExecuteReader(); // TODO: Switch to ExecuteNonQuery when implemented.
+        Assert.AreEqual(-1, command.ExecuteNonQuery());
     }
 }

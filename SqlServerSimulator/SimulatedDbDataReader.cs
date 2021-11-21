@@ -147,7 +147,7 @@ sealed class SimulatedDbDataReader : DbDataReader
     {
         var hasNext = this.results.MoveNext();
 
-        this.records = this.results.Current.GetEnumerator();
+        this.records = this.results.Current?.GetEnumerator() ?? Enumerable.Empty<object[]>().GetEnumerator();
 
         return hasNext;
     }

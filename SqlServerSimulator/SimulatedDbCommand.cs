@@ -63,7 +63,12 @@ sealed class SimulatedDbCommand : DbCommand
 
     public override int ExecuteNonQuery()
     {
-        throw new NotImplementedException();
+        using var reader = new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this));
+
+        while (reader.NextResult())
+            continue;
+
+        return -1;
     }
 
     public override object ExecuteScalar()

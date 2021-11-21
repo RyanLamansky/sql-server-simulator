@@ -14,14 +14,10 @@ class UnquotedString : Name
 
     public Keyword Parse()
     {
-        try
-        {
-            return Enum.Parse<Keyword>(value, true);
-        }
-        catch (ArgumentException)
-        {
+        if (!Enum.TryParse<Keyword>(value, true, out var result))
             throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{value}`.");
-        }
+
+        return result;
     }
 
 #if DEBUG
