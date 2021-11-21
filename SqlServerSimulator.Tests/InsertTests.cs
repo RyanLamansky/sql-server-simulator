@@ -6,7 +6,6 @@ namespace SqlServerSimulator;
 public class InsertTests
 {
     [TestMethod]
-    [Ignore("Insert not yet sufficiently implemented.")]
     public void InsertWithColumnNames()
     {
         var simulation = new Simulation();

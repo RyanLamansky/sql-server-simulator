@@ -11,6 +11,7 @@ sealed class SimulatedDbDataReader : DbDataReader
     internal readonly Simulation simulation;
     internal readonly IEnumerator<SimulatedResultSet> results;
     internal IEnumerator<object[]> records;
+    private int recordsAffected;
 
     public SimulatedDbDataReader(Simulation simulation, IEnumerable<SimulatedResultSet> results)
     {
@@ -31,7 +32,7 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override bool IsClosed => throw new NotImplementedException();
 
-    public override int RecordsAffected => throw new NotImplementedException();
+    public override int RecordsAffected => recordsAffected;
 
     public override bool GetBoolean(int ordinal)
     {
@@ -147,12 +148,23 @@ sealed class SimulatedDbDataReader : DbDataReader
     {
         var hasNext = this.results.MoveNext();
 
+        if (hasNext)
+            this.recordsAffected = 0;
+
         this.records = this.results.Current?.GetEnumerator() ?? Enumerable.Empty<object[]>().GetEnumerator();
 
         return hasNext;
     }
 
-    public override bool Read() => this.records.MoveNext();
+    public override bool Read()
+    {
+        var hasNext = this.records.MoveNext();
+
+        if (hasNext)
+            this.recordsAffected++;
+
+        return hasNext;
+    }
 
     protected override void Dispose(bool disposing)
     {

@@ -17,15 +17,20 @@ static class Tokenizer
         DoubleQuotedString,
         AtPrefixedString,
         DoubleAtPrefixedString,
+        Numeric
     }
 
-    public static IEnumerable<Token> Tokenize(string command)
+    public static IEnumerable<Token> Tokenize(string? command)
     {
+        if (string.IsNullOrEmpty(command))
+            throw new InvalidOperationException("ExecuteReader: CommandText property has not been initialized");
+
         using var commandEnumerator = command.GetEnumerator();
 
         var state = State.None;
         var index = -1;
         var buffer = new StringBuilder();
+        var number = 0m;
 
         while (commandEnumerator.TryGetNext(out var c, ref index))
         {
@@ -47,7 +52,19 @@ static class Tokenizer
                     else if (c >= '0' && c <= '9')
                     {
                         if (state.IsAnyString())
+                        {
                             buffer.Append(c);
+                            continue;
+                        }
+
+                        if (state == State.Numeric)
+                        {
+                            number *= 10 + (c - '0');
+                            continue;
+                        }
+
+                        state = State.Numeric;
+                        number = c - '0';
 
                         continue;
                     }
@@ -114,6 +131,10 @@ static class Tokenizer
                             yield return new UnquotedString(buffer);
                             state = State.None;
                             break;
+                        case State.Numeric:
+                            yield return new Numeric(number);
+                            state = State.None;
+                            break;
                     }
                     yield return new StatementTerminator();
                     continue;
@@ -126,6 +147,10 @@ static class Tokenizer
                     {
                         case State.UnquotedString:
                             yield return new UnquotedString(buffer);
+                            state = State.None;
+                            break;
+                        case State.Numeric:
+                            yield return new Numeric(number);
                             state = State.None;
                             break;
                     }

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 
 namespace SqlServerSimulator;
 
@@ -61,15 +62,13 @@ sealed class SimulatedDbCommand : DbCommand
         throw new NotImplementedException();
     }
 
-    public override int ExecuteNonQuery()
-    {
-        using var reader = new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this));
-
-        while (reader.NextResult())
-            continue;
-
-        return -1;
-    }
+    public override int ExecuteNonQuery() => simulation
+        .CreateResultSetsForCommand(this)
+        .OfType<SimulatedNonQuery>()
+        .Where(result => result.RecordsAffected != -1)
+        .Select(result => result.RecordsAffected)
+        .DefaultIfEmpty(-1)
+        .Sum();
 
     public override object ExecuteScalar()
     {
@@ -87,7 +86,5 @@ sealed class SimulatedDbCommand : DbCommand
     }
 
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
-    {
-        return new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this));
-    }
+        => new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this).OfType<SimulatedResultSet>());
 }

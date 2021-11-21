@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedResultSet : IEnumerable<object[]>
+sealed class SimulatedResultSet : SimulatedStatementOutcome, IEnumerable<object[]>
 {
     internal readonly IEnumerable<object[]> records;
     internal readonly Dictionary<string, int> columnIndexes;
@@ -14,6 +14,7 @@ sealed class SimulatedResultSet : IEnumerable<object[]>
     }
 
     public SimulatedResultSet(Dictionary<string, int> columnIndexes, IEnumerable<object[]> records)
+        : base(-1)
     {
         this.records = records;
         this.columnIndexes = columnIndexes;
