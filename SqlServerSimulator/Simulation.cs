@@ -85,7 +85,7 @@ public sealed class Simulation
                                             if ((token = tokens.RequireNext()) is not OpenParentheses)
                                                 break;
 
-                                            var table = new Table(tableName.value);
+                                            var table = new Table(tableName.Value);
 
                                             var columns = table.Columns;
                                             do
@@ -96,7 +96,7 @@ public sealed class Simulation
                                                 if (tokens.RequireNext() is not Name type)
                                                     throw new SimulatedSqlException("Simulated table creation requires columns to have a type.");
 
-                                                columns.Add(new Column(columnName.value, type.value));
+                                                columns.Add(new Column(columnName.Value, type.Value));
                                             } while ((token = tokens.RequireNext()) is Comma);
 
                                             if (token is not CloseParentheses)
@@ -112,9 +112,9 @@ public sealed class Simulation
                             switch (token = tokens.RequireNext())
                             {
                                 case DoubleAtPrefixedString selected:
-                                    switch (selected.value)
+                                    switch (selected.Parse())
                                     {
-                                        case "VERSION":
+                                        case AtAtKeyword.Version:
                                             if (tokens.TryMoveNext(out token))
                                                 break;
 
@@ -122,6 +122,9 @@ public sealed class Simulation
                                             continue;
                                     }
                                     break;
+                                case Numeric selected:
+                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), new object[] { selected.Value });
+                                    continue;
                             }
                             break;
 
@@ -138,7 +141,7 @@ public sealed class Simulation
                             var destinationColumns = new List<string>();
                             while ((token = tokens.RequireNext()) is StringToken column)
                             {
-                                destinationColumns.Add(column.value);
+                                destinationColumns.Add(column.Value);
                             }
 
                             if (token is not CloseParentheses)
@@ -156,7 +159,7 @@ public sealed class Simulation
                                 switch (token)
                                 {
                                     case StringToken parsed:
-                                        sourceValues.Add(parsed.value);
+                                        sourceValues.Add(parsed.Value);
                                         break;
                                     case Numeric parsed:
                                         sourceValues.Add(parsed.Value);

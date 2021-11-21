@@ -1,4 +1,5 @@
 ﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -7,53 +8,39 @@ namespace SqlServerSimulator;
 public class SelectTests
 {
     [TestMethod]
-    public void SelectVersion()
+    public void Select1ViaExecuteScalar()
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1"));
+
+    private static DbDataReader ScalarViaReaderTest(string commandText)
     {
-        var simulation = new Simulation();
-        var version = simulation.Version;
-        IsNotNull(version);
-
-        using var connection = simulation.CreateDbConnection();
-        using var command = connection.CreateCommand("SELECT @@VERSION");
-
-        connection.Open();
-        using var reader = command.ExecuteReader();
-
+        var reader = new Simulation().ExecuteReader(commandText);
         IsTrue(reader.Read());
-        AreEqual(version, reader.GetString(0));
+        return reader;
     }
 
     [TestMethod]
-    public void SelectVersion_MixedCaseSelect()
+    public void Select1ViaExecuteReaderIndexer()
+        => AreEqual(1, ScalarViaReaderTest("select 1")[0]);
+
+    [TestMethod]
+    public void Select1ViaExecuteReaderGetInt32()
+        => AreEqual(1, ScalarViaReaderTest("select 1").GetInt32(0));
+
+    private static void VersionTest(string commandText)
     {
         var simulation = new Simulation();
         var version = simulation.Version;
         IsNotNull(version);
 
-        using var connection = simulation.CreateDbConnection();
-        using var command = connection.CreateCommand("Select @@VERSION");
-
-        connection.Open();
-        using var reader = command.ExecuteReader();
-
-        IsTrue(reader.Read());
-        AreEqual(version, reader.GetString(0));
+        AreEqual(version, simulation.ExecuteScalar(commandText));
     }
 
     [TestMethod]
-    public void SelectVersion_LowerCaseSelect()
-    {
-        var simulation = new Simulation();
-        var version = simulation.Version;
-        IsNotNull(version);
+    public void SelectVersion() => VersionTest("SELECT @@VERSION");
 
-        using var connection = simulation.CreateDbConnection();
-        using var command = connection.CreateCommand("select @@VERSION");
+    [TestMethod]
+    public void SelectVersion_LowerCase() => VersionTest("select @@version");
 
-        connection.Open();
-        using var reader = command.ExecuteReader();
-
-        IsTrue(reader.Read());
-        AreEqual(version, reader.GetString(0));
-    }
+    [TestMethod]
+    public void SelectVersion_MixedCase() => VersionTest("Select @@Version");
 }

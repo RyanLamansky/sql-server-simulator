@@ -70,9 +70,13 @@ sealed class SimulatedDbCommand : DbCommand
         .DefaultIfEmpty(-1)
         .Sum();
 
-    public override object ExecuteScalar()
+    public override object? ExecuteScalar()
     {
-        throw new NotImplementedException();
+        using var reader = ExecuteDbDataReader();
+        if (!reader.Read())
+            return null;
+
+        return reader[0];
     }
 
     public override void Prepare()
@@ -85,6 +89,6 @@ sealed class SimulatedDbCommand : DbCommand
         return new SimulatedDbParameter();
     }
 
-    protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
+    protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior = default)
         => new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this).OfType<SimulatedResultSet>());
 }

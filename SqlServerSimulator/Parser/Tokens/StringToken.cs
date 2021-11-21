@@ -4,15 +4,15 @@ namespace SqlServerSimulator.Parser.Tokens;
 
 abstract class StringToken : Token
 {
-    public readonly string value;
+    public readonly string Value;
 
     private protected StringToken(StringBuilder buffer)
     {
-        this.value = buffer.ToString();
+        this.Value = buffer.ToString();
         buffer.Clear();
     }
 
 #if DEBUG
-    public override string ToString() => $"{GetType().Name} {value}";
+    public override string ToString() => $"{GetType().Name} {Value}";
 #endif
 }

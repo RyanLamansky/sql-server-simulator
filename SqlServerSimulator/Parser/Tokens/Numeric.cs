@@ -1,12 +1,38 @@
-﻿namespace SqlServerSimulator.Parser.Tokens;
+﻿using System;
+using System.Text;
+
+namespace SqlServerSimulator.Parser.Tokens;
 
 internal sealed class Numeric : Token
 {
-    public readonly decimal Value;
+    public readonly IFormattable Value;
 
-    public Numeric(decimal value) => this.Value = value;
+    public Numeric(StringBuilder buffer)
+    {
+        var number = buffer.ToString();
+
+        if (int.TryParse(number, out var int32))
+        {
+            this.Value = int32;
+            return;
+        }
+
+        if (long.TryParse(number, out var int64))
+        {
+            this.Value = int64;
+            return;
+        }
+
+        if (double.TryParse(number, out var float64))
+        {
+            this.Value = float64;
+            return;
+        }
+
+        throw new SimulatedSqlException($"Simulated command tokenizer couldn't parse {number} as a number.");
+    }
 
 #if DEBUG
-    public override string ToString() => this.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public override string ToString() => this.Value.ToString("n", System.Globalization.CultureInfo.InvariantCulture);
 #endif
 }

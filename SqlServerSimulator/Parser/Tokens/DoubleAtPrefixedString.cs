@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System;
+using System.Text;
 
 namespace SqlServerSimulator.Parser.Tokens;
 
@@ -8,8 +9,16 @@ class DoubleAtPrefixedString : StringToken
         : base(buffer)
     {
     }
+    public AtAtKeyword Parse()
+    {
+        if (!Enum.TryParse<AtAtKeyword>(Value, true, out var result))
+            throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{Value}`.");
+
+        return result;
+    }
 
 #if DEBUG
-    public override string ToString() => $"@@{value}";
+    public override string ToString() => $"@@{Value}";
 #endif
 }
+

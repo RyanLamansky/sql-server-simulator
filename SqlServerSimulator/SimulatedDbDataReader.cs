@@ -20,7 +20,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         this.records = (this.results.MoveNext() ? this.results.Current.records : Enumerable.Empty<object[]>()).GetEnumerator();
     }
 
-    public override object this[int ordinal] => throw new NotImplementedException();
+    public override object this[int ordinal] => records.Current[ordinal];
 
     public override object this[string name] => throw new NotImplementedException();
 
@@ -104,10 +104,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override int GetInt32(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override int GetInt32(int ordinal) => (int)this[ordinal];
 
     public override long GetInt64(int ordinal)
     {
@@ -127,7 +124,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override string GetString(int ordinal) => (string)records.Current[ordinal];
+    public override string GetString(int ordinal) => (string)this[ordinal];
 
     public override object GetValue(int ordinal)
     {
