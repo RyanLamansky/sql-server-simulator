@@ -4,10 +4,10 @@ namespace SqlServerSimulator;
 
 static class Extensions
 {
-    public static DbCommand CreateCommand(this Simulation simulation, string commandText)
+    public static DbCommand CreateCommand(this Simulation simulation, string? commandText)
         => simulation.CreateOpenConnection().CreateCommand(commandText);
 
-    public static DbCommand CreateCommand(this DbConnection connection, string commandText)
+    public static DbCommand CreateCommand(this DbConnection connection, string? commandText)
     {
         var command = connection.CreateCommand();
         command.CommandText = commandText;
@@ -22,7 +22,7 @@ static class Extensions
         return connection;
     }
 
-    public static object ExecuteScalar(this Simulation simulation, string commandText)
+    public static object? ExecuteScalar(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteScalar();
 
     public static DbDataReader ExecuteReader(this Simulation simulation, string commandText)

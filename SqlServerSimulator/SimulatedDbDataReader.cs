@@ -44,7 +44,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override long GetBytes(int ordinal, long dataOffset, byte[] buffer, int bufferOffset, int length)
+    public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
     {
         throw new NotImplementedException();
     }
@@ -54,7 +54,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override long GetChars(int ordinal, long dataOffset, char[] buffer, int bufferOffset, int length)
+    public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
     {
         throw new NotImplementedException();
     }

@@ -8,6 +8,12 @@ namespace SqlServerSimulator;
 public class SimpleCommandTests
 {
     [TestMethod]
+    public void CommandTextConvertsNullToEmpty()
+    {
+        AreSame(new Simulation().CreateCommand(null).CommandText, string.Empty);
+    }
+
+    [TestMethod]
     public void CommandNotInitialized()
     {
         using var connnection = new Simulation().CreateDbConnection();

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator;
 
@@ -13,6 +14,7 @@ sealed class SimulatedDbConnection : DbConnection
         this.simulation = simulation;
     }
 
+    [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }
 
     public override string Database => throw new NotImplementedException();

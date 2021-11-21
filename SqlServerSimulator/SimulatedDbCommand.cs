@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 
 namespace SqlServerSimulator;
@@ -10,6 +11,7 @@ sealed class SimulatedDbCommand : DbCommand
     internal Simulation simulation;
     internal SimulatedDbConnection connection;
     internal SimulatedDbTransaction? transaction;
+    private string commandText = string.Empty;
 
     public SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
@@ -24,12 +26,18 @@ sealed class SimulatedDbCommand : DbCommand
         this.transaction = transaction;
     }
 
-    public override string? CommandText { get; set; }
+    [AllowNull]
+    public override string CommandText
+    {
+        get => commandText;
+        set => commandText = value ?? string.Empty;
+    }
+
     public override int CommandTimeout { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
     public override CommandType CommandType { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
     public override bool DesignTimeVisible { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
     public override UpdateRowSource UpdatedRowSource { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    protected override DbConnection DbConnection { get => this.connection; set => throw new NotImplementedException(); }
+    protected override DbConnection? DbConnection { get => this.connection; set => throw new NotImplementedException(); }
 
     protected override DbParameterCollection DbParameterCollection { get; } = new SimulatedDbParameterCollection();
 
@@ -57,10 +65,7 @@ sealed class SimulatedDbCommand : DbCommand
         }
     }
 
-    public override void Cancel()
-    {
-        throw new NotImplementedException();
-    }
+    public override void Cancel() => throw new NotImplementedException();
 
     public override int ExecuteNonQuery() => simulation
         .CreateResultSetsForCommand(this)
@@ -79,15 +84,9 @@ sealed class SimulatedDbCommand : DbCommand
         return reader[0];
     }
 
-    public override void Prepare()
-    {
-        throw new NotImplementedException();
-    }
+    public override void Prepare() => throw new NotImplementedException();
 
-    protected override DbParameter CreateDbParameter()
-    {
-        return new SimulatedDbParameter();
-    }
+    protected override DbParameter CreateDbParameter() => new SimulatedDbParameter();
 
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior = default)
         => new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this).OfType<SimulatedResultSet>());
