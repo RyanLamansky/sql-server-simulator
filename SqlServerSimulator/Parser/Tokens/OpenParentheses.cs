@@ -1,10 +1,9 @@
-﻿namespace SqlServerSimulator.Parser.Tokens
+﻿namespace SqlServerSimulator.Parser.Tokens;
+
+sealed class OpenParentheses : Token
 {
-    sealed class OpenParentheses : Token
-    {
 
 #if DEBUG
-        public override string ToString() => "(";
+    public override string ToString() => "(";
 #endif
-    }
 }

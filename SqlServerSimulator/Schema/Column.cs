@@ -1,19 +1,18 @@
-﻿namespace SqlServerSimulator.Schema
+﻿namespace SqlServerSimulator.Schema;
+
+class Column
 {
-    class Column
+    public Column(string name, string type)
     {
-        public Column(string name, string type)
-        {
-            this.Name = name;
-            this.Type = type;
-        }
+        this.Name = name;
+        this.Type = type;
+    }
 
-        public string Name;
+    public string Name;
 
-        public string Type;
+    public string Type;
 
 #if DEBUG
-        public override string ToString() => $"{Name} {Type}";
+    public override string ToString() => $"{Name} {Type}";
 #endif
-    }
 }

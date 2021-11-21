@@ -1,6 +1,5 @@
-﻿namespace SqlServerSimulator.Parser.Tokens
+﻿namespace SqlServerSimulator.Parser.Tokens;
+
+class Comment : Token
 {
-    class Comment : Token
-    {
-    }
 }

@@ -4,161 +4,160 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Linq;
 
-namespace SqlServerSimulator
+namespace SqlServerSimulator;
+
+sealed class SimulatedDbDataReader : DbDataReader
 {
-    sealed class SimulatedDbDataReader : DbDataReader
+    internal readonly Simulation simulation;
+    internal readonly IEnumerator<SimulatedResultSet> results;
+    internal IEnumerator<object[]> records;
+
+    public SimulatedDbDataReader(Simulation simulation, IEnumerable<SimulatedResultSet> results)
     {
-        internal readonly Simulation simulation;
-        internal readonly IEnumerator<SimulatedResultSet> results;
-        internal IEnumerator<object[]> records;
+        this.simulation = simulation;
+        this.results = results.GetEnumerator();
+        this.records = (this.results.MoveNext() ? this.results.Current.records : Enumerable.Empty<object[]>()).GetEnumerator();
+    }
 
-        public SimulatedDbDataReader(Simulation simulation, IEnumerable<SimulatedResultSet> results)
-        {
-            this.simulation = simulation;
-            this.results = results.GetEnumerator();
-            this.records = (this.results.MoveNext() ? this.results.Current.records : Enumerable.Empty<object[]>()).GetEnumerator();
-        }
+    public override object this[int ordinal] => throw new NotImplementedException();
 
-        public override object this[int ordinal] => throw new NotImplementedException();
+    public override object this[string name] => throw new NotImplementedException();
 
-        public override object this[string name] => throw new NotImplementedException();
+    public override int Depth => throw new NotImplementedException();
 
-        public override int Depth => throw new NotImplementedException();
+    public override int FieldCount => throw new NotImplementedException();
 
-        public override int FieldCount => throw new NotImplementedException();
+    public override bool HasRows => throw new NotImplementedException();
 
-        public override bool HasRows => throw new NotImplementedException();
+    public override bool IsClosed => throw new NotImplementedException();
 
-        public override bool IsClosed => throw new NotImplementedException();
+    public override int RecordsAffected => throw new NotImplementedException();
 
-        public override int RecordsAffected => throw new NotImplementedException();
+    public override bool GetBoolean(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override bool GetBoolean(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override byte GetByte(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override byte GetByte(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override long GetBytes(int ordinal, long dataOffset, byte[] buffer, int bufferOffset, int length)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override long GetBytes(int ordinal, long dataOffset, byte[] buffer, int bufferOffset, int length)
-        {
-            throw new NotImplementedException();
-        }
+    public override char GetChar(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override char GetChar(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override long GetChars(int ordinal, long dataOffset, char[] buffer, int bufferOffset, int length)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override long GetChars(int ordinal, long dataOffset, char[] buffer, int bufferOffset, int length)
-        {
-            throw new NotImplementedException();
-        }
+    public override string GetDataTypeName(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override string GetDataTypeName(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override DateTime GetDateTime(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override DateTime GetDateTime(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override decimal GetDecimal(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override decimal GetDecimal(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override double GetDouble(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override double GetDouble(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override IEnumerator GetEnumerator()
+    {
+        throw new NotImplementedException();
+    }
 
-        public override IEnumerator GetEnumerator()
-        {
-            throw new NotImplementedException();
-        }
+    public override Type GetFieldType(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override Type GetFieldType(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override float GetFloat(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override float GetFloat(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override Guid GetGuid(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override Guid GetGuid(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override short GetInt16(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override short GetInt16(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override int GetInt32(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override int GetInt32(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override long GetInt64(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override long GetInt64(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override string GetName(int ordinal)
+    {
+        if (ordinal >= this.FieldCount)
+            throw new IndexOutOfRangeException();
 
-        public override string GetName(int ordinal)
-        {
-            if (ordinal >= this.FieldCount)
-                throw new IndexOutOfRangeException();
+        throw new NotImplementedException();
+    }
 
-            throw new NotImplementedException();
-        }
+    public override int GetOrdinal(string name)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override int GetOrdinal(string name)
-        {
-            throw new NotImplementedException();
-        }
+    public override string GetString(int ordinal) => (string)records.Current[ordinal];
 
-        public override string GetString(int ordinal) => (string)records.Current[ordinal];
+    public override object GetValue(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override object GetValue(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override int GetValues(object[] values)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override int GetValues(object[] values)
-        {
-            throw new NotImplementedException();
-        }
+    public override bool IsDBNull(int ordinal)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override bool IsDBNull(int ordinal)
-        {
-            throw new NotImplementedException();
-        }
+    public override bool NextResult()
+    {
+        var hasNext = this.results.MoveNext();
 
-        public override bool NextResult()
-        {
-            var hasNext = this.results.MoveNext();
+        this.records = this.results.Current.GetEnumerator();
 
-            this.records = this.results.Current.GetEnumerator();
+        return hasNext;
+    }
 
-            return hasNext;
-        }
+    public override bool Read() => this.records.MoveNext();
 
-        public override bool Read() => this.records.MoveNext();
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
 
-        protected override void Dispose(bool disposing)
-        {
-            base.Dispose(disposing);
-
-            this.results.Dispose();
-        }
+        this.results.Dispose();
     }
 }

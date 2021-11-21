@@ -2,31 +2,30 @@
 using System.Data;
 using System.Data.Common;
 
-namespace SqlServerSimulator
+namespace SqlServerSimulator;
+
+sealed class SimulatedDbTransaction : DbTransaction
 {
-    sealed class SimulatedDbTransaction : DbTransaction
+    internal readonly Simulation simulation;
+    internal readonly SimulatedDbConnection connection;
+
+    public SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel)
     {
-        internal readonly Simulation simulation;
-        internal readonly SimulatedDbConnection connection;
+        this.simulation = simulation;
+        this.connection = connection;
+        this.IsolationLevel = isolationLevel;
+    }
 
-        public SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel)
-        {
-            this.simulation = simulation;
-            this.connection = connection;
-            this.IsolationLevel = isolationLevel;
-        }
+    public override IsolationLevel IsolationLevel { get; }
 
-        public override IsolationLevel IsolationLevel { get; }
+    protected override DbConnection DbConnection => this.connection;
 
-        protected override DbConnection DbConnection => this.connection;
+    public override void Commit()
+    {
+    }
 
-        public override void Commit()
-        {
-        }
-
-        public override void Rollback()
-        {
-            throw new NotImplementedException();
-        }
+    public override void Rollback()
+    {
+        throw new NotImplementedException();
     }
 }

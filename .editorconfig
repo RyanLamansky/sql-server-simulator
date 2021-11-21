@@ -2,3 +2,4 @@
 
 # IDE0008: Use explicit type
 csharp_style_var_elsewhere = true
+csharp_style_namespace_declarations=file_scoped:warning

@@ -1,9 +1,8 @@
-﻿namespace SqlServerSimulator.Parser
+﻿namespace SqlServerSimulator.Parser;
+
+abstract class Token
 {
-    abstract class Token
+    private protected Token()
     {
-        private protected Token()
-        {
-        }
     }
 }

@@ -1,21 +1,20 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 
-namespace SqlServerSimulator.Schema
+namespace SqlServerSimulator.Schema;
+
+class Table
 {
-    class Table
+    public Table(string name)
     {
-        public Table(string name)
-        {
-            this.Name = name;
-        }
+        this.Name = name;
+    }
 
-        public string Name;
+    public string Name;
 
-        public List<Column> Columns = new();
+    public List<Column> Columns = new();
 
 #if DEBUG
-        public override string ToString() => $"{this.Name} ({string.Join(", ", Columns.Select(column => column.Name))})";
+    public override string ToString() => $"{this.Name} ({string.Join(", ", Columns.Select(column => column.Name))})";
 #endif
-    }
 }

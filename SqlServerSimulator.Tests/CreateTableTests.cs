@@ -1,21 +1,20 @@
 ﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 
-namespace SqlServerSimulator
+namespace SqlServerSimulator;
+
+[TestClass]
+public class CreateTableTests
+
 {
-    [TestClass]
-    public class CreateTableTests
-
+    [TestMethod]
+    public void CreateTableMinimal()
     {
-        [TestMethod]
-        public void CreateTableMinimal()
-        {
-            var simulation = new Simulation();
+        var simulation = new Simulation();
 
-            using var connection = simulation.CreateDbConnection();
-            using var command = connection.CreateCommand("create table t ( v int )");
+        using var connection = simulation.CreateDbConnection();
+        using var command = connection.CreateCommand("create table t ( v int )");
 
-            connection.Open();
-            using var reader = command.ExecuteReader(); // TODO: Switch to ExecuteNonQuery when implemented.
-        }
+        connection.Open();
+        using var reader = command.ExecuteReader(); // TODO: Switch to ExecuteNonQuery when implemented.
     }
 }

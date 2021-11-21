@@ -3,97 +3,96 @@ using System.Data.Common;
 using System.Collections;
 using System.Collections.Generic;
 
-namespace SqlServerSimulator
+namespace SqlServerSimulator;
+
+sealed class SimulatedDbParameterCollection : DbParameterCollection
 {
-    sealed class SimulatedDbParameterCollection : DbParameterCollection
+    readonly List<SimulatedDbParameter> parameters = new();
+
+    public override int Count => throw new NotImplementedException();
+
+    public override object SyncRoot => throw new NotImplementedException();
+
+    public override int Add(object value)
     {
-        readonly List<SimulatedDbParameter> parameters = new();
+        this.parameters.Add((SimulatedDbParameter)value);
+        return this.parameters.Count - 1;
+    }
 
-        public override int Count => throw new NotImplementedException();
+    public override void AddRange(Array values)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override object SyncRoot => throw new NotImplementedException();
+    public override void Clear() => this.parameters.Clear();
 
-        public override int Add(object value)
-        {
-            this.parameters.Add((SimulatedDbParameter)value);
-            return this.parameters.Count - 1;
-        }
+    public override bool Contains(object value)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void AddRange(Array values)
-        {
-            throw new NotImplementedException();
-        }
+    public override bool Contains(string value)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void Clear() => this.parameters.Clear();
+    public override void CopyTo(Array array, int index)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override bool Contains(object value)
-        {
-            throw new NotImplementedException();
-        }
+    public override IEnumerator GetEnumerator()
+    {
+        throw new NotImplementedException();
+    }
 
-        public override bool Contains(string value)
-        {
-            throw new NotImplementedException();
-        }
+    public override int IndexOf(object value)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void CopyTo(Array array, int index)
-        {
-            throw new NotImplementedException();
-        }
+    public override int IndexOf(string parameterName)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override IEnumerator GetEnumerator()
-        {
-            throw new NotImplementedException();
-        }
+    public override void Insert(int index, object value)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override int IndexOf(object value)
-        {
-            throw new NotImplementedException();
-        }
+    public override void Remove(object value)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override int IndexOf(string parameterName)
-        {
-            throw new NotImplementedException();
-        }
+    public override void RemoveAt(int index)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void Insert(int index, object value)
-        {
-            throw new NotImplementedException();
-        }
+    public override void RemoveAt(string parameterName)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void Remove(object value)
-        {
-            throw new NotImplementedException();
-        }
+    protected override DbParameter GetParameter(int index)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void RemoveAt(int index)
-        {
-            throw new NotImplementedException();
-        }
+    protected override DbParameter GetParameter(string parameterName)
+    {
+        throw new NotImplementedException();
+    }
 
-        public override void RemoveAt(string parameterName)
-        {
-            throw new NotImplementedException();
-        }
+    protected override void SetParameter(int index, DbParameter value)
+    {
+        throw new NotImplementedException();
+    }
 
-        protected override DbParameter GetParameter(int index)
-        {
-            throw new NotImplementedException();
-        }
-
-        protected override DbParameter GetParameter(string parameterName)
-        {
-            throw new NotImplementedException();
-        }
-
-        protected override void SetParameter(int index, DbParameter value)
-        {
-            throw new NotImplementedException();
-        }
-
-        protected override void SetParameter(string parameterName, DbParameter value)
-        {
-            throw new NotImplementedException();
-        }
+    protected override void SetParameter(string parameterName, DbParameter value)
+    {
+        throw new NotImplementedException();
     }
 }

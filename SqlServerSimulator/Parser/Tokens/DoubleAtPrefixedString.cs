@@ -1,16 +1,15 @@
 ﻿using System.Text;
 
-namespace SqlServerSimulator.Parser.Tokens
+namespace SqlServerSimulator.Parser.Tokens;
+
+class DoubleAtPrefixedString : StringToken
 {
-    class DoubleAtPrefixedString : StringToken
+    public DoubleAtPrefixedString(StringBuilder buffer)
+        : base(buffer)
     {
-        public DoubleAtPrefixedString(StringBuilder buffer)
-            : base(buffer)
-        {
-        }
+    }
 
 #if DEBUG
-        public override string ToString() => $"@@{value}";
+    public override string ToString() => $"@@{value}";
 #endif
-    }
 }

@@ -2,41 +2,40 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
-namespace SqlServerSimulator.EFCore
+namespace SqlServerSimulator.EFCore;
+
+[TestClass]
+public class EFCoreBasics
 {
-    [TestClass]
-    public class EFCoreBasics
+    class TestRow
     {
-        class TestRow
+        public int Id { get; set; }
+    }
+
+    class TestContext : DbContext
+    {
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            public int Id { get; set; }
+            optionsBuilder.UseSqlServer(new Simulation().CreateDbConnection());
         }
 
-        class TestContext : DbContext
-        {
-            protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-            {
-                optionsBuilder.UseSqlServer(new Simulation().CreateDbConnection());
-            }
+        public DbSet<TestRow> Rows { get; set; }
+    }
 
-            public DbSet<TestRow> Rows { get; set; }
-        }
+    [TestMethod]
+    [Ignore("Requires basic command text parsing.")]
+    public void InsertAndRetrieveRowSync()
+    {
+        using var context = new TestContext();
 
-        [TestMethod]
-        [Ignore("Requires basic command text parsing.")]
-        public void InsertAndRetrieveRowSync()
-        {
-            using var context = new TestContext();
+        var row = new TestRow { Id = 1 };
 
-            var row = new TestRow { Id = 1 };
+        context.Rows.Add(row);
 
-            context.Rows.Add(row);
+        context.SaveChanges();
 
-            context.SaveChanges();
+        var rows = context.Rows.ToArray();
 
-            var rows = context.Rows.ToArray();
-
-            Assert.AreEqual(1, rows.Length);
-        }
+        Assert.AreEqual(1, rows.Length);
     }
 }

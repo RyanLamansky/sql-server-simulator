@@ -1,12 +1,11 @@
 ﻿using System.Text;
 
-namespace SqlServerSimulator.Parser.Tokens
+namespace SqlServerSimulator.Parser.Tokens;
+
+abstract class Name : StringToken
 {
-    abstract class Name : StringToken
+    private protected Name(StringBuilder buffer)
+        : base(buffer)
     {
-        private protected Name(StringBuilder buffer)
-            : base(buffer)
-        {
-        }
     }
 }
