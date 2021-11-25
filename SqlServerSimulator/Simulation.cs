@@ -1,6 +1,8 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 
 namespace SqlServerSimulator;
 
@@ -30,6 +32,8 @@ public sealed class Simulation
     /// </summary>
     /// <returns>A new simulated database connection instance.</returns>
     public DbConnection CreateDbConnection() => new SimulatedDbConnection(this);
+
+    private readonly ConcurrentDictionary<string, Table> tables = new(Collation.Default);
 
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
@@ -102,6 +106,10 @@ public sealed class Simulation
                                             if (token is not CloseParentheses)
                                                 break;
 
+                                            if (!this.tables.TryAdd(table.Name, table))
+                                                // TODO Msg 2714, Level 16, State 6, Line x
+                                                throw new SimulatedSqlException($"There is already an object named '{table.Name}' in the database.");
+
                                             continue;
                                     }
                                     break;
@@ -132,22 +140,33 @@ public sealed class Simulation
                             if ((token = tokens.RequireNext()) is UnquotedString maybeInto && maybeInto.TryParse(out var keyword) && keyword == Keyword.Into)
                                 token = tokens.RequireNext();
 
-                            if (token is not StringToken desinationTable)
+                            if (token is not StringToken desinationTableToken)
                                 break;
 
-                            if ((token = tokens.RequireNext()) is not OpenParentheses)
-                                break;
+                            if (!this.tables.TryGetValue(desinationTableToken.Value, out var desinationTable))
+                                // TODO Msg 208, Level 16, State 0, Line x
+                                throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.");
 
-                            var destinationColumns = new List<string>();
-                            while ((token = tokens.RequireNext()) is StringToken column)
+                            if ((token = tokens.RequireNext()) is OpenParentheses)
                             {
-                                destinationColumns.Add(column.Value);
+                                var destinationColumns = new List<string>();
+                                while ((token = tokens.RequireNext()) is StringToken column)
+                                {
+                                    var columnName = column.Value;
+                                    if (!desinationTable.Columns.Any(c => Collation.Default.Equals(c.Name, columnName)))
+                                        // TODO Msg 207, Level 16, State 1, Line x
+                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.");
+
+                                    destinationColumns.Add(columnName);
+                                }
+
+                                if (token is not CloseParentheses)
+                                    break;
+
+                                token = tokens.RequireNext();
                             }
 
-                            if (token is not CloseParentheses)
-                                break;
-
-                            if ((token = tokens.RequireNext()) is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
+                            if (token is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
                                 break;
 
                             if ((token = tokens.RequireNext()) is not OpenParentheses)

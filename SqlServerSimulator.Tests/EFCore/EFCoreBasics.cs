@@ -1,5 +1,4 @@
-﻿using System.Linq;
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace SqlServerSimulator.EFCore;
@@ -16,7 +15,13 @@ public class EFCoreBasics
     {
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseSqlServer(new Simulation().CreateDbConnection());
+            var simulation = new Simulation();
+            simulation
+                .CreateOpenConnection()
+                .CreateCommand("create table Rows ( Id int )")
+                .ExecuteNonQuery();
+
+            optionsBuilder.UseSqlServer(simulation.CreateDbConnection());
         }
 
 #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
