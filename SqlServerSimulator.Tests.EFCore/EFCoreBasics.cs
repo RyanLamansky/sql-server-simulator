@@ -1,7 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
-namespace SqlServerSimulator.EFCore;
+namespace SqlServerSimulator;
 
 [TestClass]
 public class EFCoreBasics
