@@ -92,16 +92,44 @@ public sealed class Simulation
                                             var table = new Table(tableName.Value);
 
                                             var columns = table.Columns;
+                                            bool dontAdvanceToken;
                                             do
                                             {
+                                                dontAdvanceToken = false;
                                                 if (tokens.RequireNext() is not Name columnName)
                                                     throw new SimulatedSqlException("Simulated table creation requires named columns.");
 
                                                 if (tokens.RequireNext() is not Name type)
                                                     throw new SimulatedSqlException("Simulated table creation requires columns to have a type.");
 
-                                                columns.Add(new Column(columnName.Value, type.Value));
-                                            } while ((token = tokens.RequireNext()) is Comma);
+                                                var nullable = true;
+
+                                                token = tokens.RequireNext();
+                                                if (token is UnquotedString next)
+                                                {
+                                                    switch (next.Parse())
+                                                    {
+                                                        case Keyword.Not:
+                                                            if ((token = tokens.RequireNext()) is not UnquotedString mustBeNull || mustBeNull.Parse() != Keyword.Null)
+                                                                throw new NotSupportedException($"Simulated command processor doesn't know how to handle column definition token {token}.");
+
+                                                            nullable = false;
+                                                            break;
+                                                        case Keyword.Null:
+                                                            nullable = true;
+                                                            break;
+                                                        default:
+                                                            throw new NotSupportedException($"Simulated command processor doesn't know how handle column definition token {token}.");
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    dontAdvanceToken = true;
+                                                    nullable = true;
+                                                }
+
+                                                columns.Add(new Column(columnName.Value, type.Value, nullable));
+                                            } while ((dontAdvanceToken ? token : token = tokens.RequireNext()) is Comma);
 
                                             if (token is not CloseParentheses)
                                                 break;
