@@ -1,5 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Threading.Tasks;
 
 namespace SqlServerSimulator;
 
@@ -39,5 +40,21 @@ public class EFCoreBasics
         context.Rows.Add(row);
 
         context.SaveChanges();
+    }
+
+    /// <summary>
+    /// Same as <see cref="InsertRowSync"/> except using async logic.
+    /// The simulator is 100% sync so this really just ensures the bult-in default async-over-sync wrapper works.
+    /// </summary>
+    [TestMethod]
+    public async Task InsertRowAsync()
+    {
+        using var context = new TestContext();
+
+        var row = new TestRow { Id = 1 };
+
+        context.Rows.Add(row);
+
+        await context.SaveChangesAsync();
     }
 }
