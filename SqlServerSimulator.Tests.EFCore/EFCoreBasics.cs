@@ -49,7 +49,7 @@ public class EFCoreBasics
     [TestMethod]
     public async Task InsertRowAsync()
     {
-        using var context = new TestContext();
+        await using var context = new TestContext();
 
         var row = new TestRow { Id = 1 };
 
