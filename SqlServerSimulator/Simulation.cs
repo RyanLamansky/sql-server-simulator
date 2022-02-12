@@ -175,17 +175,18 @@ public sealed class Simulation
                                 // TODO Msg 208, Level 16, State 0, Line x
                                 throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.");
 
+                            var destinationColumns = new List<Column>();
                             if ((token = tokens.RequireNext()) is OpenParentheses)
                             {
-                                var destinationColumns = new List<string>();
                                 while ((token = tokens.RequireNext()) is StringToken column)
                                 {
                                     var columnName = column.Value;
-                                    if (!desinationTable.Columns.Any(c => Collation.Default.Equals(c.Name, columnName)))
+                                    var tableColumn = desinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName));
+                                    if (tableColumn is null)
                                         // TODO Msg 207, Level 16, State 1, Line x
                                         throw new SimulatedSqlException($"Invalid column name '{columnName}'.");
 
-                                    destinationColumns.Add(columnName);
+                                    destinationColumns.Add(tableColumn);
                                 }
 
                                 if (token is not CloseParentheses)
@@ -218,6 +219,8 @@ public sealed class Simulation
 
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
+
+                            desinationTable.ReceiveData(new[] { sourceValues.ToArray() });
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;
