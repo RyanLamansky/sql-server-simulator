@@ -32,12 +32,27 @@ public class InsertTests
             .CreateCommand("create table t ( v int );insert t values ( @p0 )", createParameter =>
             {
                 var parm = createParameter();
-                parm.ParameterName = "p1";
+                parm.ParameterName = "p0";
                 parm.Value = 1;
             })
             .ExecuteNonQuery();
 
         Assert.AreEqual(1, result);
+    }
+
+    [TestMethod]
+    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
+    public void InsertParameterizedNameMismatch()
+    {
+        var result = new Simulation()
+            .CreateOpenConnection()
+            .CreateCommand("create table t ( v int );insert t values ( @p0 )", createParameter =>
+            {
+                var parm = createParameter();
+                parm.ParameterName = "p1";
+                parm.Value = 1;
+            })
+            .ExecuteNonQuery();
     }
 
     [TestMethod]

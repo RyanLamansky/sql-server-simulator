@@ -37,10 +37,24 @@ public sealed class Simulation
 
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
-        var parameterValues = command
+        var variables = command
             .Parameters
             .Cast<DbParameter>()
-            .ToDictionary(param => param.ParameterName.StartsWith("@") ? param.ParameterName[1..] : param.ParameterName, StringComparer.InvariantCultureIgnoreCase);
+            .Select(parameter =>
+            {
+                var name = parameter.ParameterName;
+                var type = DataType.GetByDbType(parameter.DbType);
+                return (Name: name.StartsWith("@") ? name[1..] : name, TypeValue: (DataType: type, Value: parameter.Value is null ? null : type.ConvertFrom(parameter.Value)));
+            })
+            .ToDictionary(tuple => tuple.Name, StringComparer.InvariantCultureIgnoreCase);
+
+        object? ValidatingGetVariableValue(string name)
+        {
+            if (variables.TryGetValue(name, out var value))
+                return value.TypeValue.Value;
+
+            throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
+        };
 
         using var tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
 
@@ -163,6 +177,9 @@ public sealed class Simulation
                                             continue;
                                     }
                                     break;
+                                case AtPrefixedString atPrefixed:
+                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), new object?[] { ValidatingGetVariableValue(atPrefixed.Value) });
+                                    continue;
                                 case Numeric selected:
                                     yield return new SimulatedResultSet(new Dictionary<string, int>(), new object[] { selected.Value });
                                     continue;
@@ -180,9 +197,10 @@ public sealed class Simulation
                                 // TODO Msg 208, Level 16, State 0, Line x
                                 throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.");
 
-                            var destinationColumns = new List<Column>();
+                            Column[] destinationColumns;
                             if ((token = tokens.RequireNext()) is OpenParentheses)
                             {
+                                var usedColumns = new List<Column>();
                                 while ((token = tokens.RequireNext()) is StringToken column)
                                 {
                                     var columnName = column.Value;
@@ -191,13 +209,19 @@ public sealed class Simulation
                                         // TODO Msg 207, Level 16, State 1, Line x
                                         throw new SimulatedSqlException($"Invalid column name '{columnName}'.");
 
-                                    destinationColumns.Add(tableColumn);
+                                    usedColumns.Add(tableColumn);
                                 }
 
                                 if (token is not CloseParentheses)
                                     break;
 
+                                destinationColumns = usedColumns.ToArray();
+
                                 token = tokens.RequireNext();
+                            }
+                            else
+                            {
+                                destinationColumns = desinationTable.Columns.ToArray();
                             }
 
                             if (token is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
@@ -215,13 +239,7 @@ public sealed class Simulation
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
-                            desinationTable.ReceiveData(destinationColumns.ToArray(), new[] { sourceValues.ToArray() }, name =>
-                            {
-                                if (parameterValues.TryGetValue(name, out var value))
-                                    return value.Value;
-
-                                throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
-                            });
+                            desinationTable.ReceiveData(destinationColumns.ToArray(), new[] { sourceValues.ToArray() }, ValidatingGetVariableValue);
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;

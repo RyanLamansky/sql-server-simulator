@@ -20,7 +20,12 @@ static class Extensions
     {
         var command = connection.CreateCommand();
         command.CommandText = commandText;
-        addParameters(command.CreateParameter);
+        addParameters(() =>
+        {
+            var parameter = command.CreateParameter();
+            command.Parameters.Add(parameter);
+            return parameter;
+        });
 
         return command;
     }

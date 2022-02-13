@@ -43,4 +43,20 @@ public class SelectTests
 
     [TestMethod]
     public void SelectVersion_MixedCase() => VersionTest("Select @@Version");
+
+    [TestMethod]
+    public void SelectParameterValue()
+    {
+        var result = new Simulation()
+            .CreateOpenConnection()
+            .CreateCommand("select @p0", createParameter =>
+            {
+                var parm = createParameter();
+                parm.ParameterName = "p0";
+                parm.Value = 5;
+            })
+            .ExecuteScalar();
+
+        Assert.AreEqual(5, result);
+    }
 }

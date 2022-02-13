@@ -174,6 +174,9 @@ static class Tokenizer
 
         switch (state)
         {
+            case State.AtPrefixedString:
+                yield return new AtPrefixedString(buffer);
+                break;
             case State.DoubleAtPrefixedString:
                 yield return new DoubleAtPrefixedString(buffer);
                 break;
