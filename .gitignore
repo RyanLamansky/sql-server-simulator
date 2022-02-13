@@ -1,4 +1,8 @@
+# Visual Studio generated files
 .vs/
 bin/
 obj/
 *.user
+
+# Code coverage analysis results
+*.coverage
