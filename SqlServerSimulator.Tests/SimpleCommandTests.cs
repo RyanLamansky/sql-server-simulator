@@ -1,5 +1,6 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
+using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -50,13 +51,14 @@ public class SimpleCommandTests
     }
 
     [TestMethod]
+    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
     public void IncompleteSingleLineCommentCommand()
     {
         using var connnection = new Simulation().CreateDbConnection();
         connnection.Open();
 
         using var command = connnection.CreateCommand("-");
-        ThrowsException<SimulatedSqlException>(command.ExecuteReader);
+        command.ExecuteReader();
     }
 
     [TestMethod]

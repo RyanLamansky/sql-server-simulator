@@ -1,4 +1,5 @@
 ﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -6,7 +7,7 @@ namespace SqlServerSimulator;
 public class InsertTests
 {
     [TestMethod]
-    [ExpectedException(typeof(SimulatedSqlException))]
+    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
     public void InsertRequiresTableToExist() => new Simulation()
         .CreateOpenConnection()
         .CreateCommand("insert t ( v ) values ( 1 )")
@@ -73,7 +74,7 @@ public class InsertTests
     }
 
     [TestMethod]
-    [ExpectedException(typeof(SimulatedSqlException))]
+    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
     public void InsertRequiresValidColumnNames()
     {
         var result = new Simulation()
