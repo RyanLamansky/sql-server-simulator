@@ -5,7 +5,6 @@ using System.Threading.Tasks;
 namespace SqlServerSimulator;
 
 [TestClass]
-[Ignore("Blocked by simulator inability to handle parameterized inserts.")]
 public class EFCoreBasics
 {
     class TestRow

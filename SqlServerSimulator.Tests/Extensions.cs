@@ -1,4 +1,5 @@
-﻿using System.Data.Common;
+﻿using System;
+using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -11,6 +12,15 @@ static class Extensions
     {
         var command = connection.CreateCommand();
         command.CommandText = commandText;
+
+        return command;
+    }
+
+    public static DbCommand CreateCommand(this DbConnection connection, string? commandText, Action<Func<DbParameter>> addParameters)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        addParameters(command.CreateParameter);
 
         return command;
     }

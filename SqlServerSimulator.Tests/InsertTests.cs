@@ -24,6 +24,22 @@ public class InsertTests
     }
 
     [TestMethod]
+    public void InsertParameterized()
+    {
+        var result = new Simulation()
+            .CreateOpenConnection()
+            .CreateCommand("create table t ( v int );insert t values ( @p0 )", createParameter =>
+            {
+                var parm = createParameter();
+                parm.ParameterName = "p1";
+                parm.Value = 1;
+            })
+            .ExecuteNonQuery();
+
+        Assert.AreEqual(1, result);
+    }
+
+    [TestMethod]
     public void InsertWithoutColumnNamesCaseInsensitive()
     {
         var result = new Simulation()

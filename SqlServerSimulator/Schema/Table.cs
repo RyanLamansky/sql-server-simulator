@@ -1,7 +1,11 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace SqlServerSimulator.Schema;
+
+using Parser;
+using Parser.Tokens;
 
 class Table
 {
@@ -23,7 +27,7 @@ class Table
 
     public readonly List<object[]> Rows = new();
 
-    public void ReceiveData(Column[] columnsUsed, IEnumerable<object[]> values)
+    public void ReceiveData(Column[] columnsUsed, IEnumerable<Token[]> values, Func<string, object?> getVariableValue)
     {
         foreach (var row in values)
         {
@@ -34,7 +38,18 @@ class Table
                 var column = columnsUsed[i];
                 var columnValue = row[i];
 
-                incomingRow[i] = column.Type.ConvertFrom(columnValue);
+                var toConvert = columnValue switch
+                {
+                    AtPrefixedString atPrefixed => getVariableValue(atPrefixed.Value),
+                    StringToken token => token.Value,
+                    Numeric numeric => numeric.Value,
+                    _ => throw new NotSupportedException($"Simulate data processing doesn't know how to handle input of type {columnValue.GetType().Name}"),
+                };
+
+                if (toConvert is null)
+                    continue;
+
+                incomingRow[i] = column.Type.ConvertFrom(toConvert);
             }
 
             this.Rows.Add(incomingRow);

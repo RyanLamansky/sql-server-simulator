@@ -41,10 +41,7 @@ sealed class SimulatedDbParameterCollection : DbParameterCollection
         throw new NotImplementedException();
     }
 
-    public override IEnumerator GetEnumerator()
-    {
-        throw new NotImplementedException();
-    }
+    public override IEnumerator GetEnumerator() => this.parameters.GetEnumerator();
 
     public override int IndexOf(object value)
     {
