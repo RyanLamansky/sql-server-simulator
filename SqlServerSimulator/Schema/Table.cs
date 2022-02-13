@@ -23,12 +23,21 @@ class Table
 
     public readonly List<object[]> Rows = new();
 
-    public void ReceiveData(IEnumerable<object[]> values)
+    public void ReceiveData(Column[] columnsUsed, IEnumerable<object[]> values)
     {
         foreach (var row in values)
         {
-            // TODO: Convert incoming values to the correct types.
-            this.Rows.Add(row);
+            var incomingRow = new object[this.Columns.Count];
+
+            for (var i = 0; i < columnsUsed.Length; i++)
+            {
+                var column = columnsUsed[i];
+                var columnValue = row[i];
+
+                incomingRow[i] = column.Type.ConvertFrom(columnValue);
+            }
+
+            this.Rows.Add(incomingRow);
         }
     }
 

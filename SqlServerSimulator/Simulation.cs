@@ -128,7 +128,7 @@ public sealed class Simulation
                                                     nullable = true;
                                                 }
 
-                                                columns.Add(new Column(columnName.Value, type.Value, nullable));
+                                                columns.Add(new Column(columnName.Value, DataType.GetByName(type), nullable));
                                             } while ((dontAdvanceToken ? token : token = tokens.RequireNext()) is Comma);
 
                                             if (token is not CloseParentheses)
@@ -220,7 +220,7 @@ public sealed class Simulation
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
-                            desinationTable.ReceiveData(new[] { sourceValues.ToArray() });
+                            desinationTable.ReceiveData(destinationColumns.ToArray(), new[] { sourceValues.ToArray() });
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;

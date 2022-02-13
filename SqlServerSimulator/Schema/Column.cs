@@ -2,7 +2,7 @@
 
 class Column
 {
-    public Column(string name, string type, bool nullable)
+    public Column(string name, DataType type, bool nullable)
     {
         this.Name = name;
         this.Type = type;
@@ -11,7 +11,7 @@ class Column
 
     public string Name;
 
-    public string Type;
+    public DataType Type;
 
     public bool Nullable;
 
