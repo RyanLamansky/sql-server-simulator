@@ -1,6 +1,4 @@
-﻿using System;
-
-namespace SqlServerSimulator;
+﻿namespace SqlServerSimulator;
 
 internal class LazyRegeneratingWeakReference<T> : Lazy<WeakReference<T>>
     where T : class

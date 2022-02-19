@@ -1,7 +1,5 @@
-﻿using System;
-using System.Data.Common;
+﻿using System.Data.Common;
 using System.Collections;
-using System.Collections.Generic;
 
 namespace SqlServerSimulator;
 

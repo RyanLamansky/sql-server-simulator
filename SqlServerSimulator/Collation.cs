@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-
-namespace SqlServerSimulator;
+﻿namespace SqlServerSimulator;
 
 internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 {

@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-
-namespace SqlServerSimulator.Schema;
+﻿namespace SqlServerSimulator.Schema;
 
 using Parser;
 using Parser.Tokens;
