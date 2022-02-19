@@ -13,9 +13,23 @@ internal sealed class SimulatedSqlException : DbException
         base.HResult = unchecked((int)0x80131904);
     }
 
+    internal SimulatedSqlException(string? message, int number, byte @class, byte state)
+        : this(message)
+    {
+        this.Number = number;
+        this.Class = @class;
+        this.State = state;
+    }
+
     /// <inheritdoc/>
     public sealed override int ErrorCode => this.HResult;
 
     /// <inheritdoc/>
     public sealed override bool IsTransient => false;
+
+    public int Number { get; }
+
+    public byte Class { get; }
+
+    public byte State { get; }
 }

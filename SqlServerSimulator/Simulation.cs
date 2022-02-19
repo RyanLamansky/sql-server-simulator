@@ -151,8 +151,7 @@ public sealed class Simulation
                                                 break;
 
                                             if (!this.tables.TryAdd(table.Name, table))
-                                                // TODO Msg 2714, Level 16, State 6, Line x
-                                                throw new SimulatedSqlException($"There is already an object named '{table.Name}' in the database.");
+                                                throw new SimulatedSqlException($"There is already an object named '{table.Name}' in the database.", 2714, 16, 6);
 
                                             continue;
                                     }
@@ -180,6 +179,28 @@ public sealed class Simulation
                                 case Numeric selected:
                                     yield return new SimulatedResultSet(new Dictionary<string, int>(), new object[] { selected.Value });
                                     continue;
+                                case StringToken stringToken:
+                                    var columnName = stringToken.Value;
+
+                                    token = tokens.RequireNext();
+                                    if (token is not UnquotedString shouldBeFrom || shouldBeFrom.Parse() != Keyword.From)
+                                        break;
+                                    
+                                    token = tokens.RequireNext();
+                                    if (token is not StringToken tableName)
+                                        break;
+
+                                    if (!this.tables.TryGetValue(tableName.Value, out var table))
+                                        throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
+
+                                    if (tokens.TryMoveNext(out token))
+                                        break;
+
+                                    if (!table.Columns.Exists(column => Collation.Default.Equals(column.Name, columnName)))
+                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
+
+                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), table.Rows);
+                                    break;
                             }
                             break;
 
@@ -191,8 +212,7 @@ public sealed class Simulation
                                 break;
 
                             if (!this.tables.TryGetValue(desinationTableToken.Value, out var desinationTable))
-                                // TODO Msg 208, Level 16, State 0, Line x
-                                throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.");
+                                throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.", 208, 16, 0);
 
                             Column[] destinationColumns;
                             if ((token = tokens.RequireNext()) is OpenParentheses)
@@ -203,8 +223,7 @@ public sealed class Simulation
                                     var columnName = column.Value;
                                     var tableColumn = desinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName));
                                     if (tableColumn is null)
-                                        // TODO Msg 207, Level 16, State 1, Line x
-                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.");
+                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
 
                                     usedColumns.Add(tableColumn);
                                 }

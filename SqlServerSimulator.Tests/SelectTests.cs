@@ -59,4 +59,20 @@ public class SelectTests
 
         Assert.AreEqual(5, result);
     }
+
+    [TestMethod]
+    public void SelectParameterValueWithAtInName()
+    {
+        var result = new Simulation()
+            .CreateOpenConnection()
+            .CreateCommand("select @p0", createParameter =>
+            {
+                var parm = createParameter();
+                parm.ParameterName = "@p0";
+                parm.Value = 6;
+            })
+            .ExecuteScalar();
+
+        Assert.AreEqual(6, result);
+    }
 }

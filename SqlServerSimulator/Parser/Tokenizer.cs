@@ -34,7 +34,7 @@ static class Tokenizer
             switch (c)
             {
                 default:
-                    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                    if (c is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
                     {
                         switch (state)
                         {
@@ -46,7 +46,7 @@ static class Tokenizer
                         buffer.Append(c);
                         continue;
                     }
-                    else if (c >= '0' && c <= '9')
+                    else if (c is >= '0' and <= '9')
                     {
                         if (state.IsAnyString() || state == State.Numeric)
                         {
@@ -172,6 +172,9 @@ static class Tokenizer
 
         switch (state)
         {
+            case State.UnquotedString:
+                yield return new UnquotedString(buffer);
+                break;
             case State.AtPrefixedString:
                 yield return new AtPrefixedString(buffer);
                 break;
