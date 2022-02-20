@@ -53,6 +53,8 @@ public sealed class Simulation
             throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
         };
 
+        var allTokens = Tokenizer.Tokenize(command.CommandText).ToArray();
+
         using var tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
 
         while (tokens.TryMoveNext(out var token))
@@ -160,47 +162,47 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Select:
-                            switch (token = tokens.RequireNext())
+                            token = tokens.RequireNext();
+
+                            var expression = Expression.Parse(this, tokens, ref token, ValidatingGetVariableValue);
+
+                            if (token is UnquotedString unquoted && unquoted.Parse() == Keyword.From)
                             {
-                                case DoubleAtPrefixedString selected:
-                                    switch (selected.Parse())
+                                token = tokens.RequireNext();
+
+                                if (token is not StringToken tableName)
+                                    break;
+
+                                if (!this.tables.TryGetValue(tableName.Value, out var table))
+                                    throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
+
+                                if (tokens.TryMoveNext(out token))
+                                    break;
+
+                                var columnIndexes = new Dictionary<string, int>();
+
+                                yield return new SimulatedResultSet(
+                                    new Dictionary<string, int>(),
+                                    table.Rows.Select(row =>
                                     {
-                                        case AtAtKeyword.Version:
-                                            if (tokens.TryMoveNext(out token))
-                                                break;
+                                        return new object?[] {
+                                            expression.Run(columnName =>
+                                            {
+                                                var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName));
+                                                if (columnIndex == -1)
+                                                    throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
 
-                                            yield return new SimulatedResultSet(new Dictionary<string, int>(), new object[] { this.Version });
-                                            continue;
-                                    }
-                                    break;
-                                case AtPrefixedString atPrefixed:
-                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), new object?[] { ValidatingGetVariableValue(atPrefixed.Value) });
-                                    continue;
-                                case Numeric selected:
-                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), new object[] { selected.Value });
-                                    continue;
-                                case StringToken stringToken:
-                                    var columnName = stringToken.Value;
-
-                                    token = tokens.RequireNext();
-                                    if (token is not UnquotedString shouldBeFrom || shouldBeFrom.Parse() != Keyword.From)
-                                        break;
-                                    
-                                    token = tokens.RequireNext();
-                                    if (token is not StringToken tableName)
-                                        break;
-
-                                    if (!this.tables.TryGetValue(tableName.Value, out var table))
-                                        throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
-
-                                    if (tokens.TryMoveNext(out token))
-                                        break;
-
-                                    if (!table.Columns.Exists(column => Collation.Default.Equals(column.Name, columnName)))
-                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
-
-                                    yield return new SimulatedResultSet(new Dictionary<string, int>(), table.Rows);
-                                    break;
+                                                return row[columnIndex];
+                                            })
+                                        };
+                                    }));
+                            }
+                            else
+                            {
+                                yield return new SimulatedResultSet(
+                                    new Dictionary<string, int>(),
+                                    new object?[] { expression.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1)) }
+                                    );
                             }
                             break;
 

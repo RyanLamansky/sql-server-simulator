@@ -75,4 +75,12 @@ public class SelectTests
 
         Assert.AreEqual(6, result);
     }
+
+    [TestMethod]
+    public void Select1Plus1()
+    {
+        var result = new Simulation().ExecuteScalar("select 1 + 1");
+
+        AreEqual(2, result);
+    }
 }

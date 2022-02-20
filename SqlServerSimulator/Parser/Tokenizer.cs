@@ -140,11 +140,21 @@ static class Tokenizer
                             yield return new UnquotedString(buffer);
                             state = State.None;
                             break;
+                        case State.AtPrefixedString:
+                            yield return new AtPrefixedString(buffer);
+                            state = State.None;
+                            break;
                         case State.Numeric:
                             yield return new Numeric(buffer);
                             state = State.None;
                             break;
                     }
+
+                    buffer.Clear();
+                    continue;
+
+                case '+':
+                    yield return new Plus();
                     continue;
 
                 case '-':
