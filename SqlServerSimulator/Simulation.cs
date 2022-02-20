@@ -182,7 +182,7 @@ public sealed class Simulation
                                 var columnIndexes = new Dictionary<string, int>();
 
                                 yield return new SimulatedResultSet(
-                                    new Dictionary<string, int>(),
+                                    new Dictionary<string, int> { { expression.Name, 0} },
                                     table.Rows.Select(row =>
                                     {
                                         return new object?[] {
@@ -200,7 +200,7 @@ public sealed class Simulation
                             else
                             {
                                 yield return new SimulatedResultSet(
-                                    new Dictionary<string, int>(),
+                                    new Dictionary<string, int> { { expression.Name, 0 } },
                                     new object?[] { expression.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1)) }
                                     );
                             }

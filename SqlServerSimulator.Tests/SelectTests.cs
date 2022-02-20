@@ -1,6 +1,5 @@
 ﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Data.Common;
-using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
 
@@ -9,30 +8,30 @@ public class SelectTests
 {
     [TestMethod]
     public void Select1ViaExecuteScalar()
-        => AreEqual(1, new Simulation().ExecuteScalar("select 1"));
+        => Assert.AreEqual(1, new Simulation().ExecuteScalar("select 1"));
 
     private static DbDataReader ScalarViaReaderTest(string commandText)
     {
         var reader = new Simulation().ExecuteReader(commandText);
-        IsTrue(reader.Read());
+        Assert.IsTrue(reader.Read());
         return reader;
     }
 
     [TestMethod]
     public void Select1ViaExecuteReaderIndexer()
-        => AreEqual(1, ScalarViaReaderTest("select 1")[0]);
+        => Assert.AreEqual(1, ScalarViaReaderTest("select 1")[0]);
 
     [TestMethod]
     public void Select1ViaExecuteReaderGetInt32()
-        => AreEqual(1, ScalarViaReaderTest("select 1").GetInt32(0));
+        => Assert.AreEqual(1, ScalarViaReaderTest("select 1").GetInt32(0));
 
     private static void VersionTest(string commandText)
     {
         var simulation = new Simulation();
         var version = simulation.Version;
-        IsNotNull(version);
+        Assert.IsNotNull(version);
 
-        AreEqual(version, simulation.ExecuteScalar(commandText));
+        Assert.AreEqual(version, simulation.ExecuteScalar(commandText));
     }
 
     [TestMethod]
@@ -81,6 +80,16 @@ public class SelectTests
     {
         var result = new Simulation().ExecuteScalar("select 1 + 1");
 
-        AreEqual(2, result);
+        Assert.AreEqual(2, result);
+    }
+
+    [TestMethod]
+    public void SelectAliasedExpression()
+    {
+        using var reader = new Simulation().ExecuteReader("select 1 as c");
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("c", reader.GetName(0));
+        Assert.AreEqual(1, reader.GetInt32(0));
     }
 }

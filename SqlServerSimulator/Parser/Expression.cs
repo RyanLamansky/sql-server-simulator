@@ -8,6 +8,8 @@ internal abstract class Expression
     {
     }
 
+    public virtual string Name => string.Empty;
+
     public static Expression Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
     {
         Expression? expression = null;
@@ -30,6 +32,13 @@ internal abstract class Expression
                     {
                         switch (keyword)
                         {
+                            case Keyword.As:
+                                if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
+                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'as'.", 156, 15, 1);
+
+                                expression = new NamedExpression(expression, alias.Value);
+                                tokens.TryMoveNext(out token);
+                                return expression;
                             case Keyword.From:
                                 if (expression is null)
                                     throw new SimulatedSqlException("Incorrect syntax near the keyword 'from'.", 156, 15, 1);
@@ -58,6 +67,22 @@ internal abstract class Expression
     }
 
     public abstract object? Run(Func<string, object?> getColumnValue);
+
+    private sealed class NamedExpression : Expression
+    {
+        private readonly Expression expression;
+        private readonly string name;
+
+        public NamedExpression(Expression expression, string name)
+        {
+            this.expression = expression;
+            this.name = name;
+        }
+
+        public override string Name => this.name;
+
+        public override object? Run(Func<string, object?> getColumnValue) => this.expression.Run(getColumnValue);
+    }
 
     /// <summary>
     /// Values are resolved at parse time.

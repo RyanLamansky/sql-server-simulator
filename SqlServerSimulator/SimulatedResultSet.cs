@@ -6,6 +6,7 @@ sealed class SimulatedResultSet : SimulatedStatementOutcome, IEnumerable<object?
 {
     internal readonly IEnumerable<object?[]> records;
     internal readonly Dictionary<string, int> columnIndexes;
+    internal readonly string[] columnNames;
 
     public SimulatedResultSet(Dictionary<string, int> columnIndexes, params object?[][] records)
         : this(columnIndexes, (IEnumerable<object?[]>)records)
@@ -17,6 +18,10 @@ sealed class SimulatedResultSet : SimulatedStatementOutcome, IEnumerable<object?
     {
         this.records = records;
         this.columnIndexes = columnIndexes;
+        this.columnNames = columnIndexes
+            .OrderBy(kv => kv.Value)
+            .Select(kv => kv.Key)
+            .ToArray();
     }
 
     public IEnumerator<object?[]> GetEnumerator() => this.records.GetEnumerator();

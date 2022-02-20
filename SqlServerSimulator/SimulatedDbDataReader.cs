@@ -23,7 +23,7 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override int Depth => throw new NotImplementedException();
 
-    public override int FieldCount => throw new NotImplementedException();
+    public override int FieldCount => records.Current.Length;
 
     public override bool HasRows => throw new NotImplementedException();
 
@@ -113,7 +113,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         if (ordinal >= this.FieldCount)
             throw new IndexOutOfRangeException();
 
-        throw new NotImplementedException();
+        return this.results.Current.columnNames[ordinal];
     }
 
     public override int GetOrdinal(string name)
