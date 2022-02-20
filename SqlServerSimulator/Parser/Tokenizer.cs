@@ -175,6 +175,21 @@ static class Tokenizer
                             continue;
                     }
                     break;
+
+                case '.':
+                    switch (state)
+                    {
+                        case State.UnquotedString:
+                            yield return new UnquotedString(buffer);
+                            break;
+                        case State.AtPrefixedString:
+                            yield return new AtPrefixedString(buffer);
+                            break;
+                    }
+
+                    state = State.None;
+                    yield return new Period();
+                    continue;
             }
 
             throw new NotSupportedException($"Simulated command tokenizer doesn't know what to do with command text past character at index {index}, '{c}'.");

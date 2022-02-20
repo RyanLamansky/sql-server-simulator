@@ -53,8 +53,6 @@ public sealed class Simulation
             throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
         };
 
-        var allTokens = Tokenizer.Tokenize(command.CommandText).ToArray();
-
         using var tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
 
         while (tokens.TryMoveNext(out var token))
@@ -188,7 +186,7 @@ public sealed class Simulation
                                         return new object?[] {
                                             expression.Run(columnName =>
                                             {
-                                                var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName));
+                                                var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
                                                 if (columnIndex == -1)
                                                     throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
 

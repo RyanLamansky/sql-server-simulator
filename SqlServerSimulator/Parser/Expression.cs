@@ -58,15 +58,27 @@ internal abstract class Expression
 
                     expression = new Add(expression, Parse(simulation, tokens, ref token, getVariableValue));
                     break;
+                case Period:
+                    if (expression is null)
+                        throw new NotSupportedException("Simulated expression parser didn't know how to handle '.' at the start of an expression.");
+
+                    if (expression is not Reference reference)
+                        throw new NotSupportedException("Simulated expression parser didn't know how to handle '.' here.");
+
+                    if (!tokens.TryMoveNext(out token) || token is not Name multiPartComponent)
+                        throw new SimulatedSqlException("Incorrect syntax near '.'.", 102, 15, 1);
+
+                    reference.AddMultiPartComponent(multiPartComponent);
+                    break;
                 default:
-                    throw new NotSupportedException($"Simulated expression parser didn't know how to handle {token}.");
+                    throw new NotSupportedException($"Simulated expression parser didn't know how to handle '{token}'.");
             }
         } while (tokens.TryMoveNext(out token));
 
         return expression;
     }
 
-    public abstract object? Run(Func<string, object?> getColumnValue);
+    public abstract object? Run(Func<List<string>, object?> getColumnValue);
 
     private sealed class NamedExpression : Expression
     {
@@ -81,7 +93,7 @@ internal abstract class Expression
 
         public override string Name => this.name;
 
-        public override object? Run(Func<string, object?> getColumnValue) => this.expression.Run(getColumnValue);
+        public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
     }
 
     /// <summary>
@@ -113,7 +125,7 @@ internal abstract class Expression
             throw new NotSupportedException($"Simulator doesn't recognize {doubleAtPrefixedString}.");
         }
 
-        public override object? Run(Func<string, object?> getColumnValue) => value;
+        public override object? Run(Func<List<string>, object?> getColumnValue) => value;
     }
 
     public sealed class Add : Expression
@@ -126,7 +138,7 @@ internal abstract class Expression
             this.right = right;
         }
 
-        public override object? Run(Func<string, object?> getColumnValue)
+        public override object? Run(Func<List<string>, object?> getColumnValue)
         {
             var leftValue = left.Run(getColumnValue);
             var rightValue = right.Run(getColumnValue);
@@ -137,14 +149,19 @@ internal abstract class Expression
 
     public sealed class Reference : Expression
     {
-        private readonly string name;
+        private readonly List<string> name = new();
 
         public Reference(Name name)
         {
-            this.name = name.Value;
+            this.name.Add(name.Value);
         }
 
-        public override object? Run(Func<string, object?> getColumnValue)
+        public void AddMultiPartComponent(Name name)
+        {
+            this.name.Add(name.Value);
+        }
+
+        public override object? Run(Func<List<string>, object?> getColumnValue)
         {
             return getColumnValue(this.name);
         }
