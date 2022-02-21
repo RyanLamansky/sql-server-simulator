@@ -1,0 +1,74 @@
+﻿namespace SqlServerSimulator;
+
+using Schema;
+
+internal static class BuiltInResources
+{
+    public static readonly Table[] SystemTables = new[]
+    {
+        new Table(
+            "systypes",
+            new[]
+            {
+                new Column("name", DataType.BuiltInDbString, false),
+                new Column("name", DataType.BuiltInDbSystemName, false),
+                new Column("xtype", DataType.BuiltInDbByte, false),
+                new Column("status", DataType.BuiltInDbByte, true),
+                new Column("xusertype", DataType.BuiltInDbInt16, true),
+                new Column("length", DataType.BuiltInDbInt16, false),
+                new Column("xprec", DataType.BuiltInDbByte, false),
+                new Column("xscale", DataType.BuiltInDbByte, false),
+                new Column("tdefault", DataType.BuiltInDbInt32, false),
+                new Column("domain", DataType.BuiltInDbInt32, false),
+                new Column("uid", DataType.BuiltInDbInt16, true),
+                new Column("reserved", DataType.BuiltInDbInt16, true),
+                new Column("collationid", DataType.BuiltInDbInt32, true),
+                new Column("usertype", DataType.BuiltInDbInt16, true),
+                new Column("variable", DataType.BuiltInDbBoolean, false),
+                new Column("allownulls", DataType.BuiltInDbBoolean, true),
+                new Column("type", DataType.BuiltInDbByte, false),
+                new Column("printfmt", DataType.BuiltInDbAnsiString, true),
+                new Column("prec", DataType.BuiltInDbInt16, true),
+                new Column("scale", DataType.BuiltInDbByte, true),
+                new Column("collation", DataType.BuiltInDbString, true),
+                new Column("collation", DataType.BuiltInDbSystemName, true),
+            },
+            new object?[][]
+            {
+                new object?[] { "image", 34, 0, 34, 16, 0, 0, 0, 0, 4, 0, null, 20, false, true, 34, null, null, null, null },
+                new object?[] { "text", 35, 0, 35, 16, 0, 0, 0, 0, 4, 0, 872468488, 19, false, true, 35, null, null, null, "SQL_Latin1_General_CP1_CI_AS" },
+                new object?[] { "uniqueidentifier", 36, 0, 36, 16, 0, 0, 0, 0, 4, 0, null, 0, false, true, 37, null, 16, null, null },
+                new object?[] { "date", 40, 0, 40, 3, 10, 0, 0, 0, 4, 0, null, 0, false, true, 0, null, 10, 0, null },
+                new object?[] { "time", 41, 0, 41, 5, 16, 7, 0, 0, 4, 0, null, 0, false, true, 0, null, 16, 7, null },
+                new object?[] { "datetime2", 42, 0, 42, 8, 27, 7, 0, 0, 4, 0, null, 0, false, true, 0, null, 27, 7, null },
+                new object?[] { "datetimeoffset", 43, 0, 43, 10, 34, 7, 0, 0, 4, 0, null, 0, false, true, 0, null, 34, 7, null },
+                new object?[] { "tinyint", 48, 0, 48, 1, 3, 0, 0, 0, 4, 0, null, 5, false, true, 48, null, 3, 0, null },
+                new object?[] { "smallint", 52, 0, 52, 2, 5, 0, 0, 0, 4, 0, null, 6, false, true, 52, null, 5, 0, null },
+                new object?[] { "int", 56, 0, 56, 4, 10, 0, 0, 0, 4, 0, null, 7, false, true, 56, null, 10, 0, null },
+                new object?[] { "smalldatetime", 58, 0, 58, 4, 16, 0, 0, 0, 4, 0, null, 22, false, true, 58, null, 16, 0, null },
+                new object?[] { "real", 59, 0, 59, 4, 24, 0, 0, 0, 4, 0, null, 23, false, true, 59, null, 24, null, null },
+                new object?[] { "money", 60, 0, 60, 8, 19, 4, 0, 0, 4, 0, null, 11, false, true, 60, null, 19, 4, null },
+                new object?[] { "datetime", 61, 0, 61, 8, 23, 3, 0, 0, 4, 0, null, 12, false, true, 61, null, 23, 3, null },
+                new object?[] { "float", 62, 0, 62, 8, 53, 0, 0, 0, 4, 0, null, 8, false, true, 62, null, 53, null, null },
+                new object?[] { "sql_variant", 98, 0, 98, 8016, 0, 0, 0, 0, 4, 0, null, 0, false, true, 39, null, 0, null, null },
+                new object?[] { "ntext", 99, 0, 99, 16, 0, 0, 0, 0, 4, 0, 872468488, 0, false, true, 35, null, null, null, "SQL_Latin1_General_CP1_CI_AS" },
+                new object?[] { "bit", 104, 0, 104, 1, 1, 0, 0, 0, 4, 0, null, 16, false, true, 50, null, 1, null, null },
+                new object?[] { "decimal", 106, 0, 106, 17, 38, 38, 0, 0, 4, 0, null, 24, false, true, 55, null, 38, 38, null },
+                new object?[] { "numeric", 108, 0, 108, 17, 38, 38, 0, 0, 4, 0, null, 10, false, true, 63, null, 38, 38, null },
+                new object?[] { "smallmoney", 122, 0, 122, 4, 10, 4, 0, 0, 4, 0, null, 21, false, true, 122, null, 10, 4, null },
+                new object?[] { "bigint", 127, 0, 127, 8, 19, 0, 0, 0, 4, 0, null, 0, false, true, 63, null, 19, 0, null },
+                new object?[] { "hierarchyid", 240, 0, 128, 892, 0, 0, 0, 0, 4, 0, null, 0, false, true, 0, null, 892, null, null },
+                new object?[] { "geometry", 240, 0, 129, -1, 0, 0, 0, 0, 4, 0, null, 0, false, true, 0, null, -1, null, null },
+                new object?[] { "geography", 240, 0, 130, -1, 0, 0, 0, 0, 4, 0, null, 0, false, true, 0, null, -1, null, null },
+                new object?[] { "varbinary", 165, 0, 165, 8000, 0, 0, 0, 0, 4, 0, null, 4, true, true, 37, null, 8000, null, null },
+                new object?[] { "varchar", 167, 0, 167, 8000, 0, 0, 0, 0, 4, 0, 872468488, 2, true, true, 39, null, 8000, null, "SQL_Latin1_General_CP1_CI_AS" },
+                new object?[] { "binary", 173, 0, 173, 8000, 0, 0, 0, 0, 4, 0, null, 3, false, true, 45, null, 8000, null, null },
+                new object?[] { "char", 175, 0, 175, 8000, 0, 0, 0, 0, 4, 0, 872468488, 1, false, true, 47, null, 8000, null, "SQL_Latin1_General_CP1_CI_AS" },
+                new object?[] { "timestamp", 189, 1, 189, 8, 0, 0, 0, 0, 4, 0, null, 80, false, false, 45, null, 8, null, null },
+                new object?[] { "nvarchar", 231, 0, 231, 8000, 0, 0, 0, 0, 4, 0, 872468488, 0, true, true, 39, null, 4000, null, "SQL_Latin1_General_CP1_CI_AS" },
+                new object?[] { "nchar", 239, 0, 239, 8000, 0, 0, 0, 0, 4, 0, 872468488, 0, false, true, 47, null, 4000, null, "SQL_Latin1_General_CP1_CI_AS" },
+                new object?[] { "xml", 241, 0, 241, -1, 0, 0, 0, 0, 4, 0, null, 0, false, true, 0, null, -1, null, null },
+                new object?[] { "sysname", 231, 1, 256, 256, 0, 0, 0, 0, 4, 0, 872468488, 18, true, false, 39, null, 128, null, "SQL_Latin1_General_CP1_CI_AS" },
+            }),
+    };
+}

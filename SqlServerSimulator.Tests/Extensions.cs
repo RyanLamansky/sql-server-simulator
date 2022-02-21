@@ -41,4 +41,10 @@ static class Extensions
 
     public static DbDataReader ExecuteReader(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteReader();
+
+    public static IEnumerable<DbDataReader> EnumerateRecords(this DbDataReader reader)
+    {
+        while (reader.Read())
+            yield return reader;
+    }
 }

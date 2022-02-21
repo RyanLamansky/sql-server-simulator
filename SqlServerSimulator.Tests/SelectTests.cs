@@ -92,4 +92,20 @@ public class SelectTests
         Assert.AreEqual("c", reader.GetName(0));
         Assert.AreEqual(1, reader.GetInt32(0));
     }
+
+    [TestMethod]
+    public void SelectExpressionFromSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select 1 from systypes");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetInt32(0))
+            .ToArray();
+
+        Assert.AreEqual(34, results.Length);
+        Assert.AreEqual(1, results.ToHashSet().Count);
+        Assert.AreEqual(1, results[0]);
+    }
 }

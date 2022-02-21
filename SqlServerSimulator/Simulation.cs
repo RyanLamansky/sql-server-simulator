@@ -32,6 +32,8 @@ public sealed class Simulation
 
     private readonly ConcurrentDictionary<string, Table> tables = new(Collation.Default);
 
+    private readonly Lazy<Dictionary<string, Table>> systemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
+
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
         var variables = command
@@ -171,7 +173,7 @@ public sealed class Simulation
                                 if (token is not StringToken tableName)
                                     break;
 
-                                if (!this.tables.TryGetValue(tableName.Value, out var table))
+                                if (!this.tables.TryGetValue(tableName.Value, out var table) && !this.systemTables.Value.TryGetValue(tableName.Value, out table))
                                     throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
 
                                 if (tokens.TryMoveNext(out token))

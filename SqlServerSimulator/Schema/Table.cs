@@ -5,23 +5,23 @@ using Parser.Tokens;
 
 class Table
 {
-    private readonly LazyRegeneratingWeakReference<Dictionary<Column, int>> columnByIndex;
-
     public Table(string name)
     {
         this.Name = name;
+    }
 
-        this.columnByIndex = new(() => this
-            .Columns
-            .Select((column, i) => new KeyValuePair<Column, int>(column, i))
-            .ToDictionary(kv => kv.Key, kv => kv.Value));
+    public Table(string name, IEnumerable<Column> columns, IEnumerable<object?[]> rows)
+        : this(name)
+    {
+        this.Columns.AddRange(columns);
+        this.Rows.AddRange(rows);
     }
 
     public string Name;
 
     public readonly List<Column> Columns = new();
 
-    public readonly List<object[]> Rows = new();
+    public readonly List<object?[]> Rows = new();
 
     public void ReceiveData(Column[] columnsUsed, IEnumerable<Token[]> values, Func<string, object?> getVariableValue)
     {
