@@ -156,6 +156,8 @@ internal abstract class Expression
             this.name.Add(name.Value);
         }
 
+        public override string Name => this.name.Last();
+
         public void AddMultiPartComponent(Name name)
         {
             this.name.Add(name.Value);

@@ -108,4 +108,95 @@ public class SelectTests
         Assert.AreEqual(1, results.ToHashSet().Count);
         Assert.AreEqual(1, results[0]);
     }
+
+    [TestMethod]
+    public void SelectExpressionFromAliasedSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select 1 from systypes as s");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetInt32(0))
+            .ToArray();
+
+        Assert.AreEqual(34, results.Length);
+        Assert.AreEqual(1, results.ToHashSet().Count);
+        Assert.AreEqual(1, results[0]);
+    }
+
+    [TestMethod]
+    public void SelectColumnFromSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select name from systypes");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetString(0))
+            .ToHashSet();
+
+        Assert.AreEqual(34, results.Count);
+        Assert.IsTrue(results.Contains("int"));
+    }
+
+    [TestMethod]
+    public void SelectAliasedColumnFromSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select name as c from systypes");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetName(0))
+            .ToHashSet();
+
+        Assert.AreEqual(1, results.Count);
+        Assert.IsTrue(results.Contains("c"));
+    }
+
+    [TestMethod]
+    public void SelectAliasedColumnFromAliasedSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select name as c from systypes as s");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetName(0))
+            .ToHashSet();
+
+        Assert.AreEqual(1, results.Count);
+        Assert.IsTrue(results.Contains("c"));
+    }
+
+    [TestMethod]
+    public void SelectMultiPartColumnFromSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select systypes.name from systypes");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetName(0))
+            .ToHashSet();
+
+        Assert.AreEqual(1, results.Count);
+        Assert.IsTrue(results.Contains("name"));
+    }
+
+    [TestMethod]
+    public void SelectMultiPartColumnFromAliasedSystemTable()
+    {
+        using var reader = new Simulation().ExecuteReader("select s.name from systypes as s");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => reader.GetName(0))
+            .ToHashSet();
+
+        Assert.AreEqual(1, results.Count);
+        Assert.IsTrue(results.Contains("name"));
+    }
 }

@@ -7,5 +7,5 @@ abstract class SimulatedStatementOutcome
         this.RecordsAffected = recordsAffected;
     }
 
-    public int RecordsAffected { get; set; }
+    public int RecordsAffected { get; }
 }

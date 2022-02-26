@@ -177,7 +177,15 @@ public sealed class Simulation
                                     throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
 
                                 if (tokens.TryMoveNext(out token))
-                                    break;
+                                {
+                                    if (token is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
+                                    {
+                                        if (token is not UnquotedString)
+                                            break;
+                                    }
+                                    else
+                                        break;
+                                }
 
                                 var columnIndexes = new Dictionary<string, int>();
 
@@ -257,7 +265,7 @@ public sealed class Simulation
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
-                            desinationTable.ReceiveData(destinationColumns.ToArray(), new[] { sourceValues.ToArray() }, ValidatingGetVariableValue);
+                            desinationTable.ReceiveData(destinationColumns, new[] { sourceValues.ToArray() }, ValidatingGetVariableValue);
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;

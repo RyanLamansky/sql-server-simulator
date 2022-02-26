@@ -78,7 +78,6 @@ public class EFCoreBasics
     }
 
     [TestMethod]
-    [Ignore("Unsupported query syntax: SELECT [r].[Id] FROM [Rows] AS [r]")]
     public void RoundTrip()
     {
         var simulation = CreateDefaultSimulation();
