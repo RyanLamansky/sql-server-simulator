@@ -30,9 +30,9 @@ public sealed class Simulation
     /// <returns>A new simulated database connection instance.</returns>
     public DbConnection CreateDbConnection() => new SimulatedDbConnection(this);
 
-    private readonly ConcurrentDictionary<string, Table> tables = new(Collation.Default);
+    internal readonly ConcurrentDictionary<string, Table> Tables = new(Collation.Default);
 
-    private readonly Lazy<Dictionary<string, Table>> systemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
+    internal readonly Lazy<Dictionary<string, Table>> SystemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
 
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
@@ -152,7 +152,7 @@ public sealed class Simulation
                                             if (token is not CloseParentheses)
                                                 break;
 
-                                            if (!this.tables.TryAdd(table.Name, table))
+                                            if (!this.Tables.TryAdd(table.Name, table))
                                                 throw new SimulatedSqlException($"There is already an object named '{table.Name}' in the database.", 2714, 16, 6);
 
                                             continue;
@@ -162,56 +162,7 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Select:
-                            token = tokens.RequireNext();
-
-                            var expression = Expression.Parse(this, tokens, ref token, ValidatingGetVariableValue);
-
-                            if (token is UnquotedString unquoted && unquoted.Parse() == Keyword.From)
-                            {
-                                token = tokens.RequireNext();
-
-                                if (token is not StringToken tableName)
-                                    break;
-
-                                if (!this.tables.TryGetValue(tableName.Value, out var table) && !this.systemTables.Value.TryGetValue(tableName.Value, out table))
-                                    throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
-
-                                if (tokens.TryMoveNext(out token))
-                                {
-                                    if (token is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
-                                    {
-                                        if (token is not UnquotedString)
-                                            break;
-                                    }
-                                    else
-                                        break;
-                                }
-
-                                var columnIndexes = new Dictionary<string, int>();
-
-                                yield return new SimulatedResultSet(
-                                    new Dictionary<string, int> { { expression.Name, 0} },
-                                    table.Rows.Select(row =>
-                                    {
-                                        return new object?[] {
-                                            expression.Run(columnName =>
-                                            {
-                                                var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
-                                                if (columnIndex == -1)
-                                                    throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
-
-                                                return row[columnIndex];
-                                            })
-                                        };
-                                    }));
-                            }
-                            else
-                            {
-                                yield return new SimulatedResultSet(
-                                    new Dictionary<string, int> { { expression.Name, 0 } },
-                                    new object?[] { expression.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1)) }
-                                    );
-                            }
+                            yield return Selection.Parse(this, tokens, ref token, ValidatingGetVariableValue).Results;
                             break;
 
                         case Keyword.Insert:
@@ -221,7 +172,7 @@ public sealed class Simulation
                             if (token is not StringToken desinationTableToken)
                                 break;
 
-                            if (!this.tables.TryGetValue(desinationTableToken.Value, out var desinationTable))
+                            if (!this.Tables.TryGetValue(desinationTableToken.Value, out var desinationTable))
                                 throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.", 208, 16, 0);
 
                             Column[] destinationColumns;
