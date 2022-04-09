@@ -9,7 +9,5 @@ class BracketDelimitedString : Name
     {
     }
 
-#if DEBUG
     public override string ToString() => $"[{Value}]";
-#endif
 }

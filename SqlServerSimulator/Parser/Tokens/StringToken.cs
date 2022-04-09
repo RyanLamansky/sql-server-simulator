@@ -12,7 +12,5 @@ abstract class StringToken : Token
         buffer.Clear();
     }
 
-#if DEBUG
-    public override string ToString() => $"{GetType().Name} {Value}";
-#endif
+    public abstract override string ToString();
 }
