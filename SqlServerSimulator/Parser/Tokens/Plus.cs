@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator.Parser.Tokens;
 
-class Plus : Token
+sealed class Plus : Token
 {
     public override string ToString() => "+";
 }

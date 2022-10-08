@@ -2,7 +2,7 @@
 
 namespace SqlServerSimulator.Parser.Tokens;
 
-class UnquotedString : Name
+sealed class UnquotedString : Name
 {
     public UnquotedString(StringBuilder buffer)
         : base(buffer)

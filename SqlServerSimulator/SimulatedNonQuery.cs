@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator;
 
-class SimulatedNonQuery : SimulatedStatementOutcome
+sealed class SimulatedNonQuery : SimulatedStatementOutcome
 {
     public SimulatedNonQuery()
         : this(-1)

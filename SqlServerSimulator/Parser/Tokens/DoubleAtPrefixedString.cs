@@ -2,7 +2,7 @@
 
 namespace SqlServerSimulator.Parser.Tokens;
 
-class DoubleAtPrefixedString : StringToken
+sealed class DoubleAtPrefixedString : StringToken
 {
     public DoubleAtPrefixedString(StringBuilder buffer)
         : base(buffer)

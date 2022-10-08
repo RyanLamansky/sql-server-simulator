@@ -2,7 +2,7 @@
 
 abstract class SimulatedStatementOutcome
 {
-    protected SimulatedStatementOutcome(int recordsAffected)
+    private protected SimulatedStatementOutcome(int recordsAffected)
     {
         this.RecordsAffected = recordsAffected;
     }
