@@ -76,11 +76,12 @@ public sealed class Simulation
                                 case UnquotedString setTarget:
                                     switch (setTarget.Parse())
                                     {
+                                        case Keyword.Implicit_Transactions:
                                         case Keyword.NoCount:
                                             switch (token = tokens.RequireNext())
                                             {
-                                                case UnquotedString noCountMode:
-                                                    switch (noCountMode.Parse())
+                                                case UnquotedString onOff:
+                                                    switch (onOff.Parse())
                                                     {
                                                         case Keyword.On:
                                                         case Keyword.Off:

@@ -36,6 +36,9 @@ static class Extensions
         return connection;
     }
 
+    public static int ExecuteNonQuery(this Simulation simulation, string commandText)
+        => simulation.CreateCommand(commandText).ExecuteNonQuery();
+
     public static object? ExecuteScalar(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteScalar();
 

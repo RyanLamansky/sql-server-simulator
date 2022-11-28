@@ -34,7 +34,7 @@ static class Tokenizer
             switch (c)
             {
                 default:
-                    if (c is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
+                    if (c is '_'or >= 'A' and <= 'Z' or >= 'a' and <= 'z')
                     {
                         switch (state)
                         {

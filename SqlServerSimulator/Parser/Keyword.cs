@@ -22,6 +22,7 @@ enum Keyword
     Exists,
     Float,
     From,
+    Implicit_Transactions,
     In,
     Inner,
     Insert,
