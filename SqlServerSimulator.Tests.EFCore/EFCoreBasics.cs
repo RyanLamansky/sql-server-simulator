@@ -31,9 +31,7 @@ public class EFCoreBasics
         {
         }
 
-#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
         public TestContext(Simulation simulation)
-#pragma warning restore
         {
             this.Simulation = simulation;
         }
@@ -44,9 +42,7 @@ public class EFCoreBasics
             optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
         }
 
-#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
-        public DbSet<TestRow> Rows { get; set; }
-#pragma warning restore
+        public DbSet<TestRow> Rows => Set<TestRow>();
     }
 
     [TestMethod]
