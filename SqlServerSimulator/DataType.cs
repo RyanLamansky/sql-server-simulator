@@ -1,4 +1,5 @@
 ﻿using System.Data;
+using System.Globalization;
 
 namespace SqlServerSimulator;
 
@@ -59,28 +60,28 @@ internal abstract class DataType
     {
         public override DbType Type => DbType.Boolean;
 
-        public override object ConvertFrom(object value) => Convert.ToBoolean(value);
+        public override object ConvertFrom(object value) => Convert.ToBoolean(value, CultureInfo.InvariantCulture);
     }
 
     private sealed class DbByte : DataType
     {
         public override DbType Type => DbType.Byte;
 
-        public override object ConvertFrom(object value) => Convert.ToByte(value);
+        public override object ConvertFrom(object value) => Convert.ToByte(value, CultureInfo.InvariantCulture);
     }
 
     private sealed class DbInt16 : DataType
     {
         public override DbType Type => DbType.Int16;
 
-        public override object ConvertFrom(object value) => Convert.ToInt16(value);
+        public override object ConvertFrom(object value) => Convert.ToInt16(value, CultureInfo.InvariantCulture);
     }
 
     private sealed class DbInt32 : DataType
     {
         public override DbType Type => DbType.Int32;
 
-        public override object ConvertFrom(object value) => Convert.ToInt32(value);
+        public override object ConvertFrom(object value) => Convert.ToInt32(value, CultureInfo.InvariantCulture);
     }
 
     private sealed class DbAnsiString : DataType

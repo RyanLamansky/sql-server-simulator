@@ -2,7 +2,7 @@
 
 using Tokens;
 
-internal class Selection
+internal sealed class Selection
 {
     internal SimulatedResultSet Results;
 

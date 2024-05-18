@@ -113,7 +113,10 @@ sealed class SimulatedDbDataReader : DbDataReader
     public override string GetName(int ordinal)
     {
         if (ordinal >= this.FieldCount)
+#pragma warning disable CA2201 // Do not raise reserved exception types
+            // This is thrown by the official SqlDataReader class so we do it here, too.
             throw new IndexOutOfRangeException();
+#pragma warning restore
 
         return this.results.Current.columnNames[ordinal];
     }
@@ -147,6 +150,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         if (hasNext)
             this.recordsAffected = 0;
 
+        this.records.Dispose();
         this.records = this.results.Current?.GetEnumerator() ?? Enumerable.Empty<object?[]>().GetEnumerator();
 
         return hasNext;
@@ -167,5 +171,6 @@ sealed class SimulatedDbDataReader : DbDataReader
         base.Dispose(disposing);
 
         this.results.Dispose();
+        this.records.Dispose();
     }
 }

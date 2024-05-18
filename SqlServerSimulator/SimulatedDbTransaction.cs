@@ -3,19 +3,15 @@ using System.Data.Common;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedDbTransaction : DbTransaction
+sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel) : DbTransaction
 {
-    internal readonly Simulation simulation;
-    internal readonly SimulatedDbConnection connection;
+    internal readonly Simulation simulation = simulation;
+#pragma warning disable CA2213 // Disposable fields should be disposed
+    // This is intended to survive even if the transaction is disposed.
+    internal readonly SimulatedDbConnection connection = connection;
+#pragma warning restore
 
-    public SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel)
-    {
-        this.simulation = simulation;
-        this.connection = connection;
-        this.IsolationLevel = isolationLevel;
-    }
-
-    public override IsolationLevel IsolationLevel { get; }
+    public override IsolationLevel IsolationLevel { get; } = isolationLevel;
 
     protected override DbConnection DbConnection => this.connection;
 

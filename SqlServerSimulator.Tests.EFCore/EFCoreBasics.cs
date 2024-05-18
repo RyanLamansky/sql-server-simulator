@@ -22,20 +22,14 @@ public class EFCoreBasics
         public int Id { get; set; }
     }
 
-    class TestContext : DbContext
+    class TestContext(Simulation simulation) : DbContext
     {
-        public Simulation Simulation { get; set; }
+        public Simulation Simulation { get; set; } = simulation;
 
         public TestContext()
             : this(CreateDefaultSimulation())
         {
         }
-
-        public TestContext(Simulation simulation)
-        {
-            this.Simulation = simulation;
-        }
-
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {

@@ -80,16 +80,10 @@ internal abstract class Expression
 
     public abstract object? Run(Func<List<string>, object?> getColumnValue);
 
-    private sealed class NamedExpression : Expression
+    private sealed class NamedExpression(Expression expression, string name) : Expression
     {
-        private readonly Expression expression;
-        private readonly string name;
-
-        public NamedExpression(Expression expression, string name)
-        {
-            this.expression = expression;
-            this.name = name;
-        }
+        private readonly Expression expression = expression;
+        private readonly string name = name;
 
         public override string Name => this.name;
 
@@ -128,15 +122,9 @@ internal abstract class Expression
         public override object? Run(Func<List<string>, object?> getColumnValue) => value;
     }
 
-    public sealed class Add : Expression
+    public sealed class Add(Expression left, Expression right) : Expression
     {
-        private readonly Expression left, right;
-
-        public Add(Expression left, Expression right)
-        {
-            this.left = left;
-            this.right = right;
-        }
+        private readonly Expression left = left, right = right;
 
         public override object? Run(Func<List<string>, object?> getColumnValue)
         {
@@ -149,7 +137,7 @@ internal abstract class Expression
 
     public sealed class Reference : Expression
     {
-        private readonly List<string> name = new();
+        private readonly List<string> name = [];
 
         public Reference(Name name)
         {

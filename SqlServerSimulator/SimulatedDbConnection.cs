@@ -4,14 +4,9 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedDbConnection : DbConnection
+sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
 {
-    internal readonly Simulation simulation;
-
-    public SimulatedDbConnection(Simulation simulation)
-    {
-        this.simulation = simulation;
-    }
+    internal readonly Simulation simulation = simulation;
 
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }

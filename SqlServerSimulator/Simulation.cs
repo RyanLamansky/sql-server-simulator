@@ -43,7 +43,7 @@ public sealed class Simulation
             {
                 var name = parameter.ParameterName;
                 var type = DataType.GetByDbType(parameter.DbType);
-                return (Name: name.StartsWith("@") ? name[1..] : name, TypeValue: (DataType: type, Value: parameter.Value is null ? null : type.ConvertFrom(parameter.Value)));
+                return (Name: name.StartsWith('@') ? name[1..] : name, TypeValue: (DataType: type, Value: parameter.Value is null ? null : type.ConvertFrom(parameter.Value)));
             })
             .ToDictionary(tuple => tuple.Name, StringComparer.InvariantCultureIgnoreCase);
 
@@ -193,13 +193,13 @@ public sealed class Simulation
                                 if (token is not CloseParentheses)
                                     break;
 
-                                destinationColumns = usedColumns.ToArray();
+                                destinationColumns = [.. usedColumns];
 
                                 token = tokens.RequireNext();
                             }
                             else
                             {
-                                destinationColumns = desinationTable.Columns.ToArray();
+                                destinationColumns = [.. desinationTable.Columns];
                             }
 
                             if (token is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
@@ -217,7 +217,7 @@ public sealed class Simulation
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
-                            desinationTable.ReceiveData(destinationColumns, new[] { sourceValues.ToArray() }, ValidatingGetVariableValue);
+                            desinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], ValidatingGetVariableValue);
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;

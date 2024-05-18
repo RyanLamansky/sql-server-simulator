@@ -2,18 +2,22 @@
 
 namespace SqlServerSimulator;
 
+#pragma warning disable CA1032 // Implement standard exception constructors
+// This is only thrown internally so standard constructors aren't needed.
+
 /// <summary>
 /// Describes a simulated SQL exception.
 /// </summary>
 internal sealed class SimulatedSqlException : DbException
+
 {
     internal SimulatedSqlException(string? message)
-        : this(message, Array.Empty<SimulatedSqlError>())
+        : this(message, [])
     {
     }
 
     internal SimulatedSqlException(string message, int number, byte @class, byte state)
-        : this(message, new[] { new SimulatedSqlError(message, number, @class, state)})
+        : this(message, [new SimulatedSqlError(message, number, @class, state)])
     {
     }
 
@@ -22,11 +26,11 @@ internal sealed class SimulatedSqlException : DbException
     {
         base.HResult = unchecked((int)0x80131904);
         
-        errors = this.Errors = errors ?? Array.Empty<SimulatedSqlError>();
+        errors = this.Errors = errors ?? [];
 
         if (errors.Count == 0)
         {
-            this.Errors = new [] { new SimulatedSqlError(base.Message, 0, 0, 0)};
+            this.Errors = [new SimulatedSqlError(base.Message, 0, 0, 0)];
 
             return;
         }

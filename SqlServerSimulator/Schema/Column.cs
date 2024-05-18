@@ -1,19 +1,12 @@
 ﻿namespace SqlServerSimulator.Schema;
 
-class Column
+sealed class Column(string name, DataType type, bool nullable)
 {
-    public Column(string name, DataType type, bool nullable)
-    {
-        this.Name = name;
-        this.Type = type;
-        this.Nullable = nullable;
-    }
+    public string Name = name;
 
-    public string Name;
+    public DataType Type = type;
 
-    public DataType Type;
-
-    public bool Nullable;
+    public bool Nullable = nullable;
 
 #if DEBUG
     public override string ToString() => $"{Name} {Type}";

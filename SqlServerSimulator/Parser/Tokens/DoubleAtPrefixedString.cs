@@ -2,12 +2,8 @@
 
 namespace SqlServerSimulator.Parser.Tokens;
 
-sealed class DoubleAtPrefixedString : StringToken
+sealed class DoubleAtPrefixedString(StringBuilder buffer) : StringToken(buffer)
 {
-    public DoubleAtPrefixedString(StringBuilder buffer)
-        : base(buffer)
-    {
-    }
     public AtAtKeyword Parse()
     {
         if (!Enum.TryParse<AtAtKeyword>(Value, true, out var result))

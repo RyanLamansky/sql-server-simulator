@@ -9,34 +9,34 @@ public class ConnectionTests
     [TestMethod]
     public void OpenCloseSync()
     {
-        using var connnection = new Simulation().CreateDbConnection();
+        using var connection = new Simulation().CreateDbConnection();
 
-        Assert.AreEqual(ConnectionState.Closed, connnection.State);
-        connnection.Open();
-        Assert.AreEqual(ConnectionState.Open, connnection.State);
-        connnection.Close();
-        Assert.AreEqual(ConnectionState.Closed, connnection.State);
+        Assert.AreEqual(ConnectionState.Closed, connection.State);
+        connection.Open();
+        Assert.AreEqual(ConnectionState.Open, connection.State);
+        connection.Close();
+        Assert.AreEqual(ConnectionState.Closed, connection.State);
     }
 
     [TestMethod]
     public async Task OpenCloseAsync()
     {
-        using var connnection = new Simulation().CreateDbConnection();
+        using var connection = new Simulation().CreateDbConnection();
 
-        Assert.AreEqual(ConnectionState.Closed, connnection.State);
-        await connnection.OpenAsync();
-        Assert.AreEqual(ConnectionState.Open, connnection.State);
-        await connnection.CloseAsync();
-        Assert.AreEqual(ConnectionState.Closed, connnection.State);
+        Assert.AreEqual(ConnectionState.Closed, connection.State);
+        await connection.OpenAsync();
+        Assert.AreEqual(ConnectionState.Open, connection.State);
+        await connection.CloseAsync();
+        Assert.AreEqual(ConnectionState.Closed, connection.State);
     }
 
     [TestMethod]
     public async Task OpenAsyncCancellable()
     {
-        using var connnection = new Simulation().CreateDbConnection();
+        using var connection = new Simulation().CreateDbConnection();
 
-        Assert.AreEqual(ConnectionState.Closed, connnection.State);
-        await connnection.OpenAsync(default);
-        Assert.AreEqual(ConnectionState.Open, connnection.State);
+        Assert.AreEqual(ConnectionState.Closed, connection.State);
+        await connection.OpenAsync(default);
+        Assert.AreEqual(ConnectionState.Open, connection.State);
     }
 }

@@ -2,12 +2,7 @@
 
 namespace SqlServerSimulator.Parser.Tokens;
 
-sealed class AtPrefixedString : StringToken
+sealed class AtPrefixedString(StringBuilder buffer) : StringToken(buffer)
 {
-    public AtPrefixedString(StringBuilder buffer)
-        : base(buffer)
-    {
-    }
-
     public override string ToString() => $"@{Value}";
 }

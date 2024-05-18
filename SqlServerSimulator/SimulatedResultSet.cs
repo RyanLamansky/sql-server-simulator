@@ -2,26 +2,18 @@
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedResultSet : SimulatedStatementOutcome, IEnumerable<object?[]>
+sealed class SimulatedResultSet(Dictionary<string, int> columnIndexes, IEnumerable<object?[]> records) : SimulatedStatementOutcome(-1), IEnumerable<object?[]>
 {
-    internal readonly IEnumerable<object?[]> records;
-    internal readonly Dictionary<string, int> columnIndexes;
-    internal readonly string[] columnNames;
+    internal readonly IEnumerable<object?[]> records = records;
+    internal readonly Dictionary<string, int> columnIndexes = columnIndexes;
+    internal readonly string[] columnNames = columnIndexes
+        .OrderBy(kv => kv.Value)
+        .Select(kv => kv.Key)
+        .ToArray();
 
     public SimulatedResultSet(Dictionary<string, int> columnIndexes, params object?[][] records)
         : this(columnIndexes, (IEnumerable<object?[]>)records)
     {
-    }
-
-    public SimulatedResultSet(Dictionary<string, int> columnIndexes, IEnumerable<object?[]> records)
-        : base(-1)
-    {
-        this.records = records;
-        this.columnIndexes = columnIndexes;
-        this.columnNames = columnIndexes
-            .OrderBy(kv => kv.Value)
-            .Select(kv => kv.Key)
-            .ToArray();
     }
 
     public IEnumerator<object?[]> GetEnumerator() => this.records.GetEnumerator();

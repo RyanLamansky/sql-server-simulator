@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 
 sealed class SimulatedDbParameterCollection : DbParameterCollection
 {
-    readonly List<SimulatedDbParameter> parameters = new();
+    readonly List<SimulatedDbParameter> parameters = [];
 
     public override int Count => throw new NotImplementedException();
 

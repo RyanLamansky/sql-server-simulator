@@ -2,12 +2,7 @@
 
 namespace SqlServerSimulator.Parser.Tokens;
 
-sealed class BracketDelimitedString : Name
+sealed class BracketDelimitedString(StringBuilder buffer) : Name(buffer)
 {
-    public BracketDelimitedString(StringBuilder buffer)
-        : base(buffer)
-    {
-    }
-
     public override string ToString() => $"[{Value}]";
 }

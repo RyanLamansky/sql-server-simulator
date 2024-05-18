@@ -3,13 +3,8 @@
 using Parser;
 using Parser.Tokens;
 
-class Table
+sealed class Table(string name)
 {
-    public Table(string name)
-    {
-        this.Name = name;
-    }
-
     public Table(string name, IEnumerable<Column> columns, IEnumerable<object?[]> rows)
         : this(name)
     {
@@ -17,11 +12,11 @@ class Table
         this.Rows.AddRange(rows);
     }
 
-    public string Name;
+    public string Name = name;
 
-    public readonly List<Column> Columns = new();
+    public readonly List<Column> Columns = [];
 
-    public readonly List<object?[]> Rows = new();
+    public readonly List<object?[]> Rows = [];
 
     public void ReceiveData(Column[] columnsUsed, IEnumerable<Token[]> values, Func<string, object?> getVariableValue)
     {
