@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator;
 
@@ -14,7 +15,7 @@ sealed class SimulatedDbDataReader : DbDataReader
     {
         this.simulation = simulation;
         this.results = results.GetEnumerator();
-        this.records = (this.results.MoveNext() ? this.results.Current.records : Enumerable.Empty<object[]>()).GetEnumerator();
+        this.records = (this.results.MoveNext() ? this.results.Current.records : []).GetEnumerator();
     }
 
     public override object this[int ordinal] => records.Current[ordinal] ?? DBNull.Value;
@@ -81,6 +82,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
+    [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
     public override Type GetFieldType(int ordinal)
     {
         throw new NotImplementedException();
