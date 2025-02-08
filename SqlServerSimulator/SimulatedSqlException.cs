@@ -1,4 +1,5 @@
-﻿using System.Data.Common;
+﻿using System.Collections.Immutable;
+using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -9,7 +10,6 @@ namespace SqlServerSimulator;
 /// Describes a simulated SQL exception.
 /// </summary>
 internal sealed class SimulatedSqlException : DbException
-
 {
     internal SimulatedSqlException(string? message)
         : this(message, [])
@@ -17,23 +17,23 @@ internal sealed class SimulatedSqlException : DbException
     }
 
     internal SimulatedSqlException(string message, int number, byte @class, byte state)
-        : this(message, [new SimulatedSqlError(message, number, @class, state)])
+        : this(message, new SimulatedSqlError(message, number, @class, state))
     {
     }
 
-    internal SimulatedSqlException(string? message, IReadOnlyList<SimulatedSqlError>? errors)
+    internal SimulatedSqlException(string? message, params SimulatedSqlError[] errors)
         : base(message ?? "Simulated exception with no message.")
     {
         base.HResult = unchecked((int)0x80131904);
-        
-        errors = this.Errors = errors ?? [];
 
-        if (errors.Count == 0)
+        if (errors.Length == 0)
         {
-            this.Errors = [new SimulatedSqlError(base.Message, 0, 0, 0)];
+            this.Errors = ImmutableArray.Create([new SimulatedSqlError(base.Message, 0, 0, 0)]);
 
             return;
         }
+
+        this.Errors = ImmutableArray.Create(errors);
 
         var firstError = errors[0];
 

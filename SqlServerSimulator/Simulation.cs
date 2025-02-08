@@ -111,10 +111,10 @@ public sealed class Simulation
                                             var table = new Table(tableName.Value);
 
                                             var columns = table.Columns;
-                                            bool dontAdvanceToken;
+                                            bool suppressAdvanceToken;
                                             do
                                             {
-                                                dontAdvanceToken = false;
+                                                suppressAdvanceToken = false;
                                                 if (tokens.RequireNext() is not Name columnName)
                                                     throw new SimulatedSqlException("Simulated table creation requires named columns.");
 
@@ -143,12 +143,12 @@ public sealed class Simulation
                                                 }
                                                 else
                                                 {
-                                                    dontAdvanceToken = true;
+                                                    suppressAdvanceToken = true;
                                                     nullable = true;
                                                 }
 
                                                 columns.Add(new Column(columnName.Value, DataType.GetByName(type), nullable));
-                                            } while ((dontAdvanceToken ? token : token = tokens.RequireNext()) is Comma);
+                                            } while ((suppressAdvanceToken ? token : token = tokens.RequireNext()) is Comma);
 
                                             if (token is not CloseParentheses)
                                                 break;
@@ -170,11 +170,11 @@ public sealed class Simulation
                             if ((token = tokens.RequireNext()) is UnquotedString maybeInto && maybeInto.TryParse(out var keyword) && keyword == Keyword.Into)
                                 token = tokens.RequireNext();
 
-                            if (token is not StringToken desinationTableToken)
+                            if (token is not StringToken destinationTableToken)
                                 break;
 
-                            if (!this.Tables.TryGetValue(desinationTableToken.Value, out var desinationTable))
-                                throw new SimulatedSqlException($"Invalid object name '{desinationTableToken.Value}'.", 208, 16, 0);
+                            if (!this.Tables.TryGetValue(destinationTableToken.Value, out var destinationTable))
+                                throw new SimulatedSqlException($"Invalid object name '{destinationTableToken.Value}'.", 208, 16, 0);
 
                             Column[] destinationColumns;
                             if ((token = tokens.RequireNext()) is OpenParentheses)
@@ -183,10 +183,8 @@ public sealed class Simulation
                                 while ((token = tokens.RequireNext()) is StringToken column)
                                 {
                                     var columnName = column.Value;
-                                    var tableColumn = desinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName));
-                                    if (tableColumn is null)
-                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
-
+                                    var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
+                                        ?? throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
                                     usedColumns.Add(tableColumn);
                                 }
 
@@ -199,7 +197,7 @@ public sealed class Simulation
                             }
                             else
                             {
-                                destinationColumns = [.. desinationTable.Columns];
+                                destinationColumns = [.. destinationTable.Columns];
                             }
 
                             if (token is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
@@ -217,7 +215,7 @@ public sealed class Simulation
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
-                            desinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], ValidatingGetVariableValue);
+                            destinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], ValidatingGetVariableValue);
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;

@@ -22,7 +22,7 @@ internal sealed class Selection
         {
             return new Selection(new SimulatedResultSet(
                 new Dictionary<string, int> { { expression.Name, 0 } },
-                new object?[] { expression.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1)) }
+                [expression.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1))]
                 ));
         }
 
@@ -62,6 +62,22 @@ internal sealed class Selection
                     })
                         };
                     })));
+
+            case OpenParentheses:
+                token = tokens.RequireNext();
+
+                switch (token)
+                {
+                    case UnquotedString unquotedString:
+                        var parsed = unquotedString.Parse();
+                        switch (parsed)
+                        {
+                            case Keyword.Select:
+                                throw new NotSupportedException("Derived tables are not currently supported.");
+                        }
+                        break;
+                }
+                break;
         }
 
         throw new NotSupportedException($"Simulated command processor doesn't know what to do with {token}.");
