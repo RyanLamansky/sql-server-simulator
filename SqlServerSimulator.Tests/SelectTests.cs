@@ -48,12 +48,7 @@ public class SelectTests
     {
         var result = new Simulation()
             .CreateOpenConnection()
-            .CreateCommand("select @p0", createParameter =>
-            {
-                var parm = createParameter();
-                parm.ParameterName = "p0";
-                parm.Value = 5;
-            })
+            .CreateCommand("select @p0", ("@p0", 5))
             .ExecuteScalar();
 
         Assert.AreEqual(5, result);
@@ -64,12 +59,7 @@ public class SelectTests
     {
         var result = new Simulation()
             .CreateOpenConnection()
-            .CreateCommand("select @p0", createParameter =>
-            {
-                var parm = createParameter();
-                parm.ParameterName = "@p0";
-                parm.Value = 6;
-            })
+            .CreateCommand("select @p0", ("@p0", 6))
             .ExecuteScalar();
 
         Assert.AreEqual(6, result);

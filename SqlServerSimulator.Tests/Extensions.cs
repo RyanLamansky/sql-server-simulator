@@ -15,16 +15,18 @@ static class Extensions
         return command;
     }
 
-    public static DbCommand CreateCommand(this DbConnection connection, string? commandText, Action<Func<DbParameter>> addParameters)
+    public static DbCommand CreateCommand(this DbConnection connection, string? commandText, params (string Name, object Value)[] parameters)
     {
         var command = connection.CreateCommand();
         command.CommandText = commandText;
-        addParameters(() =>
+
+        foreach (var (name, value) in parameters)
         {
             var parameter = command.CreateParameter();
             command.Parameters.Add(parameter);
-            return parameter;
-        });
+            parameter.ParameterName = name;
+            parameter.Value = value;
+        }
 
         return command;
     }

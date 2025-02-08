@@ -29,12 +29,7 @@ public class InsertTests
     {
         var result = new Simulation()
             .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t values ( @p0 )", createParameter =>
-            {
-                var parm = createParameter();
-                parm.ParameterName = "p0";
-                parm.Value = 1;
-            })
+            .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p0", 1))
             .ExecuteNonQuery();
 
         Assert.AreEqual(1, result);
@@ -46,12 +41,7 @@ public class InsertTests
     {
         var result = new Simulation()
             .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t values ( @p0 )", createParameter =>
-            {
-                var parm = createParameter();
-                parm.ParameterName = "p1";
-                parm.Value = 1;
-            })
+            .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
             .ExecuteNonQuery();
     }
 
