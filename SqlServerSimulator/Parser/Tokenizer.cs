@@ -193,16 +193,24 @@ static class Tokenizer
 
                 case ',':
                     if (state.IsQuotedString())
-                        buffer.Append(c);
-                    else if (state == State.Numeric)
                     {
-                        yield return new Numeric(buffer);
-                        yield return new Comma();
-                        state = State.None;
-                        buffer.Clear();
+                        buffer.Append(c);
+                        continue;
                     }
-                    else
-                        break;
+
+                    switch (state)
+                    {
+                        case State.Numeric:
+                            yield return new Numeric(buffer);
+                            break;
+                        case State.UnquotedString:
+                            yield return new UnquotedString(buffer);
+                            break;
+                    }
+
+                    state = State.None;
+                    buffer.Clear();
+                    yield return new Comma();
                     continue;
             }
 

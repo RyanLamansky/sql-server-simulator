@@ -205,4 +205,21 @@ public class SelectTests
         Assert.AreEqual(1, C1);
         Assert.AreEqual(2, C2);
     }
+
+    [TestMethod]
+    public void SelectTwoColumns()
+    {
+        using var reader = new Simulation().ExecuteReader("select name, length from systypes");
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(34) // There might be more someday, but there won't be less.
+            .Select(reader => (C1: reader.GetString(0), C2: reader.GetInt32(1)))
+            .ToArray();
+
+        Assert.AreEqual(34, results.Length);
+        var (C1, C2) = results[0];
+        Assert.AreEqual("image", C1);
+        Assert.AreEqual(16, C2);
+    }
 }

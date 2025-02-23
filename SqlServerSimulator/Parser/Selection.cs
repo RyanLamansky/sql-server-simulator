@@ -56,16 +56,14 @@ internal sealed class Selection
 
                             return new(new(
                                 columnIndexes,
-                                table.Rows.Select(row => new object?[] {
-                                    expression.Run(columnName =>
-                                    {
-                                        var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
-                                        if (columnIndex == -1)
-                                            throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
-
-                                        return row[columnIndex];
-                                    })
-                                })));
+                                table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
+                                {
+                                    var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
+                                    if (columnIndex == -1)
+                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
+                                    
+                                    return row[columnIndex];
+                                }))])));
                     }
 
                     throw new NotSupportedException($"Simulated selection processor expected a source table, found {token}.");

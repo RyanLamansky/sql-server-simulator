@@ -9,7 +9,6 @@ internal static class BuiltInResources
         new Table(
             "systypes",
             [
-                new("name", DataType.BuiltInDbString, false),
                 new("name", DataType.BuiltInDbSystemName, false),
                 new("xtype", DataType.BuiltInDbByte, false),
                 new("status", DataType.BuiltInDbByte, true),
@@ -29,7 +28,6 @@ internal static class BuiltInResources
                 new("printfmt", DataType.BuiltInDbAnsiString, true),
                 new("prec", DataType.BuiltInDbInt16, true),
                 new("scale", DataType.BuiltInDbByte, true),
-                new("collation", DataType.BuiltInDbString, true),
                 new("collation", DataType.BuiltInDbSystemName, true),
             ],
             [

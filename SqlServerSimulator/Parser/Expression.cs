@@ -84,6 +84,10 @@ internal abstract class Expression
 
     public abstract object? Run(Func<List<string>, object?> getColumnValue);
 
+#if DEBUG
+    public abstract override string ToString();
+#endif
+
     private sealed class NamedExpression(Expression expression, string name) : Expression
     {
         private readonly Expression expression = expression;
@@ -92,6 +96,10 @@ internal abstract class Expression
         public override string Name => this.name;
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
+
+#if DEBUG
+        public override string ToString() => $"{expression} {name}";
+#endif
     }
 
     /// <summary>
@@ -124,6 +132,10 @@ internal abstract class Expression
         }
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => value;
+
+#if DEBUG
+        public override string ToString() => value?.ToString() ?? "null";
+#endif
     }
 
     public sealed class Add(Expression left, Expression right) : Expression
@@ -137,6 +149,10 @@ internal abstract class Expression
 
             return (int)leftValue! + (int)rightValue!; // TODO: Handle varied input types here.
         }
+
+#if DEBUG
+        public override string ToString() => $"{left} + {right}";
+#endif
     }
 
     public sealed class Reference : Expression
@@ -159,5 +175,9 @@ internal abstract class Expression
         {
             return getColumnValue(this.name);
         }
+
+#if DEBUG
+        public override string ToString() => string.Join('.', name);
+#endif
     }
 }
