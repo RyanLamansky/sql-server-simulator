@@ -76,10 +76,7 @@ sealed class SimulatedDbCommand : DbCommand
     public override object? ExecuteScalar()
     {
         using var reader = ExecuteDbDataReader();
-        if (!reader.Read())
-            return null;
-
-        return reader[0];
+        return !reader.Read() ? null : reader[0];
     }
 
     public override void Prepare() => throw new NotImplementedException();

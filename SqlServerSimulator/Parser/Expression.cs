@@ -1,6 +1,6 @@
-﻿namespace SqlServerSimulator.Parser;
+﻿using SqlServerSimulator.Parser.Tokens;
 
-using Tokens;
+namespace SqlServerSimulator.Parser;
 
 internal abstract class Expression
 {
@@ -37,7 +37,7 @@ internal abstract class Expression
                                     throw new SimulatedSqlException("Incorrect syntax near the keyword 'as'.", 156, 15, 1);
 
                                 expression = new NamedExpression(expression, alias.Value);
-                                tokens.TryMoveNext(out token);
+                                _ = tokens.TryMoveNext(out token);
                                 return expression;
                             case Keyword.From:
                                 if (expression is null)

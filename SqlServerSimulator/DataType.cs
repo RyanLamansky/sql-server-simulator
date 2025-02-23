@@ -1,10 +1,9 @@
-﻿using System.Data;
+﻿using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
+using System.Data;
 using System.Globalization;
 
 namespace SqlServerSimulator;
-
-using Parser;
-using Parser.Tokens;
 
 internal abstract class DataType
 {

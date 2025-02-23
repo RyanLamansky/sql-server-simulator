@@ -1,6 +1,6 @@
-﻿namespace SqlServerSimulator;
+﻿using SqlServerSimulator.Schema;
 
-using Schema;
+namespace SqlServerSimulator;
 
 internal static class BuiltInResources
 {

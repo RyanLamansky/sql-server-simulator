@@ -12,6 +12,7 @@
     <IsPackable>false</IsPackable>
     <RootNamespace>SqlServerSimulator</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
   </PropertyGroup>
 
   <ItemGroup>

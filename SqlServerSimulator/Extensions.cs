@@ -14,11 +14,7 @@ static class Extensions
     public static T RequireNext<T>(this IEnumerator<T> enumerator)
         => enumerator.RequireNext(null);
 
-    public static T RequireNext<T>(this IEnumerator<T> enumerator, string? exceptionMessage = null)
-    {
-        if (!enumerator.MoveNext())
-            throw new SimulatedSqlException(exceptionMessage ?? "Simulated command processor expected the command to be longer.");
-
-        return enumerator.Current;
-    }
+    public static T RequireNext<T>(this IEnumerator<T> enumerator, string? exceptionMessage = null) => !enumerator.MoveNext()
+        ? throw new SimulatedSqlException(exceptionMessage ?? "Simulated command processor expected the command to be longer.")
+        : enumerator.Current;
 }

@@ -57,7 +57,7 @@ public class SimpleCommandTests
         connnection.Open();
 
         using var command = connnection.CreateCommand("-");
-        command.ExecuteReader();
+        _ = command.ExecuteReader();
     }
 
     [TestMethod]

@@ -1,7 +1,7 @@
-﻿namespace SqlServerSimulator.Schema;
+﻿using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
 
-using Parser;
-using Parser.Tokens;
+namespace SqlServerSimulator.Schema;
 
 sealed class Table(string name)
 {

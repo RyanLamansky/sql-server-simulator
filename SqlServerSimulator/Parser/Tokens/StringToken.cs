@@ -9,6 +9,6 @@ abstract class StringToken : Token
     private protected StringToken(StringBuilder buffer)
     {
         this.Value = buffer.ToString();
-        buffer.Clear();
+        _ = buffer.Clear();
     }
 }

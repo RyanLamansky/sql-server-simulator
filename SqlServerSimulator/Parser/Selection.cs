@@ -1,6 +1,6 @@
-﻿namespace SqlServerSimulator.Parser;
+﻿using SqlServerSimulator.Parser.Tokens;
 
-using Tokens;
+namespace SqlServerSimulator.Parser;
 
 internal sealed class Selection
 {
@@ -51,7 +51,9 @@ internal sealed class Selection
                                         break;
                                 }
                                 else
+                                {
                                     break;
+                                }
                             }
 
                             return new(new(
@@ -59,11 +61,7 @@ internal sealed class Selection
                                 table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                 {
                                     var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
-                                    if (columnIndex == -1)
-                                        throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
-                                    
-                                    return row[columnIndex];
-                                }))])));
+                                    return columnIndex == -1 ? throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1) : row[columnIndex]; }))])));
                     }
 
                     throw new NotSupportedException($"Simulated selection processor expected a source table, found {token}.");

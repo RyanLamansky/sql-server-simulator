@@ -9,7 +9,7 @@ public class EFCoreBasics
     public static Simulation CreateDefaultSimulation()
     {
         var simulation = new Simulation();
-        simulation
+        _ = simulation
             .CreateOpenConnection()
             .CreateCommand("create table Rows ( Id int )")
             .ExecuteNonQuery();
@@ -33,7 +33,7 @@ public class EFCoreBasics
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
+            _ = optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
         }
 
         public DbSet<TestRow> Rows => Set<TestRow>();
@@ -46,9 +46,9 @@ public class EFCoreBasics
 
         var row = new TestRow { Id = 1 };
 
-        context.Rows.Add(row);
+        _ = context.Rows.Add(row);
 
-        context.SaveChanges();
+        _ = context.SaveChanges();
     }
 
     /// <summary>
@@ -62,9 +62,9 @@ public class EFCoreBasics
 
         var row = new TestRow { Id = 1 };
 
-        context.Rows.Add(row);
+        _ = context.Rows.Add(row);
 
-        await context.SaveChangesAsync();
+        _ = await context.SaveChangesAsync();
     }
 
     [TestMethod]
@@ -77,9 +77,9 @@ public class EFCoreBasics
         {
             var row = new TestRow { Id = storedValue };
 
-            context.Rows.Add(row);
+            _ = context.Rows.Add(row);
 
-            context.SaveChanges();
+            _ = context.SaveChanges();
         }
 
         using (var context = new TestContext(simulation))

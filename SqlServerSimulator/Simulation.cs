@@ -1,12 +1,11 @@
-﻿using System.Collections.Concurrent;
+﻿using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schema;
+using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Data.Common;
 
 namespace SqlServerSimulator;
-
-using Parser;
-using Parser.Tokens;
-using Schema;
 
 /// <summary>
 /// Defines and controls the simulated scenario.
@@ -66,17 +65,17 @@ public sealed class Simulation
         {
             var result = new System.Text.StringBuilder();
             var source = this.source;
-            
+
             for (var i = 0; i < source.Length; i++)
             {
                 var token = source[i];
                 if (i != Index)
                 {
-                    result.Append(token).Append('·');
+                    _ = result.Append(token).Append('·');
                     continue;
                 }
 
-                result.Append('»').Append(token).Append('«').Append('·');
+                _ = result.Append('»').Append(token).Append('«').Append('·');
             }
 
             return result.ToString(0, result.Length - 1);
@@ -105,10 +104,9 @@ public sealed class Simulation
 
         private object? ValidatingGetVariableValue(string name)
         {
-            if (variables.TryGetValue(name, out var value))
-                return value.TypeValue.Value;
-
-            throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
+            return variables.TryGetValue(name, out var value)
+                ? value.TypeValue.Value
+                : throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
         }
 
         public static Func<string, object?> FromCommand(SimulatedDbCommand command) => new VariableFinder(command).ValidatingGetVariableValue;

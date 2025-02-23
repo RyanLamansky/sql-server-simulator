@@ -23,7 +23,7 @@ static class Extensions
         foreach (var (name, value) in parameters)
         {
             var parameter = command.CreateParameter();
-            command.Parameters.Add(parameter);
+            _ = command.Parameters.Add(parameter);
             parameter.ParameterName = name;
             parameter.Value = value;
         }

@@ -1,8 +1,7 @@
-﻿using System.Text;
+﻿using SqlServerSimulator.Parser.Tokens;
+using System.Text;
 
 namespace SqlServerSimulator.Parser;
-
-using Tokens;
 
 static class Tokenizer
 {
@@ -34,7 +33,7 @@ static class Tokenizer
             switch (c)
             {
                 default:
-                    if (c is '_'or >= 'A' and <= 'Z' or >= 'a' and <= 'z')
+                    if (c is '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z'))
                     {
                         switch (state)
                         {
@@ -43,19 +42,19 @@ static class Tokenizer
                                 break;
                         }
 
-                        buffer.Append(c);
+                        _ = buffer.Append(c);
                         continue;
                     }
                     else if (c is >= '0' and <= '9')
                     {
                         if (state.IsAnyString() || state == State.Numeric)
                         {
-                            buffer.Append(c);
+                            _ = buffer.Append(c);
                             continue;
                         }
 
                         state = State.Numeric;
-                        buffer.Append(c);
+                        _ = buffer.Append(c);
 
                         continue;
                     }
@@ -73,7 +72,7 @@ static class Tokenizer
                             continue;
                     }
 
-                    buffer.Append(c);
+                    _ = buffer.Append(c);
                     continue;
 
                 case '[':
@@ -92,13 +91,15 @@ static class Tokenizer
 
                 case '(':
                     if (state.IsQuotedString())
-                        buffer.Append(c);
+                        _ = buffer.Append(c);
                     else
                         yield return new OpenParentheses();
                     continue;
                 case ')':
                     if (state.IsQuotedString())
-                        buffer.Append(c);
+                    {
+                        _ = buffer.Append(c);
+                    }
                     else
                     {
                         switch (state)
@@ -150,7 +151,7 @@ static class Tokenizer
                             break;
                     }
 
-                    buffer.Clear();
+                    _ = buffer.Clear();
                     continue;
 
                 case '+':
@@ -194,7 +195,7 @@ static class Tokenizer
                 case ',':
                     if (state.IsQuotedString())
                     {
-                        buffer.Append(c);
+                        _ = buffer.Append(c);
                         continue;
                     }
 
@@ -209,7 +210,7 @@ static class Tokenizer
                     }
 
                     state = State.None;
-                    buffer.Clear();
+                    _ = buffer.Clear();
                     yield return new Comma();
                     continue;
             }
@@ -247,13 +248,9 @@ static class Tokenizer
         return false;
     }
 
-    static char GetNext(this CharEnumerator enumerator, ref int index)
-    {
-        if (!enumerator.TryGetNext(out var c, ref index))
-            throw new SimulatedSqlException($"Simulated syntax error at index {index}.");
-
-        return c;
-    }
+    static char GetNext(this CharEnumerator enumerator, ref int index) => !enumerator.TryGetNext(out var c, ref index)
+        ? throw new SimulatedSqlException($"Simulated syntax error at index {index}.")
+        : c;
 
     static bool IsQuotedString(this State state) => state switch
     {

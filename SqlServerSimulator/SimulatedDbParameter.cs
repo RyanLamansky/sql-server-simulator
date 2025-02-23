@@ -13,15 +13,14 @@ sealed class SimulatedDbParameter : DbParameter
         get
         {
             var dbType = this.dbType;
-            if (dbType is not null)
-                return dbType.Value;
-
-            return this.Value switch
-            {
-                int => DbType.Int32,
-                null => DbType.String,
-                _ => throw new ArgumentException($"No mapping exists from object type {this.Value.GetType().FullName} to a known managed provider native type."),
-            };
+            return dbType is not null
+                ? dbType.Value
+                : this.Value switch
+                {
+                    int => DbType.Int32,
+                    null => DbType.String,
+                    _ => throw new ArgumentException($"No mapping exists from object type {this.Value.GetType().FullName} to a known managed provider native type."),
+                };
         }
         set => this.dbType = value;
     }

@@ -6,10 +6,9 @@ sealed class SimulatedResultSet(Dictionary<string, int> columnIndexes, IEnumerab
 {
     internal readonly IEnumerable<object?[]> records = records;
     internal readonly Dictionary<string, int> columnIndexes = columnIndexes;
-    internal readonly string[] columnNames = columnIndexes
+    internal readonly string[] columnNames = [.. columnIndexes
         .OrderBy(kv => kv.Value)
-        .Select(kv => kv.Key)
-        .ToArray();
+        .Select(kv => kv.Key)];
 
     public SimulatedResultSet(Dictionary<string, int> columnIndexes, params object?[][] records)
         : this(columnIndexes, (IEnumerable<object?[]>)records)

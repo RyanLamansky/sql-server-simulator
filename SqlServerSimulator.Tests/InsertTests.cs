@@ -39,7 +39,7 @@ public class InsertTests
     [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
     public void InsertParameterizedNameMismatch()
     {
-        var result = new Simulation()
+        _ = new Simulation()
             .CreateOpenConnection()
             .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
             .ExecuteNonQuery();
