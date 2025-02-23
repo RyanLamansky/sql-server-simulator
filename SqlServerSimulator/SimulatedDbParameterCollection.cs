@@ -7,7 +7,7 @@ sealed class SimulatedDbParameterCollection : DbParameterCollection
 {
     readonly List<SimulatedDbParameter> parameters = [];
 
-    public override int Count => throw new NotImplementedException();
+    public override int Count => this.parameters.Count;
 
     public override object SyncRoot => throw new NotImplementedException();
 
