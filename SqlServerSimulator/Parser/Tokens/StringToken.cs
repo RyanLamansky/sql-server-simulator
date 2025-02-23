@@ -11,6 +11,4 @@ abstract class StringToken : Token
         this.Value = buffer.ToString();
         buffer.Clear();
     }
-
-    public abstract override string ToString();
 }

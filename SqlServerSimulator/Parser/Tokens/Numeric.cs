@@ -31,5 +31,7 @@ internal sealed class Numeric : Token
         throw new SimulatedSqlException($"Simulated command tokenizer couldn't parse {number} as a number.");
     }
 
+#if DEBUG
     public override string ToString() => this.Value.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
+#endif
 }

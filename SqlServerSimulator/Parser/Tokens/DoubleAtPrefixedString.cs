@@ -12,6 +12,8 @@ sealed class DoubleAtPrefixedString(StringBuilder buffer) : StringToken(buffer)
         return result;
     }
 
+#if DEBUG
     public override string ToString() => $"@@{Value}";
+#endif
 }
 
