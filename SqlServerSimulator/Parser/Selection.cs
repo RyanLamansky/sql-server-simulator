@@ -4,82 +4,76 @@ using Tokens;
 
 internal sealed class Selection
 {
-    internal SimulatedResultSet Results;
+    internal readonly SimulatedResultSet Results;
 
-    private Selection(SimulatedResultSet results)
-    {
-        this.Results = results;
-    }
-
+    private Selection(SimulatedResultSet results) => this.Results = results;
 
     public static Selection Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
     {
         token = tokens.RequireNext();
 
-        var expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+        Dictionary<string, int> columnIndexes = [];
+        List<Expression> expressions = [];
 
-        if (token is not UnquotedString unquoted || unquoted.Parse() != Keyword.From)
+        do
         {
-            return new Selection(new SimulatedResultSet(
-                new Dictionary<string, int> { { expression.Name, 0 } },
-                [expression.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1))]
-                ));
-        }
+            var expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+            if (expression.Name.Length > 0)
+                columnIndexes.Add(expression.Name, columnIndexes.Count);
+            expressions.Add(expression);
 
-        token = tokens.RequireNext();
+            switch (token)
+            {
+                case Comma:
+                    continue;
 
-        switch (token)
-        {
-            case StringToken tableName:
-                if (!simulation.Tables.TryGetValue(tableName.Value, out var table) && !simulation.SystemTables.Value.TryGetValue(tableName.Value, out table))
-                    throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
+                case null: // "Select" with no "From".
+                    return new(new(
+                        columnIndexes,
+                        [[.. expressions.Select(x => x.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1)))]]
+                        ));
 
-                if (tokens.TryMoveNext(out token))
-                {
-                    if (token is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
+                case UnquotedString unquotedString:
+                    if (!unquotedString.TryParse(out var keyword) || keyword != Keyword.From)
+                        throw new NotSupportedException("Simulated selection processor expected a `from`.");
+
+                    switch (token = tokens.RequireNext())
                     {
-                        if (token is not UnquotedString)
-                            break;
+                        case StringToken tableName:
+                            if (!simulation.Tables.TryGetValue(tableName.Value, out var table) && !simulation.SystemTables.Value.TryGetValue(tableName.Value, out table))
+                                throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
+
+                            if (tokens.TryMoveNext(out token))
+                            {
+                                if (token is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
+                                {
+                                    if (token is not UnquotedString)
+                                        break;
+                                }
+                                else
+                                    break;
+                            }
+
+                            return new(new(
+                                columnIndexes,
+                                table.Rows.Select(row => new object?[] {
+                                    expression.Run(columnName =>
+                                    {
+                                        var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
+                                        if (columnIndex == -1)
+                                            throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
+
+                                        return row[columnIndex];
+                                    })
+                                })));
                     }
-                    else
-                        break;
-                }
 
-                var columnIndexes = new Dictionary<string, int>();
+                    throw new NotSupportedException($"Simulated selection processor expected a source table, found {token}.");
+            }
 
-                return new Selection(new SimulatedResultSet(
-                    new Dictionary<string, int> { { expression.Name, 0 } },
-                    table.Rows.Select(row =>
-                    {
-                        return new object?[] {
-                    expression.Run(columnName =>
-                    {
-                        var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
-                        if (columnIndex == -1)
-                            throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
+            throw new NotSupportedException($"Simulated selection processor doesn't know what to do with {token}.");
+        } while (tokens.TryMoveNext(out token));
 
-                        return row[columnIndex];
-                    })
-                        };
-                    })));
-
-            case OpenParentheses:
-                token = tokens.RequireNext();
-
-                switch (token)
-                {
-                    case UnquotedString unquotedString:
-                        var parsed = unquotedString.Parse();
-                        switch (parsed)
-                        {
-                            case Keyword.Select:
-                                throw new NotSupportedException("Derived tables are not currently supported.");
-                        }
-                        break;
-                }
-                break;
-        }
-
-        throw new NotSupportedException($"Simulated command processor doesn't know what to do with {token}.");
+        throw new NotSupportedException($"Simulated selection reached the end of the command before expected.");
     }
 }

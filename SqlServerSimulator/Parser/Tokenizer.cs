@@ -190,6 +190,20 @@ static class Tokenizer
                     state = State.None;
                     yield return new Period();
                     continue;
+
+                case ',':
+                    if (state.IsQuotedString())
+                        buffer.Append(c);
+                    else if (state == State.Numeric)
+                    {
+                        yield return new Numeric(buffer);
+                        yield return new Comma();
+                        state = State.None;
+                        buffer.Clear();
+                    }
+                    else
+                        break;
+                    continue;
             }
 
             throw new NotSupportedException($"Simulated command tokenizer doesn't know what to do with command text past character at index {index}, '{c}'.");

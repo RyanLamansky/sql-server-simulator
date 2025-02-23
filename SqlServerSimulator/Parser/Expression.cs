@@ -51,7 +51,7 @@ internal abstract class Expression
                     break;
                 case Plus:
                     if (expression is null)
-                        throw new NotSupportedException("Simulated expression parser didn't know how to handle + at the start of an expression.");
+                        throw new NotSupportedException("Simulated expression parser doesn't know how to handle + at the start of an expression.");
 
                     if (!tokens.TryMoveNext(out token))
                         throw new SimulatedSqlException("Incorrect syntax near '+'.", 102, 15, 1);
@@ -60,18 +60,22 @@ internal abstract class Expression
                     break;
                 case Period:
                     if (expression is null)
-                        throw new NotSupportedException("Simulated expression parser didn't know how to handle '.' at the start of an expression.");
+                        throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' at the start of an expression.");
 
                     if (expression is not Reference reference)
-                        throw new NotSupportedException("Simulated expression parser didn't know how to handle '.' here.");
+                        throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
                     if (!tokens.TryMoveNext(out token) || token is not Name multiPartComponent)
                         throw new SimulatedSqlException("Incorrect syntax near '.'.", 102, 15, 1);
 
                     reference.AddMultiPartComponent(multiPartComponent);
                     break;
+                case Comma:
+                    if (expression is null)
+                        throw new SimulatedSqlException("Incorrect syntax near ','.", 102, 15, 1);
+                    return expression;
                 default:
-                    throw new NotSupportedException($"Simulated expression parser didn't know how to handle '{token}'.");
+                    throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");
             }
         } while (tokens.TryMoveNext(out token));
 

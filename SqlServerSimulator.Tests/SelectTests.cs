@@ -189,4 +189,20 @@ public class SelectTests
         Assert.AreEqual(1, results.Count);
         Assert.IsTrue(results.Contains("name"));
     }
+
+    [TestMethod]
+    public void Select1Comma2()
+    {
+        using var reader = new Simulation().ExecuteReader("select 1, 2");
+
+        var results = reader
+            .EnumerateRecords()
+            .Select(reader => (C1: reader.GetInt32(0), C2: reader.GetInt32(1)))
+            .ToArray();
+
+        Assert.AreEqual(1, results.Length);
+        var (C1, C2) = results[0];
+        Assert.AreEqual(1, C1);
+        Assert.AreEqual(2, C2);
+    }
 }

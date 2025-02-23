@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Data.Common;
 
 namespace SqlServerSimulator;
@@ -34,28 +35,94 @@ public sealed class Simulation
 
     internal readonly Lazy<Dictionary<string, Table>> SystemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
 
-    internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
+#if DEBUG
+    private sealed class TokenArrayEnumerator(string? command) : IEnumerator<Token>
     {
-        var variables = command
-            .Parameters
-            .Cast<DbParameter>()
-            .Select(parameter =>
-            {
-                var name = parameter.ParameterName;
-                var type = DataType.GetByDbType(parameter.DbType);
-                return (Name: name.StartsWith('@') ? name[1..] : name, TypeValue: (DataType: type, Value: parameter.Value is null ? null : type.ConvertFrom(parameter.Value)));
-            })
-            .ToDictionary(tuple => tuple.Name, StringComparer.InvariantCultureIgnoreCase);
+        private readonly Token[] source = [.. Tokenizer.Tokenize(command)];
 
-        object? ValidatingGetVariableValue(string name)
+        public int Index { get; private set; } = -1;
+
+        public Token Current => source[Index];
+
+        object System.Collections.IEnumerator.Current => Current;
+
+        public void Dispose()
+        {
+        }
+
+        public bool MoveNext()
+        {
+            var newIndex = checked(Index + 1);
+            if (newIndex >= source.Length)
+                return false;
+
+            Index = newIndex;
+            return true;
+        }
+
+        public void Reset() => Index = -1;
+
+        public override string ToString()
+        {
+            var result = new System.Text.StringBuilder();
+            var source = this.source;
+            
+            for (var i = 0; i < source.Length; i++)
+            {
+                var token = source[i];
+                if (i != Index)
+                {
+                    result.Append(token).Append('·');
+                    continue;
+                }
+
+                result.Append('»').Append(token).Append('«').Append('·');
+            }
+
+            return result.ToString(0, result.Length - 1);
+
+        }
+    }
+#endif
+
+    private sealed class VariableFinder
+    {
+        private readonly FrozenDictionary<string, (string Name, (DataType type, object? Value) TypeValue)> variables;
+
+        private VariableFinder(SimulatedDbCommand command)
+        {
+            variables = command
+                .Parameters
+                .Cast<DbParameter>()
+                .Select(parameter =>
+                {
+                    var name = parameter.ParameterName;
+                    var type = DataType.GetByDbType(parameter.DbType);
+                    return (Name: name.StartsWith('@') ? name[1..] : name, TypeValue: (DataType: type, Value: parameter.Value is null ? null : type.ConvertFrom(parameter.Value)));
+                })
+                .ToFrozenDictionary(tuple => tuple.Name, StringComparer.InvariantCultureIgnoreCase);
+        }
+
+        private object? ValidatingGetVariableValue(string name)
         {
             if (variables.TryGetValue(name, out var value))
                 return value.TypeValue.Value;
 
             throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
-        };
+        }
 
+        public static Func<string, object?> FromCommand(SimulatedDbCommand command) => new VariableFinder(command).ValidatingGetVariableValue;
+    }
+
+    internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
+    {
+        var getVariableValue = VariableFinder.FromCommand(command);
+
+#if DEBUG
+        using var tokens = new TokenArrayEnumerator(command.CommandText);
+#else
         using var tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
+#endif
 
         while (tokens.TryMoveNext(out var token))
         {
@@ -163,7 +230,7 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Select:
-                            yield return Selection.Parse(this, tokens, ref token, ValidatingGetVariableValue).Results;
+                            yield return Selection.Parse(this, tokens, ref token, getVariableValue).Results;
                             break;
 
                         case Keyword.Insert:
@@ -215,7 +282,7 @@ public sealed class Simulation
                             if (token is not CloseParentheses)
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
-                            destinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], ValidatingGetVariableValue);
+                            destinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], getVariableValue);
 
                             yield return new SimulatedNonQuery(sourceValues.Count);
                             continue;
