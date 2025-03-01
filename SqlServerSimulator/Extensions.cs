@@ -1,4 +1,5 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator;
 
@@ -11,10 +12,26 @@ static class Extensions
         return moved;
     }
 
-    public static T RequireNext<T>(this IEnumerator<T> enumerator, Simulation simulation)
-        => enumerator.RequireNext(simulation, null);
+    public static Parser.Token RequireNext(this IEnumerator<Parser.Token> enumerator, Simulation simulation)
+    {
+        Debug.Assert(enumerator.Current is not null);
+        var previous = enumerator.Current!;
+        return enumerator.MoveNext() ? enumerator.Current : throw simulation.SyntaxErrorNear(previous);
+    }
 
-    public static T RequireNext<T>(this IEnumerator<T> enumerator, Simulation simulation, string? exceptionMessage = null) => !enumerator.MoveNext()
-        ? throw new SimulatedSqlException(simulation, exceptionMessage ?? "Simulated command processor expected the command to be longer.")
-        : enumerator.Current;
+    public static T RequireNext<T>(this IEnumerator<Parser.Token> enumerator, Simulation simulation)
+        where T : Parser.Token
+    {
+        Debug.Assert(enumerator.Current is not null);
+        var previous = enumerator.Current!;
+
+        if (enumerator.MoveNext())
+        {
+            var current = enumerator.Current as T;
+            if (current is not null)
+                return current;
+        }
+
+        throw simulation.SyntaxErrorNear(previous);
+    }
 }

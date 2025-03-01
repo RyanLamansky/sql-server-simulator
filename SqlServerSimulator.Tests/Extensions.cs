@@ -45,11 +45,11 @@ static class Extensions
     public static object? ExecuteScalar(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteScalar();
 
-    public static void ValidateSyntaxError(this Simulation simulation, string commandText, string expectedMessage)
+    public static void ValidateSyntaxError(this Simulation simulation, string commandText, string nearSyntax)
     {
         var exception = Assert.Throws<DbException>(() => simulation.ExecuteScalar(commandText));
 
-        Assert.AreEqual(expectedMessage, exception.Message);
+        Assert.AreEqual($"Incorrect syntax near '{nearSyntax}'.", exception.Message);
 
         // The following checks verify that the DbException matches what Microsoft.Data.SqlClient produces.
         Assert.AreEqual(unchecked((int)0x80131904), exception.HResult);

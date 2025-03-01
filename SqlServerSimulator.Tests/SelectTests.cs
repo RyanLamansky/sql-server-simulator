@@ -224,8 +224,11 @@ public class SelectTests
     }
 
     [TestMethod]
-    public void SelectCommaReturnsCorrectError() =>
-        new Simulation().ValidateSyntaxError("select ,", "Incorrect syntax near ','.");
+    [DataRow("select", "select")]
+    [DataRow("select ", "select")]
+    [DataRow("select ,", ",")]
+    public void SelectSyntaxErrorsAreCorrect(string commandText, string nearSyntax) =>
+        new Simulation().ValidateSyntaxError(commandText, nearSyntax);
 
     [TestMethod]
     [TestCategory("TODO")]

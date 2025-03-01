@@ -53,8 +53,7 @@ internal abstract class Expression
                     if (expression is null)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle + at the start of an expression.");
 
-                    if (!tokens.TryMoveNext(out token))
-                        throw new SimulatedSqlException(simulation, "Incorrect syntax near '+'.", 102, 15, 1);
+                    token = tokens.RequireNext(simulation);
 
                     expression = new Add(expression, Parse(simulation, tokens, ref token, getVariableValue));
                     break;
@@ -65,14 +64,11 @@ internal abstract class Expression
                     if (expression is not Reference reference)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
-                    if (!tokens.TryMoveNext(out token) || token is not Name multiPartComponent)
-                        throw new SimulatedSqlException(simulation, "Incorrect syntax near '.'.", 102, 15, 1);
-
-                    reference.AddMultiPartComponent(multiPartComponent);
+                    reference.AddMultiPartComponent(tokens.RequireNext<Name>(simulation));
                     break;
                 case Comma:
                     if (expression is null)
-                        throw new SimulatedSqlException(simulation, "Incorrect syntax near ','.", 102, 15, 1);
+                        throw simulation.SyntaxErrorNear(token);
                     return expression;
                 default:
                     throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");

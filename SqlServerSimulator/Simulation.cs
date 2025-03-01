@@ -302,4 +302,6 @@ public class Simulation
             throw new NotSupportedException($"Simulated command processor doesn't know what to do with {token}.");
         }
     }
+
+    internal SimulatedSqlException SyntaxErrorNear(Token token) => new(this, $"Incorrect syntax near '{token}'.", 102, 15, 1);
 }
