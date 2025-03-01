@@ -10,7 +10,7 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Defines and controls the simulated scenario.
 /// </summary>
-public sealed class Simulation
+public class Simulation
 {
     /// <summary>
     /// Creates a new <see cref="Simulation"/> instance with default behaviors.
@@ -22,21 +22,22 @@ public sealed class Simulation
     /// <summary>
     /// The value for the `@@VERSION` system-defined value, defaults to "SQL Server Simulator".
     /// </summary>
-    public string Version { get; set; } = "SQL Server Simulator";
-
-    private static IEnumerable<KeyValuePair<object, object?>> BaseDbExceptionData()
-    {
-        yield return new("HelpLink.ProdName", "Microsoft SQL Server");
-        yield return new("HelpLink.ProdVer", "99.00.1000");
-        yield return new("HelpLink.EvtSrc", "MSSQLServer");
-        yield return new("HelpLink.BaseHelpUrl", "https://go.microsoft.com/fwlink");
-        yield return new("HelpLink.LinkId", "20476");
-    }
+    public virtual string Version => "SQL Server Simulator";
 
     /// <summary>
     /// Initial <see cref="Exception.Data"/> values for any <see cref="DbException"/> instances thrown.
     /// </summary>
-    public IEnumerable<KeyValuePair<object, object?>> DbExceptionData { get; set; } = BaseDbExceptionData();
+    public virtual IEnumerable<KeyValuePair<object, object?>> DbExceptionData
+    {
+        get
+        {
+            yield return new("HelpLink.ProdName", "Microsoft SQL Server");
+            yield return new("HelpLink.ProdVer", "99.00.1000");
+            yield return new("HelpLink.EvtSrc", "MSSQLServer");
+            yield return new("HelpLink.BaseHelpUrl", "https://go.microsoft.com/fwlink");
+            yield return new("HelpLink.LinkId", "20476");
+        }
+    }
 
     /// <summary>
     /// Creates a simulated database connection.
