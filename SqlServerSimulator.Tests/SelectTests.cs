@@ -222,4 +222,14 @@ public class SelectTests
         Assert.AreEqual("image", C1);
         Assert.AreEqual(16, C2);
     }
+
+    [TestMethod]
+    public void SelectCommaReturnsCorrectError() =>
+        new Simulation().ValidateSyntaxError("select ,", "Incorrect syntax near ','.");
+
+    [TestMethod]
+    [TestCategory("TODO")]
+    [ExpectedException(typeof(NotSupportedException))]
+    public void Select1FromDerivedTable() =>
+        Assert.AreEqual(1, new Simulation().ExecuteScalar("select 1 from ( select 1 x ) x"));
 }

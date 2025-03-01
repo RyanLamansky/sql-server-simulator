@@ -11,10 +11,7 @@ abstract class Name : StringToken
 
     public bool TryParse(out Keyword keyword) => Enum.TryParse(Value, true, out keyword);
 
-    public Keyword Parse()
-    {
-        return !Enum.TryParse<Keyword>(Value, true, out var result)
-            ? throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{Value}`.")
-            : result;
-    }
+    public Keyword Parse() => !Enum.TryParse<Keyword>(Value, true, out var result)
+        ? throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{Value}`.")
+        : result;
 }

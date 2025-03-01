@@ -10,7 +10,7 @@ internal sealed class Selection
 
     public static Selection Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
     {
-        token = tokens.RequireNext();
+        token = tokens.RequireNext(simulation);
 
         Dictionary<string, int> columnIndexes = [];
         List<Expression> expressions = [];
@@ -30,18 +30,18 @@ internal sealed class Selection
                 case null: // "Select" with no "From".
                     return new(new(
                         columnIndexes,
-                        [[.. expressions.Select(x => x.Run(column => throw new SimulatedSqlException($"Invalid column name '{column}'.", 207, 16, 1)))]]
+                        [[.. expressions.Select(x => x.Run(column => throw new SimulatedSqlException(simulation, $"Invalid column name '{column}'.", 207, 16, 1)))]]
                         ));
 
                 case UnquotedString unquotedString:
                     if (!unquotedString.TryParse(out var keyword) || keyword != Keyword.From)
                         throw new NotSupportedException("Simulated selection processor expected a `from`.");
 
-                    switch (token = tokens.RequireNext())
+                    switch (token = tokens.RequireNext(simulation))
                     {
                         case StringToken tableName:
                             if (!simulation.Tables.TryGetValue(tableName.Value, out var table) && !simulation.SystemTables.Value.TryGetValue(tableName.Value, out table))
-                                throw new SimulatedSqlException($"Invalid object name {tableName}.", 208, 16, 1);
+                                throw new SimulatedSqlException(simulation, $"Invalid object name {tableName}.", 208, 16, 1);
 
                             if (tokens.TryMoveNext(out token))
                             {
@@ -61,7 +61,7 @@ internal sealed class Selection
                                 table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                 {
                                     var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
-                                    return columnIndex == -1 ? throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1) : row[columnIndex]; }))])));
+                                    return columnIndex == -1 ? throw new SimulatedSqlException(simulation, $"Invalid column name '{columnName}'.", 207, 16, 1) : row[columnIndex]; }))])));
                     }
 
                     throw new NotSupportedException($"Simulated selection processor expected a source table, found {token}.");

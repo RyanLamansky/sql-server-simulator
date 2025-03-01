@@ -34,14 +34,14 @@ internal abstract class Expression
                         {
                             case Keyword.As:
                                 if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
-                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'as'.", 156, 15, 1);
+                                    throw new SimulatedSqlException(simulation, "Incorrect syntax near the keyword 'as'.", 156, 15, 1);
 
                                 expression = new NamedExpression(expression, alias.Value);
                                 _ = tokens.TryMoveNext(out token);
                                 return expression;
                             case Keyword.From:
                                 if (expression is null)
-                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'from'.", 156, 15, 1);
+                                    throw new SimulatedSqlException(simulation, "Incorrect syntax near the keyword 'from'.", 156, 15, 1);
 
                                 return expression;
                         }
@@ -54,7 +54,7 @@ internal abstract class Expression
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle + at the start of an expression.");
 
                     if (!tokens.TryMoveNext(out token))
-                        throw new SimulatedSqlException("Incorrect syntax near '+'.", 102, 15, 1);
+                        throw new SimulatedSqlException(simulation, "Incorrect syntax near '+'.", 102, 15, 1);
 
                     expression = new Add(expression, Parse(simulation, tokens, ref token, getVariableValue));
                     break;
@@ -66,13 +66,13 @@ internal abstract class Expression
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
                     if (!tokens.TryMoveNext(out token) || token is not Name multiPartComponent)
-                        throw new SimulatedSqlException("Incorrect syntax near '.'.", 102, 15, 1);
+                        throw new SimulatedSqlException(simulation, "Incorrect syntax near '.'.", 102, 15, 1);
 
                     reference.AddMultiPartComponent(multiPartComponent);
                     break;
                 case Comma:
                     if (expression is null)
-                        throw new SimulatedSqlException("Incorrect syntax near ','.", 102, 15, 1);
+                        throw new SimulatedSqlException(simulation, "Incorrect syntax near ','.", 102, 15, 1);
                     return expression;
                 default:
                     throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");

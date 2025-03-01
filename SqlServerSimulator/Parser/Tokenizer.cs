@@ -17,7 +17,7 @@ static class Tokenizer
         Numeric
     }
 
-    public static IEnumerable<Token> Tokenize(string? command)
+    public static IEnumerable<Token> Tokenize(Simulation simulation, string? command)
     {
         if (string.IsNullOrEmpty(command))
             throw new InvalidOperationException("ExecuteReader: CommandText property has not been initialized");
@@ -124,7 +124,7 @@ static class Tokenizer
                             state = State.None;
                             break;
                         case State.Numeric:
-                            yield return new Numeric(buffer);
+                            yield return new Numeric(simulation, buffer);
                             state = State.None;
                             break;
                     }
@@ -146,7 +146,7 @@ static class Tokenizer
                             state = State.None;
                             break;
                         case State.Numeric:
-                            yield return new Numeric(buffer);
+                            yield return new Numeric(simulation, buffer);
                             state = State.None;
                             break;
                     }
@@ -159,7 +159,7 @@ static class Tokenizer
                     continue;
 
                 case '-':
-                    c = commandEnumerator.GetNext(ref index);
+                    c = commandEnumerator.GetNext(simulation, ref index);
                     switch (c)
                     {
                         case '-':
@@ -202,7 +202,7 @@ static class Tokenizer
                     switch (state)
                     {
                         case State.Numeric:
-                            yield return new Numeric(buffer);
+                            yield return new Numeric(simulation, buffer);
                             break;
                         case State.UnquotedString:
                             yield return new UnquotedString(buffer);
@@ -230,7 +230,7 @@ static class Tokenizer
                 yield return new DoubleAtPrefixedString(buffer);
                 break;
             case State.Numeric:
-                yield return new Numeric(buffer);
+                yield return new Numeric(simulation, buffer);
                 break;
         }
     }
@@ -248,8 +248,8 @@ static class Tokenizer
         return false;
     }
 
-    static char GetNext(this CharEnumerator enumerator, ref int index) => !enumerator.TryGetNext(out var c, ref index)
-        ? throw new SimulatedSqlException($"Simulated syntax error at index {index}.")
+    static char GetNext(this CharEnumerator enumerator, Simulation simulation, ref int index) => !enumerator.TryGetNext(out var c, ref index)
+        ? throw new SimulatedSqlException(simulation, $"Simulated syntax error at index {index}.")
         : c;
 
     static bool IsQuotedString(this State state) => state switch

@@ -8,8 +8,6 @@ sealed class DoubleAtPrefixedString(StringBuilder buffer) : StringToken(buffer)
         ? throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{Value}`.")
         : result;
 
-#if DEBUG
     public override string ToString() => $"@@{Value}";
-#endif
 }
 

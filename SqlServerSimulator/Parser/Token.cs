@@ -6,7 +6,6 @@ abstract class Token
     {
     }
 
-#if DEBUG
+    // This is used for various error messages even though tokens are not directly accessible to user code.
     public abstract override string ToString();
-#endif
 }

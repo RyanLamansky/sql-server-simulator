@@ -11,10 +11,10 @@ static class Extensions
         return moved;
     }
 
-    public static T RequireNext<T>(this IEnumerator<T> enumerator)
-        => enumerator.RequireNext(null);
+    public static T RequireNext<T>(this IEnumerator<T> enumerator, Simulation simulation)
+        => enumerator.RequireNext(simulation, null);
 
-    public static T RequireNext<T>(this IEnumerator<T> enumerator, string? exceptionMessage = null) => !enumerator.MoveNext()
-        ? throw new SimulatedSqlException(exceptionMessage ?? "Simulated command processor expected the command to be longer.")
+    public static T RequireNext<T>(this IEnumerator<T> enumerator, Simulation simulation, string? exceptionMessage = null) => !enumerator.MoveNext()
+        ? throw new SimulatedSqlException(simulation, exceptionMessage ?? "Simulated command processor expected the command to be longer.")
         : enumerator.Current;
 }

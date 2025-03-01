@@ -1,4 +1,5 @@
-﻿using System.Data.Common;
+﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -43,6 +44,28 @@ static class Extensions
 
     public static object? ExecuteScalar(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteScalar();
+
+    public static void ValidateSyntaxError(this Simulation simulation, string commandText, string expectedMessage)
+    {
+        var exception = Assert.Throws<DbException>(() => simulation.ExecuteScalar(commandText));
+
+        Assert.AreEqual(expectedMessage, exception.Message);
+
+        // The following checks verify that the DbException matches what Microsoft.Data.SqlClient produces.
+        Assert.AreEqual(unchecked((int)0x80131904), exception.HResult);
+        Assert.AreEqual(unchecked((int)0x80131904), exception.ErrorCode);
+        Assert.AreEqual("Core Microsoft SqlClient Data Provider", exception.Source);
+        Assert.IsFalse(exception.IsTransient);
+
+        var data = exception.Data;
+        Assert.AreEqual(6, data.Count);
+        Assert.AreEqual("Microsoft SQL Server", data["HelpLink.ProdName"]);
+        Assert.AreEqual("99.00.1000", data["HelpLink.ProdVer"]); // This should probably be a simulation property.
+        Assert.AreEqual("MSSQLServer", data["HelpLink.EvtSrc"]);
+        Assert.AreEqual("102", data["HelpLink.EvtID"]);
+        Assert.AreEqual("https://go.microsoft.com/fwlink", data["HelpLink.BaseHelpUrl"]);
+        Assert.AreEqual("20476", data["HelpLink.LinkId"]);
+    }
 
     public static DbDataReader ExecuteReader(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteReader();

@@ -1,5 +1,6 @@
 ﻿using System.Collections.Immutable;
 using System.Data.Common;
+using System.Globalization;
 
 namespace SqlServerSimulator;
 
@@ -11,20 +12,21 @@ namespace SqlServerSimulator;
 /// </summary>
 internal sealed class SimulatedSqlException : DbException
 {
-    internal SimulatedSqlException(string? message)
-        : this(message, [])
+    internal SimulatedSqlException(Simulation simulation, string? message)
+        : this(simulation, message, [])
     {
     }
 
-    internal SimulatedSqlException(string message, int number, byte @class, byte state)
-        : this(message, new SimulatedSqlError(message, number, @class, state))
+    internal SimulatedSqlException(Simulation simulation, string message, int number, byte @class, byte state)
+        : this(simulation, message, new SimulatedSqlError(message, number, @class, state))
     {
     }
 
-    internal SimulatedSqlException(string? message, params SimulatedSqlError[] errors)
+    internal SimulatedSqlException(Simulation simulation, string? message, params SimulatedSqlError[] errors)
         : base(message ?? "Simulated exception with no message.")
     {
         base.HResult = unchecked((int)0x80131904);
+        base.Source = "Core Microsoft SqlClient Data Provider";
 
         if (errors.Length == 0)
         {
@@ -40,6 +42,13 @@ internal sealed class SimulatedSqlException : DbException
         this.Number = firstError.Number;
         this.Class = firstError.Class;
         this.State = firstError.State;
+
+        var data = this.Data;
+
+        foreach (var kv in simulation.DbExceptionData)
+            data.Add(kv.Key, kv.Value);
+
+        data["HelpLink.EvtID"] = firstError.Number.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <inheritdoc/>
