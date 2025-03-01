@@ -25,7 +25,7 @@ internal abstract class Expression
                     expression = new Value(atPrefixed, getVariableValue);
                     break;
                 case DoubleAtPrefixedString doubleAtPrefixedString:
-                    expression = new Value(simulation, doubleAtPrefixedString);
+                    expression = new Value(doubleAtPrefixedString);
                     break;
                 case Name name:
                     if (name is UnquotedString && name.TryParse(out var keyword))
@@ -34,14 +34,14 @@ internal abstract class Expression
                         {
                             case Keyword.As:
                                 if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
-                                    throw new SimulatedSqlException(simulation, "Incorrect syntax near the keyword 'as'.", 156, 15, 1);
+                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'as'.", 156, 15, 1);
 
                                 expression = new NamedExpression(expression, alias.Value);
                                 _ = tokens.TryMoveNext(out token);
                                 return expression;
                             case Keyword.From:
                                 if (expression is null)
-                                    throw new SimulatedSqlException(simulation, "Incorrect syntax near the keyword 'from'.", 156, 15, 1);
+                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'from'.", 156, 15, 1);
 
                                 return expression;
                         }
@@ -53,7 +53,7 @@ internal abstract class Expression
                     if (expression is null)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle + at the start of an expression.");
 
-                    token = tokens.RequireNext(simulation);
+                    token = tokens.RequireNext();
 
                     expression = new Add(expression, Parse(simulation, tokens, ref token, getVariableValue));
                     break;
@@ -64,11 +64,11 @@ internal abstract class Expression
                     if (expression is not Reference reference)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
-                    reference.AddMultiPartComponent(tokens.RequireNext<Name>(simulation));
+                    reference.AddMultiPartComponent(tokens.RequireNext<Name>());
                     break;
                 case Comma:
                     if (expression is null)
-                        throw simulation.SyntaxErrorNear(token);
+                        throw SimulatedSqlException.SyntaxErrorNear(token);
                     return expression;
                 default:
                     throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");
@@ -115,12 +115,12 @@ internal abstract class Expression
             this.value = getVariableValue(atPrefixed.Value);
         }
 
-        public Value(Simulation simulation, DoubleAtPrefixedString doubleAtPrefixedString)
+        public Value(DoubleAtPrefixedString doubleAtPrefixedString)
         {
             switch (doubleAtPrefixedString.Parse())
             {
                 case AtAtKeyword.Version:
-                    this.value = simulation.Version;
+                    this.value = "SQL Server Simulator";
                     return;
             }
 

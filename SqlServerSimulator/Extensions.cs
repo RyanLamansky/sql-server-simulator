@@ -12,14 +12,14 @@ static class Extensions
         return moved;
     }
 
-    public static Parser.Token RequireNext(this IEnumerator<Parser.Token> enumerator, Simulation simulation)
+    public static Parser.Token RequireNext(this IEnumerator<Parser.Token> enumerator)
     {
         Debug.Assert(enumerator.Current is not null);
         var previous = enumerator.Current!;
-        return enumerator.MoveNext() ? enumerator.Current : throw simulation.SyntaxErrorNear(previous);
+        return enumerator.MoveNext() ? enumerator.Current : throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 
-    public static T RequireNext<T>(this IEnumerator<Parser.Token> enumerator, Simulation simulation)
+    public static T RequireNext<T>(this IEnumerator<Parser.Token> enumerator)
         where T : Parser.Token
     {
         Debug.Assert(enumerator.Current is not null);
@@ -32,6 +32,6 @@ static class Extensions
                 return current;
         }
 
-        throw simulation.SyntaxErrorNear(previous);
+        throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 }

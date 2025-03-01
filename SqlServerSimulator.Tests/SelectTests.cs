@@ -25,14 +25,8 @@ public class SelectTests
     public void Select1ViaExecuteReaderGetInt32()
         => Assert.AreEqual(1, ScalarViaReaderTest("select 1").GetInt32(0));
 
-    private static void VersionTest(string commandText)
-    {
-        var simulation = new Simulation();
-        var version = simulation.Version;
-        Assert.IsNotNull(version);
-
-        Assert.AreEqual(version, simulation.ExecuteScalar(commandText));
-    }
+    private static void VersionTest(string commandText) =>
+        Assert.AreEqual("SQL Server Simulator", new Simulation().ExecuteScalar(commandText));
 
     [TestMethod]
     public void SelectVersion() => VersionTest("SELECT @@VERSION");

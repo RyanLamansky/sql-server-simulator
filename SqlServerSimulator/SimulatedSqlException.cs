@@ -1,4 +1,5 @@
-﻿using System.Collections.Immutable;
+﻿using SqlServerSimulator.Parser;
+using System.Collections.Immutable;
 using System.Data.Common;
 using System.Globalization;
 
@@ -12,17 +13,17 @@ namespace SqlServerSimulator;
 /// </summary>
 internal sealed class SimulatedSqlException : DbException
 {
-    internal SimulatedSqlException(Simulation simulation, string? message)
-        : this(simulation, message, [])
+    internal SimulatedSqlException(string? message)
+        : this(message, [])
     {
     }
 
-    internal SimulatedSqlException(Simulation simulation, string message, int number, byte @class, byte state)
-        : this(simulation, message, new SimulatedSqlError(message, number, @class, state))
+    internal SimulatedSqlException(string message, int number, byte @class, byte state)
+        : this(message, new SimulatedSqlError(message, number, @class, state))
     {
     }
 
-    internal SimulatedSqlException(Simulation simulation, string? message, params SimulatedSqlError[] errors)
+    internal SimulatedSqlException(string? message, params SimulatedSqlError[] errors)
         : base(message ?? "Simulated exception with no message.")
     {
         base.HResult = unchecked((int)0x80131904);
@@ -45,10 +46,12 @@ internal sealed class SimulatedSqlException : DbException
 
         var data = this.Data;
 
-        foreach (var kv in simulation.DbExceptionData)
-            data.Add(kv.Key, kv.Value);
-
-        data["HelpLink.EvtID"] = firstError.Number.ToString(CultureInfo.InvariantCulture);
+        data.Add("HelpLink.ProdName", "Microsoft SQL Server");
+        data.Add("HelpLink.ProdVer", "99.00.1000");
+        data.Add("HelpLink.EvtSrc", "MSSQLServer");
+        data.Add("HelpLink.EvtID", firstError.Number.ToString(CultureInfo.InvariantCulture));
+        data.Add("HelpLink.BaseHelpUrl", "https://go.microsoft.com/fwlink");
+        data.Add("HelpLink.LinkId", "20476");
     }
 
     /// <inheritdoc/>
@@ -80,4 +83,6 @@ internal sealed class SimulatedSqlException : DbException
     public byte State { get; }
 
     public IReadOnlyList<SimulatedSqlError> Errors { get; }
+
+    internal static SimulatedSqlException SyntaxErrorNear(Token token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
 }

@@ -8,35 +8,15 @@ using System.Data.Common;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Defines and controls the simulated scenario.
+/// Simulates a SQL Server instance.
 /// </summary>
-public class Simulation
+public sealed class Simulation
 {
     /// <summary>
-    /// Creates a new <see cref="Simulation"/> instance with default behaviors.
+    /// Creates a new <see cref="Simulation"/> instance.
     /// </summary>
     public Simulation()
     {
-    }
-
-    /// <summary>
-    /// The value for the `@@VERSION` system-defined value, defaults to "SQL Server Simulator".
-    /// </summary>
-    public virtual string Version => "SQL Server Simulator";
-
-    /// <summary>
-    /// Initial <see cref="Exception.Data"/> values for any <see cref="DbException"/> instances thrown.
-    /// </summary>
-    public virtual IEnumerable<KeyValuePair<object, object?>> DbExceptionData
-    {
-        get
-        {
-            yield return new("HelpLink.ProdName", "Microsoft SQL Server");
-            yield return new("HelpLink.ProdVer", "99.00.1000");
-            yield return new("HelpLink.EvtSrc", "MSSQLServer");
-            yield return new("HelpLink.BaseHelpUrl", "https://go.microsoft.com/fwlink");
-            yield return new("HelpLink.LinkId", "20476");
-        }
     }
 
     /// <summary>
@@ -50,9 +30,9 @@ public class Simulation
     internal readonly Lazy<Dictionary<string, Table>> SystemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
 
 #if DEBUG
-    private sealed class TokenArrayEnumerator(Simulation simulation, string? command) : IEnumerator<Token>
+    private sealed class TokenArrayEnumerator(string? command) : IEnumerator<Token>
     {
-        private readonly Token[] source = [.. Tokenizer.Tokenize(simulation, command)];
+        private readonly Token[] source = [.. Tokenizer.Tokenize(command)];
 
         public int Index { get; private set; } = -1;
 
@@ -116,7 +96,7 @@ public class Simulation
         {
             return variables.TryGetValue(name, out var value)
                 ? value.TypeValue.Value
-                : throw new SimulatedSqlException(command.simulation, $"Must declare the scalar variable \"@{name}\".");
+                : throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
         }
 
         public static Func<string, object?> FromCommand(SimulatedDbCommand command) => new VariableFinder(command).ValidatingGetVariableValue;
@@ -124,13 +104,12 @@ public class Simulation
 
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
-        var simulation = command.simulation;
         var getVariableValue = VariableFinder.FromCommand(command);
 
 #if DEBUG
-        using var tokens = new TokenArrayEnumerator(this, command.CommandText);
+        using var tokens = new TokenArrayEnumerator(command.CommandText);
 #else
-        using var tokens = Tokenizer.Tokenize(this, command.CommandText).GetEnumerator();
+        using var tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
 #endif
 
         while (tokens.TryMoveNext(out var token))
@@ -147,14 +126,14 @@ public class Simulation
                     switch (unquotedString.Parse())
                     {
                         case Keyword.Set:
-                            switch (token = tokens.RequireNext(simulation))
+                            switch (token = tokens.RequireNext())
                             {
                                 case UnquotedString setTarget:
                                     switch (setTarget.Parse())
                                     {
                                         case Keyword.Implicit_Transactions:
                                         case Keyword.NoCount:
-                                            switch (token = tokens.RequireNext(simulation))
+                                            switch (token = tokens.RequireNext())
                                             {
                                                 case UnquotedString onOff:
                                                     switch (onOff.Parse())
@@ -172,16 +151,16 @@ public class Simulation
                             break;
 
                         case Keyword.Create:
-                            switch (token = tokens.RequireNext(simulation))
+                            switch (token = tokens.RequireNext())
                             {
                                 case UnquotedString whatToCreate:
                                     switch (whatToCreate.Parse())
                                     {
                                         case Keyword.Table:
-                                            if (tokens.RequireNext(simulation) is not Name tableName)
+                                            if (tokens.RequireNext() is not Name tableName)
                                                 break;
 
-                                            if ((token = tokens.RequireNext(simulation)) is not OpenParentheses)
+                                            if ((token = tokens.RequireNext()) is not OpenParentheses)
                                                 break;
 
                                             var table = new Table(tableName.Value);
@@ -191,21 +170,21 @@ public class Simulation
                                             do
                                             {
                                                 suppressAdvanceToken = false;
-                                                if (tokens.RequireNext(simulation) is not Name columnName)
-                                                    throw new SimulatedSqlException(this, "Simulated table creation requires named columns.");
+                                                if (tokens.RequireNext() is not Name columnName)
+                                                    throw new SimulatedSqlException("Simulated table creation requires named columns.");
 
-                                                if (tokens.RequireNext(simulation) is not Name type)
-                                                    throw new SimulatedSqlException(this, "Simulated table creation requires columns to have a type.");
+                                                if (tokens.RequireNext() is not Name type)
+                                                    throw new SimulatedSqlException("Simulated table creation requires columns to have a type.");
 
                                                 var nullable = true;
 
-                                                token = tokens.RequireNext(simulation);
+                                                token = tokens.RequireNext();
                                                 if (token is UnquotedString next)
                                                 {
                                                     switch (next.Parse())
                                                     {
                                                         case Keyword.Not:
-                                                            if ((token = tokens.RequireNext(simulation)) is not UnquotedString mustBeNull || mustBeNull.Parse() != Keyword.Null)
+                                                            if ((token = tokens.RequireNext()) is not UnquotedString mustBeNull || mustBeNull.Parse() != Keyword.Null)
                                                                 throw new NotSupportedException($"Simulated command processor doesn't know how to handle column definition token {token}.");
 
                                                             nullable = false;
@@ -224,13 +203,13 @@ public class Simulation
                                                 }
 
                                                 columns.Add(new Column(columnName.Value, DataType.GetByName(type), nullable));
-                                            } while ((suppressAdvanceToken ? token : token = tokens.RequireNext(simulation)) is Comma);
+                                            } while ((suppressAdvanceToken ? token : token = tokens.RequireNext()) is Comma);
 
                                             if (token is not CloseParentheses)
                                                 break;
 
                                             if (!this.Tables.TryAdd(table.Name, table))
-                                                throw new SimulatedSqlException(this, $"There is already an object named '{table.Name}' in the database.", 2714, 16, 6);
+                                                throw new SimulatedSqlException($"There is already an object named '{table.Name}' in the database.", 2714, 16, 6);
 
                                             continue;
                                     }
@@ -243,24 +222,24 @@ public class Simulation
                             break;
 
                         case Keyword.Insert:
-                            if ((token = tokens.RequireNext(simulation)) is UnquotedString maybeInto && maybeInto.TryParse(out var keyword) && keyword == Keyword.Into)
-                                token = tokens.RequireNext(simulation);
+                            if ((token = tokens.RequireNext()) is UnquotedString maybeInto && maybeInto.TryParse(out var keyword) && keyword == Keyword.Into)
+                                token = tokens.RequireNext();
 
                             if (token is not StringToken destinationTableToken)
                                 break;
 
                             if (!this.Tables.TryGetValue(destinationTableToken.Value, out var destinationTable))
-                                throw new SimulatedSqlException(this, $"Invalid object name '{destinationTableToken.Value}'.", 208, 16, 0);
+                                throw new SimulatedSqlException($"Invalid object name '{destinationTableToken.Value}'.", 208, 16, 0);
 
                             Column[] destinationColumns;
-                            if ((token = tokens.RequireNext(simulation)) is OpenParentheses)
+                            if ((token = tokens.RequireNext()) is OpenParentheses)
                             {
                                 var usedColumns = new List<Column>();
-                                while ((token = tokens.RequireNext(simulation)) is StringToken column)
+                                while ((token = tokens.RequireNext()) is StringToken column)
                                 {
                                     var columnName = column.Value;
                                     var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
-                                        ?? throw new SimulatedSqlException(this, $"Invalid column name '{columnName}'.", 207, 16, 1);
+                                        ?? throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
                                     usedColumns.Add(tableColumn);
                                 }
 
@@ -269,7 +248,7 @@ public class Simulation
 
                                 destinationColumns = [.. usedColumns];
 
-                                token = tokens.RequireNext(simulation);
+                                token = tokens.RequireNext();
                             }
                             else
                             {
@@ -279,11 +258,11 @@ public class Simulation
                             if (token is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
                                 break;
 
-                            if ((token = tokens.RequireNext(simulation)) is not OpenParentheses)
+                            if ((token = tokens.RequireNext()) is not OpenParentheses)
                                 break;
 
                             var sourceValues = new List<Token>();
-                            while ((token = tokens.RequireNext(simulation)) is not CloseParentheses)
+                            while ((token = tokens.RequireNext()) is not CloseParentheses)
                             {
                                 sourceValues.Add(token);
                             }
@@ -302,6 +281,4 @@ public class Simulation
             throw new NotSupportedException($"Simulated command processor doesn't know what to do with {token}.");
         }
     }
-
-    internal SimulatedSqlException SyntaxErrorNear(Token token) => new(this, $"Incorrect syntax near '{token}'.", 102, 15, 1);
 }
