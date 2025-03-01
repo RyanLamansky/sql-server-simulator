@@ -11,9 +11,12 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 	ProjectSection(SolutionItems) = preProject
 		.editorconfig = .editorconfig
 		.github\workflows\dotnetcore.yml = .github\workflows\dotnetcore.yml
+		README.md = README.md
 	EndProjectSection
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.EFCore", "SqlServerSimulator.Tests.EFCore\SqlServerSimulator.Tests.EFCore.csproj", "{C2F98EBD-5A19-45BC-A2AD-F24E4976909F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Example", "Example\Example.csproj", "{56BC4138-449D-456E-840F-6F55303BA26A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -33,6 +36,10 @@ Global
 		{C2F98EBD-5A19-45BC-A2AD-F24E4976909F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C2F98EBD-5A19-45BC-A2AD-F24E4976909F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C2F98EBD-5A19-45BC-A2AD-F24E4976909F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{56BC4138-449D-456E-840F-6F55303BA26A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{56BC4138-449D-456E-840F-6F55303BA26A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{56BC4138-449D-456E-840F-6F55303BA26A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{56BC4138-449D-456E-840F-6F55303BA26A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
