@@ -10,11 +10,6 @@ sealed class SimulatedResultSet(Dictionary<string, int> columnIndexes, IEnumerab
         .OrderBy(kv => kv.Value)
         .Select(kv => kv.Key)];
 
-    public SimulatedResultSet(Dictionary<string, int> columnIndexes, params object?[][] records)
-        : this(columnIndexes, (IEnumerable<object?[]>)records)
-    {
-    }
-
     public IEnumerator<object?[]> GetEnumerator() => this.records.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();

@@ -16,7 +16,7 @@ static class Extensions
         return command;
     }
 
-    public static DbCommand CreateCommand(this DbConnection connection, string? commandText, params (string Name, object Value)[] parameters)
+    public static DbCommand CreateCommand(this DbConnection connection, string? commandText, params ReadOnlySpan<(string Name, object Value)> parameters)
     {
         var command = connection.CreateCommand();
         command.CommandText = commandText;

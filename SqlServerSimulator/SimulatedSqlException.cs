@@ -23,7 +23,7 @@ internal sealed class SimulatedSqlException : DbException
     {
     }
 
-    internal SimulatedSqlException(string? message, params SimulatedSqlError[] errors)
+    internal SimulatedSqlException(string? message, params ReadOnlySpan<SimulatedSqlError> errors)
         : base(message ?? "Simulated exception with no message.")
     {
         base.HResult = unchecked((int)0x80131904);
