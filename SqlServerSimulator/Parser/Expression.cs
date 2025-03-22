@@ -34,14 +34,14 @@ internal abstract class Expression
                         {
                             case Keyword.As:
                                 if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
-                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'as'.", 156, 15, 1);
+                                    throw SimulatedSqlException.SyntaxErrorNear(name);
 
                                 expression = new NamedExpression(expression, alias.Value);
                                 _ = tokens.TryMoveNext(out token);
                                 return expression;
                             case Keyword.From:
                                 if (expression is null)
-                                    throw new SimulatedSqlException("Incorrect syntax near the keyword 'from'.", 156, 15, 1);
+                                    throw SimulatedSqlException.SyntaxErrorNear(name);
 
                                 return expression;
                         }

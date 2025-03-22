@@ -1,5 +1,5 @@
 ﻿using SqlServerSimulator.Parser;
-using System.Collections.Immutable;
+using SqlServerSimulator.Parser.Tokens;
 using System.Data.Common;
 using System.Globalization;
 
@@ -18,12 +18,12 @@ internal sealed class SimulatedSqlException : DbException
     {
     }
 
-    internal SimulatedSqlException(string message, int number, byte @class, byte state)
+    private SimulatedSqlException(string message, int number, byte @class, byte state)
         : this(message, new SimulatedSqlError(message, number, @class, state))
     {
     }
 
-    internal SimulatedSqlException(string? message, params ReadOnlySpan<SimulatedSqlError> errors)
+    private SimulatedSqlException(string? message, params ReadOnlySpan<SimulatedSqlError> errors)
         : base(message ?? "Simulated exception with no message.")
     {
         base.HResult = unchecked((int)0x80131904);
@@ -31,12 +31,12 @@ internal sealed class SimulatedSqlException : DbException
 
         if (errors.Length == 0)
         {
-            this.Errors = ImmutableArray.Create([new SimulatedSqlError(base.Message, 0, 0, 0)]);
+            this.Errors = [new SimulatedSqlError(base.Message, 0, 0, 0)];
 
             return;
         }
 
-        this.Errors = ImmutableArray.Create(errors);
+        this.Errors = [.. errors];
 
         var firstError = errors[0];
 
@@ -84,5 +84,13 @@ internal sealed class SimulatedSqlException : DbException
 
     public IReadOnlyList<SimulatedSqlError> Errors { get; }
 
+    internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
+
+    internal static SimulatedSqlException InvalidColumnName(IEnumerable<string> name) => InvalidColumnName(string.Join('.', name));
+
+    internal static SimulatedSqlException InvalidObjectName(StringToken name) => new($"Invalid object name {name}.", 208, 16, 1);
+
     internal static SimulatedSqlException SyntaxErrorNear(Token token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
+
+    internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 }

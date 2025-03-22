@@ -209,7 +209,7 @@ public sealed class Simulation
                                                 break;
 
                                             if (!this.Tables.TryAdd(table.Name, table))
-                                                throw new SimulatedSqlException($"There is already an object named '{table.Name}' in the database.", 2714, 16, 6);
+                                                throw SimulatedSqlException.ThereIsAlreadyAnObject(table.Name);
 
                                             continue;
                                     }
@@ -229,7 +229,7 @@ public sealed class Simulation
                                 break;
 
                             if (!this.Tables.TryGetValue(destinationTableToken.Value, out var destinationTable))
-                                throw new SimulatedSqlException($"Invalid object name '{destinationTableToken.Value}'.", 208, 16, 0);
+                                throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
 
                             Column[] destinationColumns;
                             if ((token = tokens.RequireNext()) is OpenParentheses)
@@ -239,7 +239,7 @@ public sealed class Simulation
                                 {
                                     var columnName = column.Value;
                                     var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
-                                        ?? throw new SimulatedSqlException($"Invalid column name '{columnName}'.", 207, 16, 1);
+                                        ?? throw SimulatedSqlException.InvalidColumnName(columnName);
                                     usedColumns.Add(tableColumn);
                                 }
 
