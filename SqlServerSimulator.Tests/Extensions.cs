@@ -1,5 +1,4 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
-using System.Data.Common;
+﻿using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -58,7 +57,7 @@ static class Extensions
         Assert.IsFalse(exception.IsTransient);
 
         var data = exception.Data;
-        Assert.AreEqual(6, data.Count);
+        Assert.HasCount(6, data);
         Assert.AreEqual("Microsoft SQL Server", data["HelpLink.ProdName"]);
         Assert.AreEqual("99.00.1000", data["HelpLink.ProdVer"]); // This should probably be a simulation property.
         Assert.AreEqual("MSSQLServer", data["HelpLink.EvtSrc"]);

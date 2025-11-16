@@ -1,5 +1,4 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
-using System.Data.Common;
+﻿using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -7,11 +6,11 @@ namespace SqlServerSimulator;
 public class InsertTests
 {
     [TestMethod]
-    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
-    public void InsertRequiresTableToExist() => new Simulation()
+    public void InsertRequiresTableToExist() => Assert.Throws<DbException>(() => new Simulation()
         .CreateOpenConnection()
         .CreateCommand("insert t ( v ) values ( 1 )")
-        .ExecuteNonQuery();
+        .ExecuteNonQuery()
+    );
 
     [TestMethod]
     public void InsertWithoutColumnNames()
@@ -36,14 +35,11 @@ public class InsertTests
     }
 
     [TestMethod]
-    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
-    public void InsertParameterizedNameMismatch()
-    {
-        _ = new Simulation()
-            .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
-            .ExecuteNonQuery();
-    }
+    public void InsertParameterizedNameMismatch() => Assert.Throws<DbException>(() => new Simulation()
+        .CreateOpenConnection()
+        .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
+        .ExecuteNonQuery()
+    );
 
     [TestMethod]
     public void InsertWithoutColumnNamesCaseInsensitive()
@@ -79,14 +75,9 @@ public class InsertTests
     }
 
     [TestMethod]
-    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
-    public void InsertRequiresValidColumnNames()
-    {
-        var result = new Simulation()
-            .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t ( x ) values ( 1 )")
-            .ExecuteNonQuery();
-
-        Assert.AreEqual(1, result);
-    }
+    public void InsertRequiresValidColumnNames() => Assert.Throws<DbException>(() => new Simulation()
+        .CreateOpenConnection()
+        .CreateCommand("create table t ( v int );insert t ( x ) values ( 1 )")
+        .ExecuteNonQuery()
+    );
 }

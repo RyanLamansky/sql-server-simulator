@@ -1,5 +1,4 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
-using System.Data.Common;
+﻿using System.Data.Common;
 
 namespace SqlServerSimulator;
 
@@ -88,8 +87,8 @@ public class SelectTests
             .Select(reader => reader.GetInt32(0))
             .ToArray();
 
-        Assert.AreEqual(34, results.Length);
-        Assert.AreEqual(1, results.ToHashSet().Count);
+        Assert.HasCount(34, results);
+        Assert.HasCount(1, results.ToHashSet());
         Assert.AreEqual(1, results[0]);
     }
 
@@ -104,8 +103,8 @@ public class SelectTests
             .Select(reader => reader.GetInt32(0))
             .ToArray();
 
-        Assert.AreEqual(34, results.Length);
-        Assert.AreEqual(1, results.ToHashSet().Count);
+        Assert.HasCount(34, results);
+        Assert.HasCount(1, results.ToHashSet());
         Assert.AreEqual(1, results[0]);
     }
 
@@ -120,8 +119,8 @@ public class SelectTests
             .Select(reader => reader.GetString(0))
             .ToHashSet();
 
-        Assert.AreEqual(34, results.Count);
-        Assert.IsTrue(results.Contains("int"));
+        Assert.HasCount(34, results);
+        Assert.Contains("int", results);
     }
 
     [TestMethod]
@@ -135,8 +134,8 @@ public class SelectTests
             .Select(reader => reader.GetName(0))
             .ToHashSet();
 
-        Assert.AreEqual(1, results.Count);
-        Assert.IsTrue(results.Contains("c"));
+        Assert.HasCount(1, results);
+        Assert.Contains("c", results);
     }
 
     [TestMethod]
@@ -150,8 +149,8 @@ public class SelectTests
             .Select(reader => reader.GetName(0))
             .ToHashSet();
 
-        Assert.AreEqual(1, results.Count);
-        Assert.IsTrue(results.Contains("c"));
+        Assert.HasCount(1, results);
+        Assert.Contains("c", results);
     }
 
     [TestMethod]
@@ -165,8 +164,8 @@ public class SelectTests
             .Select(reader => reader.GetName(0))
             .ToHashSet();
 
-        Assert.AreEqual(1, results.Count);
-        Assert.IsTrue(results.Contains("name"));
+        Assert.HasCount(1, results);
+        Assert.Contains("name", results);
     }
 
     [TestMethod]
@@ -180,8 +179,8 @@ public class SelectTests
             .Select(reader => reader.GetName(0))
             .ToHashSet();
 
-        Assert.AreEqual(1, results.Count);
-        Assert.IsTrue(results.Contains("name"));
+        Assert.HasCount(1, results);
+        Assert.Contains("name", results);
     }
 
     [TestMethod]
@@ -194,7 +193,7 @@ public class SelectTests
             .Select(reader => (C1: reader.GetInt32(0), C2: reader.GetInt32(1)))
             .ToArray();
 
-        Assert.AreEqual(1, results.Length);
+        Assert.HasCount(1, results);
         var (C1, C2) = results[0];
         Assert.AreEqual(1, C1);
         Assert.AreEqual(2, C2);
@@ -211,7 +210,7 @@ public class SelectTests
             .Select(reader => (C1: reader.GetString(0), C2: reader.GetInt32(1)))
             .ToArray();
 
-        Assert.AreEqual(34, results.Length);
+        Assert.HasCount(34, results);
         var (C1, C2) = results[0];
         Assert.AreEqual("image", C1);
         Assert.AreEqual(16, C2);
@@ -223,10 +222,4 @@ public class SelectTests
     [DataRow("select ,", ",")]
     public void SelectSyntaxErrorsAreCorrect(string commandText, string nearSyntax) =>
         new Simulation().ValidateSyntaxError(commandText, nearSyntax);
-
-    [TestMethod]
-    [TestCategory("TODO")]
-    [ExpectedException(typeof(NotSupportedException))]
-    public void Select1FromDerivedTable() =>
-        Assert.AreEqual(1, new Simulation().ExecuteScalar("select 1 from ( select 1 x ) x"));
 }

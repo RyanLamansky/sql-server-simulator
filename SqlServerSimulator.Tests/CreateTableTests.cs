@@ -1,6 +1,4 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
-
-namespace SqlServerSimulator;
+﻿namespace SqlServerSimulator;
 
 [TestClass]
 public class CreateTableTests

@@ -1,4 +1,3 @@
-using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
@@ -16,57 +15,56 @@ public class SimpleCommandTests
     [TestMethod]
     public void CommandNotInitialized()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        using var command = connnection.CreateCommand();
+        using var connection = new Simulation().CreateDbConnection();
+        using var command = connection.CreateCommand();
 
-        connnection.Open();
+        connection.Open();
 
-        var x = ThrowsException<InvalidOperationException>(command.ExecuteReader);
+        var x = Throws<InvalidOperationException>(command.ExecuteReader);
         AreEqual("ExecuteReader: CommandText property has not been initialized", x.Message);
     }
 
     [TestMethod]
     public void EmptyCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand("");
+        using var command = connection.CreateCommand("");
 
-        var x = ThrowsException<InvalidOperationException>(command.ExecuteReader);
+        var x = Throws<InvalidOperationException>(command.ExecuteReader);
         AreEqual("ExecuteReader: CommandText property has not been initialized", x.Message);
     }
 
     [TestMethod]
     public void SpaceCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand(" ");
+        using var command = connection.CreateCommand(" ");
         using var reader = command.ExecuteReader();
 
         IsFalse(reader.Read());
     }
 
     [TestMethod]
-    [ExpectedException(typeof(DbException), AllowDerivedTypes = true)]
     public void IncompleteSingleLineCommentCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand("-");
-        _ = command.ExecuteReader();
+        using var command = connection.CreateCommand("-");
+        _ = Throws<DbException>(command.ExecuteReader);
     }
 
     [TestMethod]
     public void SingleLineEmptyCommentCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand("--");
+        using var command = connection.CreateCommand("--");
         using var reader = command.ExecuteReader();
 
         IsFalse(reader.Read());
@@ -75,10 +73,10 @@ public class SimpleCommandTests
     [TestMethod]
     public void SingleLineCommentCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand("-- Test");
+        using var command = connection.CreateCommand("-- Test");
         using var reader = command.ExecuteReader();
 
         IsFalse(reader.Read());
@@ -87,10 +85,10 @@ public class SimpleCommandTests
     [TestMethod]
     public void SingleLineCommentWithNewlineCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand("-- Test\n");
+        using var command = connection.CreateCommand("-- Test\n");
         using var reader = command.ExecuteReader();
 
         IsFalse(reader.Read());
@@ -99,10 +97,10 @@ public class SimpleCommandTests
     [TestMethod]
     public void SingleLineCommentWithCarriageReturnCommand()
     {
-        using var connnection = new Simulation().CreateDbConnection();
-        connnection.Open();
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
 
-        using var command = connnection.CreateCommand("-- Test\r");
+        using var command = connection.CreateCommand("-- Test\r");
         using var reader = command.ExecuteReader();
 
         IsFalse(reader.Read());

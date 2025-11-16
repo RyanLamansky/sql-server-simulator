@@ -1,6 +1,4 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
-
-namespace SqlServerSimulator;
+﻿namespace SqlServerSimulator;
 
 /// <summary>
 /// Verifies that a variety of set commands are processed without error.

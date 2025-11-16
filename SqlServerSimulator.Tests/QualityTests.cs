@@ -1,11 +1,9 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
-
-namespace SqlServerSimulator;
+﻿namespace SqlServerSimulator;
 
 [TestClass]
 public class QualityTests
 {
-    [TestMethod("Public API Whitelist")]
+    [TestMethod()]
     [Description("Prevents unintentional expansion of the public API.")]
     public void PublicApiWhitelist()
     {
@@ -17,7 +15,7 @@ public class QualityTests
             .Where(type => type.IsPublic)
             .ToArray();
 
-        Assert.AreEqual(1, types.Length);
+        Assert.HasCount(1, types);
         Assert.AreEqual(simulation, types[0]);
 
         var members = simulation
@@ -25,7 +23,7 @@ public class QualityTests
             .Where(member => member.DeclaringType == simulation)
             .ToArray();
 
-        Assert.AreEqual(2, members.Length);
+        Assert.HasCount(2, members);
 
         HashSet<string> allowedMemberNames = [
             ".ctor",
