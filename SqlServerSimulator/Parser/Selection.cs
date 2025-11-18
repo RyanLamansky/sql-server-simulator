@@ -8,7 +8,7 @@ internal sealed class Selection
 
     private Selection(SimulatedResultSet results) => this.Results = results;
 
-    public static Selection Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
+    public static Selection Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue, uint depth)
     {
         token = tokens.RequireNext();
 
@@ -26,6 +26,12 @@ internal sealed class Selection
             {
                 case Comma:
                     continue;
+
+                case CloseParentheses:
+                    if (depth == 0)
+                        throw SimulatedSqlException.SyntaxErrorNear(token);
+
+                    goto case null;
 
                 case null: // "Select" with no "From".
                     return new(new(
@@ -61,7 +67,36 @@ internal sealed class Selection
                                 table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                 {
                                     var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
-                                    return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex]; }))])));
+                                    return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
+                                }))])
+                                ));
+
+                        case OpenParentheses:
+                            if ((token = tokens.RequireNext()) is not UnquotedString maybeSelect || maybeSelect.Parse() != Keyword.Select)
+                                throw SimulatedSqlException.SyntaxErrorNear(token);
+
+                            {
+                                var derived = Selection.Parse(simulation, tokens, ref token, getVariableValue, depth + 1).Results;
+
+                                if ((token = tokens.RequireNext()) is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
+                                {
+                                    if (token is not UnquotedString)
+                                        break;
+                                }
+                                else
+                                {
+                                    break;
+                                }
+
+                                return new(new(
+                                    columnIndexes,
+                                    derived.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
+                                    {
+                                        var columnIndex = Array.FindIndex(derived.columnNames, name => Collation.Default.Equals(name, columnName.Last()));
+                                        return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
+                                    }))])
+                                    ));
+                            }
                     }
 
                     throw new NotSupportedException($"Simulated selection processor expected a source table, found {token}.");

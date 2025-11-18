@@ -218,7 +218,7 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Select:
-                            yield return Selection.Parse(this, tokens, ref token, getVariableValue).Results;
+                            yield return Selection.Parse(this, tokens, ref token, getVariableValue, 0).Results;
                             break;
 
                         case Keyword.Insert:

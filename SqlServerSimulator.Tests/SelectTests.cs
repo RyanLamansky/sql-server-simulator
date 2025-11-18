@@ -222,4 +222,8 @@ public class SelectTests
     [DataRow("select ,", ",")]
     public void SelectSyntaxErrorsAreCorrect(string commandText, string nearSyntax) =>
         new Simulation().ValidateSyntaxError(commandText, nearSyntax);
+
+    [TestMethod]
+    public void SelectFromDerivedTable() =>
+        Assert.AreEqual(1, new Simulation().ExecuteScalar("select x from ( select 1 as x ) as x"));
 }
