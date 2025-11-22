@@ -77,6 +77,16 @@ public class SelectTests
     }
 
     [TestMethod]
+    public void SelectAliasedMathExpression()
+    {
+        using var reader = new Simulation().ExecuteReader("select 1 + 1 as c");
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("c", reader.GetName(0));
+        Assert.AreEqual(2, reader.GetInt32(0));
+    }
+
+    [TestMethod]
     public void SelectExpressionFromSystemTable()
     {
         using var reader = new Simulation().ExecuteReader("select 1 from systypes");

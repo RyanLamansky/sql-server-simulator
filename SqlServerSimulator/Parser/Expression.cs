@@ -55,7 +55,10 @@ internal abstract class Expression
 
                     token = tokens.RequireNext();
 
-                    expression = new Add(expression, Parse(simulation, tokens, ref token, getVariableValue));
+                    var parsed = Parse(simulation, tokens, ref token, getVariableValue);
+                    expression = new Add(expression, parsed);
+                    if (parsed is NamedExpression named)
+                        expression = named.TransferName(expression);
                     break;
                 case Period:
                     if (expression is null)
@@ -88,13 +91,32 @@ internal abstract class Expression
     {
         private readonly Expression expression = expression;
         private readonly string name = name;
+#if DEBUG
+        private bool transferred;
+#endif
 
         public override string Name => this.name;
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
 
 #if DEBUG
-        public override string ToString() => $"{expression} {name}";
+        /// <summary>
+        /// Transfers the name to an outer expression.
+        /// </summary>
+        /// <param name="destination">The expression wrapping this<see cref="NamedExpression"/>.</param>
+        /// <returns>A new <see cref="NamedExpression"/> wrapping <paramref name="destination"/> using <see cref="Name"/>.</returns>
+#endif
+        public NamedExpression TransferName(Expression destination)
+        {
+#if DEBUG
+            transferred = true;
+#endif
+
+            return new(destination, this.name);
+        }
+
+#if DEBUG
+        public override string ToString() => transferred ? expression.ToString() : $"{expression} {name}";
 #endif
     }
 
