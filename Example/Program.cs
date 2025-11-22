@@ -35,7 +35,7 @@ sealed class ExampleRecord
     public required int Id { get; set; }
 }
 
-// Below is the minimum require to get entity framework to use the simulation.
+// Below is the minimum required to get entity framework to use the simulation.
 sealed class SimulatedContext(Simulation simulation) : DbContext
 {
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
