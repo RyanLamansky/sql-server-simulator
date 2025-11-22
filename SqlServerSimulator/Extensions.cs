@@ -15,7 +15,7 @@ static class Extensions
     public static Parser.Token RequireNext(this IEnumerator<Parser.Token> enumerator)
     {
         Debug.Assert(enumerator.Current is not null);
-        var previous = enumerator.Current!;
+        var previous = enumerator.Current;
         return enumerator.MoveNext() ? enumerator.Current : throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 
@@ -23,7 +23,7 @@ static class Extensions
         where T : Parser.Token
     {
         Debug.Assert(enumerator.Current is not null);
-        var previous = enumerator.Current!;
+        var previous = enumerator.Current;
 
         if (enumerator.MoveNext())
         {

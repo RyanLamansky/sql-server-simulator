@@ -30,8 +30,18 @@ public sealed class Simulation
     internal readonly Lazy<Dictionary<string, Table>> SystemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
 
 #if DEBUG
+    /// <summary>
+    /// Simplifies parser debugging by providing a useful string representation of the token enumeration.
+    /// Specifically, when calling <see cref="ToString"/> tokens are separated by '·' and the <see cref="Current"/> token is wrapped by '»' and '«'.
+    /// </summary>
+    /// <param name="command">The SQL command to process.</param>
+    /// <remarks>This should only be included in debug builds because it reduces parsing efficiency.</remarks>
     private sealed class TokenArrayEnumerator(string? command) : IEnumerator<Token>
     {
+        /// <summary>
+        /// Retains the full results of <see cref="Tokenizer.Tokenize(string?)"/>.
+        /// This is less efficient than streaming the results, but enables this class's debugging-friendly <see cref="ToString"/>.
+        /// </summary>
         private readonly Token[] source = [.. Tokenizer.Tokenize(command)];
 
         public int Index { get; private set; } = -1;
@@ -56,6 +66,11 @@ public sealed class Simulation
 
         public void Reset() => Index = -1;
 
+        /// <summary>
+        /// Returns a string representation of the tokenized command.
+        /// Tokens are separated by '·' and the <see cref="Current"/> token is wrapped by '»' and '«'.
+        /// </summary>
+        /// <returns>The string representation.</returns>
         public override string ToString()
         {
             var result = new System.Text.StringBuilder();
