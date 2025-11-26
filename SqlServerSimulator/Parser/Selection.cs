@@ -12,15 +12,11 @@ internal sealed class Selection
     {
         token = tokens.RequireNext();
 
-        Dictionary<string, int> columnIndexes = [];
         List<Expression> expressions = [];
 
         do
         {
-            var expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
-            if (expression.Name.Length > 0)
-                columnIndexes.Add(expression.Name, columnIndexes.Count);
-            expressions.Add(expression);
+            expressions.Add(Expression.Parse(simulation, tokens, ref token, getVariableValue));
 
             switch (token)
             {
@@ -35,7 +31,7 @@ internal sealed class Selection
 
                 case null: // "Select" with no "From".
                     return new(new(
-                        columnIndexes,
+                        expressions,
                         [[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]]
                         ));
 
@@ -63,7 +59,7 @@ internal sealed class Selection
                             }
 
                             return new(new(
-                                columnIndexes,
+                                expressions,
                                 table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                 {
                                     var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
@@ -89,7 +85,7 @@ internal sealed class Selection
                                 }
 
                                 return new(new(
-                                    columnIndexes,
+                                    expressions,
                                     derived.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                     {
                                         var columnIndex = Array.FindIndex(derived.columnNames, name => Collation.Default.Equals(name, columnName.Last()));

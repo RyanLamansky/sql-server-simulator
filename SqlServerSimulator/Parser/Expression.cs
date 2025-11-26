@@ -13,9 +13,12 @@ internal abstract class Expression
     public static Expression Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
     {
         Expression? expression = null;
+        bool tokenWasRead;
 
         do
         {
+            tokenWasRead = false;
+
             switch (token)
             {
                 case Numeric number:
@@ -59,6 +62,8 @@ internal abstract class Expression
                     expression = new Add(expression, parsed);
                     if (parsed is NamedExpression named)
                         expression = named.TransferName(expression);
+
+                    tokenWasRead = true;
                     break;
                 case Period:
                     if (expression is null)
@@ -70,13 +75,14 @@ internal abstract class Expression
                     reference.AddMultiPartComponent(tokens.RequireNext<Name>());
                     break;
                 case Comma:
+                case CloseParentheses:
                     if (expression is null)
                         throw SimulatedSqlException.SyntaxErrorNear(token);
                     return expression;
                 default:
                     throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");
             }
-        } while (tokens.TryMoveNext(out token));
+        } while ((tokenWasRead && token is not null) || tokens.TryMoveNext(out token));
 
         return expression;
     }

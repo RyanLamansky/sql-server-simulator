@@ -67,6 +67,7 @@ public class SelectTests
     [DataRow("select 1 from systypes", 34, 1, 1)]
     [DataRow("select 1 from systypes as s", 34, 1, 1)]
     [DataRow("select name from systypes", 34, 34, "image")]
+    [DataRow("select 1 + 1 from systypes", 34, 1, 2)]
     public void ExpressionFromTable(string commandText, int minimumRows, int uniqueRows, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
@@ -87,6 +88,7 @@ public class SelectTests
     [DataRow("select name as c from systypes as s", 34, 34, "c", "image")]
     [DataRow("select systypes.name from systypes", 34, 34, "name", "image")]
     [DataRow("select s.name from systypes as s", 34, 34, "name", "image")]
+    [DataRow("select 1 + 1 as c from systypes", 34, 1, "c", 2)]
     public void NamedExpressionFromTable(string commandText, int minimumRows, int uniqueRows, string name, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
@@ -104,6 +106,29 @@ public class SelectTests
         Assert.HasCount(minimumRows, results);
         Assert.HasCount(uniqueRows, results.ToHashSet());
         Assert.AreEqual(value, results[0]);
+    }
+
+    [TestMethod]
+    [DataRow("select 1 + 1 as x, name as c from systypes", 34, "x", 2, "c", "image")]
+    [DataRow("select 1 + 1, name as c from systypes", 34, "", 2, "c", "image")]
+    public void NamedExpressionAndColumnFromTable(string commandText, int minimumRows, string name0, object value0, string name1, object value1)
+    {
+        using var reader = new Simulation().ExecuteReader(commandText);
+
+        var results = reader
+            .EnumerateRecords()
+            .Take(minimumRows) // There might be more someday, but there won't be less.
+            .Select(reader =>
+            {
+                Assert.AreEqual(name0, reader.GetName(0));
+                Assert.AreEqual(name1, reader.GetName(1));
+                return (C0: reader[0], C1: reader[1]);
+            })
+            .ToArray();
+
+        Assert.HasCount(minimumRows, results);
+        Assert.AreEqual(value0, results[0].C0);
+        Assert.AreEqual(value1, results[0].C1);
     }
 
     [TestMethod]
@@ -147,6 +172,21 @@ public class SelectTests
         new Simulation().ValidateSyntaxError(commandText, nearSyntax);
 
     [TestMethod]
-    public void SelectFromDerivedTable() =>
-        Assert.AreEqual(1, new Simulation().ExecuteScalar("select x from ( select 1 as x ) as x"));
+    [DataRow("select x from ( select 1 as x ) as x", "x", 1)]
+    [DataRow("select x from ( select 1 + 1 as x ) as x", "x", 2)]
+    public void DerivedTable(string commandText, string name, object value)
+    {
+        using var reader = new Simulation().ExecuteReader(commandText);
+
+        var result = reader
+            .EnumerateRecords()
+            .Select(reader =>
+            {
+                Assert.AreEqual(name, reader.GetName(0));
+                return reader[0];
+            })
+            .SingleOrDefault();
+
+        Assert.AreEqual(value, result);
+    }
 }
