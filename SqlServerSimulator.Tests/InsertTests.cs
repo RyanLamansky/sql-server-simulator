@@ -13,14 +13,18 @@ public class InsertTests
     );
 
     [TestMethod]
-    public void InsertWithoutColumnNames()
+    [DataRow("create table t ( v int );insert t values ( 1 )", 1)]
+    [DataRow("create table t ( v int );insert T values ( 1 )", 1)]
+    [DataRow("create table t ( v int );insert t ( v ) values ( 1 )", 1)]
+    [DataRow("create table t ( v int );insert t ( V ) values ( 1 )", 1)]
+    public void Insert(string commandText, int expectedRecordsAffected)
     {
         var result = new Simulation()
             .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t values ( 1 )")
+            .CreateCommand(commandText)
             .ExecuteNonQuery();
 
-        Assert.AreEqual(1, result);
+        Assert.AreEqual(expectedRecordsAffected, result);
     }
 
     [TestMethod]
@@ -40,39 +44,6 @@ public class InsertTests
         .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
         .ExecuteNonQuery()
     );
-
-    [TestMethod]
-    public void InsertWithoutColumnNamesCaseInsensitive()
-    {
-        var result = new Simulation()
-            .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert T values ( 1 )")
-            .ExecuteNonQuery();
-
-        Assert.AreEqual(1, result);
-    }
-
-    [TestMethod]
-    public void InsertWithColumnNames()
-    {
-        var result = new Simulation()
-            .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t ( v ) values ( 1 )")
-            .ExecuteNonQuery();
-
-        Assert.AreEqual(1, result);
-    }
-
-    [TestMethod]
-    public void InsertWithColumnNamesCaseInsensitive()
-    {
-        var result = new Simulation()
-            .CreateOpenConnection()
-            .CreateCommand("create table t ( v int );insert t ( V ) values ( 1 )")
-            .ExecuteNonQuery();
-
-        Assert.AreEqual(1, result);
-    }
 
     [TestMethod]
     public void InsertRequiresValidColumnNames() => Assert.Throws<DbException>(() => new Simulation()
