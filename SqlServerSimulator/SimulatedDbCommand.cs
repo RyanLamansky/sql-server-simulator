@@ -6,47 +6,61 @@ namespace SqlServerSimulator;
 
 sealed class SimulatedDbCommand : DbCommand
 {
-    internal Simulation simulation;
-    internal SimulatedDbConnection connection;
-    internal SimulatedDbTransaction? transaction;
-    private string commandText = string.Empty;
+    internal readonly Simulation simulation;
 
     public SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;
-        this.connection = connection;
-    }
-
-    public SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection, SimulatedDbTransaction transaction)
-    {
-        this.simulation = simulation;
-        this.connection = connection;
-        this.transaction = transaction;
+        this.Connection = connection;
     }
 
     [AllowNull]
     public override string CommandText
     {
-        get => commandText;
-        set => commandText = value ?? string.Empty;
-    }
+        get;
+        set => field = value ?? string.Empty;
+    } = string.Empty;
 
-    public override int CommandTimeout { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    public override CommandType CommandType { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    public override bool DesignTimeVisible { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    public override UpdateRowSource UpdatedRowSource { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    protected override DbConnection? DbConnection { get => this.connection; set => throw new NotImplementedException(); }
+    public override int CommandTimeout
+    {
+        get;
+        set => field = value >= 0 ?
+            value :
+            throw new ArgumentException($"Invalid {nameof(CommandTimeout)} value {value}; the value must be >= 0.", nameof(CommandTimeout));
+        // ArgumentOutOfRangeException would be more appropriate but the official SQL Client uses ArgumentException, so this is more consistent.
+    } = 30;
+
+    public override CommandType CommandType
+    {
+        get;
+        set => throw (Enum.IsDefined(value) ? new NotSupportedException() : new ArgumentOutOfRangeException(nameof(CommandType), value, null));
+    } = CommandType.Text;
+
+    public override bool DesignTimeVisible { get; set; } = true;
+
+    public override UpdateRowSource UpdatedRowSource { get; set; } = UpdateRowSource.Both;
+
+    protected override DbConnection? DbConnection
+    {
+        get;
+        set
+        {
+            if (field is not null) // Set by the constructor.
+                throw new NotSupportedException("Simulated DbCommands cannot switch to different connections.");
+            field = value;
+        }
+    }
 
     protected override DbParameterCollection DbParameterCollection { get; } = new SimulatedDbParameterCollection();
 
     protected override DbTransaction? DbTransaction
     {
-        get => this.transaction;
+        get;
         set
         {
             if (value == null)
             {
-                this.transaction = null;
+                field = null;
                 return;
             }
 
@@ -56,10 +70,10 @@ sealed class SimulatedDbCommand : DbCommand
             if (transaction.simulation != this.simulation)
                 throw new NotSupportedException("Simulated DbCommands cannot switch to different simulations.");
 
-            if (transaction.connection != this.connection)
+            if (transaction.connection != this.Connection)
                 throw new NotSupportedException("Simulated DbCommands cannot switch to different connections.");
 
-            this.transaction = transaction;
+            field = transaction;
         }
     }
 
