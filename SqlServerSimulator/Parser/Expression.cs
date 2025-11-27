@@ -141,7 +141,8 @@ internal abstract class Expression
     private delegate Expression FunctionResolver(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue);
 
     private static readonly FrozenDictionary<string, FunctionResolver> BuiltInFunctions = FrozenDictionary.Create<string, FunctionResolver>(Collation.Default, [
-        new("datalength", (simulation, tokens, ref token, getVariableValue) => new DataLength(Expression.Parse(simulation, tokens, ref token, getVariableValue)))
+        new("datalength", (simulation, tokens, ref token, getVariableValue) => new DataLength(Expression.Parse(simulation, tokens, ref token, getVariableValue))),
+        new("abs", (simulation, tokens, ref token, getVariableValue) => new AbsoluteValue(Expression.Parse(simulation, tokens, ref token, getVariableValue))),
         ]);
 
     private sealed class NamedExpression(Expression expression, string name) : Expression
@@ -281,6 +282,22 @@ internal abstract class Expression
 
 #if DEBUG
         public override string ToString() => $"DATALENGTH({source})";
+#endif
+    }
+
+    public sealed class AbsoluteValue(Expression source) : Expression
+    {
+        private readonly Expression source = source;
+
+        public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
+        {
+            null => null,
+            int value => Math.Abs(value),
+            _ => throw new NotSupportedException($"Simulation unable to to run DATALENGTH function on the provided expression."),
+        };
+
+#if DEBUG
+        public override string ToString() => $"ABS({source})";
 #endif
     }
 }

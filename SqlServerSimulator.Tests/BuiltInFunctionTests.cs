@@ -7,7 +7,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class BuiltInFunctionTests
 {
-
     [TestMethod]
     public void UnrecognizedBuiltInFunction()
     {
@@ -16,12 +15,24 @@ public sealed class BuiltInFunctionTests
     }
 
     [TestMethod]
-    public void DataLengthOfNull() => IsInstanceOfType<DBNull>(ExecuteScalar("select datalength(null)"));
+    [DataRow("abs")]
+    [DataRow("datalength")]
+    public void NullPassThrough(string function)
+    {
+        AreEqual(function.ToLowerInvariant(), function);
+        _ = IsInstanceOfType<DBNull>(ExecuteScalar($"select {function}(null)"));
+        _ = IsInstanceOfType<DBNull>(ExecuteScalar($"select {function.ToUpperInvariant()}(null)"));
+    }
 
     [TestMethod]
-    [DataRow("1", 4)]
-    public void DataLength(string input, object? output) => AreEqual(output, ExecuteScalar($"select datalength({input})"));
-
-    [TestMethod]
-    public void DataLengthAllCaps() => AreEqual(4, ExecuteScalar<int>("select DATALENGTH(1)"));
+    [DataRow("datalength", "1", 4)]
+    [DataRow("abs", "1", 1)]
+    [DataRow("abs", "0", 0)]
+    [DataRow("abs", "-1", 1)]
+    public void BuiltInFunction(string function, string input, object output)
+    {
+        AreEqual(function.ToLowerInvariant(), function);
+        AreEqual(output, ExecuteScalar($"select {function}({input})"));
+        AreEqual(output, ExecuteScalar($"select {function.ToUpperInvariant()}({input})"));
+    }
 }
