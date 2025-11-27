@@ -48,6 +48,9 @@ internal abstract class Expression
                                     throw SimulatedSqlException.SyntaxErrorNear(name);
 
                                 return expression;
+                            case Keyword.Null:
+                                expression = new Value();
+                                continue;
                         }
                     }
 
@@ -153,6 +156,10 @@ internal abstract class Expression
     private sealed class Value : Expression
     {
         private readonly object? value;
+
+        public Value()
+        {
+        }
 
         public Value(Numeric value)
         {

@@ -5,7 +5,9 @@ namespace SqlServerSimulator;
 [TestClass]
 public class SelectTests
 {
-    private static DbDataReader ScalarViaReaderTest(string commandText)
+    private static object? ExecuteScalar(string commandText) => new Simulation().ExecuteScalar(commandText);
+
+    private static DbDataReader ExecuteReaderAndRead(string commandText)
     {
         var reader = new Simulation().ExecuteReader(commandText);
         Assert.IsTrue(reader.Read());
@@ -14,11 +16,14 @@ public class SelectTests
 
     [TestMethod]
     public void Select1ViaExecuteReaderIndexer()
-        => Assert.AreEqual(1, ScalarViaReaderTest("select 1")[0]);
+        => Assert.AreEqual(1, ExecuteReaderAndRead("select 1")[0]);
 
     [TestMethod]
     public void Select1ViaExecuteReaderGetInt32()
-        => Assert.AreEqual(1, ScalarViaReaderTest("select 1").GetInt32(0));
+        => Assert.AreEqual(1, ExecuteReaderAndRead("select 1").GetInt32(0));
+
+    [TestMethod]
+    public void Null() => Assert.IsInstanceOfType<DBNull>(ExecuteScalar("select null"));
 
     [TestMethod]
     [DataRow("SELECT @@VERSION")]

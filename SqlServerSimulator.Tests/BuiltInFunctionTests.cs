@@ -6,6 +6,8 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class BuiltInFunctionTests
 {
+    private static object? ExecuteScalar(string commandText) => new Simulation().ExecuteScalar(commandText);
+
     private static T ExecuteScalar<T>(string commandText) where T : struct => new Simulation().ExecuteScalar<T>(commandText);
 
     [TestMethod]
@@ -16,7 +18,11 @@ public sealed class BuiltInFunctionTests
     }
 
     [TestMethod]
-    public void DataLength() => AreEqual(4, ExecuteScalar<int>("select datalength(1)"));
+    public void DataLengthOfNull() => IsInstanceOfType<DBNull>(ExecuteScalar("select datalength(null)"));
+
+    [TestMethod]
+    [DataRow("1", 4)]
+    public void DataLength(string input, object? output) => AreEqual(output, ExecuteScalar($"select datalength({input})"));
 
     [TestMethod]
     public void DataLengthAllCaps() => AreEqual(4, ExecuteScalar<int>("select DATALENGTH(1)"));
