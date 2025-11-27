@@ -5,6 +5,21 @@ namespace SqlServerSimulator;
 [TestClass]
 public class EFCoreBasics
 {
+    [AssemblyInitialize]
+    public static async Task HotPath(TestContext context)
+    {
+        if (System.Diagnostics.Debugger.IsAttached)
+            return;
+
+        // Triggers JIT compilation of the most common path among all tests, improving the accuracy of their timings.
+        // Also functions as a sanity check against the simulator being completely broken.
+        using var dbContext = new TestDbContext();
+
+        Assert.IsEmpty(dbContext.Rows.Select(x => x.Id).AsEnumerable());
+
+        Assert.AreEqual(0, await dbContext.SaveChangesAsync(context.CancellationToken));
+    }
+
     public static Simulation CreateDefaultSimulation()
     {
         var simulation = new Simulation();
@@ -21,11 +36,11 @@ public class EFCoreBasics
         public int Id { get; set; }
     }
 
-    class TestContext(Simulation simulation) : DbContext
+    class TestDbContext(Simulation simulation) : DbContext
     {
         public Simulation Simulation { get; set; } = simulation;
 
-        public TestContext()
+        public TestDbContext()
             : this(CreateDefaultSimulation())
         {
         }
@@ -41,7 +56,7 @@ public class EFCoreBasics
     [TestMethod]
     public void InsertRowSync()
     {
-        using var context = new TestContext();
+        using var context = new TestDbContext();
 
         var row = new TestRow { Id = 1 };
 
@@ -57,7 +72,7 @@ public class EFCoreBasics
     [TestMethod]
     public async Task InsertRowAsync()
     {
-        await using var context = new TestContext();
+        await using var context = new TestDbContext();
 
         var row = new TestRow { Id = 1 };
 
@@ -72,7 +87,7 @@ public class EFCoreBasics
         var simulation = CreateDefaultSimulation();
         const int storedValue = 3;
 
-        using (var context = new TestContext(simulation))
+        using (var context = new TestDbContext(simulation))
         {
             var row = new TestRow { Id = storedValue };
 
@@ -81,7 +96,7 @@ public class EFCoreBasics
             _ = context.SaveChanges();
         }
 
-        using (var context = new TestContext(simulation))
+        using (var context = new TestDbContext(simulation))
         {
             var receivedValue = context.Rows.Select(x => x.Id).AsEnumerable();
 

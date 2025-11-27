@@ -5,10 +5,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public class SelectTests
 {
-    [TestMethod]
-    public void Select1ViaExecuteScalar()
-        => Assert.AreEqual(1, new Simulation().ExecuteScalar("select 1"));
-
     private static DbDataReader ScalarViaReaderTest(string commandText)
     {
         var reader = new Simulation().ExecuteReader(commandText);

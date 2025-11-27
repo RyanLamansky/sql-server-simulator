@@ -3,7 +3,18 @@
 [TestClass]
 public class QualityTests
 {
-    [TestMethod()]
+    [AssemblyInitialize]
+    public static void HotPath(TestContext context)
+    {
+        if (System.Diagnostics.Debugger.IsAttached)
+            return;
+
+        // Triggers JIT compilation of the most common path among all tests, improving the accuracy of their timings.
+        // Also functions as a sanity check against the simulator being completely broken.
+        Assert.AreEqual(1, new Simulation().ExecuteScalar<int>("select 1"));
+    }
+
+    [TestMethod]
     [Description("Prevents unintentional expansion of the public API.")]
     public void PublicApiWhitelist()
     {
