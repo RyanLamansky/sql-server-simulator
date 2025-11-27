@@ -44,11 +44,18 @@ public class SelectTests
     }
 
     [TestMethod]
-    public void Select1Plus1()
+    [DataRow("1 + 1", 2)]
+    [DataRow("1 - 1", 0)]
+    [DataRow("-1", -1)]
+    [DataRow("- 1", -1)]
+    [DataRow("+1", 1)]
+    [DataRow("+ 1", 1)]
+    public void Expression(string commandText, object value)
     {
-        var result = new Simulation().ExecuteScalar("select 1 + 1");
+        using var reader = new Simulation().ExecuteReader($"select {commandText}");
 
-        Assert.AreEqual(2, result);
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(value, reader[0]);
     }
 
     [TestMethod]

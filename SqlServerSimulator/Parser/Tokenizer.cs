@@ -30,6 +30,7 @@ static class Tokenizer
 
         while (commandEnumerator.TryGetNext(out var c, ref index))
         {
+        Switch:
             switch (c)
             {
                 default:
@@ -178,22 +179,23 @@ static class Tokenizer
                         continue;
                     }
 
-                    switch (c)
+                    if (c == '-')
                     {
-                        case '-':
-                            while (commandEnumerator.TryGetNext(out c, ref index))
+                        while (commandEnumerator.TryGetNext(out c, ref index))
+                        {
+                            switch (c)
                             {
-                                switch (c)
-                                {
-                                    case '\r':
-                                    case '\n':
-                                        yield return new Comment();
-                                        continue;
-                                }
+                                case '\r':
+                                case '\n':
+                                    yield return new Comment();
+                                    continue;
                             }
-                            continue;
+                        }
+                        continue;
                     }
-                    break;
+
+                    yield return new Minus();
+                    goto Switch; // Can't immediately think of a better way to do this that doesn't involve new variables.
 
                 case '*':
                     yield return new Asterisk();

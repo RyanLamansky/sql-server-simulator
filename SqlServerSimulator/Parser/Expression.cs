@@ -58,17 +58,44 @@ internal abstract class Expression
                     break;
                 case Plus:
                     if (expression is null)
-                        throw new NotSupportedException("Simulated expression parser doesn't know how to handle + at the start of an expression.");
+                    {
+                        token = tokens.RequireNext();
+                        expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+                        break;
+                    }
 
                     token = tokens.RequireNext();
 
-                    var parsed = Parse(simulation, tokens, ref token, getVariableValue);
-                    expression = new Add(expression, parsed);
-                    if (parsed is NamedExpression named)
-                        expression = named.TransferName(expression);
+                    {
+                        var parsed = Parse(simulation, tokens, ref token, getVariableValue);
+                        expression = new Add(expression, parsed);
+                        if (parsed is NamedExpression named)
+                            expression = named.TransferName(expression);
+                    }
 
                     tokenWasRead = true;
                     break;
+                case Minus:
+                    if (expression is null)
+                    {
+                        token = tokens.RequireNext();
+                        expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+                        expression = new Subtract(new Value(0), expression);
+                        break;
+                    }
+
+                    token = tokens.RequireNext();
+
+                    {
+                        var parsed = Parse(simulation, tokens, ref token, getVariableValue);
+                        expression = new Subtract(expression, parsed);
+                        if (parsed is NamedExpression named)
+                            expression = named.TransferName(expression);
+                    }
+
+                    tokenWasRead = true;
+                    break;
+
                 case Period:
                     if (expression is null)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' at the start of an expression.");
@@ -161,9 +188,11 @@ internal abstract class Expression
         {
         }
 
+        public Value(object? value) => this.value = value;
+
         public Value(Numeric value)
+            : this(value.Value)
         {
-            this.value = value.Value;
         }
 
         public Value(AtPrefixedString atPrefixed, Func<string, object?> getVariableValue)
@@ -200,6 +229,23 @@ internal abstract class Expression
             var rightValue = right.Run(getColumnValue);
 
             return (int)leftValue! + (int)rightValue!; // TODO: Handle varied input types here.
+        }
+
+#if DEBUG
+        public override string ToString() => $"{left} + {right}";
+#endif
+    }
+
+    public sealed class Subtract(Expression left, Expression right) : Expression
+    {
+        private readonly Expression left = left, right = right;
+
+        public override object? Run(Func<List<string>, object?> getColumnValue)
+        {
+            var leftValue = left.Run(getColumnValue);
+            var rightValue = right.Run(getColumnValue);
+
+            return (int)leftValue! - (int)rightValue!; // TODO: Handle varied input types here.
         }
 
 #if DEBUG
