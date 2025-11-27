@@ -1,14 +1,12 @@
 ﻿using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
 [TestClass]
 public sealed class BuiltInFunctionTests
 {
-    private static object? ExecuteScalar(string commandText) => new Simulation().ExecuteScalar(commandText);
-
-    private static T ExecuteScalar<T>(string commandText) where T : struct => new Simulation().ExecuteScalar<T>(commandText);
 
     [TestMethod]
     public void UnrecognizedBuiltInFunction()

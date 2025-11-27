@@ -1,12 +1,11 @@
 ﻿using System.Data.Common;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
 [TestClass]
 public class SelectTests
 {
-    private static object? ExecuteScalar(string commandText) => new Simulation().ExecuteScalar(commandText);
-
     private static DbDataReader ExecuteReaderAndRead(string commandText)
     {
         var reader = new Simulation().ExecuteReader(commandText);
