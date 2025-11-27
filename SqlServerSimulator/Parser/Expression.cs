@@ -1,4 +1,5 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
+using System.Collections.Frozen;
 
 namespace SqlServerSimulator.Parser;
 
@@ -69,16 +70,30 @@ internal abstract class Expression
                     if (expression is null)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' at the start of an expression.");
 
-                    if (expression is not Reference reference)
-                        throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
+                    {
+                        if (expression is not Reference reference)
+                            throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
-                    reference.AddMultiPartComponent(tokens.RequireNext<Name>());
+                        reference.AddMultiPartComponent(tokens.RequireNext<Name>());
+                    }
                     break;
                 case Comma:
                 case CloseParentheses:
                     if (expression is null)
                         throw SimulatedSqlException.SyntaxErrorNear(token);
                     return expression;
+                case OpenParentheses:
+                    {
+                        if (expression is not Reference reference)
+                            throw SimulatedSqlException.SyntaxErrorNear(token);
+                        if (!BuiltInFunctions.TryGetValue(reference.Name, out var builtInFunction))
+                            throw SimulatedSqlException.UnrecognizedBuiltInFunction(reference.Name);
+
+                        token = tokens.RequireNext(); // Move past (
+                        expression = builtInFunction(simulation, tokens, ref token, getVariableValue);
+                        _ = tokens.TryMoveNext(out token); // Move past )
+                        return expression;
+                    }
                 default:
                     throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");
             }
@@ -92,6 +107,12 @@ internal abstract class Expression
 #if DEBUG
     public abstract override string ToString();
 #endif
+
+    private delegate Expression FunctionResolver(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue);
+
+    private static readonly FrozenDictionary<string, FunctionResolver> BuiltInFunctions = FrozenDictionary.Create<string, FunctionResolver>(Collation.Default, [
+        new("datalength", (simulation, tokens, ref token, getVariableValue) => new DataLength(Expression.Parse(simulation, tokens, ref token, getVariableValue)))
+        ]);
 
     private sealed class NamedExpression(Expression expression, string name) : Expression
     {
@@ -179,29 +200,34 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Reference : Expression
+    public sealed class Reference(Name name) : Expression
     {
-        private readonly List<string> name = [];
-
-        public Reference(Name name)
-        {
-            this.name.Add(name.Value);
-        }
+        private readonly List<string> name = [name.Value];
 
         public override string Name => this.name.Last();
 
-        public void AddMultiPartComponent(Name name)
-        {
-            this.name.Add(name.Value);
-        }
+        public void AddMultiPartComponent(Name name) => this.name.Add(name.Value);
 
-        public override object? Run(Func<List<string>, object?> getColumnValue)
-        {
-            return getColumnValue(this.name);
-        }
+        public override object? Run(Func<List<string>, object?> getColumnValue) => getColumnValue(this.name);
 
 #if DEBUG
         public override string ToString() => string.Join('.', name);
+#endif
+    }
+
+    public sealed class DataLength(Expression source) : Expression
+    {
+        private readonly Expression source = source;
+
+        public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
+        {
+            null => null,
+            int => 4,
+            _ => throw new NotSupportedException($"Simulation unable to to run DATALENGTH function on the provided expression."),
+        };
+
+#if DEBUG
+        public override string ToString() => $"DATALENGTH({source})";
 #endif
     }
 }

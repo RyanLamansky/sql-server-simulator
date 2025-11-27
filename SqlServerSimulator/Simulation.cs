@@ -291,9 +291,10 @@ public sealed class Simulation
                             continue;
                     }
                     break;
-            }
 
-            throw new NotSupportedException($"Simulated command processor doesn't know what to do with {token}.");
-        }
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(token);
+            }
+        } // while (tokens.TryMoveNext(out var token))
     }
 }

@@ -93,4 +93,6 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException SyntaxErrorNear(Token token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
 
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
+
+    internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 }

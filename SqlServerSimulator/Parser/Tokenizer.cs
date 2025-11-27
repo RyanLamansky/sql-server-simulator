@@ -91,9 +91,19 @@ static class Tokenizer
 
                 case '(':
                     if (state.IsQuotedString())
+                    {
                         _ = buffer.Append(c);
+                    }
                     else
+                    {
+                        if (buffer.Length != 0)
+                        {
+                            yield return new UnquotedString(buffer);
+                            state = State.None;
+                        }
+
                         yield return new OpenParentheses();
+                    }
                     continue;
                 case ')':
                     if (state.IsQuotedString())
@@ -109,6 +119,9 @@ static class Tokenizer
                                 break;
                             case State.AtPrefixedString:
                                 yield return new AtPrefixedString(buffer);
+                                break;
+                            case State.Numeric:
+                                yield return new Numeric(buffer);
                                 break;
                         }
                         yield return new CloseParentheses();
@@ -159,7 +172,12 @@ static class Tokenizer
                     continue;
 
                 case '-':
-                    c = commandEnumerator.GetNext(ref index);
+                    if (!commandEnumerator.TryGetNext(out c, ref index))
+                    {
+                        yield return new Minus();
+                        continue;
+                    }
+
                     switch (c)
                     {
                         case '-':
@@ -176,6 +194,10 @@ static class Tokenizer
                             continue;
                     }
                     break;
+
+                case '*':
+                    yield return new Asterisk();
+                    continue;
 
                 case '.':
                     switch (state)
@@ -247,10 +269,6 @@ static class Tokenizer
         c = default;
         return false;
     }
-
-    static char GetNext(this CharEnumerator enumerator, ref int index) => !enumerator.TryGetNext(out var c, ref index)
-        ? throw new SimulatedSqlException($"Simulated syntax error at index {index}.")
-        : c;
 
     static bool IsQuotedString(this State state) => state switch
     {

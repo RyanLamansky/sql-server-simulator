@@ -39,10 +39,28 @@ static class Extensions
     }
 
     public static int ExecuteNonQuery(this Simulation simulation, string commandText)
-        => simulation.CreateCommand(commandText).ExecuteNonQuery();
+    {
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand(commandText);
+        return command.ExecuteNonQuery();
+    }
 
     public static object? ExecuteScalar(this Simulation simulation, string commandText)
-        => simulation.CreateCommand(commandText).ExecuteScalar();
+    {
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand(commandText);
+        return command.ExecuteScalar();
+    }
+
+    public static T ExecuteScalar<T>(this Simulation simulation, string commandText)
+        where T : struct
+    {
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand(commandText);
+        var result = command.ExecuteScalar();
+        Assert.IsNotNull(result);
+        return Assert.IsInstanceOfType<T>(result);
+    }
 
     public static void ValidateSyntaxError(this Simulation simulation, string commandText, string nearSyntax)
     {
