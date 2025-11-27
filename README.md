@@ -1,6 +1,6 @@
 # SQL Server Simulator for .NET
 
-Provides embedded SQL Server emulation, intended for high performance parallel unit testing of .NET applications.
+Provides embedded SQL Server emulation, intended for rapid testing and creating situations that can't easily be replicated on real SQL Servers.
 
 # Example
 
@@ -61,6 +61,7 @@ The feature set of this library is currently too small for use in real-world app
 
 - Feature parity with SQL Server is less than 1%.
 - No thread-safety or lock emulation.
+  - There's no shared mutable state between simulations, so multiple simulations can run concurrently.
 - Syntax validation is prone to both false positives _and_ negatives due to limited feature support.
 
 ## Development Priorities
@@ -70,8 +71,7 @@ The feature set of this library is currently too small for use in real-world app
 The remaining priorities are so far below the EF compatibility goal that they won't be seriously started until it's done.
 This project only has one main developer and that developer's time and motivation are limited, so an ETA is impossible.
 
-- Thread-safe concurrency on a single simulation, enabling parallel unit testing.
-- Realistic lock emulation, enabling deadlock testing.
+- Realistic lock emulation, enabling deadlock testing and other concurrent use of a single simulation.
 - Unreliable connection simulation, to enable testing of application-side recovery/retry mechanisms.
 - Support commonly-used non-Entity Framework features.
 - Usage metrics, enabling test validation of proper techniques, such as avoiding looped queries or excessive parameter counts.
