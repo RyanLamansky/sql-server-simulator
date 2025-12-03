@@ -98,6 +98,8 @@ internal sealed class SimulatedSqlException : DbException
 
     internal static SimulatedSqlException InvalidObjectName(StringToken name) => new($"Invalid object name {name}.", 208, 16, 1);
 
+    internal static SimulatedSqlException SyntaxErrorNearKeyword(ReservedKeyword token) => new($"Incorrect syntax near the keyword '{token}'.", 156, 15, 1);
+
     internal static SimulatedSqlException SyntaxErrorNear(Token token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
 
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);

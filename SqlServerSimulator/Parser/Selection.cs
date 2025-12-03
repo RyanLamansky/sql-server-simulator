@@ -35,8 +35,8 @@ internal sealed class Selection
                         [[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]]
                         ));
 
-                case UnquotedString unquotedString:
-                    if (!unquotedString.TryParse(out var keyword) || keyword != Keyword.From)
+                case ReservedKeyword expectFrom:
+                    if (expectFrom.Keyword != Keyword.From)
                         throw new NotSupportedException("Simulated selection processor expected a `from`.");
 
                     switch (token = tokens.RequireNext())
@@ -47,9 +47,9 @@ internal sealed class Selection
 
                             if (tokens.TryMoveNext(out token))
                             {
-                                if (token is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
+                                if (token is ReservedKeyword { Keyword: Keyword.As })
                                 {
-                                    if (token is not UnquotedString)
+                                    if (token is not ReservedKeyword)
                                         break;
                                 }
                                 else
@@ -68,15 +68,15 @@ internal sealed class Selection
                                 ));
 
                         case OpenParentheses:
-                            if ((token = tokens.RequireNext()) is not UnquotedString maybeSelect || maybeSelect.Parse() != Keyword.Select)
+                            if ((token = tokens.RequireNext()) is not ReservedKeyword { Keyword: Keyword.Select })
                                 throw SimulatedSqlException.SyntaxErrorNear(token);
 
                             {
                                 var derived = Selection.Parse(simulation, tokens, ref token, getVariableValue, depth + 1).Results;
 
-                                if ((token = tokens.RequireNext()) is UnquotedString maybeAs && maybeAs.Parse() == Keyword.As)
+                                if ((token = tokens.RequireNext()) is ReservedKeyword { Keyword: Keyword.As })
                                 {
-                                    if (token is not UnquotedString)
+                                    if (token is not ReservedKeyword)
                                         break;
                                 }
                                 else

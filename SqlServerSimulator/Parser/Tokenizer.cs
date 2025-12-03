@@ -99,7 +99,7 @@ static class Tokenizer
                     {
                         if (buffer.Length != 0)
                         {
-                            yield return new UnquotedString(buffer);
+                            yield return UnquotedString.CheckReserved(buffer);
                             state = State.None;
                         }
 
@@ -116,7 +116,7 @@ static class Tokenizer
                         switch (state)
                         {
                             case State.UnquotedString:
-                                yield return new UnquotedString(buffer);
+                                yield return UnquotedString.CheckReserved(buffer);
                                 break;
                             case State.AtPrefixedString:
                                 yield return new AtPrefixedString(buffer);
@@ -134,7 +134,7 @@ static class Tokenizer
                     switch (state)
                     {
                         case State.UnquotedString:
-                            yield return new UnquotedString(buffer);
+                            yield return UnquotedString.CheckReserved(buffer);
                             state = State.None;
                             break;
                         case State.Numeric:
@@ -152,7 +152,7 @@ static class Tokenizer
                     switch (state)
                     {
                         case State.UnquotedString:
-                            yield return new UnquotedString(buffer);
+                            yield return UnquotedString.CheckReserved(buffer);
                             state = State.None;
                             break;
                         case State.AtPrefixedString:
@@ -205,7 +205,7 @@ static class Tokenizer
                     switch (state)
                     {
                         case State.UnquotedString:
-                            yield return new UnquotedString(buffer);
+                            yield return UnquotedString.CheckReserved(buffer);
                             break;
                         case State.AtPrefixedString:
                             yield return new AtPrefixedString(buffer);
@@ -229,7 +229,7 @@ static class Tokenizer
                             yield return new Numeric(buffer);
                             break;
                         case State.UnquotedString:
-                            yield return new UnquotedString(buffer);
+                            yield return UnquotedString.CheckReserved(buffer);
                             break;
                     }
 
@@ -245,7 +245,7 @@ static class Tokenizer
         switch (state)
         {
             case State.UnquotedString:
-                yield return new UnquotedString(buffer);
+                yield return UnquotedString.CheckReserved(buffer);
                 break;
             case State.AtPrefixedString:
                 yield return new AtPrefixedString(buffer);

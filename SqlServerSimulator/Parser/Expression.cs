@@ -31,29 +31,28 @@ internal abstract class Expression
                 case DoubleAtPrefixedString doubleAtPrefixedString:
                     expression = new Value(doubleAtPrefixedString);
                     break;
-                case Name name:
-                    if (name is UnquotedString && name.TryParse(out var keyword))
+                case ReservedKeyword reservedKeyword:
+                    switch (reservedKeyword.Keyword)
                     {
-                        switch (keyword)
-                        {
-                            case Keyword.As:
-                                if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
-                                    throw SimulatedSqlException.SyntaxErrorNear(name);
+                        case Keyword.As:
+                            if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
+                                throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
 
-                                expression = new NamedExpression(expression, alias.Value);
-                                _ = tokens.TryMoveNext(out token);
-                                return expression;
-                            case Keyword.From:
-                                if (expression is null)
-                                    throw SimulatedSqlException.SyntaxErrorNear(name);
+                            expression = new NamedExpression(expression, alias.Value);
+                            _ = tokens.TryMoveNext(out token);
+                            return expression;
+                        case Keyword.From:
+                            if (expression is null)
+                                throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
 
-                                return expression;
-                            case Keyword.Null:
-                                expression = new Value();
-                                continue;
-                        }
+                            return expression;
+                        case Keyword.Null:
+                            expression = new Value();
+                            continue;
                     }
 
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
+                case Name name:
                     expression = new Reference(name);
                     break;
                 case Plus:

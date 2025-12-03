@@ -137,8 +137,8 @@ public sealed class Simulation
                 case StatementTerminator:
                     continue;
 
-                case UnquotedString unquotedString:
-                    switch (unquotedString.Parse())
+                case ReservedKeyword reserved:
+                    switch (reserved.Keyword)
                     {
                         case Keyword.Set:
                             switch (token = tokens.RequireNext())
@@ -150,8 +150,8 @@ public sealed class Simulation
                                         case "NOCOUNT":
                                             switch (token = tokens.RequireNext())
                                             {
-                                                case UnquotedString onOff:
-                                                    switch (onOff.Parse())
+                                                case ReservedKeyword onOff:
+                                                    switch (onOff.Keyword)
                                                     {
                                                         case Keyword.On:
                                                         case Keyword.Off:
@@ -168,8 +168,8 @@ public sealed class Simulation
                         case Keyword.Create:
                             switch (token = tokens.RequireNext())
                             {
-                                case UnquotedString whatToCreate:
-                                    switch (whatToCreate.Parse())
+                                case ReservedKeyword whatToCreate:
+                                    switch (whatToCreate.Keyword)
                                     {
                                         case Keyword.Table:
                                             if (tokens.RequireNext() is not Name tableName)
@@ -194,12 +194,12 @@ public sealed class Simulation
                                                 var nullable = true;
 
                                                 token = tokens.RequireNext();
-                                                if (token is UnquotedString next)
+                                                if (token is ReservedKeyword next)
                                                 {
-                                                    switch (next.Parse())
+                                                    switch (next.Keyword)
                                                     {
                                                         case Keyword.Not:
-                                                            if ((token = tokens.RequireNext()) is not UnquotedString mustBeNull || mustBeNull.Parse() != Keyword.Null)
+                                                            if ((token = tokens.RequireNext()) is not ReservedKeyword { Keyword: Keyword.Null })
                                                                 throw new NotSupportedException($"Simulated command processor doesn't know how to handle column definition token {token}.");
 
                                                             nullable = false;
@@ -237,7 +237,7 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Insert:
-                            if ((token = tokens.RequireNext()) is UnquotedString maybeInto && maybeInto.TryParse(out var keyword) && keyword == Keyword.Into)
+                            if ((token = tokens.RequireNext()) is ReservedKeyword { Keyword: Keyword.Into })
                                 token = tokens.RequireNext();
 
                             if (token is not StringToken destinationTableToken)
@@ -270,7 +270,7 @@ public sealed class Simulation
                                 destinationColumns = [.. destinationTable.Columns];
                             }
 
-                            if (token is not UnquotedString expectValues || expectValues.Parse() != Keyword.Values)
+                            if (token is not ReservedKeyword { Keyword: Keyword.Values })
                                 break;
 
                             if ((token = tokens.RequireNext()) is not OpenParentheses)
