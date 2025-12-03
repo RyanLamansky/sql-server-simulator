@@ -144,10 +144,10 @@ public sealed class Simulation
                             switch (token = tokens.RequireNext())
                             {
                                 case UnquotedString setTarget:
-                                    switch (setTarget.Parse())
+                                    switch (setTarget.Value.ToUpperInvariant())
                                     {
-                                        case Keyword.Implicit_Transactions:
-                                        case Keyword.NoCount:
+                                        case "IMPLICIT_TRANSACTIONS":
+                                        case "NOCOUNT":
                                             switch (token = tokens.RequireNext())
                                             {
                                                 case UnquotedString onOff:
@@ -217,7 +217,7 @@ public sealed class Simulation
                                                     nullable = true;
                                                 }
 
-                                                columns.Add(new Column(columnName.Value, DataType.GetByName(type), nullable));
+                                                columns.Add(new(columnName.Value, DataType.GetByName(type, columns.Count + 1), nullable));
                                             } while ((suppressAdvanceToken ? token : token = tokens.RequireNext()) is Comma);
 
                                             if (token is not CloseParentheses)

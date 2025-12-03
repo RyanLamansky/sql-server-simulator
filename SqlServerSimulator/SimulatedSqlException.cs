@@ -84,6 +84,14 @@ internal sealed class SimulatedSqlException : DbException
 
     public IReadOnlyList<SimulatedSqlError> Errors { get; }
 
+    /// <summary>
+    /// Mimics the SqlException that occurs when an unknown type is referenced.
+    /// </summary>
+    /// <param name="name">The name of the type.</param>
+    /// <param name="index">The 1-based index of the reference.</param>
+    /// <returns>The exception.</returns>
+    internal static SimulatedSqlException CannotFindDataType(string name, int index) => new($"Column, parameter, or variable #{index}: Cannot find data type {name}.", 2715, 16, 6);
+
     internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
 
     internal static SimulatedSqlException InvalidColumnName(IEnumerable<string> name) => InvalidColumnName(string.Join('.', name));

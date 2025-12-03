@@ -1,5 +1,4 @@
-﻿using SqlServerSimulator.Parser;
-using SqlServerSimulator.Parser.Tokens;
+﻿using SqlServerSimulator.Parser.Tokens;
 using System.Data;
 using System.Globalization;
 
@@ -31,17 +30,36 @@ internal abstract class DataType
 
     public static readonly DataType BuiltInDbSystemName = new DbSystemName();
 
-    public static DataType GetByName(Name name)
+    /// <summary>
+    /// Looks up the <see cref="DataType"/> for the provided type name.
+    /// </summary>
+    /// <param name="name">The name of the type.</param>
+    /// <param name="index">The 1-based index of the type, used for an error message.</param>
+    /// <returns>The matching data type.</returns>
+    /// <exception cref="SimulatedSqlException">Column, parameter, or variable #<paramref name="index"/>: Cannot find data type <paramref name="name"/>.</exception>
+    public static DataType GetByName(Name name, int index)
     {
-        var keyword = name.Parse();
-        return keyword switch
+        Span<char> upper = stackalloc char[name.Value.Length];
+        return name.Value.ToUpperInvariant(upper) switch
         {
-            Keyword.Bit => BuiltInDbBoolean,
-            Keyword.TinyInt => BuiltInDbByte,
-            Keyword.SmallInt => BuiltInDbInt16,
-            Keyword.Int => BuiltInDbInt32,
-            _ => throw new NotSupportedException($"Simulated data type parser doesn't recognize {keyword}"),
-        };
+            3 => upper switch
+            {
+                "BIT" => BuiltInDbBoolean,
+                "INT" => BuiltInDbInt32,
+                _ => null
+            },
+            7 => upper switch
+            {
+                "TINYINT" => BuiltInDbByte,
+                _ => null
+            },
+            8 => upper switch
+            {
+                "SMALLINT" => BuiltInDbInt16,
+                _ => null
+            },
+            _ => null,
+        } ?? throw SimulatedSqlException.CannotFindDataType(name.Value, index);
     }
 
     public static DataType GetByDbType(DbType dbType) => dbType switch
