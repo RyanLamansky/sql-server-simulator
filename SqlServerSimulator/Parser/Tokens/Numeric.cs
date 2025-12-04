@@ -4,11 +4,13 @@ namespace SqlServerSimulator.Parser.Tokens;
 
 internal sealed class Numeric : Token
 {
-    public readonly IFormattable Value;
+    public readonly ISpanFormattable Value;
 
     public Numeric(StringBuilder buffer)
     {
-        var number = buffer.ToString();
+        Span<char> number = stackalloc char[buffer.Length];
+        buffer.CopyTo(0, number, buffer.Length);
+        _ = buffer.Clear();
 
         if (int.TryParse(number, out var int32))
         {
