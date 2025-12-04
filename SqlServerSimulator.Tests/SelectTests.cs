@@ -196,4 +196,18 @@ public class SelectTests
 
         Assert.AreEqual(value, result);
     }
+
+    [TestMethod]
+    public void TopParenthesizedConstantUnsorted()
+    {
+        CollectionAssert.AreEquivalent([1], [.. new Simulation()
+            .ExecuteReader("select top (1) 1")
+            .EnumerateRecords()
+            .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
+
+        CollectionAssert.AreEquivalent([], [.. new Simulation()
+            .ExecuteReader("select top (0) 1")
+            .EnumerateRecords()
+            .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
+    }
 }

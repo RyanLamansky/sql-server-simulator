@@ -103,4 +103,50 @@ public class EFCoreBasics
             Assert.AreEqual(storedValue, receivedValue.FirstOrDefault());
         }
     }
+
+    [TestMethod]
+    public void SeparateInserts()
+    {
+        var simulation = CreateDefaultSimulation();
+        int[] storedValues = [2, 3];
+
+        using (var context = new TestDbContext(simulation))
+        {
+            foreach (var value in storedValues)
+            {
+                var row = new TestRow { Id = value };
+                _ = context.Rows.Add(row);
+                _ = context.SaveChanges();
+            }
+        }
+
+        using (var context = new TestDbContext(simulation))
+        {
+            CollectionAssert.AreEquivalent(storedValues, context.Rows.Select(x => x.Id).ToArray());
+        }
+    }
+
+    [TestMethod]
+    public void FirstOrDefault()
+    {
+        var simulation = CreateDefaultSimulation();
+        int[] storedValues = [4, 5];
+
+        using (var context = new TestDbContext(simulation))
+        {
+            foreach (var value in storedValues)
+            {
+                var row = new TestRow { Id = value };
+                _ = context.Rows.Add(row);
+                _ = context.SaveChanges();
+            }
+        }
+
+        using (var context = new TestDbContext(simulation))
+        {
+            var receivedValue = context.Rows.Select(x => x.Id);
+            // Without an OrderBy, we can't guarantee which of the two possibilities is returned.
+            CollectionAssert.Contains(storedValues, receivedValue.FirstOrDefault());
+        }
+    }
 }

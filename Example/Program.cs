@@ -24,7 +24,7 @@ using (var context = new SimulatedContext(simulation))
 // The simulation state is preserved across EF DbContexts.
 using (var context = new SimulatedContext(simulation))
 {
-    var receivedValue = context.ExampleRecord.Select(x => x.Id).AsEnumerable();
+    var receivedValue = context.ExampleRecord.Select(x => x.Id);
 
     Console.Write(receivedValue.FirstOrDefault()); // Will write "1", as we stored earlier.
 }

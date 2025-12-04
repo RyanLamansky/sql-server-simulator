@@ -92,6 +92,14 @@ internal sealed class SimulatedSqlException : DbException
     /// <returns>The exception.</returns>
     internal static SimulatedSqlException CannotFindDataType(string name, int index) => new($"Column, parameter, or variable #{index}: Cannot find data type {name}.", 2715, 16, 6);
 
+    /// <summary>
+    /// Mimics the SqlException that occurs then when a TOP/OFFSET/FETCH clause has an inappropriate column reference.
+    /// </summary>
+    /// <param name="name">The name of the column.</param>
+    /// <returns>The exception.</returns>
+    internal static SimulatedSqlException ColumnReferenceNotAllowed(IEnumerable<string> name)
+        => new($"The reference to column \"{string.Join('.', name)}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
+
     internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
 
     internal static SimulatedSqlException InvalidColumnName(IEnumerable<string> name) => InvalidColumnName(string.Join('.', name));
@@ -103,6 +111,12 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException SyntaxErrorNear(Token token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
 
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
+
+    /// <summary>
+    /// Mimics the SqlException that occurs then when a TOP or FETCH clause returns something other than an integer.
+    /// </summary>
+    /// <returns>The exception.</returns>
+    internal static SimulatedSqlException TopFetchRequiresInteger() => new("The number of rows provided for a TOP or FETCH clauses row count parameter must be an integer.", 1060, 15, 1);
 
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 }

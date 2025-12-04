@@ -12,7 +12,33 @@ internal sealed class Selection
     {
         token = tokens.RequireNext();
 
+        int? topCount = null;
+
+        if (token is ReservedKeyword { Keyword: Keyword.Top })
+        {
+            // SQL Server doesn't require outer parentheses.
+            // When Expression.Parse supports them, the checks for them here should be removed.
+            token = tokens.RequireNext<OpenParentheses>();
+            token = tokens.RequireNext();
+
+            var resolvedExpression = Expression.Parse(simulation, tokens, ref token, getVariableValue).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+            topCount = resolvedExpression is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
+
+            if (token is not null and not CloseParentheses)
+                throw SimulatedSqlException.SyntaxErrorNear(token);
+
+            token = tokens.RequireNext();
+        }
+
         List<Expression> expressions = [];
+
+        IEnumerable<object?[]> ApplyClauses(IEnumerable<object?[]> records)
+        {
+            if (topCount is not null)
+                records = records.Take(topCount.GetValueOrDefault());
+
+            return records;
+        }
 
         do
         {
@@ -32,7 +58,7 @@ internal sealed class Selection
                 case null: // "Select" with no "From".
                     return new(new(
                         expressions,
-                        [[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]]
+                        ApplyClauses([[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]])
                         ));
 
                 case ReservedKeyword expectFrom:
@@ -60,11 +86,11 @@ internal sealed class Selection
 
                             return new(new(
                                 expressions,
-                                table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
+                                ApplyClauses(table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                 {
                                     var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
                                     return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
-                                }))])
+                                }))]))
                                 ));
 
                         case OpenParentheses:
@@ -86,11 +112,11 @@ internal sealed class Selection
 
                                 return new(new(
                                     expressions,
-                                    derived.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
+                                    ApplyClauses(derived.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
                                     {
                                         var columnIndex = Array.FindIndex(derived.columnNames, name => Collation.Default.Equals(name, columnName.Last()));
                                         return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
-                                    }))])
+                                    }))]))
                                     ));
                             }
                     }
