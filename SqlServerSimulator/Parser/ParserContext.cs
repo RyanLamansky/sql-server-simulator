@@ -1,7 +1,5 @@
 ﻿using System.Collections.Frozen;
 using System.Data.Common;
-using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator.Parser;
 
@@ -16,7 +14,7 @@ internal sealed class ParserContext : IDisposable
 #else
     private readonly IEnumerator<Token> tokens;
 #endif
-    public Token? Token;
+    public Token? Token { get; private set; }
     private readonly FrozenDictionary<string, (string Name, (DataType type, object? Value) TypeValue)> variables;
 
     public ParserContext(SimulatedDbCommand command)
@@ -54,45 +52,84 @@ internal sealed class ParserContext : IDisposable
         ? value.TypeValue.Value
         : throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
 
-
     /// <summary>
-    /// Moves to the next item in an enumeration (if possible) and transfers <see cref="IEnumerator{T}.Current"/> to <paramref name="current"/>.
+    /// Advances <see cref="Token"/> to the next token, if one exists.
     /// </summary>
-    /// <param name="current">Receives the <see cref="IEnumerator{T}.Current"/> value, or the types default if advancement isn't possible.</param>
-    /// <returns>True if the enumerator was advanced, otherwise false.</returns>
-    public bool TryMoveNext([NotNullWhen(true)] out Token? current)
+    public void MoveNextOptional()
     {
         var enumerator = this.tokens;
-        bool moved;
-        current = (moved = enumerator.MoveNext()) ? enumerator.Current : default;
-        return moved;
+        this.Token = enumerator.MoveNext() ? enumerator.Current : null;
+    }
+
+    /// <summary>
+    /// Returns the next token in the enumeration, or null.
+    /// Also updates <see cref="Token"/> to the new value.
+    /// </summary>
+    /// <returns>The next token if the enumerator was advanced, otherwise null.</returns>
+    public Token? GetNextOptional()
+    {
+        var enumerator = this.tokens;
+        return this.Token = enumerator.MoveNext() ? enumerator.Current : null;
     }
 
     /// <summary>
     /// Returns the next token in the enumeration, throwing an exception if the end was reached instead.
+    /// Also updates <see cref="Token"/> to the new value.
     /// </summary>
     /// <returns>The next token.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
-    public Token RequireNext()
+    public Token GetNextRequired()
     {
         var enumerator = this.tokens;
-        Debug.Assert(enumerator.Current is not null);
         var previous = enumerator.Current;
-        return enumerator.MoveNext() ? enumerator.Current : throw SimulatedSqlException.SyntaxErrorNear(previous);
+        return enumerator.MoveNext() ? this.Token = enumerator.Current : throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 
     /// <summary>
     /// Returns the next token in the enumeration, throwing an exception if the end was reached instead or the token is the wrong type.
+    /// Also updates <see cref="Token"/> to the new value.
     /// </summary>
+    /// <typeparam name="T">The expected type of the new token.</typeparam>
     /// <returns>The next token.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
-    public T RequireNext<T>()
+    public T GetNextRequired<T>()
         where T : Token
     {
         var enumerator = this.tokens;
-        Debug.Assert(enumerator.Current is not null);
         var previous = enumerator.Current;
-        return enumerator.MoveNext() && enumerator.Current is T current ? current : throw SimulatedSqlException.SyntaxErrorNear(previous);
+
+        if (enumerator.MoveNext() && enumerator.Current is T current)
+        {
+            this.Token = current;
+            return current;
+        }
+
+        throw SimulatedSqlException.SyntaxErrorNear(previous);
+    }
+
+    /// <summary>
+    /// Advances <see cref="Token"/> to the next token in the enumeration, throwing an exception if the end was reached instead or the token is the wrong type.
+    /// </summary>
+    /// <typeparam name="T">The expected type of the new token.</typeparam>
+    /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
+    public void MoveNextRequired<T>()
+        where T : Token
+    {
+        var enumerator = this.tokens;
+        var previous = enumerator.Current;
+
+        this.Token = enumerator.MoveNext() && enumerator.Current is T current ? (Token)current : throw SimulatedSqlException.SyntaxErrorNear(previous);
+    }
+
+    /// <summary>
+    /// Advances <see cref="Token"/> to the next token in the enumeration, throwing an exception if the end was reached instead.
+    /// </summary>
+    /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
+    public void MoveNextRequired()
+    {
+        var enumerator = this.tokens;
+        var previous = enumerator.Current;
+        this.Token = enumerator.MoveNext() ? enumerator.Current : throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 
     private bool isDisposed;

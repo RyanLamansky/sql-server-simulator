@@ -48,11 +48,11 @@ internal abstract class Expression
                     switch (reservedKeyword.Keyword)
                     {
                         case Keyword.As:
-                            if (expression is null || !context.TryMoveNext(out context.Token) || context.Token is not Name alias)
+                            if (expression is null || context.GetNextOptional() is not Name alias)
                                 throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
 
                             expression = new NamedExpression(expression, alias.Value);
-                            _ = context.TryMoveNext(out context.Token);
+                            context.MoveNextOptional();
                             return expression;
                         case Keyword.From:
                             if (expression is null)
@@ -71,12 +71,12 @@ internal abstract class Expression
                 case Plus:
                     if (expression is null)
                     {
-                        context.Token = context.RequireNext();
+                        context.MoveNextRequired();
                         expression = Expression.Parse(context);
                         break;
                     }
 
-                    context.Token = context.RequireNext();
+                    context.MoveNextRequired();
 
                     {
                         var parsed = Parse(context);
@@ -90,13 +90,13 @@ internal abstract class Expression
                 case Minus:
                     if (expression is null)
                     {
-                        context.Token = context.RequireNext();
+                        context.MoveNextRequired();
                         expression = Parse(context);
                         expression = new Subtract(new Value(0), expression);
                         break;
                     }
 
-                    context.Token = context.RequireNext();
+                    context.MoveNextRequired();
 
                     {
                         var parsed = Parse(context);
@@ -116,7 +116,7 @@ internal abstract class Expression
                         if (expression is not Reference reference)
                             throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
-                        reference.AddMultiPartComponent(context.RequireNext<Name>());
+                        reference.AddMultiPartComponent(context.GetNextRequired<Name>());
                     }
                     break;
                 case Comma:
@@ -128,15 +128,15 @@ internal abstract class Expression
                     {
                         if (expression is not Reference reference)
                             throw SimulatedSqlException.SyntaxErrorNear(context.Token);
-                        context.Token = context.RequireNext(); // Move past (
+                        context.MoveNextRequired(); // Move past (
                         expression = ResolveBuiltIn(reference.Name, context);
-                        _ = context.TryMoveNext(out context.Token); // Move past )
+                        context.MoveNextOptional(); // Move past )
                         return expression;
                     }
                 default:
                     throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{context.Token}'.");
             }
-        } while ((tokenWasRead && context.Token is not null) || context.TryMoveNext(out context.Token));
+        } while ((tokenWasRead && context.Token is not null) || context.GetNextOptional() is not null);
 
         return expression;
     }

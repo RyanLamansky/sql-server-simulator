@@ -32,7 +32,7 @@ public sealed class Simulation
     {
         using var context = new ParserContext(command);
 
-        while (context.TryMoveNext(out context.Token))
+        while (context.GetNextOptional() is not null)
         {
             switch (context.Token)
             {
@@ -46,14 +46,14 @@ public sealed class Simulation
                     switch (reserved.Keyword)
                     {
                         case Keyword.Set:
-                            switch (context.Token = context.RequireNext())
+                            switch (context.GetNextRequired())
                             {
                                 case UnquotedString setTarget:
                                     switch (setTarget.Value.ToUpperInvariant())
                                     {
                                         case "IMPLICIT_TRANSACTIONS":
                                         case "NOCOUNT":
-                                            switch (context.Token = context.RequireNext())
+                                            switch (context.GetNextRequired())
                                             {
                                                 case ReservedKeyword onOff:
                                                     switch (onOff.Keyword)
@@ -71,16 +71,16 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Create:
-                            switch (context.Token = context.RequireNext())
+                            switch (context.GetNextRequired())
                             {
                                 case ReservedKeyword whatToCreate:
                                     switch (whatToCreate.Keyword)
                                     {
                                         case Keyword.Table:
-                                            if (context.RequireNext() is not Name tableName)
+                                            if (context.GetNextRequired() is not Name tableName)
                                                 break;
 
-                                            if ((context.Token = context.RequireNext()) is not OpenParentheses)
+                                            if (context.GetNextRequired() is not OpenParentheses)
                                                 break;
 
                                             var table = new Table(tableName.Value);
@@ -90,21 +90,21 @@ public sealed class Simulation
                                             do
                                             {
                                                 suppressAdvanceToken = false;
-                                                if (context.RequireNext() is not Name columnName)
+                                                if (context.GetNextRequired() is not Name columnName)
                                                     throw new SimulatedSqlException("Simulated table creation requires named columns.");
 
-                                                if (context.RequireNext() is not Name type)
+                                                if (context.GetNextRequired() is not Name type)
                                                     throw new SimulatedSqlException("Simulated table creation requires columns to have a type.");
 
                                                 var nullable = true;
 
-                                                context.Token = context.RequireNext();
+                                                context.MoveNextRequired();
                                                 if (context.Token is ReservedKeyword next)
                                                 {
                                                     switch (next.Keyword)
                                                     {
                                                         case Keyword.Not:
-                                                            if ((context.Token = context.RequireNext()) is not ReservedKeyword { Keyword: Keyword.Null })
+                                                            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
                                                                 throw new NotSupportedException($"Simulated command processor doesn't know how to handle column definition token {context.Token}.");
 
                                                             nullable = false;
@@ -123,7 +123,7 @@ public sealed class Simulation
                                                 }
 
                                                 columns.Add(new(columnName.Value, DataType.GetByName(type, columns.Count + 1), nullable));
-                                            } while ((suppressAdvanceToken ? context.Token : context.Token = context.RequireNext()) is Comma);
+                                            } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Comma);
 
                                             if (context.Token is not CloseParentheses)
                                                 break;
@@ -142,8 +142,8 @@ public sealed class Simulation
                             break;
 
                         case Keyword.Insert:
-                            if ((context.Token = context.RequireNext()) is ReservedKeyword { Keyword: Keyword.Into })
-                                context.Token = context.RequireNext();
+                            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Into })
+                                context.MoveNextRequired();
 
                             if (context.Token is not StringToken destinationTableToken)
                                 break;
@@ -152,10 +152,10 @@ public sealed class Simulation
                                 throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
 
                             Column[] destinationColumns;
-                            if ((context.Token = context.RequireNext()) is OpenParentheses)
+                            if (context.GetNextRequired() is OpenParentheses)
                             {
                                 var usedColumns = new List<Column>();
-                                while ((context.Token = context.RequireNext()) is StringToken column)
+                                while (context.GetNextRequired() is StringToken column)
                                 {
                                     var columnName = column.Value;
                                     var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
@@ -168,7 +168,7 @@ public sealed class Simulation
 
                                 destinationColumns = [.. usedColumns];
 
-                                context.Token = context.RequireNext();
+                                context.MoveNextRequired();
                             }
                             else
                             {
@@ -178,11 +178,11 @@ public sealed class Simulation
                             if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
                                 break;
 
-                            if ((context.Token = context.RequireNext()) is not OpenParentheses)
+                            if (context.GetNextRequired() is not OpenParentheses)
                                 break;
 
                             var sourceValues = new List<Token>();
-                            while ((context.Token = context.RequireNext()) is not CloseParentheses)
+                            while (context.GetNextRequired() is not CloseParentheses)
                             {
                                 sourceValues.Add(context.Token);
                             }
