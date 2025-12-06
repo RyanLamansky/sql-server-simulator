@@ -14,34 +14,31 @@ internal sealed class Selection
     /// <summary>
     /// Creates a <see cref="Selection"/> from a series of tokens.
     /// </summary>
-    /// <param name="simulation">Simulation shared context.</param>
-    /// <param name="tokens">The sequence of command tokens. This will be advanced to the end of the expression.</param>
-    /// <param name="token">Retains the most recently provided token from <paramref name="tokens"/>.</param>
-    /// <param name="getVariableValue">Provides the value to any variable included alongside the command.</param>
+    /// <param name="context">Manages the overall parsing state.</param>
     /// <param name="depth">The current depth of recursed selection, such as with derived tables. 0 for the top-level SELECT.</param>
     /// <returns>The prepared command.</returns>
     /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
-    public static Selection Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue, uint depth)
+    public static Selection Parse(ParserContext context, uint depth)
     {
-        token = tokens.RequireNext();
+        context.Token = context.RequireNext();
 
         int? topCount = null;
 
-        if (token is ReservedKeyword { Keyword: Keyword.Top })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Top })
         {
             // SQL Server doesn't require outer parentheses.
             // When Expression.Parse supports them, the checks for them here should be removed.
-            token = tokens.RequireNext<OpenParentheses>();
-            token = tokens.RequireNext();
+            context.Token = context.RequireNext<OpenParentheses>();
+            context.Token = context.RequireNext();
 
-            var resolvedExpression = Expression.Parse(simulation, tokens, ref token, getVariableValue).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+            var resolvedExpression = Expression.Parse(context).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
             topCount = resolvedExpression is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
 
-            if (token is not null and not CloseParentheses)
-                throw SimulatedSqlException.SyntaxErrorNear(token);
+            if (context.Token is not null and not CloseParentheses)
+                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
-            token = tokens.RequireNext();
+            context.Token = context.RequireNext();
         }
 
         List<Expression> expressions = [];
@@ -56,16 +53,16 @@ internal sealed class Selection
 
         do
         {
-            expressions.Add(Expression.Parse(simulation, tokens, ref token, getVariableValue));
+            expressions.Add(Expression.Parse(context));
 
-            switch (token)
+            switch (context.Token)
             {
                 case Comma:
                     continue;
 
                 case CloseParentheses:
                     if (depth == 0)
-                        throw SimulatedSqlException.SyntaxErrorNear(token);
+                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
                     goto case null;
 
@@ -79,17 +76,17 @@ internal sealed class Selection
                     if (expectFrom.Keyword != Keyword.From)
                         throw new NotSupportedException("Simulated selection processor expected a `from`.");
 
-                    switch (token = tokens.RequireNext())
+                    switch (context.Token = context.RequireNext())
                     {
                         case StringToken tableName:
-                            if (!simulation.Tables.TryGetValue(tableName.Value, out var table) && !simulation.SystemTables.Value.TryGetValue(tableName.Value, out table))
+                            if (!context.Simulation.Tables.TryGetValue(tableName.Value, out var table) && !context.Simulation.SystemTables.Value.TryGetValue(tableName.Value, out table))
                                 throw SimulatedSqlException.InvalidObjectName(tableName);
 
-                            if (tokens.TryMoveNext(out token))
+                            if (context.TryMoveNext(out context.Token))
                             {
-                                if (token is ReservedKeyword { Keyword: Keyword.As })
+                                if (context.Token is ReservedKeyword { Keyword: Keyword.As })
                                 {
-                                    if (token is not ReservedKeyword)
+                                    if (context.Token is not ReservedKeyword)
                                         break;
                                 }
                                 else
@@ -108,15 +105,15 @@ internal sealed class Selection
                                 ));
 
                         case OpenParentheses:
-                            if ((token = tokens.RequireNext()) is not ReservedKeyword { Keyword: Keyword.Select })
-                                throw SimulatedSqlException.SyntaxErrorNear(token);
+                            if ((context.Token = context.RequireNext()) is not ReservedKeyword { Keyword: Keyword.Select })
+                                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
                             {
-                                var derived = Selection.Parse(simulation, tokens, ref token, getVariableValue, depth + 1).Results;
+                                var derived = Selection.Parse(context, depth + 1).Results;
 
-                                if ((token = tokens.RequireNext()) is ReservedKeyword { Keyword: Keyword.As })
+                                if ((context.Token = context.RequireNext()) is ReservedKeyword { Keyword: Keyword.As })
                                 {
-                                    if (token is not ReservedKeyword)
+                                    if (context.Token is not ReservedKeyword)
                                         break;
                                 }
                                 else
@@ -135,11 +132,11 @@ internal sealed class Selection
                             }
                     }
 
-                    throw new NotSupportedException($"Simulated selection processor expected a source table, found {token}.");
+                    throw new NotSupportedException($"Simulated selection processor expected a source table, found {context.Token}.");
             }
 
-            throw new NotSupportedException($"Simulated selection processor doesn't know what to do with {token}.");
-        } while (tokens.TryMoveNext(out token));
+            throw new NotSupportedException($"Simulated selection processor doesn't know what to do with {context.Token}.");
+        } while (context.TryMoveNext(out context.Token));
 
         throw new NotSupportedException($"Simulated selection reached the end of the command before expected.");
     }

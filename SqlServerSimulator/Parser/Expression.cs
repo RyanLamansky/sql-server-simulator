@@ -20,14 +20,11 @@ internal abstract class Expression
     /// <summary>
     /// Converts the tokens from a command into a single expression.
     /// </summary>
-    /// <param name="simulation">Simulation shared context.</param>
-    /// <param name="tokens">The sequence of command tokens. This will be advanced to the end of the expression.</param>
-    /// <param name="token">Retains the most recently provided token from <paramref name="tokens"/>.</param>
-    /// <param name="getVariableValue">Provides the value to any variable included alongside the command.</param>
+    /// <param name="context">Manages the overall parsing state.</param>
     /// <returns>The parsed expression.</returns>
     /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
-    public static Expression Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
+    public static Expression Parse(ParserContext context)
     {
         Expression? expression = null;
         bool tokenWasRead;
@@ -36,13 +33,13 @@ internal abstract class Expression
         {
             tokenWasRead = false;
 
-            switch (token)
+            switch (context.Token)
             {
                 case Numeric number:
                     expression = new Value(number);
                     break;
                 case AtPrefixedString atPrefixed:
-                    expression = new Value(atPrefixed, getVariableValue);
+                    expression = new Value(atPrefixed, context);
                     break;
                 case DoubleAtPrefixedString doubleAtPrefixedString:
                     expression = new Value(doubleAtPrefixedString);
@@ -51,11 +48,11 @@ internal abstract class Expression
                     switch (reservedKeyword.Keyword)
                     {
                         case Keyword.As:
-                            if (expression is null || !tokens.TryMoveNext(out token) || token is not Name alias)
+                            if (expression is null || !context.TryMoveNext(out context.Token) || context.Token is not Name alias)
                                 throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
 
                             expression = new NamedExpression(expression, alias.Value);
-                            _ = tokens.TryMoveNext(out token);
+                            _ = context.TryMoveNext(out context.Token);
                             return expression;
                         case Keyword.From:
                             if (expression is null)
@@ -74,15 +71,15 @@ internal abstract class Expression
                 case Plus:
                     if (expression is null)
                     {
-                        token = tokens.RequireNext();
-                        expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+                        context.Token = context.RequireNext();
+                        expression = Expression.Parse(context);
                         break;
                     }
 
-                    token = tokens.RequireNext();
+                    context.Token = context.RequireNext();
 
                     {
-                        var parsed = Parse(simulation, tokens, ref token, getVariableValue);
+                        var parsed = Parse(context);
                         expression = new Add(expression, parsed);
                         if (parsed is NamedExpression named)
                             expression = named.TransferName(expression);
@@ -93,16 +90,16 @@ internal abstract class Expression
                 case Minus:
                     if (expression is null)
                     {
-                        token = tokens.RequireNext();
-                        expression = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+                        context.Token = context.RequireNext();
+                        expression = Parse(context);
                         expression = new Subtract(new Value(0), expression);
                         break;
                     }
 
-                    token = tokens.RequireNext();
+                    context.Token = context.RequireNext();
 
                     {
-                        var parsed = Parse(simulation, tokens, ref token, getVariableValue);
+                        var parsed = Parse(context);
                         expression = new Subtract(expression, parsed);
                         if (parsed is NamedExpression named)
                             expression = named.TransferName(expression);
@@ -119,27 +116,27 @@ internal abstract class Expression
                         if (expression is not Reference reference)
                             throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
 
-                        reference.AddMultiPartComponent(tokens.RequireNext<Name>());
+                        reference.AddMultiPartComponent(context.RequireNext<Name>());
                     }
                     break;
                 case Comma:
                 case CloseParentheses:
                     if (expression is null)
-                        throw SimulatedSqlException.SyntaxErrorNear(token);
+                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
                     return expression;
                 case OpenParentheses:
                     {
                         if (expression is not Reference reference)
-                            throw SimulatedSqlException.SyntaxErrorNear(token);
-                        token = tokens.RequireNext(); // Move past (
-                        expression = ResolveBuiltIn(reference.Name, simulation, tokens, ref token, getVariableValue);
-                        _ = tokens.TryMoveNext(out token); // Move past )
+                            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                        context.Token = context.RequireNext(); // Move past (
+                        expression = ResolveBuiltIn(reference.Name, context);
+                        _ = context.TryMoveNext(out context.Token); // Move past )
                         return expression;
                     }
                 default:
-                    throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{token}'.");
+                    throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{context.Token}'.");
             }
-        } while ((tokenWasRead && token is not null) || tokens.TryMoveNext(out token));
+        } while ((tokenWasRead && context.Token is not null) || context.TryMoveNext(out context.Token));
 
         return expression;
     }
@@ -155,19 +152,19 @@ internal abstract class Expression
     public abstract override string ToString();
 #endif
 
-    private static Expression ResolveBuiltIn(string name, Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
+    private static Expression ResolveBuiltIn(string name, ParserContext context)
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
         return name.ToUpperInvariant(uppercaseName) switch
         {
             3 => uppercaseName switch
             {
-                "ABS" => new AbsoluteValue(simulation, tokens, ref token, getVariableValue),
+                "ABS" => new AbsoluteValue(context),
                 _ => null
             },
             10 => uppercaseName switch
             {
-                "DATALENGTH" => new DataLength(simulation, tokens, ref token, getVariableValue),
+                "DATALENGTH" => new DataLength(context),
                 _ => null
             },
             _ => (Expression?)null
@@ -228,9 +225,9 @@ internal abstract class Expression
         {
         }
 
-        public Value(AtPrefixedString atPrefixed, Func<string, object?> getVariableValue)
+        public Value(AtPrefixedString atPrefixed, ParserContext context)
         {
-            this.value = getVariableValue(atPrefixed.Value);
+            this.value = context.GetVariableValue(atPrefixed.Value);
         }
 
         public Value(DoubleAtPrefixedString doubleAtPrefixedString)
@@ -304,12 +301,9 @@ internal abstract class Expression
     /// <summary>
     /// Encapsulates the SQL DATALENGTH command: https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql
     /// </summary>
-    public sealed class DataLength : Expression
+    public sealed class DataLength(ParserContext context) : Expression
     {
-        private readonly Expression source;
-
-        public DataLength(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
-            => this.source = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+        private readonly Expression source = Parse(context);
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
         {
@@ -326,12 +320,9 @@ internal abstract class Expression
     /// <summary>
     /// Encapsulates the SQL ABS command: https://learn.microsoft.com/en-us/sql/t-sql/functions/abs-transact-sql
     /// </summary>
-    public sealed class AbsoluteValue : Expression
+    public sealed class AbsoluteValue(ParserContext context) : Expression
     {
-        private readonly Expression source;
-
-        public AbsoluteValue(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
-            => this.source = Expression.Parse(simulation, tokens, ref token, getVariableValue);
+        private readonly Expression source = Parse(context);
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
         {
