@@ -1,5 +1,4 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
-using System.Collections.Frozen;
 
 namespace SqlServerSimulator.Parser;
 
@@ -132,11 +131,8 @@ internal abstract class Expression
                     {
                         if (expression is not Reference reference)
                             throw SimulatedSqlException.SyntaxErrorNear(token);
-                        if (!BuiltInFunctions.TryGetValue(reference.Name, out var builtInFunction))
-                            throw SimulatedSqlException.UnrecognizedBuiltInFunction(reference.Name);
-
                         token = tokens.RequireNext(); // Move past (
-                        expression = builtInFunction(simulation, tokens, ref token, getVariableValue);
+                        expression = ResolveBuiltIn(reference.Name, simulation, tokens, ref token, getVariableValue);
                         _ = tokens.TryMoveNext(out token); // Move past )
                         return expression;
                     }
@@ -159,12 +155,24 @@ internal abstract class Expression
     public abstract override string ToString();
 #endif
 
-    private delegate Expression FunctionResolver(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue);
-
-    private static readonly FrozenDictionary<string, FunctionResolver> BuiltInFunctions = FrozenDictionary.Create<string, FunctionResolver>(Collation.Default, [
-        new("datalength", (simulation, tokens, ref token, getVariableValue) => new DataLength(Expression.Parse(simulation, tokens, ref token, getVariableValue))),
-        new("abs", (simulation, tokens, ref token, getVariableValue) => new AbsoluteValue(Expression.Parse(simulation, tokens, ref token, getVariableValue))),
-        ]);
+    private static Expression ResolveBuiltIn(string name, Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
+    {
+        Span<char> uppercaseName = stackalloc char[name.Length];
+        return name.ToUpperInvariant(uppercaseName) switch
+        {
+            3 => uppercaseName switch
+            {
+                "ABS" => new AbsoluteValue(simulation, tokens, ref token, getVariableValue),
+                _ => null
+            },
+            10 => uppercaseName switch
+            {
+                "DATALENGTH" => new DataLength(simulation, tokens, ref token, getVariableValue),
+                _ => null
+            },
+            _ => (Expression?)null
+        } ?? throw SimulatedSqlException.UnrecognizedBuiltInFunction(name);
+    }
 
     /// <summary>
     /// An expression that has been given a name, such as with `as`.
@@ -296,10 +304,12 @@ internal abstract class Expression
     /// <summary>
     /// Encapsulates the SQL DATALENGTH command: https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql
     /// </summary>
-    /// <param name="source">Provides the value to be processed.</param>
-    public sealed class DataLength(Expression source) : Expression
+    public sealed class DataLength : Expression
     {
-        private readonly Expression source = source;
+        private readonly Expression source;
+
+        public DataLength(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
+            => this.source = Expression.Parse(simulation, tokens, ref token, getVariableValue);
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
         {
@@ -316,10 +326,12 @@ internal abstract class Expression
     /// <summary>
     /// Encapsulates the SQL ABS command: https://learn.microsoft.com/en-us/sql/t-sql/functions/abs-transact-sql
     /// </summary>
-    /// <param name="source">Provides the value to be processed.</param>
-    public sealed class AbsoluteValue(Expression source) : Expression
+    public sealed class AbsoluteValue : Expression
     {
-        private readonly Expression source = source;
+        private readonly Expression source;
+
+        public AbsoluteValue(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
+            => this.source = Expression.Parse(simulation, tokens, ref token, getVariableValue);
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
         {
