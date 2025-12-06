@@ -2,12 +2,26 @@
 
 namespace SqlServerSimulator.Parser;
 
+/// <summary>
+/// Manages the higher-level logic to convert a sequence of command tokens into tabular results.
+/// </summary>
 internal sealed class Selection
 {
     internal readonly SimulatedResultSet Results;
 
     private Selection(SimulatedResultSet results) => this.Results = results;
 
+    /// <summary>
+    /// Creates a <see cref="Selection"/> from a series of tokens.
+    /// </summary>
+    /// <param name="simulation">Simulation shared context.</param>
+    /// <param name="tokens">The sequence of command tokens. This will be advanced to the end of the expression.</param>
+    /// <param name="token">Retains the most recently provided token from <paramref name="tokens"/>.</param>
+    /// <param name="getVariableValue">Provides the value to any variable included alongside the command.</param>
+    /// <param name="depth">The current depth of recursed selection, such as with derived tables. 0 for the top-level SELECT.</param>
+    /// <returns>The prepared command.</returns>
+    /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
+    /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Selection Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue, uint depth)
     {
         token = tokens.RequireNext();

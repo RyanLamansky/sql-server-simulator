@@ -3,8 +3,14 @@ using System.Text;
 
 namespace SqlServerSimulator.Parser;
 
+/// <summary>
+/// Specializes in refining a SQL command string into sequence of <see cref="Token"/> instances.
+/// </summary>
 static class Tokenizer
 {
+    /// <summary>
+    /// Helps the tokenizer keep track of what it's doing.
+    /// </summary>
     enum State
     {
         None,
@@ -17,6 +23,13 @@ static class Tokenizer
         Numeric
     }
 
+    /// <summary>
+    /// Refines a SQL command string into sequence of <see cref="Token"/> instances.
+    /// </summary>
+    /// <param name="command">The command to tokenize.</param>
+    /// <returns>An enumeration of <paramref name="command"/>'s tokens.</returns>
+    /// <exception cref="InvalidOperationException">ExecuteReader: CommandText property has not been initialized.</exception>
+    /// <exception cref="NotSupportedException">An unsupported pattern was found in the command.</exception>
     public static IEnumerable<Token> Tokenize(string? command)
     {
         if (string.IsNullOrEmpty(command))
@@ -272,6 +285,11 @@ static class Tokenizer
         return false;
     }
 
+    /// <summary>
+    /// When true, the state is some variant of a quoted or delimited string.
+    /// </summary>
+    /// <param name="state">The state to check.</param>
+    /// <returns>True if the string is delimited, otherwise false.</returns>
     static bool IsQuotedString(this State state) => state switch
     {
         State.BracketDelimitedString or State.SingleQuotedString or State.DoubleQuotedString => true,

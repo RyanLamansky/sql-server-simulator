@@ -1,5 +1,8 @@
 ﻿namespace SqlServerSimulator;
 
+/// <summary>
+/// The SQL Server equivalent to .NET's <see cref="IComparer{T}"/> for strings.
+/// </summary>
 internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 {
     private protected Collation()

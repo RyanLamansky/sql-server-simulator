@@ -3,14 +3,31 @@ using System.Collections.Frozen;
 
 namespace SqlServerSimulator.Parser;
 
+/// <summary>
+/// Contains the logic described by a SQL command and computes its results.
+/// </summary>
 internal abstract class Expression
 {
     private protected Expression()
     {
     }
 
+    /// <summary>
+    /// A name or alias associated with an expression.
+    /// Anonymous expressions return <see cref="string.Empty"/>.
+    /// </summary>
     public virtual string Name => string.Empty;
 
+    /// <summary>
+    /// Converts the tokens from a command into a single expression.
+    /// </summary>
+    /// <param name="simulation">Simulation shared context.</param>
+    /// <param name="tokens">The sequence of command tokens. This will be advanced to the end of the expression.</param>
+    /// <param name="token">Retains the most recently provided token from <paramref name="tokens"/>.</param>
+    /// <param name="getVariableValue">Provides the value to any variable included alongside the command.</param>
+    /// <returns>The parsed expression.</returns>
+    /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
+    /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Expression Parse(Simulation simulation, IEnumerator<Token> tokens, ref Token? token, Func<string, object?> getVariableValue)
     {
         Expression? expression = null;
@@ -131,6 +148,11 @@ internal abstract class Expression
         return expression;
     }
 
+    /// <summary>
+    /// Runs the expression, returning its result.
+    /// </summary>
+    /// <param name="getColumnValue">Provides the value for a column.</param>
+    /// <returns>The result of the expression.</returns>
     public abstract object? Run(Func<List<string>, object?> getColumnValue);
 
 #if DEBUG
@@ -144,6 +166,11 @@ internal abstract class Expression
         new("abs", (simulation, tokens, ref token, getVariableValue) => new AbsoluteValue(Expression.Parse(simulation, tokens, ref token, getVariableValue))),
         ]);
 
+    /// <summary>
+    /// An expression that has been given a name, such as with `as`.
+    /// </summary>
+    /// <param name="expression">The expression to be named.</param>
+    /// <param name="name">The name of the expression, exposed via the <see cref="Name"/> property.</param>
     private sealed class NamedExpression(Expression expression, string name) : Expression
     {
         private readonly Expression expression = expression;
@@ -156,13 +183,11 @@ internal abstract class Expression
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
 
-#if DEBUG
         /// <summary>
         /// Transfers the name to an outer expression.
         /// </summary>
         /// <param name="destination">The expression wrapping this<see cref="NamedExpression"/>.</param>
         /// <returns>A new <see cref="NamedExpression"/> wrapping <paramref name="destination"/> using <see cref="Name"/>.</returns>
-#endif
         public NamedExpression TransferName(Expression destination)
         {
 #if DEBUG
@@ -268,6 +293,10 @@ internal abstract class Expression
 #endif
     }
 
+    /// <summary>
+    /// Encapsulates the SQL DATALENGTH command: https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql
+    /// </summary>
+    /// <param name="source">Provides the value to be processed.</param>
     public sealed class DataLength(Expression source) : Expression
     {
         private readonly Expression source = source;
@@ -284,6 +313,10 @@ internal abstract class Expression
 #endif
     }
 
+    /// <summary>
+    /// Encapsulates the SQL ABS command: https://learn.microsoft.com/en-us/sql/t-sql/functions/abs-transact-sql
+    /// </summary>
+    /// <param name="source">Provides the value to be processed.</param>
     public sealed class AbsoluteValue(Expression source) : Expression
     {
         private readonly Expression source = source;

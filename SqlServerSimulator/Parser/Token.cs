@@ -1,5 +1,8 @@
 ﻿namespace SqlServerSimulator.Parser;
 
+/// <summary>
+/// Describes a single token in a SQL command.
+/// </summary>
 abstract class Token
 {
     private protected Token()

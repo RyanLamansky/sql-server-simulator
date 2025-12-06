@@ -4,6 +4,9 @@ using System.Globalization;
 
 namespace SqlServerSimulator;
 
+/// <summary>
+/// Bridges .NET's native types, the various <see cref="DbType"/>s, and SQL Server's actual behavior.
+/// </summary>
 internal abstract class DataType
 {
     private protected DataType()
