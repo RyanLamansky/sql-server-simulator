@@ -42,8 +42,8 @@ internal abstract class DataType
     /// <exception cref="SimulatedSqlException">Column, parameter, or variable #<paramref name="index"/>: Cannot find data type <paramref name="name"/>.</exception>
     public static DataType GetByName(Name name, int index)
     {
-        Span<char> upper = stackalloc char[name.Value.Length];
-        return name.Value.ToUpperInvariant(upper) switch
+        Span<char> upper = stackalloc char[name.Span.Length];
+        return name.Span.ToUpperInvariant(upper) switch
         {
             3 => upper switch
             {
@@ -62,7 +62,7 @@ internal abstract class DataType
                 _ => null
             },
             _ => null,
-        } ?? throw SimulatedSqlException.CannotFindDataType(name.Value, index);
+        } ?? throw SimulatedSqlException.CannotFindDataType(name.Span, index);
     }
 
     public static DataType GetByDbType(DbType dbType) => dbType switch
