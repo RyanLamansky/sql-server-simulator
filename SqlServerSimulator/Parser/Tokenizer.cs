@@ -1,4 +1,5 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
+using System.Text;
 
 namespace SqlServerSimulator.Parser;
 
@@ -13,6 +14,7 @@ static class Tokenizer
     /// <param name="command">The command from which a token is produced.</param>
     /// <param name="index">The position within <paramref name="command"/> of the previous token (or -1), updated to where the next token ends.</param>
     /// <returns>The next token, or null if the end of <paramref name="command"/> has been reached.</returns>
+    /// <exception cref="SimulatedSqlException">Incorrect or unsupported syntax.</exception>
     public static Token? NextToken(string command, ref int index) =>
         ++index >= command.Length ? null : command[index] switch
         {
@@ -29,7 +31,7 @@ static class Tokenizer
             ',' => new Comma(command, index),
             '.' => new Period(command, index),
             ';' => new StatementTerminator(command, index),
-            _ => throw new NotSupportedException($"Simulated tokenizer doesn't know what to do with character '{command[index]}' at index {index}.")
+            var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
     private static Whitespace ParseWhitespace(string command, ref int index)
@@ -141,15 +143,26 @@ static class Tokenizer
     private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)
     {
         var start = index;
+        var builder = new StringBuilder();
         while (++index < command.Length)
         {
-            if (command[index] != ']')
+            var c = command[index];
+            if (c != ']')
+            {
+                _ = builder.Append(c);
                 continue;
+            }
 
-            index++;
+            if (index + 1 < command.Length && command[index + 1] == ']')
+            {
+                _ = builder.Append(']');
+                index++;
+                continue;
+            }
+
             break;
         }
 
-        return new(command.Substring(start + 1, index - start - 2), command, start, index-- - start);
+        return new(builder.ToString(), command, start, index - start);
     }
 }

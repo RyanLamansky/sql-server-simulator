@@ -60,6 +60,9 @@ public class SelectTests
 
     [TestMethod]
     [DataRow("select 1 as c", "c", 1)]
+    [DataRow("select 1 as [c]", "c", 1)]
+    [DataRow("select 1 as [c]]d]", "c]d", 1)]
+    [DataRow("select 1 as [e f]", "e f", 1)]
     [DataRow("select 1 + 1 as c", "c", 2)]
     public void Expression(string commandText, string name, object value)
     {
