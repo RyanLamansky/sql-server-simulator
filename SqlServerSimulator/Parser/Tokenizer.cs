@@ -1,5 +1,4 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
-using System.Text;
 
 namespace SqlServerSimulator.Parser;
 
@@ -23,13 +22,13 @@ static class Tokenizer
             '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
             '-' => ParseMinusOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
-            '+' => new Plus(),
-            '*' => new Asterisk(),
-            '(' => new OpenParentheses(),
-            ')' => new CloseParentheses(),
-            ',' => new Comma(),
-            '.' => new Period(),
-            ';' => new StatementTerminator(),
+            '+' => new Plus(command, index),
+            '*' => new Asterisk(command, index),
+            '(' => new OpenParentheses(command, index),
+            ')' => new CloseParentheses(command, index),
+            ',' => new Comma(command, index),
+            '.' => new Period(command, index),
+            ';' => new StatementTerminator(command, index),
             _ => throw new NotSupportedException($"Simulated tokenizer doesn't know what to do with character '{command[index]}' at index {index}.")
         };
 
@@ -80,7 +79,7 @@ static class Tokenizer
             break;
         }
 
-        return new(new StringBuilder(command, start, index - start, index-- - start));
+        return new(command, start, index-- - start);
     }
 
     private static Token ParseAtOrDoubleAtPrefixedString(string command, ref int index)
@@ -110,19 +109,20 @@ static class Tokenizer
             break;
         }
 
-        return doubleAt
-            ? new DoubleAtPrefixedString(new StringBuilder(command, start + 2, index-- - (start + 2), index - (start + 2) - 1))
-            : new AtPrefixedString(new StringBuilder(command, start + 1, index-- - (start + 1), index - (start + 1) - 1));
+        return doubleAt ?
+            new DoubleAtPrefixedString(command, start, index-- - start) :
+            new AtPrefixedString(command, start, index-- - start);
     }
 
     private static Token ParseMinusOrComment(string command, ref int index)
     {
+        var start = index;
         if (++index == command.Length)
-            return new Minus();
+            return new Minus(command, --index);
         if (command[index] != '-')
         {
             index--;
-            return new Minus();
+            return new Minus(command, index);
         }
 
         while (++index < command.Length)
@@ -131,11 +131,11 @@ static class Tokenizer
             {
                 case '\r':
                 case '\n':
-                    return new Comment();
+                    return new Comment(command, start, --index);
             }
         }
 
-        return new Comment();
+        return new Comment(command, start, --index);
     }
 
     private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)
@@ -150,6 +150,6 @@ static class Tokenizer
             break;
         }
 
-        return new(new StringBuilder(command, start + 1, index - start - 2, index-- - start - 2));
+        return new(command.Substring(start + 1, index - start - 2), command, start, index-- - start);
     }
 }

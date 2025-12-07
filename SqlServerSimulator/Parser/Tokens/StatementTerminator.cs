@@ -1,6 +1,5 @@
 ﻿namespace SqlServerSimulator.Parser.Tokens;
 
-sealed class StatementTerminator : Token
+sealed class StatementTerminator(string command, int index) : Token(command, index, 1)
 {
-    public override string ToString() => ";";
 }

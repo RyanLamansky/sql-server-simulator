@@ -1,24 +1,21 @@
-﻿using System.Text;
-
-namespace SqlServerSimulator.Parser.Tokens;
+﻿namespace SqlServerSimulator.Parser.Tokens;
 
 abstract class StringToken : Token
 {
-    public readonly string Value;
-
-    /// <summary>
-    /// Creates a <see cref="StringToken"/> from a plain string.
-    /// </summary>
-    /// <param name="value">Transfers to <see cref="Value"/>.</param>
-    private protected StringToken(string value) => this.Value = value;
-
-    /// <summary>
-    /// Creates a <see cref="StringToken"/> from the provided <paramref name="buffer"/> and then <see cref="StringBuilder.Clear"/>s it.
-    /// </summary>
-    /// <param name="buffer">The source of the string.</param>
-    private protected StringToken(StringBuilder buffer)
-        : this(buffer.ToString())
+    private protected StringToken(string command, int index, int length)
+        : base(command, index, length)
     {
-        _ = buffer.Clear();
     }
+
+    /// <summary>
+    /// The value of the string after being parsed as a read-only span.
+    /// </summary>
+    public abstract ReadOnlySpan<char> Span { get; }
+
+    /// <summary>
+    /// The value of the string after being parsed as a substring.
+    /// <see cref="Span"/> is preferable to avoid memory allocation.
+    /// </summary>
+    /// <remarks>This should be overridden if the memory allocation is avoidable.</remarks>
+    public virtual string Value => new(Span);
 }

@@ -1,6 +1,5 @@
 ﻿namespace SqlServerSimulator.Parser.Tokens;
 
-sealed class Comment : Token
+sealed class Comment(string command, int index, int length) : Token(command, index, length)
 {
-    public override string ToString() => "/* Comment */";
 }

@@ -1,8 +1,7 @@
-﻿using System.Text;
-
+﻿
 namespace SqlServerSimulator.Parser.Tokens;
 
-sealed class AtPrefixedString(StringBuilder buffer) : StringToken(buffer)
+sealed class AtPrefixedString(string command, int index, int length) : StringToken(command, index, length)
 {
-    public override string ToString() => $"@{Value}";
+    public override ReadOnlySpan<char> Span => Source[1..];
 }

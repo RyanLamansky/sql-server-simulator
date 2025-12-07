@@ -1,16 +1,12 @@
-﻿using System.Text;
-
-namespace SqlServerSimulator.Parser.Tokens;
+﻿namespace SqlServerSimulator.Parser.Tokens;
 
 internal sealed class Numeric : Token
 {
     public readonly ISpanFormattable Value;
 
-    public Numeric(StringBuilder buffer)
+    public Numeric(string command, int index, int length) : base(command, index, length)
     {
-        Span<char> number = stackalloc char[buffer.Length];
-        buffer.CopyTo(0, number, buffer.Length);
-        _ = buffer.Clear();
+        var number = base.Source;
 
         if (int.TryParse(number, out var int32))
         {
@@ -32,5 +28,4 @@ internal sealed class Numeric : Token
 
         throw new SimulatedSqlException($"Simulated command tokenizer couldn't parse {number} as a number.");
     }
-    public override string ToString() => this.Value.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
 }

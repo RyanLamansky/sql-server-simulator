@@ -1,8 +1,8 @@
-﻿using System.Text;
+﻿namespace SqlServerSimulator.Parser.Tokens;
 
-namespace SqlServerSimulator.Parser.Tokens;
-
-sealed class BracketDelimitedString(StringBuilder buffer) : Name(buffer)
+sealed class BracketDelimitedString(string value, string command, int index, int length) : Name(command, index, length)
 {
-    public override string ToString() => $"[{Value}]";
+    public override ReadOnlySpan<char> Span => Value.AsSpan();
+
+    public override string Value { get; } = value;
 }
