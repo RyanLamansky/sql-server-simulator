@@ -1,4 +1,5 @@
-﻿using System.Collections.Frozen;
+﻿using SqlServerSimulator.Parser.Tokens;
+using System.Collections.Frozen;
 using System.Data.Common;
 
 namespace SqlServerSimulator.Parser;
@@ -35,8 +36,27 @@ internal sealed class ParserContext : IDisposable
 #if DEBUG
         this.tokens = new TokenArrayEnumerator(command.CommandText);
 #else
-        this.tokens = Tokenizer.Tokenize(command.CommandText).GetEnumerator();
+        this.tokens = TokenizerIterator(command.CommandText).GetEnumerator();
 #endif
+    }
+
+    /// <summary>
+    /// Converts the redesigned tokenizer to a traditional enumerable for compatibility with the existing logic.
+    /// This should be phased out eventually.
+    /// </summary>
+    static IEnumerable<Token> TokenizerIterator(string? commandText)
+    {
+        if (string.IsNullOrEmpty(commandText))
+            throw new InvalidOperationException("ExecuteReader: CommandText property has not been initialized");
+
+        var index = -1;
+        while (Tokenizer.NextToken(commandText, ref index) is Token token)
+        {
+            if (token is Whitespace)
+                continue;
+
+            yield return token;
+        }
     }
 
     public Simulation Simulation => Command.simulation;
@@ -167,10 +187,10 @@ internal sealed class ParserContext : IDisposable
     private sealed class TokenArrayEnumerator(string? command) : IEnumerator<Token>
     {
         /// <summary>
-        /// Retains the full results of <see cref="Tokenizer.Tokenize(string?)"/>.
+        /// Retains the full results of tokenization.
         /// This is less efficient than streaming the results, but enables this class's debugging-friendly <see cref="ToString"/>.
         /// </summary>
-        private readonly Token[] source = [.. Tokenizer.Tokenize(command)];
+        private readonly Token[] source = [.. TokenizerIterator(command)];
 
         public int Index { get; private set; } = -1;
 

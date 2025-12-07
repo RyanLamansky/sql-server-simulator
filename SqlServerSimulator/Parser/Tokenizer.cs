@@ -9,296 +9,147 @@ namespace SqlServerSimulator.Parser;
 static class Tokenizer
 {
     /// <summary>
-    /// Helps the tokenizer keep track of what it's doing.
+    /// Provides the next <see cref="Token"/> from the provided SQL command text beginning at <paramref name="index"/>.
     /// </summary>
-    enum State
-    {
-        None,
-        UnquotedString,
-        BracketDelimitedString,
-        SingleQuotedString,
-        DoubleQuotedString,
-        AtPrefixedString,
-        DoubleAtPrefixedString,
-        Numeric
-    }
-
-    /// <summary>
-    /// Refines a SQL command string into sequence of <see cref="Token"/> instances.
-    /// </summary>
-    /// <param name="command">The command to tokenize.</param>
-    /// <returns>An enumeration of <paramref name="command"/>'s tokens.</returns>
-    /// <exception cref="InvalidOperationException">ExecuteReader: CommandText property has not been initialized.</exception>
-    /// <exception cref="NotSupportedException">An unsupported pattern was found in the command.</exception>
-    public static IEnumerable<Token> Tokenize(string? command)
-    {
-        if (string.IsNullOrEmpty(command))
-            throw new InvalidOperationException("ExecuteReader: CommandText property has not been initialized");
-
-        using var commandEnumerator = command.GetEnumerator();
-
-        var state = State.None;
-        var index = -1;
-        var buffer = new StringBuilder();
-
-        while (commandEnumerator.TryGetNext(out var c, ref index))
+    /// <param name="command">The command from which a token is produced.</param>
+    /// <param name="index">The position within <paramref name="command"/> of the previous token (or -1), updated to where the next token ends.</param>
+    /// <returns>The next token, or null if the end of <paramref name="command"/> has been reached.</returns>
+    public static Token? NextToken(string command, ref int index) =>
+        ++index >= command.Length ? null : command[index] switch
         {
-        Switch:
-            switch (c)
+            ' ' or '\r' or '\n' or '\t' => ParseWhitespace(command, ref index),
+            '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') => ParseUnquotedStringOrReservedKeyword(command, ref index),
+            >= '0' and <= '9' => ParseNumeric(command, ref index),
+            '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
+            '-' => ParseMinusOrComment(command, ref index),
+            '[' => ParseBracketDelimitedString(command, ref index),
+            '+' => new Plus(),
+            '*' => new Asterisk(),
+            '(' => new OpenParentheses(),
+            ')' => new CloseParentheses(),
+            ',' => new Comma(),
+            '.' => new Period(),
+            ';' => new StatementTerminator(),
+            _ => throw new NotSupportedException($"Simulated tokenizer doesn't know what to do with character '{command[index]}' at index {index}.")
+        };
+
+    private static Whitespace ParseWhitespace(string command, ref int index)
+    {
+        var start = index;
+        while (++index < command.Length)
+        {
+            switch (command[index])
             {
-                default:
-                    if (c is '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z'))
-                    {
-                        switch (state)
-                        {
-                            case State.None:
-                                state = State.UnquotedString;
-                                break;
-                        }
-
-                        _ = buffer.Append(c);
-                        continue;
-                    }
-                    else if (c is >= '0' and <= '9')
-                    {
-                        if (state.IsAnyString() || state == State.Numeric)
-                        {
-                            _ = buffer.Append(c);
-                            continue;
-                        }
-
-                        state = State.Numeric;
-                        _ = buffer.Append(c);
-
-                        continue;
-                    }
-
-                    break;
-
-                case '@':
-                    switch (state)
-                    {
-                        case State.None:
-                            state = State.AtPrefixedString;
-                            continue;
-                        case State.AtPrefixedString:
-                            state = State.DoubleAtPrefixedString;
-                            continue;
-                    }
-
-                    _ = buffer.Append(c);
-                    continue;
-
-                case '[':
-                    state = State.BracketDelimitedString;
-                    continue;
-                case ']':
-                    switch (state)
-                    {
-                        case State.BracketDelimitedString:
-                            yield return new BracketDelimitedString(buffer);
-                            state = State.None;
-                            continue;
-                    }
-
-                    break;
-
-                case '(':
-                    if (state.IsQuotedString())
-                    {
-                        _ = buffer.Append(c);
-                    }
-                    else
-                    {
-                        if (buffer.Length != 0)
-                        {
-                            yield return UnquotedString.CheckReserved(buffer);
-                            state = State.None;
-                        }
-
-                        yield return new OpenParentheses();
-                    }
-                    continue;
-                case ')':
-                    if (state.IsQuotedString())
-                    {
-                        _ = buffer.Append(c);
-                    }
-                    else
-                    {
-                        switch (state)
-                        {
-                            case State.UnquotedString:
-                                yield return UnquotedString.CheckReserved(buffer);
-                                break;
-                            case State.AtPrefixedString:
-                                yield return new AtPrefixedString(buffer);
-                                break;
-                            case State.Numeric:
-                                yield return new Numeric(buffer);
-                                break;
-                        }
-                        yield return new CloseParentheses();
-                        state = State.None;
-                    }
-                    continue;
-
-                case ';':
-                    switch (state)
-                    {
-                        case State.UnquotedString:
-                            yield return UnquotedString.CheckReserved(buffer);
-                            state = State.None;
-                            break;
-                        case State.Numeric:
-                            yield return new Numeric(buffer);
-                            state = State.None;
-                            break;
-                    }
-                    yield return new StatementTerminator();
-                    continue;
-
                 case ' ':
                 case '\r':
                 case '\n':
                 case '\t':
-                    switch (state)
-                    {
-                        case State.UnquotedString:
-                            yield return UnquotedString.CheckReserved(buffer);
-                            state = State.None;
-                            break;
-                        case State.AtPrefixedString:
-                            yield return new AtPrefixedString(buffer);
-                            state = State.None;
-                            break;
-                        case State.Numeric:
-                            yield return new Numeric(buffer);
-                            state = State.None;
-                            break;
-                    }
-
-                    _ = buffer.Clear();
-                    continue;
-
-                case '+':
-                    yield return new Plus();
-                    continue;
-
-                case '-':
-                    if (!commandEnumerator.TryGetNext(out c, ref index))
-                    {
-                        yield return new Minus();
-                        continue;
-                    }
-
-                    if (c == '-')
-                    {
-                        while (commandEnumerator.TryGetNext(out c, ref index))
-                        {
-                            switch (c)
-                            {
-                                case '\r':
-                                case '\n':
-                                    yield return new Comment();
-                                    continue;
-                            }
-                        }
-                        continue;
-                    }
-
-                    yield return new Minus();
-                    goto Switch; // Can't immediately think of a better way to do this that doesn't involve new variables.
-
-                case '*':
-                    yield return new Asterisk();
-                    continue;
-
-                case '.':
-                    switch (state)
-                    {
-                        case State.UnquotedString:
-                            yield return UnquotedString.CheckReserved(buffer);
-                            break;
-                        case State.AtPrefixedString:
-                            yield return new AtPrefixedString(buffer);
-                            break;
-                    }
-
-                    state = State.None;
-                    yield return new Period();
-                    continue;
-
-                case ',':
-                    if (state.IsQuotedString())
-                    {
-                        _ = buffer.Append(c);
-                        continue;
-                    }
-
-                    switch (state)
-                    {
-                        case State.Numeric:
-                            yield return new Numeric(buffer);
-                            break;
-                        case State.UnquotedString:
-                            yield return UnquotedString.CheckReserved(buffer);
-                            break;
-                    }
-
-                    state = State.None;
-                    _ = buffer.Clear();
-                    yield return new Comma();
                     continue;
             }
 
-            throw new NotSupportedException($"Simulated command tokenizer doesn't know what to do with command text past character at index {index}, '{c}'.");
+            break;
         }
 
-        switch (state)
-        {
-            case State.UnquotedString:
-                yield return UnquotedString.CheckReserved(buffer);
-                break;
-            case State.AtPrefixedString:
-                yield return new AtPrefixedString(buffer);
-                break;
-            case State.DoubleAtPrefixedString:
-                yield return new DoubleAtPrefixedString(buffer);
-                break;
-            case State.Numeric:
-                yield return new Numeric(buffer);
-                break;
-        }
+        return new(command, start, index-- - start);
     }
 
-    static bool TryGetNext(this CharEnumerator enumerator, out char c, ref int index)
+    private static Token ParseUnquotedStringOrReservedKeyword(string command, ref int index)
     {
-        if (enumerator.MoveNext())
+        var start = index;
+        while (++index < command.Length)
         {
+            var c = command[index];
+
+            if (char.IsLetterOrDigit(c) || c == '_')
+                continue;
+
+            break;
+        }
+
+        return UnquotedString.CheckReserved(command, start, index-- - start);
+    }
+
+    private static Numeric ParseNumeric(string command, ref int index)
+    {
+        var start = index;
+        while (++index < command.Length)
+        {
+            if (command[index] is >= '0' and <= '9')
+                continue;
+
+            break;
+        }
+
+        return new(new StringBuilder(command, start, index - start, index-- - start));
+    }
+
+    private static Token ParseAtOrDoubleAtPrefixedString(string command, ref int index)
+    {
+        var start = index;
+        if (++index == command.Length)
+            throw new SimulatedSqlException("Must declare the scalar variable \"@\".");
+
+        bool doubleAt;
+        if (command[index] == '@')
+        {
+            doubleAt = true;
             index++;
-            c = enumerator.Current;
-            return true;
+        }
+        else
+        {
+            doubleAt = false;
         }
 
-        c = default;
-        return false;
+        while (++index < command.Length)
+        {
+            var c = command[index];
+
+            if (char.IsLetterOrDigit(c) || c == '_')
+                continue;
+
+            break;
+        }
+
+        return doubleAt
+            ? new DoubleAtPrefixedString(new StringBuilder(command, start + 2, index-- - (start + 2), index - (start + 2) - 1))
+            : new AtPrefixedString(new StringBuilder(command, start + 1, index-- - (start + 1), index - (start + 1) - 1));
     }
 
-    /// <summary>
-    /// When true, the state is some variant of a quoted or delimited string.
-    /// </summary>
-    /// <param name="state">The state to check.</param>
-    /// <returns>True if the string is delimited, otherwise false.</returns>
-    static bool IsQuotedString(this State state) => state switch
+    private static Token ParseMinusOrComment(string command, ref int index)
     {
-        State.BracketDelimitedString or State.SingleQuotedString or State.DoubleQuotedString => true,
-        _ => false,
-    };
+        if (++index == command.Length)
+            return new Minus();
+        if (command[index] != '-')
+        {
+            index--;
+            return new Minus();
+        }
 
-    static bool IsAnyString(this State state) => state.IsQuotedString() || state switch
+        while (++index < command.Length)
+        {
+            switch (command[index])
+            {
+                case '\r':
+                case '\n':
+                    return new Comment();
+            }
+        }
+
+        return new Comment();
+    }
+
+    private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)
     {
-        State.AtPrefixedString or State.DoubleAtPrefixedString => true,
-        _ => false,
-    };
+        var start = index;
+        while (++index < command.Length)
+        {
+            if (command[index] != ']')
+                continue;
+
+            index++;
+            break;
+        }
+
+        return new(new StringBuilder(command, start + 1, index - start - 2, index-- - start - 2));
+    }
 }
