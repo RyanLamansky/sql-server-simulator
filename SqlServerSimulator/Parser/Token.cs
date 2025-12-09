@@ -27,4 +27,20 @@ abstract class Token
 
     // This is used for various error messages even though tokens are not directly accessible to user code.
     public sealed override string ToString() => command.Substring(index, length);
+
+#if DEBUG
+    /// <summary>
+    /// Identifies this token within the scope of the full command by wrapping it with '»' and '«';
+    /// </summary>
+    public void Highlight(Span<char> result)
+    {
+        var command = this.command.AsSpan();
+
+        command[..this.index].CopyTo(result);
+        result[index] = '»';
+        this.Source.CopyTo(result[(index + 1)..]);
+        result[index + 1 + this.length] = '«';
+        command[(index + length)..].CopyTo(result[(index + length + 2)..]);
+    }
+#endif
 }

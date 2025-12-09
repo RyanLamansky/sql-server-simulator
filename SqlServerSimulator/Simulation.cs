@@ -30,7 +30,7 @@ public sealed class Simulation
 
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
-        using var context = new ParserContext(command);
+        var context = new ParserContext(command);
 
         while (context.GetNextOptional() is not null)
         {
