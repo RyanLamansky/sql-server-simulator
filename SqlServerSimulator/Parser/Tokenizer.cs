@@ -88,7 +88,7 @@ static class Tokenizer
     {
         var start = index;
         if (++index == command.Length)
-            throw new SimulatedSqlException("Must declare the scalar variable \"@\".");
+            throw SimulatedSqlException.MustDeclareScalarVariable(string.Empty);
 
         bool doubleAt;
         if (command[index] == '@')

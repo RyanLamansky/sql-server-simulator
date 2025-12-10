@@ -13,18 +13,13 @@ namespace SqlServerSimulator;
 /// </summary>
 internal sealed class SimulatedSqlException : DbException
 {
-    internal SimulatedSqlException(string? message)
-        : this(message, [])
-    {
-    }
-
     private SimulatedSqlException(string message, int number, byte @class, byte state)
         : this(message, new SimulatedSqlError(message, number, @class, state))
     {
     }
 
-    private SimulatedSqlException(string? message, params ReadOnlySpan<SimulatedSqlError> errors)
-        : base(message ?? "Simulated exception with no message.")
+    private SimulatedSqlException(string message, params ReadOnlySpan<SimulatedSqlError> errors)
+        : base(message)
     {
         base.HResult = unchecked((int)0x80131904);
         base.Source = "Core Microsoft SqlClient Data Provider";
@@ -105,6 +100,8 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException InvalidColumnName(IEnumerable<string> name) => InvalidColumnName(string.Join('.', name));
 
     internal static SimulatedSqlException InvalidObjectName(StringToken name) => new($"Invalid object name {name}.", 208, 16, 1);
+
+    internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 
     internal static SimulatedSqlException SyntaxErrorNearKeyword(ReservedKeyword token) => new($"Incorrect syntax near the keyword '{token}'.", 156, 15, 1);
 

@@ -90,11 +90,8 @@ public sealed class Simulation
                                             do
                                             {
                                                 suppressAdvanceToken = false;
-                                                if (context.GetNextRequired() is not Name columnName)
-                                                    throw new SimulatedSqlException("Simulated table creation requires named columns.");
-
-                                                if (context.GetNextRequired() is not Name type)
-                                                    throw new SimulatedSqlException("Simulated table creation requires columns to have a type.");
+                                                var columnName = context.GetNextRequired<Name>();
+                                                var type = context.GetNextRequired<Name>();
 
                                                 var nullable = true;
 

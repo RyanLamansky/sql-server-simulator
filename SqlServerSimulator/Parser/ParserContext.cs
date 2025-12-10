@@ -49,7 +49,7 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public object? GetVariableValue(string name) =>
         variables.TryGetValue(name, out var value)
         ? value.TypeValue.Value
-        : throw new SimulatedSqlException($"Must declare the scalar variable \"@{name}\".");
+        : throw SimulatedSqlException.MustDeclareScalarVariable(name);
 
     /// <summary>
     /// Advances <see cref="Token"/> to the next token, if one exists.

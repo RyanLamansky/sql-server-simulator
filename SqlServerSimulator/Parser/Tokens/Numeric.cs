@@ -26,6 +26,6 @@ internal sealed class Numeric : Token
             return;
         }
 
-        throw new SimulatedSqlException($"Simulated command tokenizer couldn't parse {number} as a number.");
+        throw new NotSupportedException($"Simulated command tokenizer couldn't parse {number} as a number.");
     }
 }
