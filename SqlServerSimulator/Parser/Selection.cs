@@ -29,13 +29,14 @@ internal sealed class Selection
         {
             // SQL Server doesn't require outer parentheses.
             // When Expression.Parse supports them, the checks for them here should be removed.
-            context.MoveNextRequired<OpenParentheses>();
+            if (context.GetNextRequired<Operator>() is not { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
             context.MoveNextRequired();
 
             var resolvedExpression = Expression.Parse(context).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
             topCount = resolvedExpression is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
 
-            if (context.Token is not null and not CloseParentheses)
+            if (context.Token is not null and not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
             context.MoveNextRequired();
@@ -57,10 +58,10 @@ internal sealed class Selection
 
             switch (context.Token)
             {
-                case Comma:
+                case Operator { Character: ',' }:
                     continue;
 
-                case CloseParentheses:
+                case Operator { Character: ')' }:
                     if (depth == 0)
                         throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
@@ -104,7 +105,7 @@ internal sealed class Selection
                                 }))]))
                                 ));
 
-                        case OpenParentheses:
+                        case Operator { Character: '(' }:
                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
                                 throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 

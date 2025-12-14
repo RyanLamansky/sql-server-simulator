@@ -68,7 +68,7 @@ internal abstract class Expression
                 case Name name:
                     expression = new Reference(name);
                     break;
-                case Plus:
+                case Operator { Character: '+' }:
                     if (expression is null)
                     {
                         context.MoveNextRequired();
@@ -87,7 +87,7 @@ internal abstract class Expression
 
                     tokenWasRead = true;
                     break;
-                case Minus:
+                case Operator { Character: '-' }:
                     if (expression is null)
                     {
                         context.MoveNextRequired();
@@ -108,7 +108,7 @@ internal abstract class Expression
                     tokenWasRead = true;
                     break;
 
-                case Period:
+                case Operator { Character: '.' }:
                     if (expression is null)
                         throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' at the start of an expression.");
 
@@ -119,12 +119,12 @@ internal abstract class Expression
                         reference.AddMultiPartComponent(context.GetNextRequired<Name>());
                     }
                     break;
-                case Comma:
-                case CloseParentheses:
+                case Operator { Character: ',' }:
+                case Operator { Character: ')' }:
                     if (expression is null)
                         throw SimulatedSqlException.SyntaxErrorNear(context.Token);
                     return expression;
-                case OpenParentheses:
+                case Operator { Character: '(' }:
                     {
                         if (expression is not Reference reference)
                             throw SimulatedSqlException.SyntaxErrorNear(context.Token);

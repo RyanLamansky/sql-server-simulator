@@ -24,13 +24,7 @@ static class Tokenizer
             '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
             '-' => ParseMinusOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
-            '+' => new Plus(command, index),
-            '*' => new Asterisk(command, index),
-            '(' => new OpenParentheses(command, index),
-            ')' => new CloseParentheses(command, index),
-            ',' => new Comma(command, index),
-            '.' => new Period(command, index),
-            ';' => new StatementTerminator(command, index),
+            '+' or '*' or '(' or ')' or ',' or '.' or ';' => new Operator(command, index),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
@@ -120,11 +114,11 @@ static class Tokenizer
     {
         var start = index;
         if (++index == command.Length)
-            return new Minus(command, --index);
+            return new Operator(command, --index);
         if (command[index] != '-')
         {
             index--;
-            return new Minus(command, index);
+            return new Operator(command, index);
         }
 
         while (++index < command.Length)

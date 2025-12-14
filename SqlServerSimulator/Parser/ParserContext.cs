@@ -128,6 +128,9 @@ internal sealed class ParserContext(SimulatedDbCommand command)
             if (token is Whitespace)
                 continue;
 
+#if DEBUG
+            tokens.Add(token);
+#endif
             this.Token = token;
             return true;
         }
@@ -137,6 +140,11 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     }
 
 #if DEBUG
+    /// <summary>
+    /// Contains all the non-whitespace tokens that have been read so far.
+    /// </summary>
+    private readonly List<Token> tokens = [];
+
     /// <summary>
     /// Returns a string representation of the tokenized command.
     /// The <see cref="Token"/> token is wrapped by '»' and '«'.

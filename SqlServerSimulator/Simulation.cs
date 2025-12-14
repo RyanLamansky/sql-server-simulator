@@ -39,7 +39,7 @@ public sealed class Simulation
                 case Comment:
                     continue;
 
-                case StatementTerminator:
+                case Operator { Character: ';' }:
                     continue;
 
                 case ReservedKeyword reserved:
@@ -80,7 +80,7 @@ public sealed class Simulation
                                             if (context.GetNextRequired() is not Name tableName)
                                                 break;
 
-                                            if (context.GetNextRequired() is not OpenParentheses)
+                                            if (context.GetNextRequired() is not Operator { Character: '(' })
                                                 break;
 
                                             var table = new Table(tableName.Value);
@@ -120,9 +120,9 @@ public sealed class Simulation
                                                 }
 
                                                 columns.Add(new(columnName.Value, DataType.GetByName(type, columns.Count + 1), nullable));
-                                            } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Comma);
+                                            } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
 
-                                            if (context.Token is not CloseParentheses)
+                                            if (context.Token is not Operator { Character: ')' })
                                                 break;
 
                                             if (!this.Tables.TryAdd(table.Name, table))
@@ -149,7 +149,7 @@ public sealed class Simulation
                                 throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
 
                             Column[] destinationColumns;
-                            if (context.GetNextRequired() is OpenParentheses)
+                            if (context.GetNextRequired() is Operator { Character: '(' })
                             {
                                 var usedColumns = new List<Column>();
                                 while (context.GetNextRequired() is StringToken column)
@@ -160,7 +160,7 @@ public sealed class Simulation
                                     usedColumns.Add(tableColumn);
                                 }
 
-                                if (context.Token is not CloseParentheses)
+                                if (context.Token is not Operator { Character: ')' })
                                     break;
 
                                 destinationColumns = [.. usedColumns];
@@ -175,16 +175,16 @@ public sealed class Simulation
                             if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
                                 break;
 
-                            if (context.GetNextRequired() is not OpenParentheses)
+                            if (context.GetNextRequired() is not Operator { Character: '(' })
                                 break;
 
                             var sourceValues = new List<Token>();
-                            while (context.GetNextRequired() is not CloseParentheses)
+                            while (context.GetNextRequired() is not Operator { Character: ')' })
                             {
                                 sourceValues.Add(context.Token);
                             }
 
-                            if (context.Token is not CloseParentheses)
+                            if (context.Token is not Operator { Character: ')' })
                                 throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
 
                             destinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], context.GetVariableValue);
