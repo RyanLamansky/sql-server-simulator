@@ -182,6 +182,24 @@ public class SelectTests
         new Simulation().ValidateSyntaxError(commandText, nearSyntax);
 
     [TestMethod]
+    public void IdentifierVeryLong()
+    {
+        var identifier = new string('z', 128);
+        using var reader = new Simulation().ExecuteReader($"select 1 as {identifier}");
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(identifier, reader.GetName(0));
+        Assert.AreEqual(1, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void IdentifierTooLong()
+    {
+        var exception = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar($"select 1 as {new string('z', 129)}"));
+        Assert.Contains("zzz", exception.Message);
+    }
+
+    [TestMethod]
     [DataRow("select x from ( select 1 as x ) as x", "x", 1)]
     [DataRow("select x from ( select 1 + 1 as x ) as x", "x", 2)]
     public void DerivedTable(string commandText, string name, object value)
