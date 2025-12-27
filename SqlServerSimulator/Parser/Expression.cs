@@ -26,104 +26,61 @@ internal abstract class Expression
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Expression Parse(ParserContext context)
     {
-        Expression? expression = null;
-        bool tokenWasRead;
+        Expression expression;
 
-        do
+        switch (context.Token)
         {
-            tokenWasRead = false;
+            case Numeric number:
+                expression = new Value(number);
+                break;
+            case AtPrefixedString atPrefixed:
+                expression = new Value(atPrefixed, context);
+                break;
+            case DoubleAtPrefixedString doubleAtPrefixedString:
+                expression = new Value(doubleAtPrefixedString);
+                break;
+            case ReservedKeyword { Keyword: Keyword.Null }:
+                expression = new Value();
+                break;
+            case Name name:
+                expression = new Reference(name);
+                break;
+            case Operator { Character: '+' }:
+                context.MoveNextRequired();
+                expression = Expression.Parse(context);
+                break;
+            case Operator { Character: '-' }:
+                context.MoveNextRequired();
+                expression = Parse(context);
+                expression = new Subtract(new Value(0), expression);
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+        }
 
-            switch (context.Token)
+        while (true)
+        {
+            switch (context.GetNextOptional())
             {
-                case Numeric number:
-                    expression = new Value(number);
-                    break;
-                case AtPrefixedString atPrefixed:
-                    expression = new Value(atPrefixed, context);
-                    break;
-                case DoubleAtPrefixedString doubleAtPrefixedString:
-                    expression = new Value(doubleAtPrefixedString);
-                    break;
-                case ReservedKeyword reservedKeyword:
-                    switch (reservedKeyword.Keyword)
-                    {
-                        case Keyword.As:
-                            if (expression is null || context.GetNextOptional() is not Name alias)
-                                throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
-
-                            expression = new NamedExpression(expression, alias.Value);
-                            context.MoveNextOptional();
-                            return expression;
-                        case Keyword.From:
-                            if (expression is null)
-                                throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
-
-                            return expression;
-                        case Keyword.Null:
-                            expression = new Value();
-                            continue;
-                    }
-
-                    throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedKeyword);
-                case Name name:
-                    expression = new Reference(name);
-                    break;
                 case Operator { Character: '+' }:
-                    if (expression is null)
-                    {
-                        context.MoveNextRequired();
-                        expression = Expression.Parse(context);
-                        break;
-                    }
-
                     context.MoveNextRequired();
-
-                    {
-                        var parsed = Parse(context);
-                        expression = new Add(expression, parsed);
-                        if (parsed is NamedExpression named)
-                            expression = named.TransferName(expression);
-                    }
-
-                    tokenWasRead = true;
+                    expression = new Add(expression, Parse(context));
                     break;
                 case Operator { Character: '-' }:
-                    if (expression is null)
-                    {
-                        context.MoveNextRequired();
-                        expression = Parse(context);
-                        expression = new Subtract(new Value(0), expression);
-                        break;
-                    }
-
                     context.MoveNextRequired();
-
-                    {
-                        var parsed = Parse(context);
-                        expression = new Subtract(expression, parsed);
-                        if (parsed is NamedExpression named)
-                            expression = named.TransferName(expression);
-                    }
-
-                    tokenWasRead = true;
+                    expression = new Subtract(expression, Parse(context));
                     break;
 
                 case Operator { Character: '.' }:
-                    if (expression is null)
-                        throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' at the start of an expression.");
-
                     {
                         if (expression is not Reference reference)
-                            throw new NotSupportedException("Simulated expression parser doesn't know how to handle '.' here.");
+                            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
                         reference.AddMultiPartComponent(context.GetNextRequired<Name>());
                     }
-                    break;
-                case Operator { Character: ',' }:
+                    continue;
                 case Operator { Character: ')' }:
-                    if (expression is null)
-                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
-                    return expression;
+                    break;
                 case Operator { Character: '(' }:
                     {
                         if (expression is not Reference reference)
@@ -131,15 +88,21 @@ internal abstract class Expression
                         context.MoveNextRequired(); // Move past (
                         expression = ResolveBuiltIn(reference.Name, context);
                         context.MoveNextOptional(); // Move past )
-                        return expression;
+                        continue;
                     }
-                default:
-                    throw new NotSupportedException($"Simulated expression parser doesn't know how to handle '{context.Token}'.");
             }
-        } while ((tokenWasRead && context.Token is not null) || context.GetNextOptional() is not null);
 
-        return expression;
+            return expression;
+        }
     }
+
+    /// <summary>
+    /// Wraps the provided <see cref="Expression"/> in a <see cref="NamedExpression"/> with the provided <paramref name="name"/>.
+    /// </summary>
+    /// <param name="expression">The expression to wrap.</param>
+    /// <param name="name">The name to assign.</param>
+    /// <returns>The named expression.</returns>
+    public static Expression AssignName(Expression expression, string name) => new NamedExpression(expression, name);
 
     /// <summary>
     /// Runs the expression, returning its result.
@@ -180,30 +143,13 @@ internal abstract class Expression
     {
         private readonly Expression expression = expression;
         private readonly string name = name;
-#if DEBUG
-        private bool transferred;
-#endif
 
         public override string Name => this.name;
 
         public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
 
-        /// <summary>
-        /// Transfers the name to an outer expression.
-        /// </summary>
-        /// <param name="destination">The expression wrapping this<see cref="NamedExpression"/>.</param>
-        /// <returns>A new <see cref="NamedExpression"/> wrapping <paramref name="destination"/> using <see cref="Name"/>.</returns>
-        public NamedExpression TransferName(Expression destination)
-        {
 #if DEBUG
-            transferred = true;
-#endif
-
-            return new(destination, this.name);
-        }
-
-#if DEBUG
-        public override string ToString() => transferred ? expression.ToString() : $"{expression} {name}";
+        public override string ToString() => $"{expression} {name}";
 #endif
     }
 

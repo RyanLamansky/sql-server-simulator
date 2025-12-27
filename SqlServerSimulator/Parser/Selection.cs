@@ -54,29 +54,38 @@ internal sealed class Selection
 
         do
         {
-            expressions.Add(Expression.Parse(context));
-
             switch (context.Token)
             {
-                case Operator { Character: ',' }:
-                    continue;
+                case ReservedKeyword { Keyword: Keyword.From }:
+                    break;
 
+                case Operator { Character: ',' }:
+                    if (expressions.Count == 0)
+                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                    continue;
                 case Operator { Character: ')' }:
                     if (depth == 0)
                         throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                    goto ExitWhileTokenLoop;
 
-                    goto case null;
+                default:
+                    expressions.Add(Expression.Parse(context));
+                    break;
+            }
 
-                case null: // "Select" with no "From".
-                    return new(new(
-                        expressions,
-                        ApplyClauses([[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]])
-                        ));
+            switch (context.Token)
+            {
+                case null:
+                    goto ExitWhileTokenLoop;
 
-                case ReservedKeyword expectFrom:
-                    if (expectFrom.Keyword != Keyword.From)
-                        throw new NotSupportedException("Simulated selection processor expected a `from`.");
+                case Operator { Character: ',' }:
+                    continue;
 
+                case ReservedKeyword { Keyword: Keyword.As }:
+                    expressions[^1] = Expression.AssignName(expressions.Last(), context.GetNextRequired<StringToken>().Value);
+                    continue;
+
+                case ReservedKeyword { Keyword: Keyword.From }:
                     switch (context.GetNextRequired())
                     {
                         case StringToken tableName:
@@ -138,7 +147,11 @@ internal sealed class Selection
 
             throw new NotSupportedException($"Simulated selection processor doesn't know what to do with {context.Token}.");
         } while (context.GetNextOptional() is not null);
+    ExitWhileTokenLoop:
 
-        throw new NotSupportedException($"Simulated selection reached the end of the command before expected.");
+        return new(new(
+            expressions,
+            ApplyClauses([[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]])
+            ));
     }
 }
