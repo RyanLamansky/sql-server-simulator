@@ -33,6 +33,7 @@ public class SelectTests
     [TestMethod]
     [DataRow("select @p0", "p0", 5)]
     [DataRow("select @p0", "@p0", 6)]
+    [DataRow("select (@p0)", "p0", 7)]
     public void SelectParameterValue(string commandText, string name, object value)
     {
         var result = new Simulation()
@@ -44,6 +45,10 @@ public class SelectTests
     }
 
     [TestMethod]
+    [DataRow("1", 1)]
+    [DataRow("(1)", 1)]
+    [DataRow("(1) + 1", 2)]
+    [DataRow("(1) + (1)", 2)]
     [DataRow("1 + 1", 2)]
     [DataRow("1 - 1", 0)]
     [DataRow("-1", -1)]
@@ -73,7 +78,7 @@ public class SelectTests
     [DataRow("select 1 as [c]]d]", "c]d", 1)]
     [DataRow("select 1 as [e f]", "e f", 1)]
     [DataRow("select 1 + 1 as c", "c", 2)]
-    public void Expression(string commandText, string name, object value)
+    public void NamedExpression(string commandText, string name, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
 
@@ -229,15 +234,29 @@ public class SelectTests
     }
 
     [TestMethod]
-    public void TopParenthesizedConstantUnsorted()
+    [DataRow("1", new[] { 1 })]
+    [DataRow("0", new int[] { })]
+    [DataRow("(1)", new[] { 1 })]
+    [DataRow("(0)", new int[] { })]
+    public void TopConstantUnsorted(string topExpression, int[] expectedValues)
     {
-        CollectionAssert.AreEquivalent([1], [.. new Simulation()
-            .ExecuteReader("select top (1) 1")
+        CollectionAssert.AreEquivalent(expectedValues, [.. new Simulation()
+            .ExecuteReader($"select top {topExpression} 1")
             .EnumerateRecords()
             .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
+    }
 
-        CollectionAssert.AreEquivalent([], [.. new Simulation()
-            .ExecuteReader("select top (0) 1")
+    [TestMethod]
+    [DataRow("@p0", 1, new[] { 1 })]
+    [DataRow("(@p0)", 1, new[] { 1 })]
+    [DataRow("@p0", 0, new int[] { })]
+    [DataRow("(@p0)", 0, new int[] { })]
+    public void TopParameterizedUnsorted(string parameterExpression, int parameterValue, int[] expectedValues)
+    {
+        CollectionAssert.AreEquivalent(expectedValues, [.. new Simulation()
+            .CreateOpenConnection()
+            .CreateCommand($"select top {parameterExpression} 1", ("p0", parameterValue))
+            .ExecuteReader()
             .EnumerateRecords()
             .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
     }

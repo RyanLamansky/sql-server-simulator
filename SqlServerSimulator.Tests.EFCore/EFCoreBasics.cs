@@ -13,20 +13,28 @@ public class EFCoreBasics
 
         // Triggers JIT compilation of the most common path among all tests, improving the accuracy of their timings.
         // Also functions as a sanity check against the simulator being completely broken.
-        using var dbContext = new TestDbContext();
-
-        Assert.IsEmpty(dbContext.Rows.Select(x => x.Id).AsEnumerable());
-
-        Assert.AreEqual(0, await dbContext.SaveChangesAsync(context.CancellationToken));
+        using var dbContext = new TestDbContext(1);
+        _ = await dbContext.Rows.Select(x => x.Id).FirstOrDefaultAsync(context.CancellationToken);
     }
 
-    public static Simulation CreateDefaultSimulation()
+    public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
         var simulation = new Simulation();
         _ = simulation
             .CreateOpenConnection()
             .CreateCommand("create table Rows ( Id int )")
             .ExecuteNonQuery();
+
+        if (values.Length != 0)
+        {
+            using var context = new TestDbContext(simulation);
+            foreach (var value in values)
+            {
+                var row = new TestRow { Id = value };
+                _ = context.Rows.Add(row);
+                _ = context.SaveChanges();
+            }
+        }
 
         return simulation;
     }
@@ -40,8 +48,8 @@ public class EFCoreBasics
     {
         public Simulation Simulation { get; set; } = simulation;
 
-        public TestDbContext()
-            : this(CreateDefaultSimulation())
+        public TestDbContext(params ReadOnlySpan<int> values)
+            : this(CreateDefaultSimulation(values))
         {
         }
 
@@ -56,13 +64,7 @@ public class EFCoreBasics
     [TestMethod]
     public void InsertRowSync()
     {
-        using var context = new TestDbContext();
-
-        var row = new TestRow { Id = 1 };
-
-        _ = context.Rows.Add(row);
-
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(1);
     }
 
     /// <summary>
@@ -84,69 +86,48 @@ public class EFCoreBasics
     [TestMethod]
     public void RoundTrip()
     {
-        var simulation = CreateDefaultSimulation();
         const int storedValue = 3;
+        using var context = new TestDbContext(storedValue);
+        var receivedValue = context.Rows.Select(x => x.Id).AsEnumerable();
 
-        using (var context = new TestDbContext(simulation))
-        {
-            var row = new TestRow { Id = storedValue };
-
-            _ = context.Rows.Add(row);
-
-            _ = context.SaveChanges();
-        }
-
-        using (var context = new TestDbContext(simulation))
-        {
-            var receivedValue = context.Rows.Select(x => x.Id).AsEnumerable();
-
-            Assert.AreEqual(storedValue, receivedValue.FirstOrDefault());
-        }
+        Assert.AreEqual(storedValue, receivedValue.FirstOrDefault());
     }
 
     [TestMethod]
     public void SeparateInserts()
     {
-        var simulation = CreateDefaultSimulation();
         int[] storedValues = [2, 3];
-
-        using (var context = new TestDbContext(simulation))
-        {
-            foreach (var value in storedValues)
-            {
-                var row = new TestRow { Id = value };
-                _ = context.Rows.Add(row);
-                _ = context.SaveChanges();
-            }
-        }
-
-        using (var context = new TestDbContext(simulation))
-        {
-            CollectionAssert.AreEquivalent(storedValues, context.Rows.Select(x => x.Id).ToArray());
-        }
+        using var context = new TestDbContext(storedValues);
+        CollectionAssert.AreEquivalent(storedValues, context.Rows.Select(x => x.Id).ToArray());
     }
 
     [TestMethod]
     public void FirstOrDefault()
     {
-        var simulation = CreateDefaultSimulation();
         int[] storedValues = [4, 5];
+        using var context = new TestDbContext(storedValues);
+        var receivedValue = context.Rows.Select(x => x.Id);
+        // Without an OrderBy, we can't guarantee which of the two possibilities is returned.
+        CollectionAssert.Contains(storedValues, receivedValue.FirstOrDefault());
+    }
 
-        using (var context = new TestDbContext(simulation))
-        {
-            foreach (var value in storedValues)
-            {
-                var row = new TestRow { Id = value };
-                _ = context.Rows.Add(row);
-                _ = context.SaveChanges();
-            }
-        }
+    [TestMethod]
+    public void SingleOrDefault()
+    {
+        const int storedValue = 6;
+        using var context = new TestDbContext(storedValue);
+        var receivedValue = context.Rows.Select(x => x.Id);
+        // Without an OrderBy, we can't guarantee which of the two possibilities is returned.
+        Assert.AreEqual(storedValue, receivedValue.SingleOrDefault());
+    }
 
-        using (var context = new TestDbContext(simulation))
-        {
-            var receivedValue = context.Rows.Select(x => x.Id);
-            // Without an OrderBy, we can't guarantee which of the two possibilities is returned.
-            CollectionAssert.Contains(storedValues, receivedValue.FirstOrDefault());
-        }
+    [TestMethod]
+    public void Take()
+    {
+        int[] storedValues = [4, 5];
+        using var context = new TestDbContext(storedValues);
+        var receivedValue = context.Rows.Select(x => x.Id);
+        // Without an OrderBy, we can't guarantee which of the two possibilities is returned.
+        CollectionAssert.Contains(storedValues, receivedValue.Take(1).AsEnumerable().First());
     }
 }

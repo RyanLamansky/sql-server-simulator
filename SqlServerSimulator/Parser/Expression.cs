@@ -54,6 +54,10 @@ internal abstract class Expression
                 expression = Parse(context);
                 expression = new Subtract(new Value(0), expression);
                 break;
+            case Operator { Character: '(' }:
+                context.MoveNextRequired();
+                expression = new Parenthesized(Parse(context));
+                break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context.Token);
         }
@@ -84,7 +88,11 @@ internal abstract class Expression
                 case Operator { Character: '(' }:
                     {
                         if (expression is not Reference reference)
-                            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                        {
+                            expression = new Parenthesized(Parse(context));
+                            break;
+                        }
+
                         context.MoveNextRequired(); // Move past (
                         expression = ResolveBuiltIn(reference.Name, context);
                         context.MoveNextOptional(); // Move past )
@@ -114,6 +122,20 @@ internal abstract class Expression
 #if DEBUG
     public abstract override string ToString();
 #endif
+
+    /// <summary>
+    /// An expression that's wrapped in parentheses, potentially affecting the order of operations.
+    /// </summary>
+    private sealed class Parenthesized(Expression wrapped) : Expression
+    {
+        private readonly Expression wrapped = wrapped;
+
+        public override object? Run(Func<List<string>, object?> getColumnValue) => wrapped.Run(getColumnValue);
+
+#if DEBUG
+        public override string ToString() => $"( {wrapped} )";
+#endif
+    }
 
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {

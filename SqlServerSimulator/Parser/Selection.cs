@@ -27,19 +27,10 @@ internal sealed class Selection
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.Top })
         {
-            // SQL Server doesn't require outer parentheses.
-            // When Expression.Parse supports them, the checks for them here should be removed.
-            if (context.GetNextRequired<Operator>() is not { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
             context.MoveNextRequired();
 
             var resolvedExpression = Expression.Parse(context).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
             topCount = resolvedExpression is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
-
-            if (context.Token is not null and not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
-
-            context.MoveNextRequired();
         }
 
         List<Expression> expressions = [];
