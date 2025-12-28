@@ -59,6 +59,15 @@ public class SelectTests
     }
 
     [TestMethod]
+    public void BareAs()
+    {
+        var exception = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar("select as z"));
+        Assert.AreEqual("Incorrect syntax near the keyword 'as'.", exception.Message);
+    }
+
+    [TestMethod]
+    [DataRow("select 1", "", 1)]
+    [DataRow("select 1 c", "c", 1)]
     [DataRow("select 1 as c", "c", 1)]
     [DataRow("select 1 as [c]", "c", 1)]
     [DataRow("select 1 as [c]]d]", "c]d", 1)]
@@ -94,6 +103,7 @@ public class SelectTests
     }
 
     [TestMethod]
+    [DataRow("select name c from systypes", 34, 34, "c", "image")]
     [DataRow("select name as c from systypes", 34, 34, "c", "image")]
     [DataRow("select name as c from systypes as s", 34, 34, "c", "image")]
     [DataRow("select systypes.name from systypes", 34, 34, "name", "image")]

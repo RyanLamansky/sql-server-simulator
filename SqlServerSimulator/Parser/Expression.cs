@@ -102,7 +102,7 @@ internal abstract class Expression
     /// <param name="expression">The expression to wrap.</param>
     /// <param name="name">The name to assign.</param>
     /// <returns>The named expression.</returns>
-    public static Expression AssignName(Expression expression, string name) => new NamedExpression(expression, name);
+    public static Expression AssignName(Expression expression, Name name) => new NamedExpression(expression, name.Value);
 
     /// <summary>
     /// Runs the expression, returning its result.

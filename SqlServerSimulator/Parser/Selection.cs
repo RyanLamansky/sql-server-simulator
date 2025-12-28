@@ -59,6 +59,9 @@ internal sealed class Selection
                 case ReservedKeyword { Keyword: Keyword.From }:
                     break;
 
+                case ReservedKeyword { Keyword: not Keyword.Null } keyword:
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
+
                 case Operator { Character: ',' }:
                     if (expressions.Count == 0)
                         throw SimulatedSqlException.SyntaxErrorNear(context.Token);
@@ -81,14 +84,18 @@ internal sealed class Selection
                 case Operator { Character: ',' }:
                     continue;
 
+                case Name name:
+                    expressions[^1] = Expression.AssignName(expressions.Last(), name);
+                    continue;
+
                 case ReservedKeyword { Keyword: Keyword.As }:
-                    expressions[^1] = Expression.AssignName(expressions.Last(), context.GetNextRequired<StringToken>().Value);
+                    expressions[^1] = Expression.AssignName(expressions.Last(), context.GetNextRequired<Name>());
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
                     switch (context.GetNextRequired())
                     {
-                        case StringToken tableName:
+                        case Name tableName:
                             if (!context.Simulation.Tables.TryGetValue(tableName.Value, out var table) && !context.Simulation.SystemTables.Value.TryGetValue(tableName.Value, out table))
                                 throw SimulatedSqlException.InvalidObjectName(tableName);
 
