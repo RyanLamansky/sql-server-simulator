@@ -13,15 +13,21 @@ public class InsertTests
     );
 
     [TestMethod]
-    [DataRow("create table t ( v int );insert t values ( 1 )", 1)]
-    [DataRow("create table t ( v int );insert T values ( 1 )", 1)]
-    [DataRow("create table t ( v int );insert t ( v ) values ( 1 )", 1)]
-    [DataRow("create table t ( v int );insert t ( V ) values ( 1 )", 1)]
+    [DataRow("t values ( 1 )", 1)]
+    [DataRow("T values ( 1 )", 1)]
+    [DataRow("t ( v ) values ( 1 )", 1)]
+    [DataRow("t ( V ) values ( 1 )", 1)]
+    [DataRow("t values ( 1 ), ( 2 )", 2)]
     public void Insert(string commandText, int expectedRecordsAffected)
     {
-        var result = new Simulation()
+        var simulation = new Simulation();
+        _ = simulation
             .CreateOpenConnection()
-            .CreateCommand(commandText)
+            .CreateCommand("create table t ( v int )")
+            .ExecuteNonQuery();
+
+        var result = simulation
+            .CreateCommand($"insert {commandText}")
             .ExecuteNonQuery();
 
         Assert.AreEqual(expectedRecordsAffected, result);

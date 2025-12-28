@@ -13,7 +13,7 @@ public class EFCoreBasics
 
         // Triggers JIT compilation of the most common path among all tests, improving the accuracy of their timings.
         // Also functions as a sanity check against the simulator being completely broken.
-        using var dbContext = new TestDbContext(1);
+        using var dbContext = new TestDbContext(1, 2);
         _ = await dbContext.Rows.Select(x => x.Id).FirstOrDefaultAsync(context.CancellationToken);
     }
 
@@ -32,8 +32,8 @@ public class EFCoreBasics
             {
                 var row = new TestRow { Id = value };
                 _ = context.Rows.Add(row);
-                _ = context.SaveChanges();
             }
+            _ = context.SaveChanges();
         }
 
         return simulation;
@@ -94,7 +94,7 @@ public class EFCoreBasics
     }
 
     [TestMethod]
-    public void SeparateInserts()
+    public void MultiRowInsert()
     {
         int[] storedValues = [2, 3];
         using var context = new TestDbContext(storedValues);
@@ -114,10 +114,9 @@ public class EFCoreBasics
     [TestMethod]
     public void SingleOrDefault()
     {
-        const int storedValue = 6;
+        const int storedValue = 6; // Until `Where` is supported, this won't pass if multiple rows exist.
         using var context = new TestDbContext(storedValue);
         var receivedValue = context.Rows.Select(x => x.Id);
-        // Without an OrderBy, we can't guarantee which of the two possibilities is returned.
         Assert.AreEqual(storedValue, receivedValue.SingleOrDefault());
     }
 

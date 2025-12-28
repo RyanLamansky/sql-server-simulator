@@ -175,21 +175,24 @@ public sealed class Simulation
                             if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
                                 break;
 
-                            if (context.GetNextRequired() is not Operator { Character: '(' })
-                                break;
+                            var sourceRows = new List<Token[]>();
 
-                            var sourceValues = new List<Token>();
-                            while (context.GetNextRequired() is not Operator { Character: ')' })
+                            do
                             {
-                                sourceValues.Add(context.Token);
-                            }
+                                if (context.GetNextRequired<Operator>() is not { Character: '(' })
+                                    throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
-                            if (context.Token is not Operator { Character: ')' })
-                                throw new NotSupportedException("Simulated command processor expected a closing parentheses.");
+                                var sourceValues = new List<Token>();
+                                while (context.GetNextRequired() is not Operator { Character: ')' })
+                                    sourceValues.Add(context.Token);
 
-                            destinationTable.ReceiveData(destinationColumns, [[.. sourceValues]], context.GetVariableValue);
+                                sourceRows.Add([.. sourceValues]);
 
-                            yield return new SimulatedNonQuery(sourceValues.Count);
+                            } while (context.GetNextOptional() is Operator { Character: ',' });
+
+                            destinationTable.ReceiveData(destinationColumns, sourceRows, context.GetVariableValue);
+
+                            yield return new SimulatedNonQuery(sourceRows.Count);
                             continue;
                     }
                     break;
