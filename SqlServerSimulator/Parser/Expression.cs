@@ -59,7 +59,7 @@ internal abstract class Expression
                 expression = new Parenthesized(Parse(context));
                 break;
             default:
-                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
         while (true)
@@ -78,7 +78,7 @@ internal abstract class Expression
                 case Operator { Character: '.' }:
                     {
                         if (expression is not Reference reference)
-                            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
 
                         reference.AddMultiPartComponent(context.GetNextRequired<Name>());
                     }

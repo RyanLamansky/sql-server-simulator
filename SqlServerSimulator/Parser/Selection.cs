@@ -55,11 +55,11 @@ internal sealed class Selection
 
                 case Operator { Character: ',' }:
                     if (expressions.Count == 0)
-                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
                     continue;
                 case Operator { Character: ')' }:
                     if (depth == 0)
-                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
                     goto ExitWhileTokenLoop;
 
                 default:
@@ -114,7 +114,7 @@ internal sealed class Selection
 
                         case Operator { Character: '(' }:
                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
-                                throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
 
                             {
                                 var derived = Selection.Parse(context, depth + 1).Results;
@@ -140,10 +140,10 @@ internal sealed class Selection
                             }
                     }
 
-                    throw new NotSupportedException($"Simulated selection processor expected a source table, found {context.Token}.");
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
             }
 
-            throw new NotSupportedException($"Simulated selection processor doesn't know what to do with {context.Token}.");
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
 

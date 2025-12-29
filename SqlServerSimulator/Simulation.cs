@@ -102,7 +102,7 @@ public sealed class Simulation
                                                     {
                                                         case Keyword.Not:
                                                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                                                                throw new NotSupportedException($"Simulated command processor doesn't know how to handle column definition token {context.Token}.");
+                                                                throw SimulatedSqlException.SyntaxErrorNear(context);
 
                                                             nullable = false;
                                                             break;
@@ -110,7 +110,7 @@ public sealed class Simulation
                                                             nullable = true;
                                                             break;
                                                         default:
-                                                            throw new NotSupportedException($"Simulated command processor doesn't know how handle column definition token {context.Token}.");
+                                                            throw SimulatedSqlException.SyntaxErrorNear(context);
                                                     }
                                                 }
                                                 else
@@ -180,7 +180,7 @@ public sealed class Simulation
                             do
                             {
                                 if (context.GetNextRequired<Operator>() is not { Character: '(' })
-                                    throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                                    throw SimulatedSqlException.SyntaxErrorNear(context);
 
                                 var sourceValues = new List<Token>();
                                 while (context.GetNextRequired() is not Operator { Character: ')' })
@@ -198,7 +198,7 @@ public sealed class Simulation
                     break;
 
                 default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
             }
         } // while (tokens.TryMoveNext(out var token))
     }
