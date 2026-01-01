@@ -1,6 +1,21 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <Title>SQL Server Simulator</Title>
+    <AssemblyTitle>SQL Server Simulator</AssemblyTitle>
+    <Authors>Ryan Lamansky</Authors>
+    <Description>A simulated SQL Server that runs inside your .NET application.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageReleaseNotes>SQL Server feature compatiblity is limited, see the README for more information.</PackageReleaseNotes>
+    <PackageProjectUrl>https://github.com/RyanLamansky/sql-server-simulator</PackageProjectUrl>
+    <Copyright>Copyright © Ryan Lamansky. All rights reserved.</Copyright>
+    <PackageTags>SqlServer SQL</PackageTags>
+    <RepositoryUrl>https://github.com/RyanLamansky/sql-server-simulator</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <GenerateDocumentationFile>True</GenerateDocumentationFile>
@@ -16,10 +31,8 @@
 
   <ItemGroup>
     <None Include="..\.editorconfig" Link=".editorconfig" />
-    <None Include="..\README.md">
-      <Pack>True</Pack>
-      <PackagePath>\</PackagePath>
-    </None>
+    <None Include="../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../README.md" Pack="true" PackagePath="/"/>
   </ItemGroup>
 
 </Project>
