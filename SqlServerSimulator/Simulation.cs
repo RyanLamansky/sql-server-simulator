@@ -36,9 +36,6 @@ public sealed class Simulation
         {
             switch (context.Token)
             {
-                case Comment:
-                    continue;
-
                 case Operator { Character: ';' }:
                     continue;
 

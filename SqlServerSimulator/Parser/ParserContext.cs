@@ -121,11 +121,21 @@ internal sealed class ParserContext(SimulatedDbCommand command)
             throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 
+    /// <summary>
+    /// Updates <see cref="Token"/> with the next usable token in <see cref="commandText"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Whitespace"/> and <see cref="Comment"/> tokens are skipped.
+    /// <see cref="index"/> is updated to the position of the next token.
+    /// </remarks>
+    /// <returns>True if another token was found, otherwise false.</returns>
     private bool MoveNext()
     {
         while (Tokenizer.NextToken(commandText, ref index) is Token token)
         {
             if (token is Whitespace)
+                continue;
+            if (token is Comment)
                 continue;
 
 #if DEBUG

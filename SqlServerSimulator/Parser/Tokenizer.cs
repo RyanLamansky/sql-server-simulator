@@ -149,7 +149,7 @@ static class Tokenizer
         while (++index < command.Length)
         {
             if (command[index] == '*' && command.Length >= index + 2 && command[index + 1] == '/')
-                return new Comment(command, start, index += 2);
+                return new Comment(command, start, index++ - start);
         }
 
         throw SimulatedSqlException.MissingEndCommentMark();

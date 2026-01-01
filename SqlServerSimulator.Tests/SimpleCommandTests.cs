@@ -107,8 +107,23 @@ public class SimpleCommandTests
     }
 
     [TestMethod]
-    public void BlockComment()
+    [DataRow("/* */")]
+    [DataRow("/**/")]
+    [DataRow("/***/")]
+    [DataRow("/** **/")]
+    [DataRow("/*\r*/")]
+    [DataRow("/*\n*/")]
+    [DataRow("/*\r\n*/")]
+    public void BlockComment(string comment)
     {
-        AreEqual(-1, new Simulation().ExecuteNonQuery("/* */"));
+        IsNull(new Simulation().ExecuteScalar($"{comment}"));
+        AreEqual(1, new Simulation().ExecuteScalar<int>($"select 1 {comment}"));
+        AreEqual(2, new Simulation().ExecuteScalar<int>($"select 2{comment}"));
+        AreEqual(3, new Simulation().ExecuteScalar<int>($"{comment}select 3"));
+        AreEqual(4, new Simulation().ExecuteScalar<int>($"{comment} select 4"));
+        AreEqual(5, new Simulation().ExecuteScalar<int>($"select{comment}5"));
+        AreEqual(6, new Simulation().ExecuteScalar<int>($"select {comment}6"));
+        AreEqual(7, new Simulation().ExecuteScalar<int>($"select{comment} 7"));
+        AreEqual(8, new Simulation().ExecuteScalar<int>($"select {comment} 8"));
     }
 }
