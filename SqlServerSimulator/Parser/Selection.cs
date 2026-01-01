@@ -34,9 +34,23 @@ internal sealed class Selection
         }
 
         List<Expression> expressions = [];
+        List<BooleanExpression> excluders = [];
 
-        IEnumerable<object?[]> ApplyClauses(IEnumerable<object?[]> records)
+        IEnumerable<object?[]> ApplyClauses(IEnumerable<object?[]> records, Func<object?[], List<string>, object?> getColumnValueFromRow)
         {
+            records = records.Where(row =>
+            {
+                foreach (var excluder in excluders)
+                {
+                    if (!excluder.Run(columnName => getColumnValueFromRow(row, columnName)))
+                        return false;
+                }
+
+                return true;
+            }).Select<object?[], object?[]>(row =>
+                [.. expressions.Select(x => x.Run(columnName => getColumnValueFromRow(row, columnName)))]
+            );
+
             if (topCount is not null)
                 records = records.Take(topCount.GetValueOrDefault());
 
@@ -105,11 +119,11 @@ internal sealed class Selection
 
                             return new(new(
                                 expressions,
-                                ApplyClauses(table.Rows.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
+                                ApplyClauses(table.Rows, (row, columnName) =>
                                 {
                                     var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
                                     return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
-                                }))]))
+                                })
                                 ));
 
                         case Operator { Character: '(' }:
@@ -131,16 +145,21 @@ internal sealed class Selection
 
                                 return new(new(
                                     expressions,
-                                    ApplyClauses(derived.Select<object?[], object?[]>(row => [..expressions.Select(x => x.Run(columnName =>
+                                    ApplyClauses(derived.records, (row, columnName) =>
                                     {
                                         var columnIndex = Array.FindIndex(derived.columnNames, name => Collation.Default.Equals(name, columnName.Last()));
                                         return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
-                                    }))]))
+                                    })
                                     ));
                             }
                     }
 
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+
+                case ReservedKeyword { Keyword: Keyword.Where }:
+                    context.MoveNextRequired();
+                    excluders.Add(BooleanExpression.Parse(context));
+                    continue;
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -149,7 +168,7 @@ internal sealed class Selection
 
         return new(new(
             expressions,
-            ApplyClauses([[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]])
+            ApplyClauses([[.. expressions.Select(x => x.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))]], (row, columnName) => throw new NotSupportedException())
             ));
     }
 }
