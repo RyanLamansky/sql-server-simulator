@@ -74,6 +74,14 @@ internal abstract class Expression
                     context.MoveNextRequired();
                     expression = new Subtract(expression, Parse(context));
                     break;
+                case Operator { Character: '*' }:
+                    context.MoveNextRequired();
+                    expression = new Multiply(expression, Parse(context));
+                    break;
+                case Operator { Character: '/' }:
+                    context.MoveNextRequired();
+                    expression = new Divide(expression, Parse(context));
+                    break;
 
                 case Operator { Character: '.' }:
                     {
@@ -244,6 +252,40 @@ internal abstract class Expression
             var rightValue = right.Run(getColumnValue);
 
             return (int)leftValue! - (int)rightValue!; // TODO: Handle varied input types here.
+        }
+
+#if DEBUG
+        public override string ToString() => $"{left} + {right}";
+#endif
+    }
+
+    public sealed class Multiply(Expression left, Expression right) : Expression
+    {
+        private readonly Expression left = left, right = right;
+
+        public override object? Run(Func<List<string>, object?> getColumnValue)
+        {
+            var leftValue = left.Run(getColumnValue);
+            var rightValue = right.Run(getColumnValue);
+
+            return (int)leftValue! * (int)rightValue!; // TODO: Handle varied input types here.
+        }
+
+#if DEBUG
+        public override string ToString() => $"{left} + {right}";
+#endif
+    }
+
+    public sealed class Divide(Expression left, Expression right) : Expression
+    {
+        private readonly Expression left = left, right = right;
+
+        public override object? Run(Func<List<string>, object?> getColumnValue)
+        {
+            var leftValue = left.Run(getColumnValue);
+            var rightValue = right.Run(getColumnValue);
+
+            return (int)leftValue! / (int)rightValue!; // TODO: Handle varied input types here.
         }
 
 #if DEBUG

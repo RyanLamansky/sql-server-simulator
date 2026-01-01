@@ -55,6 +55,9 @@ public class SelectTests
     [DataRow("- 1", -1)]
     [DataRow("+1", 1)]
     [DataRow("+ 1", 1)]
+    [DataRow("2 * 2", 4)]
+    [DataRow("2 / 2", 1)]
+    [DataRow("2 / 1", 2)]
     public void Expression(string commandText, object value)
     {
         using var reader = new Simulation().ExecuteReader($"select {commandText}");

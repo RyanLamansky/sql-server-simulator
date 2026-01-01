@@ -23,6 +23,7 @@ static class Tokenizer
             >= '0' and <= '9' => ParseNumeric(command, ref index),
             '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
             '-' => ParseMinusOrComment(command, ref index),
+            '/' => ParseForwardSlashOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
             '+' or '*' or '(' or ')' or ',' or '.' or ';' or '=' => new Operator(command, index),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
@@ -132,6 +133,26 @@ static class Tokenizer
         }
 
         return new Comment(command, start, --index);
+    }
+
+    private static Token ParseForwardSlashOrComment(string command, ref int index)
+    {
+        var start = index;
+        if (++index == command.Length)
+            return new Operator(command, --index);
+        if (command[index] != '*')
+        {
+            index--;
+            return new Operator(command, index);
+        }
+
+        while (++index < command.Length)
+        {
+            if (command[index] == '*' && command.Length >= index + 2 && command[index + 1] == '/')
+                return new Comment(command, start, index += 2);
+        }
+
+        throw SimulatedSqlException.MissingEndCommentMark();
     }
 
     private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)

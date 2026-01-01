@@ -105,4 +105,10 @@ public class SimpleCommandTests
 
         IsFalse(reader.Read());
     }
+
+    [TestMethod]
+    public void BlockComment()
+    {
+        AreEqual(-1, new Simulation().ExecuteNonQuery("/* */"));
+    }
 }
