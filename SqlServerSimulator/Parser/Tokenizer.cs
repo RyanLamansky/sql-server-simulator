@@ -122,17 +122,7 @@ static class Tokenizer
             return new Operator(command, index);
         }
 
-        while (++index < command.Length)
-        {
-            switch (command[index])
-            {
-                case '\r':
-                case '\n':
-                    return new Comment(command, start, --index);
-            }
-        }
-
-        return new Comment(command, start, --index);
+        return Comment.ParseSingleLine(start, ref index, command);
     }
 
     private static Token ParseForwardSlashOrComment(string command, ref int index)
@@ -146,13 +136,7 @@ static class Tokenizer
             return new Operator(command, index);
         }
 
-        while (++index < command.Length)
-        {
-            if (command[index] == '*' && command.Length >= index + 2 && command[index + 1] == '/')
-                return new Comment(command, start, index++ - start);
-        }
-
-        throw SimulatedSqlException.MissingEndCommentMark();
+        return Comment.ParseBlock(start, ref index, command);
     }
 
     private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)

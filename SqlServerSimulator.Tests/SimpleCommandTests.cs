@@ -114,6 +114,7 @@ public class SimpleCommandTests
     [DataRow("/*\r*/")]
     [DataRow("/*\n*/")]
     [DataRow("/*\r\n*/")]
+    [DataRow("/* /* */ */")]
     public void BlockComment(string comment)
     {
         IsNull(new Simulation().ExecuteScalar($"{comment}"));
@@ -125,5 +126,12 @@ public class SimpleCommandTests
         AreEqual(6, new Simulation().ExecuteScalar<int>($"select {comment}6"));
         AreEqual(7, new Simulation().ExecuteScalar<int>($"select{comment} 7"));
         AreEqual(8, new Simulation().ExecuteScalar<int>($"select {comment} 8"));
+    }
+
+    [TestMethod]
+    public void MissingEndCommentMark()
+    {
+        var x = Throws<DbException>(() => new Simulation().ExecuteScalar("/*"));
+        AreEqual("Missing end comment mark '*/'.", x.Message);
     }
 }
