@@ -82,6 +82,18 @@ internal abstract class Expression
                     context.MoveNextRequired();
                     expression = new Divide(expression, Parse(context));
                     break;
+                case Operator { Character: '&' }:
+                    context.MoveNextRequired();
+                    expression = new BitwiseAnd(expression, Parse(context));
+                    break;
+                case Operator { Character: '|' }:
+                    context.MoveNextRequired();
+                    expression = new BitwiseOr(expression, Parse(context));
+                    break;
+                case Operator { Character: '^' }:
+                    context.MoveNextRequired();
+                    expression = new BitwiseExclusiveOr(expression, Parse(context));
+                    break;
 
                 case Operator { Character: '.' }:
                     {
@@ -225,71 +237,82 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Add(Expression left, Expression right) : Expression
+    public abstract class TwoSidedExpression(Expression left, Expression right) : Expression
     {
         private readonly Expression left = left, right = right;
 
-        public override object? Run(Func<List<string>, object?> getColumnValue)
-        {
-            var leftValue = left.Run(getColumnValue);
-            var rightValue = right.Run(getColumnValue);
+        public sealed override object? Run(Func<List<string>, object?> getColumnValue)
+            => Run(left.Run(getColumnValue), right.Run(getColumnValue));
 
-            return (int)leftValue! + (int)rightValue!; // TODO: Handle varied input types here.
-        }
+        protected abstract object? Run(object? left, object? right);
 
 #if DEBUG
-        public override string ToString() => $"{left} + {right}";
+        protected abstract char Operator { get; }
+
+        public sealed override string ToString() => $"{left} {Operator} {right}";
 #endif
     }
 
-    public sealed class Subtract(Expression left, Expression right) : Expression
+    public sealed class Add(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
-        private readonly Expression left = left, right = right;
-
-        public override object? Run(Func<List<string>, object?> getColumnValue)
-        {
-            var leftValue = left.Run(getColumnValue);
-            var rightValue = right.Run(getColumnValue);
-
-            return (int)leftValue! - (int)rightValue!; // TODO: Handle varied input types here.
-        }
+        protected override object? Run(object? left, object? right) => (int)left! + (int)right!;
 
 #if DEBUG
-        public override string ToString() => $"{left} + {right}";
+        protected override char Operator => '+';
 #endif
     }
 
-    public sealed class Multiply(Expression left, Expression right) : Expression
+    public sealed class Subtract(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
-        private readonly Expression left = left, right = right;
-
-        public override object? Run(Func<List<string>, object?> getColumnValue)
-        {
-            var leftValue = left.Run(getColumnValue);
-            var rightValue = right.Run(getColumnValue);
-
-            return (int)leftValue! * (int)rightValue!; // TODO: Handle varied input types here.
-        }
+        protected override object? Run(object? left, object? right) => (int)left! - (int)right!;
 
 #if DEBUG
-        public override string ToString() => $"{left} + {right}";
+        protected override char Operator => '-';
 #endif
     }
 
-    public sealed class Divide(Expression left, Expression right) : Expression
+    public sealed class Multiply(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
-        private readonly Expression left = left, right = right;
-
-        public override object? Run(Func<List<string>, object?> getColumnValue)
-        {
-            var leftValue = left.Run(getColumnValue);
-            var rightValue = right.Run(getColumnValue);
-
-            return (int)leftValue! / (int)rightValue!; // TODO: Handle varied input types here.
-        }
+        protected override object? Run(object? left, object? right) => (int)left! * (int)right!;
 
 #if DEBUG
-        public override string ToString() => $"{left} + {right}";
+        protected override char Operator => '*';
+#endif
+    }
+
+    public sealed class Divide(Expression left, Expression right) : TwoSidedExpression(left, right)
+    {
+        protected override object? Run(object? left, object? right) => (int)left! / (int)right!;
+
+#if DEBUG
+        protected override char Operator => '/';
+#endif
+    }
+
+    public sealed class BitwiseAnd(Expression left, Expression right) : TwoSidedExpression(left, right)
+    {
+        protected override object? Run(object? left, object? right) => (int)left! & (int)right!;
+
+#if DEBUG
+        protected override char Operator => '&';
+#endif
+    }
+
+    public sealed class BitwiseOr(Expression left, Expression right) : TwoSidedExpression(left, right)
+    {
+        protected override object? Run(object? left, object? right) => (int)left! | (int)right!;
+
+#if DEBUG
+        protected override char Operator => '|';
+#endif
+    }
+
+    public sealed class BitwiseExclusiveOr(Expression left, Expression right) : TwoSidedExpression(left, right)
+    {
+        protected override object? Run(object? left, object? right) => (int)left! ^ (int)right!;
+
+#if DEBUG
+        protected override char Operator => '^';
 #endif
     }
 

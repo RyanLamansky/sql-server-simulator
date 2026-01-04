@@ -25,7 +25,7 @@ static class Tokenizer
             '-' => ParseMinusOrComment(command, ref index),
             '/' => ParseForwardSlashOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
-            '+' or '*' or '(' or ')' or ',' or '.' or ';' or '=' => new Operator(command, index),
+            '+' or '*' or '(' or ')' or ',' or '.' or ';' or '=' or '&' or '|' or '^' => new Operator(command, index),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
