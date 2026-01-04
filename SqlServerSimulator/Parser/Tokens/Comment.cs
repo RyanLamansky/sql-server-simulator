@@ -4,13 +4,16 @@ sealed class Comment : Token
 {
     private Comment(string command, int index, int length) : base(command, index, length)
     {
+        System.Diagnostics.Debug.Assert(length >= 2);
+        System.Diagnostics.Debug.Assert(command[index] is '/' or '-' && command[index + 1] is '*' or '-');
+        System.Diagnostics.Debug.Assert(command[index] is not '/' || length >= 4);
     }
 
     /// <summary>
     /// Parses a single-line comment (`-- ...`) where the initial `--` has already been consumed.
     /// </summary>
-    /// <param name="start">The position of the opening `/`.</param>
-    /// <param name="index">Initially after the opening `*`, updated to just after the closing `/`.</param>
+    /// <param name="start">The position of the `--`.</param>
+    /// <param name="index">Initially after the opening `--`, updated to just after the end of the line.</param>
     /// <param name="command">The raw command to parse.</param>
     /// <returns>A <see cref="Comment"/>.</returns>
     public static Comment ParseSingleLine(int start, ref int index, string command)
@@ -21,11 +24,13 @@ sealed class Comment : Token
             {
                 case '\r':
                 case '\n':
-                    return new Comment(command, start, --index);
+                    return new Comment(command, start, index-- - start);
             }
         }
 
-        return new Comment(command, start, --index);
+        index--;
+
+        return new Comment(command, start, 2);
     }
 
     /// <summary>

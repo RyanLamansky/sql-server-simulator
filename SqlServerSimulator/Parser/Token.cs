@@ -14,7 +14,10 @@ abstract class Token
 
     private protected Token(string command, int index, int length)
     {
+        System.Diagnostics.Debug.Assert(index >= 0);
+        System.Diagnostics.Debug.Assert(length > 0);
         System.Diagnostics.Debug.Assert(index + length <= command.Length);
+
         this.command = command;
         this.index = index;
         this.length = length;

@@ -27,83 +27,45 @@ public class SimpleCommandTests
     [TestMethod]
     public void EmptyCommand()
     {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand("");
-
-        var x = Throws<InvalidOperationException>(command.ExecuteReader);
+        var x = Throws<InvalidOperationException>(new Simulation().CreateCommand("").ExecuteReader);
         AreEqual("ExecuteReader: CommandText property has not been initialized", x.Message);
     }
 
     [TestMethod]
     public void SpaceCommand()
     {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand(" ");
-        using var reader = command.ExecuteReader();
-
-        IsFalse(reader.Read());
+        IsFalse(new Simulation().ExecuteReader(" ").Read());
     }
 
     [TestMethod]
     public void IncompleteSingleLineCommentCommand()
     {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand("-");
-        _ = Throws<DbException>(command.ExecuteReader);
+        _ = Throws<DbException>(() => new Simulation().ExecuteReader("-"));
     }
 
     [TestMethod]
-    public void SingleLineEmptyCommentCommand()
+    [DataRow("--")]
+    [DataRow("--Test")]
+    [DataRow("--Test \n")]
+    [DataRow("--Test \r")]
+    [DataRow("--Test \r\n")]
+    [DataRow("--Test\n")]
+    [DataRow("--Test\r")]
+    [DataRow("--Test\r\n")]
+    public void LineComment(string comment)
     {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand("--");
-        using var reader = command.ExecuteReader();
-
-        IsFalse(reader.Read());
-    }
-
-    [TestMethod]
-    public void SingleLineCommentCommand()
-    {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand("-- Test");
-        using var reader = command.ExecuteReader();
-
-        IsFalse(reader.Read());
-    }
-
-    [TestMethod]
-    public void SingleLineCommentWithNewlineCommand()
-    {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand("-- Test\n");
-        using var reader = command.ExecuteReader();
-
-        IsFalse(reader.Read());
-    }
-
-    [TestMethod]
-    public void SingleLineCommentWithCarriageReturnCommand()
-    {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-
-        using var command = connection.CreateCommand("-- Test\r");
-        using var reader = command.ExecuteReader();
-
-        IsFalse(reader.Read());
+        IsNull(new Simulation().ExecuteScalar($"{comment}"));
+        AreEqual(1, new Simulation().ExecuteScalar<int>($"select 1 {comment}"));
+        AreEqual(2, new Simulation().ExecuteScalar<int>($"select 2{comment}"));
+        AreEqual(3, new Simulation().ExecuteScalar<int>($"select 3\n{comment}"));
+        AreEqual(4, new Simulation().ExecuteScalar<int>($"select 4 \n{comment}"));
+        AreEqual(5, new Simulation().ExecuteScalar<int>($"select 5\r{comment}"));
+        AreEqual(6, new Simulation().ExecuteScalar<int>($"select 6 \r{comment}"));
+        AreEqual(7, new Simulation().ExecuteScalar<int>($"select 7\r\n{comment}"));
+        AreEqual(8, new Simulation().ExecuteScalar<int>($"select 8 \r\n{comment}"));
+        AreEqual(9, new Simulation().ExecuteScalar<int>($"{comment}\nselect 9"));
+        AreEqual(10, new Simulation().ExecuteScalar<int>($"{comment}\rselect 10"));
+        AreEqual(11, new Simulation().ExecuteScalar<int>($"{comment}\r\nselect 11"));
     }
 
     [TestMethod]
