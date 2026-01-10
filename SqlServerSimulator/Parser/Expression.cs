@@ -38,7 +38,7 @@ internal abstract class Expression
         switch (context.Token)
         {
             case Numeric number:
-                expression = new Value(number);
+                expression = new Value(number.Value);
                 break;
             case AtPrefixedString atPrefixed:
                 expression = new Value(atPrefixed, context);
@@ -59,7 +59,7 @@ internal abstract class Expression
             case Operator { Character: '-' }:
                 context.MoveNextRequired();
                 expression = Parse(context);
-                expression = new Subtract(new Value(0), expression);
+                expression = new Subtract(new Value(new DataValue(0, DataType.BuiltInDbInt32)), expression);
                 break;
             case Operator { Character: '(' }:
                 context.MoveNextRequired();
@@ -144,7 +144,7 @@ internal abstract class Expression
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
     /// <returns>The result of the expression.</returns>
-    public abstract object? Run(Func<List<string>, object?> getColumnValue);
+    public abstract DataValue Run(Func<List<string>, DataValue> getColumnValue);
 
 #if DEBUG
     public abstract override string ToString();
@@ -157,7 +157,7 @@ internal abstract class Expression
     {
         private readonly Expression wrapped = wrapped;
 
-        public override object? Run(Func<List<string>, object?> getColumnValue) => wrapped.Run(getColumnValue);
+        public override DataValue Run(Func<List<string>, DataValue> getColumnValue) => wrapped.Run(getColumnValue);
 
 #if DEBUG
         public override string ToString() => $"( {wrapped} )";
@@ -197,7 +197,7 @@ internal abstract class Expression
 
         public override byte Precedence => expression.Precedence;
 
-        public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
+        public override DataValue Run(Func<List<string>, DataValue> getColumnValue) => this.expression.Run(getColumnValue);
 
 #if DEBUG
         public override string ToString() => $"{expression} {name}";
@@ -209,18 +209,13 @@ internal abstract class Expression
     /// </summary>
     private sealed class Value : Expression
     {
-        private readonly object? value;
+        private readonly DataValue value;
 
         public Value()
         {
         }
 
-        public Value(object? value) => this.value = value;
-
-        public Value(Numeric value)
-            : this(value.Value)
-        {
-        }
+        public Value(DataValue value) => this.value = value;
 
         public Value(AtPrefixedString atPrefixed, ParserContext context)
         {
@@ -232,17 +227,17 @@ internal abstract class Expression
             switch (doubleAtPrefixedString.Parse())
             {
                 case AtAtKeyword.Version:
-                    this.value = "SQL Server Simulator";
+                    this.value = new("SQL Server Simulator", DataType.BuiltInDbString);
                     return;
             }
 
             throw new NotSupportedException($"Simulator doesn't recognize {doubleAtPrefixedString}.");
         }
 
-        public override object? Run(Func<List<string>, object?> getColumnValue) => value;
+        public override DataValue Run(Func<List<string>, DataValue> getColumnValue) => value;
 
 #if DEBUG
-        public override string ToString() => value?.ToString() ?? "null";
+        public override string ToString() => value.Value?.ToString() ?? "null";
 #endif
     }
 
@@ -259,93 +254,92 @@ internal abstract class Expression
             return rightTwo;
         }
 
-        public sealed override object? Run(Func<List<string>, object?> getColumnValue)
+        public sealed override DataValue Run(Func<List<string>, DataValue> getColumnValue)
             => Run(left.Run(getColumnValue), right.Run(getColumnValue));
 
-        protected abstract object? Run(object? left, object? right);
-
-#if DEBUG
+        protected abstract DataValue Run(DataValue left, DataValue right);
         protected abstract char Operator { get; }
 
+#if DEBUG
         public sealed override string ToString() => $"{left} {Operator} {right}";
 #endif
     }
 
-    private sealed class Add(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private abstract class MathExpression(Expression left, Expression right) : TwoSidedExpression(left, right)
+    {
+        protected abstract DataValue Run(DataType.NumericCompatibleDataType common, DataValue left, DataValue right);
+
+        protected sealed override DataValue Run(DataValue left, DataValue right) => Run(DataType.CommonNumeric(left, right, this.Operator), left, right);
+    }
+
+    private sealed class Add(Expression left, Expression right) : MathExpression(left, right)
     {
         public override byte Precedence => 3;
 
-        protected override object? Run(object? left, object? right) => (int)left! + (int)right!;
+        protected override DataValue Run(DataType.NumericCompatibleDataType common, DataValue left, DataValue right) => common.Add(left, right);
 
-#if DEBUG
         protected override char Operator => '+';
-#endif
     }
 
-    private sealed class Subtract(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Subtract(Expression left, Expression right) : MathExpression(left, right)
     {
         public override byte Precedence => 3;
 
-        protected override object? Run(object? left, object? right) => (int)left! - (int)right!;
+        protected override DataValue Run(DataType.NumericCompatibleDataType common, DataValue left, DataValue right) => common.Subtract(left, right);
 
-#if DEBUG
         protected override char Operator => '-';
-#endif
     }
 
-    private sealed class Multiply(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Multiply(Expression left, Expression right) : MathExpression(left, right)
     {
         public override byte Precedence => 2;
 
-        protected override object? Run(object? left, object? right) => (int)left! * (int)right!;
+        protected override DataValue Run(DataType.NumericCompatibleDataType common, DataValue left, DataValue right) => common.Multiply(left, right);
 
-#if DEBUG
         protected override char Operator => '*';
-#endif
     }
 
-    private sealed class Divide(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Divide(Expression left, Expression right) : MathExpression(left, right)
     {
         public override byte Precedence => 2;
 
-        protected override object? Run(object? left, object? right) => (int)left! / (int)right!;
+        protected override DataValue Run(DataType.NumericCompatibleDataType common, DataValue left, DataValue right) => common.Divide(left, right);
 
-#if DEBUG
         protected override char Operator => '/';
-#endif
     }
 
-    private sealed class BitwiseAnd(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private abstract class BitwiseExpression(Expression left, Expression right) : TwoSidedExpression(left, right)
+    {
+        protected abstract DataValue Run(DataType.BitwiseCompatibleDataType common, DataValue left, DataValue right);
+
+        protected sealed override DataValue Run(DataValue left, DataValue right) => Run(DataType.CommonInteger(left, right, this.Operator), left, right);
+    }
+
+    private sealed class BitwiseAnd(Expression left, Expression right) : BitwiseExpression(left, right)
     {
         public override byte Precedence => 3;
 
-        protected override object? Run(object? left, object? right) => (int)left! & (int)right!;
+        protected override DataValue Run(DataType.BitwiseCompatibleDataType common, DataValue left, DataValue right) => common.BitwiseAnd(left, right);
 
-#if DEBUG
         protected override char Operator => '&';
-#endif
     }
 
-    private sealed class BitwiseOr(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class BitwiseOr(Expression left, Expression right) : BitwiseExpression(left, right)
     {
         public override byte Precedence => 3;
 
-        protected override object? Run(object? left, object? right) => (int)left! | (int)right!;
+        protected override DataValue Run(DataType.BitwiseCompatibleDataType common, DataValue left, DataValue right) => common.BitwiseOr(left, right);
 
-#if DEBUG
         protected override char Operator => '|';
-#endif
     }
 
-    private sealed class BitwiseExclusiveOr(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class BitwiseExclusiveOr(Expression left, Expression right) : BitwiseExpression(left, right)
     {
         public override byte Precedence => 3;
 
-        protected override object? Run(object? left, object? right) => (int)left! ^ (int)right!;
+        protected override DataValue Run(DataType.BitwiseCompatibleDataType common, DataValue left, DataValue right) => common.BitwiseExclusiveOr(left, right);
 
-#if DEBUG
         protected override char Operator => '^';
-#endif
     }
 
     private sealed class Reference(Name name) : Expression
@@ -356,7 +350,7 @@ internal abstract class Expression
 
         public void AddMultiPartComponent(Name name) => this.name.Add(name.Value);
 
-        public override object? Run(Func<List<string>, object?> getColumnValue) => getColumnValue(this.name);
+        public override DataValue Run(Func<List<string>, DataValue> getColumnValue) => getColumnValue(this.name);
 
 #if DEBUG
         public override string ToString() => string.Join('.', name);
@@ -370,12 +364,11 @@ internal abstract class Expression
     {
         private readonly Expression source = Parse(context);
 
-        public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
+        public override DataValue Run(Func<List<string>, DataValue> getColumnValue)
         {
-            null => null,
-            int => 4,
-            _ => throw new NotSupportedException($"Simulation unable to to run DATALENGTH function on the provided expression."),
-        };
+            var value = source.Run(getColumnValue);
+            return value.Value is null ? default : new(value.Type.DataLength(value));
+        }
 
 #if DEBUG
         public override string ToString() => $"DATALENGTH({source})";
@@ -389,12 +382,17 @@ internal abstract class Expression
     {
         private readonly Expression source = Parse(context);
 
-        public override object? Run(Func<List<string>, object?> getColumnValue) => source.Run(getColumnValue) switch
+        public override DataValue Run(Func<List<string>, DataValue> getColumnValue)
         {
-            null => null,
-            int value => Math.Abs(value),
-            _ => throw new NotSupportedException($"Simulation unable to to run DATALENGTH function on the provided expression."),
-        };
+            var value = source.Run(getColumnValue);
+
+            return new(value.Value switch
+            {
+                null => value.Value,
+                int v => Math.Abs(v),
+                _ => throw new NotSupportedException($"Simulation unable to to run ABS function on the provided expression."),
+            }, value.Type);
+        }
 
 #if DEBUG
         public override string ToString() => $"ABS({source})";

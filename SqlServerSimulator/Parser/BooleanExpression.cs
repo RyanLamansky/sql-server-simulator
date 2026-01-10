@@ -32,7 +32,7 @@ internal abstract class BooleanExpression
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
     /// <returns>The result of the expression.</returns>
-    public abstract bool Run(Func<List<string>, object?> getColumnValue);
+    public abstract bool Run(Func<List<string>, DataValue> getColumnValue);
 
 #if DEBUG
     public abstract override string ToString();
@@ -40,8 +40,8 @@ internal abstract class BooleanExpression
 
     private sealed class EqualityExpression(Expression left, Expression right) : BooleanExpression
     {
-        public override bool Run(Func<List<string>, object?> getColumnValue) =>
-            (left.Run(getColumnValue)?.Equals(right.Run(getColumnValue))).GetValueOrDefault();
+        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
+            (left.Run(getColumnValue).Value?.Equals(right.Run(getColumnValue).Value)).GetValueOrDefault();
 
 #if DEBUG
         public override string ToString() => $"{left} = {right}";

@@ -9,38 +9,38 @@ sealed class Table(string name)
         : this(name)
     {
         this.Columns.AddRange(columns);
-        this.Rows.AddRange(rows);
+
+        foreach (var row in rows)
+        {
+            var typed = new DataValue[this.Columns.Count];
+            this.Rows.Add(typed);
+
+            for (var i = 0; i < typed.Length; i++)
+                typed[i] = new(row[i], this.Columns[i].Type);
+        }
     }
 
     public string Name = name;
 
     public readonly List<Column> Columns = [];
 
-    public readonly List<object?[]> Rows = [];
+    public readonly List<DataValue[]> Rows = [];
 
-    public void ReceiveData(Column[] columnsUsed, IEnumerable<Token[]> values, Func<string, object?> getVariableValue)
+    public void ReceiveData(Column[] columnsUsed, IEnumerable<Token[]> values, Func<string, DataValue> getVariableValue)
     {
         foreach (var row in values)
         {
-            var incomingRow = new object[this.Columns.Count];
+            var incomingRow = new DataValue[this.Columns.Count];
 
             for (var i = 0; i < columnsUsed.Length; i++)
             {
-                var column = columnsUsed[i];
-                var columnValue = row[i];
-
-                var toConvert = columnValue switch
+                incomingRow[i] = row[i] switch
                 {
                     AtPrefixedString atPrefixed => getVariableValue(atPrefixed.Value),
-                    StringToken token => token.Value,
+                    StringToken token => columnsUsed[i].Type.ConvertFrom(token.Value),
                     Numeric numeric => numeric.Value,
-                    _ => throw new NotSupportedException($"Simulate data processing doesn't know how to handle input of type {columnValue.GetType().Name}"),
+                    var columnValue => throw new NotSupportedException($"Simulate data processing doesn't know how to handle input of type {columnValue.GetType().Name}"),
                 };
-
-                if (toConvert is null)
-                    continue;
-
-                incomingRow[i] = column.Type.ConvertFrom(toConvert);
             }
 
             this.Rows.Add(incomingRow);

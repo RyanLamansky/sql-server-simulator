@@ -8,7 +8,7 @@ sealed class SimulatedDbDataReader : DbDataReader
 {
     internal readonly Simulation simulation;
     internal readonly IEnumerator<SimulatedResultSet> results;
-    internal IEnumerator<object?[]> records;
+    internal IEnumerator<DataValue[]> records;
     private int recordsAffected;
 
     public SimulatedDbDataReader(Simulation simulation, IEnumerable<SimulatedResultSet> results)
@@ -18,7 +18,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         this.records = (this.results.MoveNext() ? this.results.Current.records : []).GetEnumerator();
     }
 
-    public override object this[int ordinal] => records.Current[ordinal] ?? DBNull.Value;
+    public override object this[int ordinal] => records.Current[ordinal].Value ?? DBNull.Value;
 
     public override object this[string name] => throw new NotImplementedException();
 
@@ -151,7 +151,7 @@ sealed class SimulatedDbDataReader : DbDataReader
             this.recordsAffected = 0;
 
         this.records.Dispose();
-        this.records = this.results.Current?.GetEnumerator() ?? Enumerable.Empty<object?[]>().GetEnumerator();
+        this.records = this.results.Current?.GetEnumerator() ?? Enumerable.Empty<DataValue[]>().GetEnumerator();
 
         return hasNext;
     }

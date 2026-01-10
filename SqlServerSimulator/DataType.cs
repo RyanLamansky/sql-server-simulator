@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Bridges .NET's native types, the various <see cref="DbType"/>s, and SQL Server's actual behavior.
 /// </summary>
-internal abstract class DataType
+internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
 {
     private protected DataType()
     {
@@ -15,7 +15,25 @@ internal abstract class DataType
 
     public abstract DbType Type { get; }
 
-    public abstract object ConvertFrom(object value);
+    /// <summary>
+    /// Precedence according to the ranking at https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-type-precedence-transact-sql
+    /// </summary>
+    protected abstract int Precedence { get; }
+
+    public int CompareTo(DataType? other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+
+        return this == other ? 0 : this.CompareTo(other);
+    }
+
+    public DataValue ConvertFrom(object? value) => ConvertFrom(new DataValue(value, this));
+
+    public abstract DataValue ConvertFrom(DataValue value);
+
+    public abstract int Compare(DataValue x, DataValue y);
+
+    public abstract int DataLength(DataValue value);
 
     public override string ToString() => Type.ToString();
 
@@ -32,6 +50,32 @@ internal abstract class DataType
     public static readonly DataType BuiltInDbString = new DbString();
 
     public static readonly DataType BuiltInDbSystemName = new DbSystemName();
+
+    public static NumericCompatibleDataType CommonNumeric(DataValue a, DataValue b, char op)
+    {
+        var (at, bt) = (a.Type, b.Type);
+        return at is not NumericCompatibleDataType atb || bt is not NumericCompatibleDataType btb
+            ? throw SimulatedSqlException.DataTypeIncompatible(at, bt, op)
+            : at.CompareTo(bt) switch
+            {
+                < 0 => atb,
+                0 => atb,
+                > 0 => btb,
+            };
+    }
+
+    public static BitwiseCompatibleDataType CommonInteger(DataValue a, DataValue b, char op)
+    {
+        var (at, bt) = (a.Type, b.Type);
+        return at is not BitwiseCompatibleDataType atb || bt is not BitwiseCompatibleDataType btb
+            ? throw SimulatedSqlException.DataTypeIncompatible(at, bt, op)
+            : at.CompareTo(bt) switch
+            {
+                < 0 => atb,
+                0 => atb,
+                > 0 => btb,
+            };
+    }
 
     /// <summary>
     /// Looks up the <see cref="DataType"/> for the provided type name.
@@ -76,46 +120,200 @@ internal abstract class DataType
         _ => throw new NotSupportedException($"Simulated data type parser doesn't recognize DbType {dbType}"),
     };
 
-    private sealed class DbBoolean : DataType
+    public abstract class NumericCompatibleDataType : DataType
+    {
+        protected abstract int DataLength();
+
+        public sealed override int DataLength(DataValue value) => DataLength();
+
+        public abstract object? Add(object? a, object? b);
+
+        public DataValue Add(DataValue a, DataValue b) => new(Add(a.Value, b.Value), this);
+
+        public abstract object? Subtract(object? a, object? b);
+
+        public DataValue Subtract(DataValue a, DataValue b) => new(Subtract(a.Value, b.Value), this);
+
+        public abstract object? Multiply(object? a, object? b);
+
+        public DataValue Multiply(DataValue a, DataValue b) => new(Multiply(a.Value, b.Value), this);
+
+        public abstract object? Divide(object? a, object? b);
+
+        public DataValue Divide(DataValue a, DataValue b) => new(Divide(a.Value, b.Value), this);
+    }
+
+    public abstract class BitwiseCompatibleDataType : NumericCompatibleDataType
+    {
+        public abstract object? BitwiseAnd(object? a, object? b);
+
+        public DataValue BitwiseAnd(DataValue a, DataValue b) => new(BitwiseAnd(a.Value, b.Value), this);
+
+        public abstract object? BitwiseOr(object? a, object? b);
+
+        public DataValue BitwiseOr(DataValue a, DataValue b) => new(BitwiseOr(a.Value, b.Value), this);
+
+        public abstract object? BitwiseExclusiveOr(object? a, object? b);
+
+        public DataValue BitwiseExclusiveOr(DataValue a, DataValue b) => new(BitwiseExclusiveOr(a.Value, b.Value), this);
+    }
+
+    private sealed class DbBoolean : BitwiseCompatibleDataType
     {
         public override DbType Type => DbType.Boolean;
 
-        public override object ConvertFrom(object value) => Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+        protected override int Precedence => 20;
+
+        public override DataValue ConvertFrom(DataValue value) => new(Convert.ToBoolean(value, CultureInfo.InvariantCulture), this);
+
+        public override int Compare(DataValue x, DataValue y) => throw new NotImplementedException();
+
+        protected override int DataLength() => 1;
+
+        public override object? Add(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Subtract(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Multiply(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Divide(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseAnd(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseOr(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseExclusiveOr(object? a, object? b) => throw new NotImplementedException();
     }
 
-    private sealed class DbByte : DataType
+    private sealed class DbByte : BitwiseCompatibleDataType
     {
         public override DbType Type => DbType.Byte;
 
-        public override object ConvertFrom(object value) => Convert.ToByte(value, CultureInfo.InvariantCulture);
+        protected override int Precedence => 19;
+
+        public override DataValue ConvertFrom(DataValue value) => new(Convert.ToByte(value, CultureInfo.InvariantCulture), this);
+
+        public override int Compare(DataValue x, DataValue y) => throw new NotImplementedException();
+
+        protected override int DataLength() => 1;
+
+        public override object? Add(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Subtract(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Multiply(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Divide(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseAnd(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseOr(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseExclusiveOr(object? a, object? b) => throw new NotImplementedException();
     }
 
-    private sealed class DbInt16 : DataType
+    private sealed class DbInt16 : BitwiseCompatibleDataType
     {
         public override DbType Type => DbType.Int16;
 
-        public override object ConvertFrom(object value) => Convert.ToInt16(value, CultureInfo.InvariantCulture);
+        protected override int Precedence => 18;
+
+        public override DataValue ConvertFrom(DataValue value) => new(Convert.ToInt16(value, CultureInfo.InvariantCulture), this);
+
+        public override int Compare(DataValue x, DataValue y) => throw new NotImplementedException();
+
+        protected override int DataLength() => 2;
+
+        public override object? Add(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Subtract(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Multiply(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Divide(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseAnd(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseOr(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? BitwiseExclusiveOr(object? a, object? b) => throw new NotImplementedException();
     }
 
-    private sealed class DbInt32 : DataType
+    private sealed class DbInt32 : BitwiseCompatibleDataType
     {
         public override DbType Type => DbType.Int32;
 
-        public override object ConvertFrom(object value) => Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        protected override int Precedence => 17;
+
+        public static int ToNative(object value) => Convert.ToInt32(value, CultureInfo.InvariantCulture);
+
+        public override DataValue ConvertFrom(DataValue value) => new(value.Value is null ? null : ToNative(value.Value), this);
+
+        public override int Compare(DataValue x, DataValue y)
+        {
+            var (xv, yv) = (x.Value, y.Value);
+            if (xv is null)
+                return yv is null ? 0 : -1;
+            else if (yv is null)
+                return 1;
+
+            return ToNative(x).CompareTo(ToNative(y));
+        }
+
+        protected override int DataLength() => 4;
+
+        private static bool TryToNative(object? rawA, object? rawB, out int a, out int b)
+        {
+            if (rawA is null || rawB is null)
+            {
+                a = default;
+                b = default;
+                return false;
+            }
+
+            a = ToNative(rawA);
+            b = ToNative(rawB);
+            return true;
+        }
+
+        public override object? Add(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA + nativeB : null;
+
+        public override object? Subtract(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA - nativeB : null;
+
+        public override object? Multiply(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA * nativeB : null;
+
+        public override object? Divide(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA / nativeB : null;
+
+        public override object? BitwiseAnd(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA & nativeB : null;
+
+        public override object? BitwiseOr(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA | nativeB : null;
+
+        public override object? BitwiseExclusiveOr(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA ^ nativeB : null;
     }
 
     private sealed class DbAnsiString : DataType
     {
         public override DbType Type => DbType.AnsiString;
 
-        public override object ConvertFrom(object value) => value.ToString() ?? throw new InvalidOperationException("value's ToString method returned null.");
+        protected override int Precedence => 28;
+
+        public override DataValue ConvertFrom(DataValue value) => new(value.Value?.ToString(), this);
+
+        public override int Compare(DataValue x, DataValue y) => throw new NotImplementedException();
+
+        public override int DataLength(DataValue value) => throw new NotImplementedException();
     }
 
     private class DbString : DataType
     {
         public override DbType Type => DbType.String;
 
-        public override object ConvertFrom(object value) => value.ToString() ?? throw new InvalidOperationException("value's ToString method returned null.");
+        protected override int Precedence => 26;
+
+        public override DataValue ConvertFrom(DataValue value) => new(value.Value?.ToString(), this);
+
+        public override int Compare(DataValue x, DataValue y) => throw new NotImplementedException();
+        public override int DataLength(DataValue value) => throw new NotImplementedException();
     }
 
     private sealed class DbSystemName : DbString

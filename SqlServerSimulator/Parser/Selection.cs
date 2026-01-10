@@ -30,13 +30,13 @@ internal sealed class Selection
             context.MoveNextRequired();
 
             var resolvedExpression = Expression.Parse(context).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
-            topCount = resolvedExpression is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
+            topCount = resolvedExpression.Value is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
         }
 
         List<Expression> expressions = [];
         List<BooleanExpression> excluders = [];
 
-        IEnumerable<object?[]> ApplyClauses(IEnumerable<object?[]> records, Func<object?[], List<string>, object?> getColumnValueFromRow)
+        IEnumerable<DataValue[]> ApplyClauses(IEnumerable<DataValue[]> records, Func<DataValue[], List<string>, DataValue> getColumnValueFromRow)
         {
             records = records.Where(row =>
             {
@@ -47,7 +47,7 @@ internal sealed class Selection
                 }
 
                 return true;
-            }).Select<object?[], object?[]>(row =>
+            }).Select<DataValue[], DataValue[]>(row =>
                 [.. expressions.Select(x => x.Run(columnName => getColumnValueFromRow(row, columnName)))]
             );
 

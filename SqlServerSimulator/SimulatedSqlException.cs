@@ -95,6 +95,8 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException ColumnReferenceNotAllowed(IEnumerable<string> name)
         => new($"The reference to column \"{string.Join('.', name)}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
 
+    internal static SimulatedSqlException DataTypeIncompatible(DataType a, DataType b, char c) => new($"The data types {a} and {b} are incompatible in the '{c}' operator.", 402, 16, 1);
+
     internal static SimulatedSqlException IdentifierTooLong(ReadOnlySpan<char> first128)
         => new($"The identifier that starts with '{first128}' is too long. Maximum length is 128.", 103, 15, 4);
 

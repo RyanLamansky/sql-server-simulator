@@ -27,16 +27,18 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// </summary>
     public Token? Token { get; private set; }
 
-    private readonly FrozenDictionary<string, (string Name, (DataType type, object? Value) TypeValue)> variables = command
+    private readonly FrozenDictionary<string, DataValue> variables = command
         .Parameters
         .Cast<DbParameter>()
-        .Select(parameter =>
+        .ToFrozenDictionary(parameter =>
         {
             var name = parameter.ParameterName;
+            return name.StartsWith('@') ? name[1..] : name;
+        }, parameter =>
+        {
             var type = DataType.GetByDbType(parameter.DbType);
-            return (Name: name.StartsWith('@') ? name[1..] : name, TypeValue: (DataType: type, Value: parameter.Value is null ? null : type.ConvertFrom(parameter.Value)));
-        })
-        .ToFrozenDictionary(tuple => tuple.Name, StringComparer.InvariantCultureIgnoreCase);
+            return type.ConvertFrom(new(parameter.Value, type));
+        }, StringComparer.InvariantCultureIgnoreCase);
 
     public Simulation Simulation => Command.simulation;
 
@@ -46,9 +48,9 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// <param name="name">The name of the variable.</param>
     /// <returns>The variable's value.</returns>
     /// <exception cref="SimulatedSqlException">Must declare the scalar variable \"@{value of <paramref name="name"/>}\".</exception>
-    public object? GetVariableValue(string name) =>
+    public DataValue GetVariableValue(string name) =>
         variables.TryGetValue(name, out var value)
-        ? value.TypeValue.Value
+        ? value
         : throw SimulatedSqlException.MustDeclareScalarVariable(name);
 
     /// <summary>
