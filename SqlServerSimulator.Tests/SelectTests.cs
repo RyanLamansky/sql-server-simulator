@@ -61,6 +61,8 @@ public class SelectTests
     [DataRow("1 & 3", 1)]
     [DataRow("1 | 3", 3)]
     [DataRow("1 ^ 3", 2)]
+    [DataRow("1 + 2 * 3", 7)]
+    [DataRow("3 * 2 + 1", 7)]
     public void Expression(string commandText, object value)
     {
         using var reader = new Simulation().ExecuteReader($"select {commandText}");

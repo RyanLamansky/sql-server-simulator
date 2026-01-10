@@ -18,6 +18,13 @@ internal abstract class Expression
     public virtual string Name => string.Empty;
 
     /// <summary>
+    /// The relative precedence of an expression.
+    /// When two are in scope, the higher one runs first, otherwise they run left-to-right.
+    /// </summary>
+    /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/language-elements/operator-precedence-transact-sql</remarks>
+    public virtual byte Precedence => 0;
+
+    /// <summary>
     /// Converts the tokens from a command into a single expression.
     /// </summary>
     /// <param name="context">Manages the overall parsing state.</param>
@@ -120,7 +127,7 @@ internal abstract class Expression
                     }
             }
 
-            return expression;
+            return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;
         }
     }
 
@@ -188,6 +195,8 @@ internal abstract class Expression
 
         public override string Name => this.name;
 
+        public override byte Precedence => expression.Precedence;
+
         public override object? Run(Func<List<string>, object?> getColumnValue) => this.expression.Run(getColumnValue);
 
 #if DEBUG
@@ -237,9 +246,18 @@ internal abstract class Expression
 #endif
     }
 
-    public abstract class TwoSidedExpression(Expression left, Expression right) : Expression
+    private abstract class TwoSidedExpression(Expression left, Expression right) : Expression
     {
-        private readonly Expression left = left, right = right;
+        private Expression right = right, left = left;
+
+        public TwoSidedExpression AdjustForPrecedence()
+        {
+            if (this.right is not TwoSidedExpression rightTwo || rightTwo.Precedence < this.Precedence)
+                return this;
+
+            (rightTwo.left, this.right) = (this, rightTwo.left);
+            return rightTwo;
+        }
 
         public sealed override object? Run(Func<List<string>, object?> getColumnValue)
             => Run(left.Run(getColumnValue), right.Run(getColumnValue));
@@ -253,8 +271,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Add(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Add(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 3;
+
         protected override object? Run(object? left, object? right) => (int)left! + (int)right!;
 
 #if DEBUG
@@ -262,8 +282,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Subtract(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Subtract(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 3;
+
         protected override object? Run(object? left, object? right) => (int)left! - (int)right!;
 
 #if DEBUG
@@ -271,8 +293,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Multiply(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Multiply(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 2;
+
         protected override object? Run(object? left, object? right) => (int)left! * (int)right!;
 
 #if DEBUG
@@ -280,8 +304,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Divide(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class Divide(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 2;
+
         protected override object? Run(object? left, object? right) => (int)left! / (int)right!;
 
 #if DEBUG
@@ -289,8 +315,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class BitwiseAnd(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class BitwiseAnd(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 3;
+
         protected override object? Run(object? left, object? right) => (int)left! & (int)right!;
 
 #if DEBUG
@@ -298,8 +326,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class BitwiseOr(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class BitwiseOr(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 3;
+
         protected override object? Run(object? left, object? right) => (int)left! | (int)right!;
 
 #if DEBUG
@@ -307,8 +337,10 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class BitwiseExclusiveOr(Expression left, Expression right) : TwoSidedExpression(left, right)
+    private sealed class BitwiseExclusiveOr(Expression left, Expression right) : TwoSidedExpression(left, right)
     {
+        public override byte Precedence => 3;
+
         protected override object? Run(object? left, object? right) => (int)left! ^ (int)right!;
 
 #if DEBUG
@@ -316,7 +348,7 @@ internal abstract class Expression
 #endif
     }
 
-    public sealed class Reference(Name name) : Expression
+    private sealed class Reference(Name name) : Expression
     {
         private readonly List<string> name = [name.Value];
 
@@ -334,7 +366,7 @@ internal abstract class Expression
     /// <summary>
     /// Encapsulates the SQL DATALENGTH command: https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql
     /// </summary>
-    public sealed class DataLength(ParserContext context) : Expression
+    private sealed class DataLength(ParserContext context) : Expression
     {
         private readonly Expression source = Parse(context);
 
@@ -353,7 +385,7 @@ internal abstract class Expression
     /// <summary>
     /// Encapsulates the SQL ABS command: https://learn.microsoft.com/en-us/sql/t-sql/functions/abs-transact-sql
     /// </summary>
-    public sealed class AbsoluteValue(ParserContext context) : Expression
+    private sealed class AbsoluteValue(ParserContext context) : Expression
     {
         private readonly Expression source = Parse(context);
 
