@@ -245,6 +245,8 @@ internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
 
         protected override int Precedence => 17;
 
+        public static int ToNative(DataValue value) => Convert.ToInt32(value.Value, CultureInfo.InvariantCulture);
+
         public static int ToNative(object value) => Convert.ToInt32(value, CultureInfo.InvariantCulture);
 
         public override DataValue ConvertFrom(DataValue value) => new(value.Value is null ? null : ToNative(value.Value), this);
