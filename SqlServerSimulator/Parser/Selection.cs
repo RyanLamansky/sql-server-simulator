@@ -90,11 +90,11 @@ internal sealed class Selection
                     continue;
 
                 case Name name:
-                    expressions[^1] = Expression.AssignName(expressions.Last(), name);
+                    expressions[^1] = Expression.AssignName(expressions[^1], name);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.As }:
-                    expressions[^1] = Expression.AssignName(expressions.Last(), context.GetNextRequired<Name>());
+                    expressions[^1] = Expression.AssignName(expressions[^1], context.GetNextRequired<Name>());
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
@@ -121,7 +121,7 @@ internal sealed class Selection
                                 expressions,
                                 ApplyClauses(table.Rows, (row, columnName) =>
                                 {
-                                    var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName.Last()));
+                                    var columnIndex = table.Columns.FindIndex(column => Collation.Default.Equals(column.Name, columnName[^1]));
                                     return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
                                 })
                                 ));
@@ -147,7 +147,7 @@ internal sealed class Selection
                                     expressions,
                                     ApplyClauses(derived.records, (row, columnName) =>
                                     {
-                                        var columnIndex = Array.FindIndex(derived.columnNames, name => Collation.Default.Equals(name, columnName.Last()));
+                                        var columnIndex = Array.FindIndex(derived.columnNames, name => Collation.Default.Equals(name, columnName[^1]));
                                         return columnIndex == -1 ? throw SimulatedSqlException.InvalidColumnName(columnName) : row[columnIndex];
                                     })
                                     ));

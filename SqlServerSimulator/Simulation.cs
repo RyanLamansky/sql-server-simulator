@@ -39,164 +39,153 @@ public sealed class Simulation
                 case Operator { Character: ';' }:
                     continue;
 
-                case ReservedKeyword reserved:
-                    switch (reserved.Keyword)
+                case ReservedKeyword { Keyword: Keyword.Set }:
+                    if (TryParseSet(context))
+                        continue;
+                    break;
+
+                case ReservedKeyword { Keyword: Keyword.Create }:
+                    switch (context.GetNextRequired())
                     {
-                        case Keyword.Set:
-                            switch (context.GetNextRequired())
-                            {
-                                case UnquotedString setTarget:
-                                    switch (setTarget.Value.ToUpperInvariant())
-                                    {
-                                        case "IMPLICIT_TRANSACTIONS":
-                                        case "NOCOUNT":
-                                            switch (context.GetNextRequired())
-                                            {
-                                                case ReservedKeyword onOff:
-                                                    switch (onOff.Keyword)
-                                                    {
-                                                        case Keyword.On:
-                                                        case Keyword.Off:
-                                                            continue;
-                                                    }
-                                                    break;
-                                            }
-                                            break;
-                                    }
-                                    break;
-                            }
-                            break;
-
-                        case Keyword.Create:
-                            switch (context.GetNextRequired())
-                            {
-                                case ReservedKeyword whatToCreate:
-                                    switch (whatToCreate.Keyword)
-                                    {
-                                        case Keyword.Table:
-                                            if (context.GetNextRequired() is not Name tableName)
-                                                break;
-
-                                            if (context.GetNextRequired() is not Operator { Character: '(' })
-                                                break;
-
-                                            var table = new Table(tableName.Value);
-
-                                            var columns = table.Columns;
-                                            bool suppressAdvanceToken;
-                                            do
-                                            {
-                                                suppressAdvanceToken = false;
-                                                var columnName = context.GetNextRequired<Name>();
-                                                var type = context.GetNextRequired<Name>();
-
-                                                var nullable = true;
-
-                                                context.MoveNextRequired();
-                                                if (context.Token is ReservedKeyword next)
-                                                {
-                                                    switch (next.Keyword)
-                                                    {
-                                                        case Keyword.Not:
-                                                            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                                                                throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                                                            nullable = false;
-                                                            break;
-                                                        case Keyword.Null:
-                                                            nullable = true;
-                                                            break;
-                                                        default:
-                                                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    suppressAdvanceToken = true;
-                                                    nullable = true;
-                                                }
-
-                                                columns.Add(new(columnName.Value, DataType.GetByName(type, columns.Count + 1), nullable));
-                                            } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
-
-                                            if (context.Token is not Operator { Character: ')' })
-                                                break;
-
-                                            if (!this.Tables.TryAdd(table.Name, table))
-                                                throw SimulatedSqlException.ThereIsAlreadyAnObject(table.Name);
-
-                                            continue;
-                                    }
-                                    break;
-                            }
-                            break;
-
-                        case Keyword.Select:
-                            yield return Selection.Parse(context, 0).Results;
-                            break;
-
-                        case Keyword.Insert:
-                            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Into })
-                                context.MoveNextRequired();
-
-                            if (context.Token is not StringToken destinationTableToken)
+                        case ReservedKeyword { Keyword: Keyword.Table }:
+                            if (context.GetNextRequired() is not Name tableName)
                                 break;
 
-                            if (!this.Tables.TryGetValue(destinationTableToken.Value, out var destinationTable))
-                                throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
-
-                            Column[] destinationColumns;
-                            if (context.GetNextRequired() is Operator { Character: '(' })
-                            {
-                                var usedColumns = new List<Column>();
-                                while (context.GetNextRequired() is StringToken column)
-                                {
-                                    var columnName = column.Value;
-                                    var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
-                                        ?? throw SimulatedSqlException.InvalidColumnName(columnName);
-                                    usedColumns.Add(tableColumn);
-                                }
-
-                                if (context.Token is not Operator { Character: ')' })
-                                    break;
-
-                                destinationColumns = [.. usedColumns];
-
-                                context.MoveNextRequired();
-                            }
-                            else
-                            {
-                                destinationColumns = [.. destinationTable.Columns];
-                            }
-
-                            if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+                            if (context.GetNextRequired() is not Operator { Character: '(' })
                                 break;
 
-                            var sourceRows = new List<Token[]>();
+                            var table = new Table(tableName.Value);
 
+                            var columns = table.Columns;
+                            bool suppressAdvanceToken;
                             do
                             {
-                                if (context.GetNextRequired<Operator>() is not { Character: '(' })
-                                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                                suppressAdvanceToken = false;
+                                var columnName = context.GetNextRequired<Name>();
+                                var type = context.GetNextRequired<Name>();
 
-                                var sourceValues = new List<Token>();
-                                while (context.GetNextRequired() is not Operator { Character: ')' })
-                                    sourceValues.Add(context.Token);
+                                var nullable = true;
 
-                                sourceRows.Add([.. sourceValues]);
+                                context.MoveNextRequired();
+                                if (context.Token is ReservedKeyword next)
+                                {
+                                    switch (next.Keyword)
+                                    {
+                                        case Keyword.Not:
+                                            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                                                throw SimulatedSqlException.SyntaxErrorNear(context);
 
-                            } while (context.GetNextOptional() is Operator { Character: ',' });
+                                            nullable = false;
+                                            break;
+                                        case Keyword.Null:
+                                            nullable = true;
+                                            break;
+                                        default:
+                                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                                    }
+                                }
+                                else
+                                {
+                                    suppressAdvanceToken = true;
+                                    nullable = true;
+                                }
 
-                            destinationTable.ReceiveData(destinationColumns, sourceRows, context.GetVariableValue);
+                                columns.Add(new(columnName.Value, DataType.GetByName(type, columns.Count + 1), nullable));
+                            } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
 
-                            yield return new SimulatedNonQuery(sourceRows.Count);
+                            if (context.Token is not Operator { Character: ')' })
+                                break;
+
+                            if (!this.Tables.TryAdd(table.Name, table))
+                                throw SimulatedSqlException.ThereIsAlreadyAnObject(table.Name);
+
                             continue;
                     }
                     break;
 
-                default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                case ReservedKeyword { Keyword: Keyword.Select }:
+                    yield return Selection.Parse(context, 0).Results;
+                    continue;
+
+                case ReservedKeyword { Keyword: Keyword.Insert }:
+                    if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Into })
+                        context.MoveNextRequired();
+
+                    if (context.Token is not StringToken destinationTableToken)
+                        break;
+
+                    if (!this.Tables.TryGetValue(destinationTableToken.Value, out var destinationTable))
+                        throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
+
+                    Column[] destinationColumns;
+                    if (context.GetNextRequired() is Operator { Character: '(' })
+                    {
+                        var usedColumns = new List<Column>();
+                        while (context.GetNextRequired() is StringToken column)
+                        {
+                            var columnName = column.Value;
+                            var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
+                                ?? throw SimulatedSqlException.InvalidColumnName(columnName);
+                            usedColumns.Add(tableColumn);
+                        }
+
+                        if (context.Token is not Operator { Character: ')' })
+                            break;
+
+                        destinationColumns = [.. usedColumns];
+
+                        context.MoveNextRequired();
+                    }
+                    else
+                    {
+                        destinationColumns = [.. destinationTable.Columns];
+                    }
+
+                    if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+                        break;
+
+                    var sourceRows = new List<Token[]>();
+
+                    do
+                    {
+                        if (context.GetNextRequired<Operator>() is not { Character: '(' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+                        var sourceValues = new List<Token>();
+                        while (context.GetNextRequired() is not Operator { Character: ')' })
+                            sourceValues.Add(context.Token);
+
+                        sourceRows.Add([.. sourceValues]);
+
+                    } while (context.GetNextOptional() is Operator { Character: ',' });
+
+                    destinationTable.ReceiveData(destinationColumns, sourceRows, context.GetVariableValue);
+
+                    yield return new SimulatedNonQuery(sourceRows.Count);
+                    continue;
             }
+
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         } // while (tokens.TryMoveNext(out var token))
+    }
+
+    private static bool TryParseSet(ParserContext context)
+    {
+        var setTarget = context.GetNextRequired<UnquotedString>().Value;
+        Span<char> upper = stackalloc char[setTarget.Length];
+        return setTarget.ToUpperInvariant(upper) switch
+        {
+            7 => upper switch
+            {
+                "NOCOUNT" => context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
+                _ => false
+            },
+            21 => upper switch
+            {
+                "IMPLICIT_TRANSACTIONS" => context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
+                _ => false
+            },
+            _ => false
+        };
     }
 }

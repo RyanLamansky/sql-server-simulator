@@ -135,9 +135,7 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     {
         while (Tokenizer.NextToken(commandText, ref index) is Token token)
         {
-            if (token is Whitespace)
-                continue;
-            if (token is Comment)
+            if (token is Whitespace or Comment)
                 continue;
 
 #if DEBUG

@@ -346,7 +346,7 @@ internal abstract class Expression
     {
         private readonly List<string> name = [name.Value];
 
-        public override string Name => this.name.Last();
+        public override string Name => this.name[^1];
 
         public void AddMultiPartComponent(Name name) => this.name.Add(name.Value);
 
