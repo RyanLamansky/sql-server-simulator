@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator.Parser.Expressions;
 
-internal sealed class Multiply(Expression left, Expression right) : MathExpression(left, right)
+internal sealed class Multiply(Expression left, ParserContext context) : MathExpression(left, context)
 {
     public override byte Precedence => 2;
 

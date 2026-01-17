@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator.Parser.Expressions;
 
-internal abstract class MathExpression(Expression left, Expression right) : TwoSidedExpression(left, right)
+internal abstract class MathExpression(Expression left, ParserContext context) : TwoSidedExpression(left, context)
 {
     protected abstract DataValue Run(DataType.NumericCompatibleDataType common, DataValue left, DataValue right);
 

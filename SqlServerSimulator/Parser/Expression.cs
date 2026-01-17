@@ -58,13 +58,10 @@ internal abstract class Expression
                 expression = Expression.Parse(context);
                 break;
             case Operator { Character: '-' }:
-                context.MoveNextRequired();
-                expression = Parse(context);
-                expression = new Subtract(new Value(new DataValue(0, DataType.BuiltInDbInt32)), expression);
+                expression = new Subtract(new Value(new DataValue(0, DataType.BuiltInDbInt32)), context);
                 break;
             case Operator { Character: '(' }:
-                context.MoveNextRequired();
-                expression = new Parenthesized(Parse(context));
+                expression = new Parenthesized(context);
                 break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -75,36 +72,28 @@ internal abstract class Expression
             switch (context.GetNextOptional())
             {
                 case Operator { Character: '+' }:
-                    context.MoveNextRequired();
-                    expression = new Add(expression, Parse(context));
+                    expression = new Add(expression, context);
                     break;
                 case Operator { Character: '-' }:
-                    context.MoveNextRequired();
-                    expression = new Subtract(expression, Parse(context));
+                    expression = new Subtract(expression, context);
                     break;
                 case Operator { Character: '*' }:
-                    context.MoveNextRequired();
-                    expression = new Multiply(expression, Parse(context));
+                    expression = new Multiply(expression, context);
                     break;
                 case Operator { Character: '/' }:
-                    context.MoveNextRequired();
-                    expression = new Divide(expression, Parse(context));
+                    expression = new Divide(expression, context);
                     break;
                 case Operator { Character: '%' }:
-                    context.MoveNextRequired();
-                    expression = new Modulus(expression, Parse(context));
+                    expression = new Modulus(expression, context);
                     break;
                 case Operator { Character: '&' }:
-                    context.MoveNextRequired();
-                    expression = new BitwiseAnd(expression, Parse(context));
+                    expression = new BitwiseAnd(expression, context);
                     break;
                 case Operator { Character: '|' }:
-                    context.MoveNextRequired();
-                    expression = new BitwiseOr(expression, Parse(context));
+                    expression = new BitwiseOr(expression, context);
                     break;
                 case Operator { Character: '^' }:
-                    context.MoveNextRequired();
-                    expression = new BitwiseExclusiveOr(expression, Parse(context));
+                    expression = new BitwiseExclusiveOr(expression, context);
                     break;
 
                 case Operator { Character: '.' }:
@@ -120,10 +109,7 @@ internal abstract class Expression
                 case Operator { Character: '(' }:
                     {
                         if (expression is not Reference reference)
-                        {
-                            expression = new Parenthesized(Parse(context));
                             break;
-                        }
 
                         context.MoveNextRequired(); // Move past (
                         expression = ResolveBuiltIn(reference.Name, context);

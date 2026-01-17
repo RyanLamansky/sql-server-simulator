@@ -1,8 +1,16 @@
 ﻿namespace SqlServerSimulator.Parser.Expressions;
 
-internal abstract class TwoSidedExpression(Expression left, Expression right) : Expression
+internal abstract class TwoSidedExpression : Expression
 {
-    private Expression right = right, left = left;
+    private Expression left, right;
+
+    public TwoSidedExpression(Expression left, ParserContext context)
+    {
+        this.left = left;
+
+        context.MoveNextRequired();
+        this.right = Parse(context);
+    }
 
     public TwoSidedExpression AdjustForPrecedence()
     {

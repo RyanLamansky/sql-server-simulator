@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator.Parser.Expressions;
 
-internal sealed class BitwiseOr(Expression left, Expression right) : BitwiseExpression(left, right)
+internal sealed class BitwiseOr(Expression left, ParserContext context) : BitwiseExpression(left, context)
 {
     public override byte Precedence => 3;
 

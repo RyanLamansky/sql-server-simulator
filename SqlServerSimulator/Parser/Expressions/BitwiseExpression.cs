@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator.Parser.Expressions;
 
-internal abstract class BitwiseExpression(Expression left, Expression right) : TwoSidedExpression(left, right)
+internal abstract class BitwiseExpression(Expression left, ParserContext context) : TwoSidedExpression(left, context)
 {
     protected abstract DataValue Run(DataType.BitwiseCompatibleDataType common, DataValue left, DataValue right);
 

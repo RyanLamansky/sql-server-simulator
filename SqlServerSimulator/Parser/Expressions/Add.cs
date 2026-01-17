@@ -1,6 +1,6 @@
 ﻿namespace SqlServerSimulator.Parser.Expressions;
 
-internal sealed class Add(Expression left, Expression right) : MathExpression(left, right)
+internal sealed class Add(Expression left, ParserContext context) : MathExpression(left, context)
 {
     public override byte Precedence => 3;
 
