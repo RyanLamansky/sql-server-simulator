@@ -141,6 +141,10 @@ internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
         public abstract object? Divide(object? a, object? b);
 
         public DataValue Divide(DataValue a, DataValue b) => new(Divide(a.Value, b.Value), this);
+
+        public abstract object? Modulus(object? a, object? b);
+
+        public DataValue Modulus(DataValue a, DataValue b) => new(Modulus(a.Value, b.Value), this);
     }
 
     public abstract class BitwiseCompatibleDataType : NumericCompatibleDataType
@@ -178,6 +182,8 @@ internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
 
         public override object? Divide(object? a, object? b) => throw new NotImplementedException();
 
+        public override object? Modulus(object? a, object? b) => throw new NotImplementedException();
+
         public override object? BitwiseAnd(object? a, object? b) => throw new NotImplementedException();
 
         public override object? BitwiseOr(object? a, object? b) => throw new NotImplementedException();
@@ -205,6 +211,8 @@ internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
 
         public override object? Divide(object? a, object? b) => throw new NotImplementedException();
 
+        public override object? Modulus(object? a, object? b) => throw new NotImplementedException();
+
         public override object? BitwiseAnd(object? a, object? b) => throw new NotImplementedException();
 
         public override object? BitwiseOr(object? a, object? b) => throw new NotImplementedException();
@@ -231,6 +239,8 @@ internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
         public override object? Multiply(object? a, object? b) => throw new NotImplementedException();
 
         public override object? Divide(object? a, object? b) => throw new NotImplementedException();
+
+        public override object? Modulus(object? a, object? b) => throw new NotImplementedException();
 
         public override object? BitwiseAnd(object? a, object? b) => throw new NotImplementedException();
 
@@ -285,6 +295,8 @@ internal abstract class DataType : IComparer<DataValue>, IComparable<DataType>
         public override object? Multiply(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA * nativeB : null;
 
         public override object? Divide(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA / nativeB : null;
+
+        public override object? Modulus(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA % nativeB : null;
 
         public override object? BitwiseAnd(object? a, object? b) => TryToNative(a, b, out var nativeA, out var nativeB) ? nativeA & nativeB : null;
 

@@ -90,6 +90,10 @@ internal abstract class Expression
                     context.MoveNextRequired();
                     expression = new Divide(expression, Parse(context));
                     break;
+                case Operator { Character: '%' }:
+                    context.MoveNextRequired();
+                    expression = new Modulus(expression, Parse(context));
+                    break;
                 case Operator { Character: '&' }:
                     context.MoveNextRequired();
                     expression = new BitwiseAnd(expression, Parse(context));
