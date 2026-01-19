@@ -16,10 +16,8 @@ internal abstract class BooleanExpression
     }
 
     private protected BooleanExpression(Expression left, ParserContext context)
+        : this(left, Expression.Parse(context.MoveNextRequiredReturnSelf()))
     {
-        this.left = left;
-        context.MoveNextRequired();
-        this.right = Expression.Parse(context);
     }
 
     public static BooleanExpression Parse(Expression left, ParserContext context) => context.Token switch

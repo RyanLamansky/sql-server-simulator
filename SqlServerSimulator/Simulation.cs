@@ -66,8 +66,7 @@ public sealed class Simulation
 
                                 var nullable = true;
 
-                                context.MoveNextRequired();
-                                if (context.Token is ReservedKeyword next)
+                                if (context.GetNextRequired() is ReservedKeyword next)
                                 {
                                     switch (next.Keyword)
                                     {

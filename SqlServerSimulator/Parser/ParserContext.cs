@@ -64,7 +64,6 @@ internal sealed class ParserContext(SimulatedDbCommand command)
 
     /// <summary>
     /// Returns the next token in the enumeration, or null.
-    /// Also updates <see cref="Token"/> to the new value.
     /// </summary>
     /// <returns>The next token if the enumerator was advanced, otherwise null.</returns>
     public Token? GetNextOptional()
@@ -74,7 +73,6 @@ internal sealed class ParserContext(SimulatedDbCommand command)
 
     /// <summary>
     /// Returns the next token in the enumeration, throwing an exception if the end was reached instead.
-    /// Also updates <see cref="Token"/> to the new value.
     /// </summary>
     /// <returns>The next token.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
@@ -86,7 +84,6 @@ internal sealed class ParserContext(SimulatedDbCommand command)
 
     /// <summary>
     /// Returns the next token in the enumeration, throwing an exception if the end was reached instead or the token is the wrong type.
-    /// Also updates <see cref="Token"/> to the new value.
     /// </summary>
     /// <typeparam name="T">The expected type of the new token.</typeparam>
     /// <returns>The next token.</returns>
@@ -100,17 +97,15 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     }
 
     /// <summary>
-    /// Advances <see cref="Token"/> to the next token in the enumeration, throwing an exception if the end was reached instead or the token is the wrong type.
+    /// Advances <see cref="Token"/> to the next token in the enumeration, throwing an exception if the end was reached instead.
+    /// The <see cref="ParserContext"/> used for this call is returned.
     /// </summary>
-    /// <typeparam name="T">The expected type of the new token.</typeparam>
+    /// <returns>This instance.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
-    public void MoveNextRequired<T>()
-        where T : Token
+    public ParserContext MoveNextRequiredReturnSelf()
     {
-        var previous = this.Token;
-
-        if (!MoveNext() || this.Token is not T)
-            throw SimulatedSqlException.SyntaxErrorNear(previous);
+        this.MoveNextRequired();
+        return this;
     }
 
     /// <summary>

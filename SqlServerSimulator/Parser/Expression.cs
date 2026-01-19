@@ -34,38 +34,18 @@ internal abstract class Expression
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Expression Parse(ParserContext context)
     {
-        Expression expression;
-
-        switch (context.Token)
+        var expression = context.Token switch
         {
-            case Numeric number:
-                expression = new Value(number.Value);
-                break;
-            case AtPrefixedString atPrefixed:
-                expression = new Value(atPrefixed, context);
-                break;
-            case DoubleAtPrefixedString doubleAtPrefixedString:
-                expression = new Value(doubleAtPrefixedString);
-                break;
-            case ReservedKeyword { Keyword: Keyword.Null }:
-                expression = new Value();
-                break;
-            case Name name:
-                expression = new Reference(name);
-                break;
-            case Operator { Character: '+' }:
-                context.MoveNextRequired();
-                expression = Expression.Parse(context);
-                break;
-            case Operator { Character: '-' }:
-                expression = new Subtract(new Value(new DataValue(0, DataType.BuiltInDbInt32)), context);
-                break;
-            case Operator { Character: '(' }:
-                expression = new Parenthesized(context);
-                break;
-            default:
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
+            Numeric number => new Value(number.Value),
+            AtPrefixedString atPrefixed => new Value(atPrefixed, context),
+            DoubleAtPrefixedString doubleAtPrefixedString => new Value(doubleAtPrefixedString),
+            ReservedKeyword { Keyword: Keyword.Null } => new Value(),
+            Name name => new Reference(name),
+            Operator { Character: '+' } => Expression.Parse(context.MoveNextRequiredReturnSelf()),
+            Operator { Character: '-' } => new Subtract(new Value(new DataValue(0, DataType.BuiltInDbInt32)), context),
+            Operator { Character: '(' } => new Parenthesized(context),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context)
+        };
 
         while (true)
         {

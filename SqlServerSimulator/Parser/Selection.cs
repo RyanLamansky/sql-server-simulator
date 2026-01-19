@@ -21,15 +21,13 @@ internal sealed class Selection
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Selection Parse(ParserContext context, uint depth)
     {
-        context.MoveNextRequired();
-
         int? topCount = null;
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Top })
+        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Top })
         {
-            context.MoveNextRequired();
-
-            var resolvedExpression = Expression.Parse(context).Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+            var resolvedExpression = Expression
+                .Parse(context.MoveNextRequiredReturnSelf())
+                .Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
             topCount = resolvedExpression.Value is int unboxed ? unboxed : throw SimulatedSqlException.TopFetchRequiresInteger();
         }
 
@@ -157,8 +155,7 @@ internal sealed class Selection
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
-                    context.MoveNextRequired();
-                    excluders.Add(BooleanExpression.Parse(Expression.Parse(context), context));
+                    excluders.Add(BooleanExpression.Parse(Expression.Parse(context.MoveNextRequiredReturnSelf()), context));
                     continue;
             }
 

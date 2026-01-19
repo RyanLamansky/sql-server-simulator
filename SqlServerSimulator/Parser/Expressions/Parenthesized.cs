@@ -3,15 +3,9 @@
 /// <summary>
 /// An expression that's wrapped in parentheses, potentially affecting the order of operations.
 /// </summary>
-internal sealed class Parenthesized : Expression
+internal sealed class Parenthesized(ParserContext context) : Expression
 {
-    private readonly Expression wrapped;
-
-    public Parenthesized(ParserContext context)
-    {
-        context.MoveNextRequired();
-        this.wrapped = Parse(context);
-    }
+    private readonly Expression wrapped = Parse(context.MoveNextRequiredReturnSelf());
 
     public override DataValue Run(Func<List<string>, DataValue> getColumnValue) => wrapped.Run(getColumnValue);
 
