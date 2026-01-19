@@ -1,6 +1,7 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
 using System.Collections.Frozen;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator.Parser;
 
@@ -80,7 +81,7 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public Token GetNextRequired()
     {
         var previous = this.Token;
-        return MoveNext() ? this.Token! : throw SimulatedSqlException.SyntaxErrorNear(previous);
+        return MoveNext() ? this.Token : throw SimulatedSqlException.SyntaxErrorNear(previous);
     }
 
     /// <summary>
@@ -131,7 +132,8 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// <see cref="index"/> is updated to the position of the next token.
     /// </remarks>
     /// <returns>True if another token was found, otherwise false.</returns>
-    private bool MoveNext()
+    [MemberNotNullWhen(true, nameof(Token))]
+    public bool MoveNext()
     {
         while (Tokenizer.NextToken(commandText, ref index) is Token token)
         {

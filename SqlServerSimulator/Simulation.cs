@@ -32,7 +32,7 @@ public sealed class Simulation
     {
         var context = new ParserContext(command);
 
-        while (context.GetNextOptional() is not null)
+        while (context.MoveNext())
         {
             switch (context.Token)
             {
@@ -166,7 +166,7 @@ public sealed class Simulation
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        } // while (tokens.TryMoveNext(out var token))
+        }
     }
 
     private static bool TryParseSet(ParserContext context)
