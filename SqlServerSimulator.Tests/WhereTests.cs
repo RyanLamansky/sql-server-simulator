@@ -16,6 +16,8 @@ public class WhereTests
     [DataRow("1 > = 0", 1)]
     [DataRow("1 > = 1", 1)]
     [DataRow("1 > = 2", 0)]
+    [DataRow("0 < 1", 1)]
+    [DataRow("1 < 1", 0)]
     [DataRow("1 <= 0", 0)]
     [DataRow("1 <= 1", 1)]
     [DataRow("1 <= 2", 1)]

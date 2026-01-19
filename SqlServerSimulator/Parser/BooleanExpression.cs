@@ -7,63 +7,44 @@ namespace SqlServerSimulator.Parser;
 /// </summary>
 internal abstract class BooleanExpression
 {
-    private protected BooleanExpression()
+    protected readonly Expression left, right;
+
+    private protected BooleanExpression(Expression left, Expression right)
     {
+        this.left = left;
+        this.right = right;
     }
 
-    public static BooleanExpression Parse(ParserContext context)
+    private protected BooleanExpression(Expression left, ParserContext context)
     {
-        var left = Expression.Parse(context);
+        this.left = left;
+        context.MoveNextRequired();
+        this.right = Expression.Parse(context);
+    }
 
-        switch (context.Token)
+    public static BooleanExpression Parse(Expression left, ParserContext context) => context.Token switch
+    {
+        Operator { Character: '=' } => new EqualityExpression(left, context),
+        Operator { Character: '>' } => context.GetNextRequired() switch
         {
-            case null:
-                break;
-            case Operator { Character: '=' }:
-                context.MoveNextRequired();
-                return new EqualityExpression(left, Expression.Parse(context));
-            case Operator { Character: '>' }:
-                if (context.GetNextRequired() is Operator { Character: '=' })
-                {
-                    context.MoveNextRequired();
-                    return new GreaterThanOrEqualExpression(left, Expression.Parse(context));
-                }
-                return new GreaterThanExpression(left, Expression.Parse(context));
-            case Operator { Character: '<' }:
-                switch (context.GetNextRequired())
-                {
-                    case Operator { Character: '=' }:
-                        context.MoveNextRequired();
-                        return new LessThanOrEqualExpression(left, Expression.Parse(context));
-                    case Operator { Character: '>' }:
-                        context.MoveNextRequired();
-                        return new InequalityExpression(left, Expression.Parse(context));
-                }
-
-                if (context.GetNextRequired() is Operator { Character: '=' })
-                {
-                    context.MoveNextRequired();
-                    return new LessThanOrEqualExpression(left, Expression.Parse(context));
-                }
-                return new LessThanExpression(left, Expression.Parse(context));
-            case Operator { Character: '!' }:
-                switch (context.GetNextRequired())
-                {
-                    case Operator { Character: '=' }:
-                        context.MoveNextRequired();
-                        return new InequalityExpression(left, Expression.Parse(context));
-                    case Operator { Character: '>' }:
-                        context.MoveNextRequired();
-                        return new LessThanOrEqualExpression(left, Expression.Parse(context));
-                    case Operator { Character: '<' }:
-                        context.MoveNextRequired();
-                        return new GreaterThanOrEqualExpression(left, Expression.Parse(context));
-                }
-                break;
-        }
-
-        throw SimulatedSqlException.SyntaxErrorNear(context);
-    }
+            Operator { Character: '=' } => new GreaterThanOrEqualExpression(left, context),
+            _ => new GreaterThanExpression(left, Expression.Parse(context))
+        },
+        Operator { Character: '<' } => context.GetNextRequired() switch
+        {
+            Operator { Character: '=' } => new LessThanOrEqualExpression(left, context),
+            Operator { Character: '>' } => new InequalityExpression(left, context),
+            _ => new LessThanExpression(left, Expression.Parse(context)),
+        },
+        Operator { Character: '!' } => context.GetNextRequired() switch
+        {
+            Operator { Character: '=' } => new InequalityExpression(left, context),
+            Operator { Character: '>' } => new LessThanOrEqualExpression(left, context),
+            Operator { Character: '<' } => new GreaterThanOrEqualExpression(left, context),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context)
+        },
+        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+    };
 
     /// <summary>
     /// Runs the expression, returning its result.
@@ -76,7 +57,7 @@ internal abstract class BooleanExpression
     public abstract override string ToString();
 #endif
 
-    private sealed class EqualityExpression(Expression left, Expression right) : BooleanExpression
+    private sealed class EqualityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
             (left.Run(getColumnValue).Value?.Equals(right.Run(getColumnValue).Value)).GetValueOrDefault();
@@ -86,7 +67,7 @@ internal abstract class BooleanExpression
 #endif
     }
 
-    private sealed class InequalityExpression(Expression left, Expression right) : BooleanExpression
+    private sealed class InequalityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
             !(left.Run(getColumnValue).Value?.Equals(right.Run(getColumnValue).Value)).GetValueOrDefault();
@@ -96,7 +77,7 @@ internal abstract class BooleanExpression
 #endif
     }
 
-    private sealed class GreaterThanExpression(Expression left, Expression right) : BooleanExpression
+    private sealed class GreaterThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
     {
         public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
             left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) > 0;
@@ -106,7 +87,7 @@ internal abstract class BooleanExpression
 #endif
     }
 
-    private sealed class GreaterThanOrEqualExpression(Expression left, Expression right) : BooleanExpression
+    private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
             left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) >= 0;
@@ -116,7 +97,7 @@ internal abstract class BooleanExpression
 #endif
     }
 
-    private sealed class LessThanExpression(Expression left, Expression right) : BooleanExpression
+    private sealed class LessThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
     {
         public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
             left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) < 0;
@@ -126,7 +107,7 @@ internal abstract class BooleanExpression
 #endif
     }
 
-    private sealed class LessThanOrEqualExpression(Expression left, Expression right) : BooleanExpression
+    private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
             left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) <= 0;

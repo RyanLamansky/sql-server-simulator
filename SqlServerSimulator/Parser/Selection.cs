@@ -158,7 +158,7 @@ internal sealed class Selection
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
                     context.MoveNextRequired();
-                    excluders.Add(BooleanExpression.Parse(context));
+                    excluders.Add(BooleanExpression.Parse(Expression.Parse(context), context));
                     continue;
             }
 
