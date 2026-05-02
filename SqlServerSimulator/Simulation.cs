@@ -1,6 +1,6 @@
-﻿using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
-using SqlServerSimulator.Schema;
+using SqlServerSimulator.Storage;
 using System.Collections.Concurrent;
 using System.Data.Common;
 
@@ -12,7 +12,7 @@ namespace SqlServerSimulator;
 public sealed class Simulation
 {
     /// <summary>
-    /// Creates a new <see cref="Simulation"/> instance.
+    /// Creates a new simulated SQL Server instance with no tables or data.
     /// </summary>
     public Simulation()
     {
@@ -24,9 +24,15 @@ public sealed class Simulation
     /// <returns>A new simulated database connection instance.</returns>
     public DbConnection CreateDbConnection() => new SimulatedDbConnection(this);
 
-    internal readonly ConcurrentDictionary<string, Table> Tables = new(Collation.Default);
+    /// <summary>User tables, keyed by name.</summary>
+    internal readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
 
-    internal readonly Lazy<Dictionary<string, Table>> SystemTables = new(() => BuiltInResources.SystemTables.ToDictionary(table => table.Name, Collation.Default));
+    /// <summary>
+    /// System tables (e.g. <c>systypes</c>). Materialized once per process and
+    /// shared across all <see cref="Simulation"/> instances; the bytes are
+    /// immutable.
+    /// </summary>
+    internal static Dictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
 
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
@@ -54,9 +60,7 @@ public sealed class Simulation
                             if (context.GetNextRequired() is not Operator { Character: '(' })
                                 break;
 
-                            var table = new Table(tableName.Value);
-
-                            var columns = table.Columns;
+                            var rawColumns = new List<(Name Name, Name TypeName, bool Nullable)>();
                             bool suppressAdvanceToken;
                             do
                             {
@@ -64,7 +68,7 @@ public sealed class Simulation
                                 var columnName = context.GetNextRequired<Name>();
                                 var type = context.GetNextRequired<Name>();
 
-                                var nullable = true;
+                                bool nullable;
 
                                 if (context.GetNextRequired() is ReservedKeyword next)
                                 {
@@ -89,14 +93,19 @@ public sealed class Simulation
                                     nullable = true;
                                 }
 
-                                columns.Add(new(columnName.Value, DataType.GetByName(type, columns.Count + 1), nullable));
+                                rawColumns.Add((columnName, type, nullable));
                             } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
 
                             if (context.Token is not Operator { Character: ')' })
                                 break;
 
-                            if (!this.Tables.TryAdd(table.Name, table))
-                                throw SimulatedSqlException.ThereIsAlreadyAnObject(table.Name);
+                            var heapColumns = new HeapColumn[rawColumns.Count];
+                            for (var i = 0; i < rawColumns.Count; i++)
+                                heapColumns[i] = new(rawColumns[i].Name.Value, SqlType.GetByName(rawColumns[i].TypeName, i + 1), rawColumns[i].Nullable);
+
+                            var heapTable = new HeapTable(tableName.Value, heapColumns);
+                            if (!this.HeapTables.TryAdd(heapTable.Name, heapTable))
+                                throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
 
                             continue;
                     }
@@ -113,58 +122,121 @@ public sealed class Simulation
                     if (context.Token is not StringToken destinationTableToken)
                         break;
 
-                    if (!this.Tables.TryGetValue(destinationTableToken.Value, out var destinationTable))
-                        throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
-
-                    Column[] destinationColumns;
-                    if (context.GetNextRequired() is Operator { Character: '(' })
-                    {
-                        var usedColumns = new List<Column>();
-                        while (context.GetNextRequired() is StringToken column)
-                        {
-                            var columnName = column.Value;
-                            var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
-                                ?? throw SimulatedSqlException.InvalidColumnName(columnName);
-                            usedColumns.Add(tableColumn);
-                        }
-
-                        if (context.Token is not Operator { Character: ')' })
-                            break;
-
-                        destinationColumns = [.. usedColumns];
-
-                        context.MoveNextRequired();
-                    }
-                    else
-                    {
-                        destinationColumns = [.. destinationTable.Columns];
-                    }
-
-                    if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
-                        break;
-
-                    var sourceRows = new List<Token[]>();
-
-                    do
-                    {
-                        if (context.GetNextRequired<Operator>() is not { Character: '(' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                        var sourceValues = new List<Token>();
-                        while (context.GetNextRequired() is not Operator { Character: ')' })
-                            sourceValues.Add(context.Token);
-
-                        sourceRows.Add([.. sourceValues]);
-
-                    } while (context.GetNextOptional() is Operator { Character: ',' });
-
-                    destinationTable.ReceiveData(destinationColumns, sourceRows, context.GetVariableValue);
-
-                    yield return new SimulatedNonQuery(sourceRows.Count);
+                    yield return this.HeapTables.TryGetValue(destinationTableToken.Value, out var destinationTable)
+                        ? ProcessHeapInsert(destinationTable, context)
+                        : throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
                     continue;
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+    }
+
+    /// <summary>
+    /// INSERT processor. Parses the column subset and VALUES tuples, converts
+    /// each value token to a <see cref="SqlValue"/> typed to its target column,
+    /// encodes each row via <see cref="RowEncoder.EncodeRow"/>, and appends
+    /// the bytes to <paramref name="destinationTable"/>'s heap.
+    /// </summary>
+    private static SimulatedNonQuery ProcessHeapInsert(HeapTable destinationTable, ParserContext context)
+    {
+        HeapColumn[] destinationColumns;
+        if (context.GetNextRequired() is Operator { Character: '(' })
+        {
+            var usedColumns = new List<HeapColumn>();
+            while (context.GetNextRequired() is StringToken column)
+            {
+                var columnName = column.Value;
+                var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
+                    ?? throw SimulatedSqlException.InvalidColumnName(columnName);
+                usedColumns.Add(tableColumn);
+            }
+
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            destinationColumns = [.. usedColumns];
+
+            context.MoveNextRequired();
+        }
+        else
+        {
+            destinationColumns = [.. destinationTable.Columns];
+        }
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var sourceRows = new List<Token[]>();
+
+        do
+        {
+            if (context.GetNextRequired<Operator>() is not { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            var sourceValues = new List<Token>();
+            while (true)
+            {
+                var valueToken = context.GetNextRequired();
+                if (valueToken is Operator { Character: ',' or ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                sourceValues.Add(valueToken);
+
+                var separator = context.GetNextRequired();
+                if (separator is Operator { Character: ')' })
+                    break;
+                if (separator is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+
+            sourceRows.Add([.. sourceValues]);
+
+        } while (context.GetNextOptional() is Operator { Character: ',' });
+
+        foreach (var sourceRow in sourceRows)
+        {
+            var rowValues = new SqlValue[destinationTable.Columns.Length];
+            for (var i = 0; i < rowValues.Length; i++)
+                rowValues[i] = SqlValue.Null(destinationTable.Schema[i]);
+
+            for (var i = 0; i < destinationColumns.Length; i++)
+            {
+                var targetColumn = destinationColumns[i];
+                var ordinal = -1;
+                for (var j = 0; j < destinationTable.Columns.Length; j++)
+                {
+                    if (ReferenceEquals(destinationTable.Columns[j], targetColumn))
+                    {
+                        ordinal = j;
+                        break;
+                    }
+                }
+
+                rowValues[ordinal] = TokenToSqlValue(sourceRow[i], targetColumn.Type, context.GetVariableValue);
+            }
+
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Schema, rowValues));
+        }
+
+        return new SimulatedNonQuery(sourceRows.Count);
+    }
+
+    private static SqlValue TokenToSqlValue(Token token, SqlType targetType, Func<string, SqlValue> getVariableValue)
+    {
+        var source = token switch
+        {
+            Numeric numeric => numeric.Value,
+            AtPrefixedString atPrefixed => getVariableValue(atPrefixed.Value),
+            _ => throw new NotSupportedException($"INSERT doesn't know how to handle input of type {token.GetType().Name}."),
+        };
+
+        try
+        {
+            return source.CoerceTo(targetType);
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
     }
 

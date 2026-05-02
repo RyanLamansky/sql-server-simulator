@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 
@@ -6,25 +6,23 @@ namespace SqlServerSimulator;
 
 sealed class SimulatedDbDataReader : DbDataReader
 {
-    internal readonly Simulation simulation;
-    internal readonly IEnumerator<SimulatedResultSet> results;
-    internal IEnumerator<DataValue[]> records;
+    private readonly IEnumerator<SimulatedQueryResult> results;
+    private RowCursor cursor;
     private int recordsAffected;
 
-    public SimulatedDbDataReader(Simulation simulation, IEnumerable<SimulatedResultSet> results)
+    public SimulatedDbDataReader(IEnumerable<SimulatedQueryResult> results)
     {
-        this.simulation = simulation;
         this.results = results.GetEnumerator();
-        this.records = (this.results.MoveNext() ? this.results.Current.records : []).GetEnumerator();
+        this.cursor = this.results.MoveNext() ? this.results.Current.CreateCursor() : EmptyCursor.Instance;
     }
 
-    public override object this[int ordinal] => records.Current[ordinal].Value ?? DBNull.Value;
+    public override object this[int ordinal] => cursor.GetValueObject(ordinal) ?? DBNull.Value;
 
     public override object this[string name] => throw new NotImplementedException();
 
     public override int Depth => throw new NotImplementedException();
 
-    public override int FieldCount => records.Current.Length;
+    public override int FieldCount => cursor.FieldCount;
 
     public override bool HasRows => throw new NotImplementedException();
 
@@ -98,10 +96,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override short GetInt16(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override short GetInt16(int ordinal) => (short)this[ordinal];
 
     public override int GetInt32(int ordinal) => (int)this[ordinal];
 
@@ -118,7 +113,7 @@ sealed class SimulatedDbDataReader : DbDataReader
             throw new IndexOutOfRangeException();
 #pragma warning restore
 
-        return this.results.Current.columnNames[ordinal];
+        return this.results.Current.ColumnNames[ordinal];
     }
 
     public override int GetOrdinal(string name)
@@ -150,15 +145,15 @@ sealed class SimulatedDbDataReader : DbDataReader
         if (hasNext)
             this.recordsAffected = 0;
 
-        this.records.Dispose();
-        this.records = this.results.Current?.GetEnumerator() ?? Enumerable.Empty<DataValue[]>().GetEnumerator();
+        this.cursor.Dispose();
+        this.cursor = hasNext ? this.results.Current.CreateCursor() : EmptyCursor.Instance;
 
         return hasNext;
     }
 
     public override bool Read()
     {
-        var hasNext = this.records.MoveNext();
+        var hasNext = this.cursor.MoveNext();
 
         if (hasNext)
             this.recordsAffected++;
@@ -171,6 +166,18 @@ sealed class SimulatedDbDataReader : DbDataReader
         base.Dispose(disposing);
 
         this.results.Dispose();
-        this.records.Dispose();
+        this.cursor.Dispose();
+    }
+
+    /// <summary>Stand-in cursor used after the last result-set is exhausted.</summary>
+    private sealed class EmptyCursor : RowCursor
+    {
+        public static readonly EmptyCursor Instance = new();
+
+        public override int FieldCount => 0;
+
+        public override bool MoveNext() => false;
+
+        public override object? GetValueObject(int ordinal) => throw new InvalidOperationException("No current row.");
     }
 }

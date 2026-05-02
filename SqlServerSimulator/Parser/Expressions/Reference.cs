@@ -1,4 +1,5 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -10,7 +11,9 @@ internal sealed class Reference(Name name) : Expression
 
     public void AddMultiPartComponent(Name name) => this.name.Add(name.Value);
 
-    public override DataValue Run(Func<List<string>, DataValue> getColumnValue) => getColumnValue(this.name);
+    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue) => getColumnValue(this.name);
+
+    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => resolveColumnType(this.name);
 
 #if DEBUG
     public override string ToString() => string.Join('.', name);

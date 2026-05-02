@@ -1,4 +1,5 @@
-﻿using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
 
@@ -45,20 +46,39 @@ internal abstract class BooleanExpression
     };
 
     /// <summary>
-    /// Runs the expression, returning its result.
+    /// Evaluates the expression. Any NULL operand yields <c>false</c>
+    /// (SQL UNKNOWN-in-WHERE semantics).
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
-    /// <returns>The result of the expression.</returns>
-    public abstract bool Run(Func<List<string>, DataValue> getColumnValue);
+    public abstract bool Run(Func<List<string>, SqlValue> getColumnValue);
 
 #if DEBUG
     public abstract override string ToString();
 #endif
 
+    /// <summary>
+    /// Evaluates both sides, applies SQL Server type promotion to a common
+    /// type, and invokes the comparator. Cross-category type pairs surface as
+    /// <see cref="NotSupportedException"/> via <see cref="SqlType.Promote"/>.
+    /// </summary>
+    private static bool ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, Func<SqlValue, SqlValue, bool> compare)
+    {
+        var l = left.Run(getColumnValue);
+        var r = right.Run(getColumnValue);
+        if (l.IsNull || r.IsNull)
+            return false;
+
+        if (l.Type == r.Type)
+            return compare(l, r);
+
+        var common = SqlType.Promote(l.Type, r.Type);
+        return compare(l.CoerceTo(common), r.CoerceTo(common));
+    }
+
     private sealed class EqualityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
-        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
-            (left.Run(getColumnValue).Value?.Equals(right.Run(getColumnValue).Value)).GetValueOrDefault();
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            ComparePromoted(left, right, getColumnValue, static (l, r) => l.Equals(r));
 
 #if DEBUG
         public override string ToString() => $"{left} = {right}";
@@ -67,8 +87,8 @@ internal abstract class BooleanExpression
 
     private sealed class InequalityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
-        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
-            !(left.Run(getColumnValue).Value?.Equals(right.Run(getColumnValue).Value)).GetValueOrDefault();
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            ComparePromoted(left, right, getColumnValue, static (l, r) => !l.Equals(r));
 
 #if DEBUG
         public override string ToString() => $"{left} <> {right}";
@@ -77,8 +97,8 @@ internal abstract class BooleanExpression
 
     private sealed class GreaterThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
     {
-        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
-            left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) > 0;
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) > 0);
 
 #if DEBUG
         public override string ToString() => $"{left} > {right}";
@@ -87,8 +107,8 @@ internal abstract class BooleanExpression
 
     private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
-        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
-            left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) >= 0;
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) >= 0);
 
 #if DEBUG
         public override string ToString() => $"{left} >= {right}";
@@ -97,8 +117,8 @@ internal abstract class BooleanExpression
 
     private sealed class LessThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
     {
-        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
-            left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) < 0;
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) < 0);
 
 #if DEBUG
         public override string ToString() => $"{left} < {right}";
@@ -107,8 +127,8 @@ internal abstract class BooleanExpression
 
     private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
-        public override bool Run(Func<List<string>, DataValue> getColumnValue) =>
-            left.Run(getColumnValue).CompareTo(right.Run(getColumnValue)) <= 0;
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) <= 0);
 
 #if DEBUG
         public override string ToString() => $"{left} <= {right}";

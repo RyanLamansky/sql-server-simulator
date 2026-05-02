@@ -5,6 +5,8 @@ namespace SqlServerSimulator;
 [TestClass]
 public class ConnectionTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     [TestMethod]
     public void OpenCloseSync()
     {
@@ -23,7 +25,7 @@ public class ConnectionTests
         using var connection = new Simulation().CreateDbConnection();
 
         Assert.AreEqual(ConnectionState.Closed, connection.State);
-        await connection.OpenAsync();
+        await connection.OpenAsync(this.TestContext.CancellationToken);
         Assert.AreEqual(ConnectionState.Open, connection.State);
         await connection.CloseAsync();
         Assert.AreEqual(ConnectionState.Closed, connection.State);
@@ -35,7 +37,7 @@ public class ConnectionTests
         using var connection = new Simulation().CreateDbConnection();
 
         Assert.AreEqual(ConnectionState.Closed, connection.State);
-        await connection.OpenAsync(default);
+        await connection.OpenAsync(this.TestContext.CancellationToken);
         Assert.AreEqual(ConnectionState.Open, connection.State);
     }
 }

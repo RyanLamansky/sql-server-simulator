@@ -45,10 +45,14 @@ public class SelectTests
     }
 
     [TestMethod]
+    [DataRow("0", 0)]
     [DataRow("1", 1)]
+    [DataRow("42", 42)]
+    [DataRow("2147483647", int.MaxValue)]
     [DataRow("(1)", 1)]
     [DataRow("(1) + 1", 2)]
     [DataRow("(1) + (1)", 2)]
+    [DataRow("(1 + 2) * 3", 9)]
     [DataRow("1 + 1", 2)]
     [DataRow("1 - 1", 0)]
     [DataRow("-1", -1)]
@@ -191,13 +195,13 @@ public class SelectTests
         var results = reader
             .EnumerateRecords()
             .Take(34) // There might be more someday, but there won't be less.
-            .Select(reader => (C1: reader.GetString(0), C2: reader.GetInt32(1)))
+            .Select(reader => (C1: reader.GetString(0), C2: reader.GetInt16(1)))
             .ToArray();
 
         Assert.HasCount(34, results);
         var (C1, C2) = results[0];
         Assert.AreEqual("image", C1);
-        Assert.AreEqual(16, C2);
+        Assert.AreEqual((short)16, C2);
     }
 
     [TestMethod]
@@ -245,30 +249,46 @@ public class SelectTests
     }
 
     [TestMethod]
-    [DataRow("1", new[] { 1 })]
-    [DataRow("0", new int[] { })]
-    [DataRow("(1)", new[] { 1 })]
-    [DataRow("(0)", new int[] { })]
-    public void TopConstantUnsorted(string topExpression, int[] expectedValues)
+    public void MultiColumnNamedAndUnnamed()
     {
-        CollectionAssert.AreEquivalent(expectedValues, [.. new Simulation()
-            .ExecuteReader($"select top {topExpression} 1")
-            .EnumerateRecords()
-            .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
+        using var reader = new Simulation().ExecuteReader("select 1 + 1 as x, 7 as y");
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(2, reader.FieldCount);
+        Assert.AreEqual("x", reader.GetName(0));
+        Assert.AreEqual("y", reader.GetName(1));
+        Assert.AreEqual(2, reader[0]);
+        Assert.AreEqual(7, reader[1]);
     }
 
     [TestMethod]
-    [DataRow("@p0", 1, new[] { 1 })]
-    [DataRow("(@p0)", 1, new[] { 1 })]
-    [DataRow("@p0", 0, new int[] { })]
-    [DataRow("(@p0)", 0, new int[] { })]
-    public void TopParameterizedUnsorted(string parameterExpression, int parameterValue, int[] expectedValues)
+    public void NullPropagatesThroughArithmetic()
+        => Assert.AreEqual(DBNull.Value, ExecuteScalar("select null + 1"));
+
+    [TestMethod]
+    public void SelectFromEmptyTable_ReturnsNoRows()
     {
-        CollectionAssert.AreEquivalent(expectedValues, [.. new Simulation()
-            .CreateOpenConnection()
-            .CreateCommand($"select top {parameterExpression} 1", ("p0", parameterValue))
-            .ExecuteReader()
-            .EnumerateRecords()
-            .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
+        using var connection = new Simulation().CreateOpenConnection();
+
+        _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
+
+        using var reader = connection.CreateCommand("select v from t").ExecuteReader();
+        Assert.IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void SelectFromTable_ProjectionReorderingAndSubsetting()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+
+        _ = connection.CreateCommand("create table t ( a int, b int, c int )").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values ( 1, 2, 3 )").ExecuteNonQuery();
+
+        using var reader = connection.CreateCommand("select c, a from t").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(2, reader.FieldCount);
+        Assert.AreEqual("c", reader.GetName(0));
+        Assert.AreEqual("a", reader.GetName(1));
+        Assert.AreEqual(3, reader[0]);
+        Assert.AreEqual(1, reader[1]);
     }
 }

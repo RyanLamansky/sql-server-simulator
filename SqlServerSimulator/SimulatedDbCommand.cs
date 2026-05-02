@@ -98,5 +98,5 @@ sealed class SimulatedDbCommand : DbCommand
     protected override DbParameter CreateDbParameter() => new SimulatedDbParameter();
 
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior = default)
-        => new SimulatedDbDataReader(this.simulation, this.simulation.CreateResultSetsForCommand(this).OfType<SimulatedResultSet>());
+        => new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this).OfType<SimulatedQueryResult>());
 }

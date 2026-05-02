@@ -42,7 +42,7 @@ internal abstract class Expression
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
             Name name => new Reference(name),
             Operator { Character: '+' } => Expression.Parse(context.MoveNextRequiredReturnSelf()),
-            Operator { Character: '-' } => new Subtract(new Value(new DataValue(0, DataType.BuiltInDbInt32)), context),
+            Operator { Character: '-' } => new Subtract(new Value(Storage.SqlValue.FromInt32(0)), context),
             Operator { Character: '(' } => new Parenthesized(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
         };
@@ -111,11 +111,19 @@ internal abstract class Expression
     public static Expression AssignName(Expression expression, Name name) => new NamedExpression(expression, name.Value);
 
     /// <summary>
-    /// Runs the expression, returning its result.
+    /// Evaluates the expression against a row's column values and returns its result.
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
-    /// <returns>The result of the expression.</returns>
-    public abstract DataValue Run(Func<List<string>, DataValue> getColumnValue);
+    public abstract Storage.SqlValue Run(Func<List<string>, Storage.SqlValue> getColumnValue);
+
+    /// <summary>
+    /// Static type-of resolver for projection planning: returns the
+    /// <see cref="Storage.SqlType"/> this expression will produce, given a
+    /// resolver that maps column-name parts to their declared types. Lets a
+    /// SELECT plan its output schema before any rows are read.
+    /// </summary>
+    /// <param name="resolveColumnType">Callback that, given a multi-part column name, returns its declared type or throws if unresolvable.</param>
+    public abstract Storage.SqlType GetSqlType(Func<List<string>, Storage.SqlType> resolveColumnType);
 
 #if DEBUG
     public abstract override string ToString();

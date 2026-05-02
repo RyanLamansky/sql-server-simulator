@@ -1,4 +1,6 @@
-﻿namespace SqlServerSimulator.Parser.Expressions;
+﻿using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// Encapsulates the SQL DATALENGTH command: https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql
@@ -7,11 +9,17 @@ internal sealed class DataLength(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override DataValue Run(Func<List<string>, DataValue> getColumnValue)
+    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
-        return value.Value is null ? default : new(value.Type.DataLength(value));
+        return value.IsNull
+            ? SqlValue.Null(SqlType.Int32)
+            : value.Type.IsFixedLength
+                ? SqlValue.FromInt32(value.Type.FixedLength)
+                : SqlValue.FromInt32(value.Type.GetVariableByteCount(value));
     }
+
+    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
 
 #if DEBUG
     public override string ToString() => $"DATALENGTH({source})";

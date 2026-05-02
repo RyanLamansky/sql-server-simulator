@@ -18,7 +18,13 @@ jobs:
         dotnet-quality: ga
     - name: Restore Dependencies
       run: dotnet restore
+    # `dotnet format` runs the full formatter pipeline (whitespace + style + analyzers)
+    # which catches a few IDE-prefixed rules, notably IDE0055 (Fix formatting), that
+    # `dotnet build` skips even with EnforceCodeStyleInBuild=true. This step keeps CI
+    # parity with what Visual Studio's IDE-side analysis flags.
+    - name: Format Check
+      run: dotnet format --verify-no-changes --no-restore
     - name: Build
-      run: dotnet build --configuration ${{ matrix.configuration }} --no-restore
+      run: dotnet build --configuration ${{ matrix.configuration }} --no-restore -p:EnforceCodeStyleInBuild=false
     - name: Test
       run: dotnet test --configuration ${{ matrix.configuration }} --no-build --nologo

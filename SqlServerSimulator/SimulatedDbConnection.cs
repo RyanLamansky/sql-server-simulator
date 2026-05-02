@@ -6,7 +6,7 @@ namespace SqlServerSimulator;
 
 sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
 {
-    internal readonly Simulation simulation = simulation;
+    private readonly Simulation simulation = simulation;
 
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }

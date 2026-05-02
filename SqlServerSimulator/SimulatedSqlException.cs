@@ -58,7 +58,7 @@ internal sealed class SimulatedSqlException : DbException
     /// <summary>
     /// An error number as described by https://learn.microsoft.com/en-us/sql/relational-databases/errors-events/database-engine-events-and-errors .
     /// </summary>
-    public int Number { get; }
+    public readonly int Number;
 
     /// <summary>
     /// A value from 1 to 25 that indicates the severity level of the error. The default is 0.
@@ -68,16 +68,23 @@ internal sealed class SimulatedSqlException : DbException
     /// Errors that have a low severity, such as 1 or 2, are information messages or low-level warnings.
     /// Errors that have a high severity indicate problems that should be addressed as soon as possible.
     /// </remarks>
-    public byte Class { get; }
+    public readonly byte Class;
 
     /// <summary>
     /// Some error messages can be raised at multiple points in the code for the Database Engine.
     /// For example, an 1105 error can be raised for several different conditions.
     /// Each specific condition that raises an error assigns a unique state code.
     /// </summary>
-    public byte State { get; }
+    public readonly byte State;
 
-    public IReadOnlyList<SimulatedSqlError> Errors { get; }
+    public readonly SimulatedSqlError[] Errors;
+
+    /// <summary>
+    /// Mimics SQL Server error 8115: arithmetic overflow converting an
+    /// expression into a narrower numeric data type.
+    /// </summary>
+    /// <param name="targetType">The destination type's display name (e.g. <c>tinyint</c>).</param>
+    internal static SimulatedSqlException ArithmeticOverflow(string targetType) => new($"Arithmetic overflow error converting expression to data type {targetType}.", 8115, 16, 8);
 
     /// <summary>
     /// Mimics the SqlException that occurs when an unknown type is referenced.
@@ -94,8 +101,6 @@ internal sealed class SimulatedSqlException : DbException
     /// <returns>The exception.</returns>
     internal static SimulatedSqlException ColumnReferenceNotAllowed(IEnumerable<string> name)
         => new($"The reference to column \"{string.Join('.', name)}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
-
-    internal static SimulatedSqlException DataTypeIncompatible(DataType a, DataType b, char c) => new($"The data types {a} and {b} are incompatible in the '{c}' operator.", 402, 16, 1);
 
     internal static SimulatedSqlException IdentifierTooLong(ReadOnlySpan<char> first128)
         => new($"The identifier that starts with '{first128}' is too long. Maximum length is 128.", 103, 15, 4);

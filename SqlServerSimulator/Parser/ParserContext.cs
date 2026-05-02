@@ -1,7 +1,10 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 using System.Collections.Frozen;
+using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 
 namespace SqlServerSimulator.Parser;
 
@@ -26,20 +29,29 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// <summary>
     /// The most recently identified token in the command string.
     /// </summary>
-    public Token? Token { get; private set; }
+    public Token? Token;
 
-    private readonly FrozenDictionary<string, DataValue> variables = command
+    private readonly FrozenDictionary<string, SqlValue> variables = command
         .Parameters
         .Cast<DbParameter>()
         .ToFrozenDictionary(parameter =>
         {
             var name = parameter.ParameterName;
             return name.StartsWith('@') ? name[1..] : name;
-        }, parameter =>
-        {
-            var type = DataType.GetByDbType(parameter.DbType);
-            return type.ConvertFrom(new(parameter.Value, type));
-        }, StringComparer.InvariantCultureIgnoreCase);
+        }, parameter => ConvertParameter(parameter.Value, SqlType.GetByDbType(parameter.DbType)),
+        StringComparer.InvariantCultureIgnoreCase);
+
+    private static SqlValue ConvertParameter(object? raw, SqlType type) =>
+        raw is null or DBNull ? SqlValue.Null(type)
+        : type == SqlType.Bit ? SqlValue.FromBoolean((bool)raw)
+        : type == SqlType.TinyInt ? SqlValue.FromByte(Convert.ToByte(raw, CultureInfo.InvariantCulture))
+        : type == SqlType.SmallInt ? SqlValue.FromInt16(Convert.ToInt16(raw, CultureInfo.InvariantCulture))
+        : type == SqlType.Int32 ? SqlValue.FromInt32(Convert.ToInt32(raw, CultureInfo.InvariantCulture))
+        : type == SqlType.BigInt ? SqlValue.FromInt64(Convert.ToInt64(raw, CultureInfo.InvariantCulture))
+        : type == SqlType.Varchar ? SqlValue.FromVarchar((string)raw)
+        : type == SqlType.NVarchar ? SqlValue.FromNVarchar((string)raw)
+        : type == SqlType.SystemName ? SqlValue.FromSystemName((string)raw)
+        : throw new NotSupportedException($"Don't know how to convert raw parameter value of type {raw.GetType().Name} to {type}.");
 
     public Simulation Simulation => Command.simulation;
 
@@ -49,7 +61,7 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// <param name="name">The name of the variable.</param>
     /// <returns>The variable's value.</returns>
     /// <exception cref="SimulatedSqlException">Must declare the scalar variable \"@{value of <paramref name="name"/>}\".</exception>
-    public DataValue GetVariableValue(string name) =>
+    public SqlValue GetVariableValue(string name) =>
         variables.TryGetValue(name, out var value)
         ? value
         : throw SimulatedSqlException.MustDeclareScalarVariable(name);

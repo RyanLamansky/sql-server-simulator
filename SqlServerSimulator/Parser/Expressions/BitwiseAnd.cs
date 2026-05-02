@@ -1,10 +1,10 @@
-﻿namespace SqlServerSimulator.Parser.Expressions;
+namespace SqlServerSimulator.Parser.Expressions;
 
-internal sealed class BitwiseAnd(Expression left, ParserContext context) : BitwiseExpression(left, context)
+internal sealed class BitwiseAnd(Expression left, ParserContext context) : TwoSidedExpression(left, context)
 {
     public override byte Precedence => 3;
 
-    protected override DataValue Run(DataType.BitwiseCompatibleDataType common, DataValue left, DataValue right) => common.BitwiseAnd(left, right);
+    protected override Storage.SqlValue Run(Storage.SqlValue left, Storage.SqlValue right) => IntegerArithmetic(left, right, '&', static (a, b) => a & b);
 
     protected override char Operator => '&';
 }
