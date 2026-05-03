@@ -3,6 +3,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
+/// <summary>
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
+/// </summary>
 [TestClass]
 public class HeapPageTests
 {

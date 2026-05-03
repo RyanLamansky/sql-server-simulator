@@ -1,0 +1,34 @@
+using SqlServerSimulator.Storage;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+
+namespace SqlServerSimulator.Parser.Expressions;
+
+/// <summary>
+/// SQL <c>LOWER(x)</c>: lowercases each character. Mirror of
+/// <see cref="Upper"/>.
+/// </summary>
+/// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/lower-transact-sql</remarks>
+internal sealed class Lower(ParserContext context) : Expression
+{
+    private readonly Expression source = Parse(context);
+
+    [SuppressMessage("Globalization", "CA1308:Normalize strings to uppercase",
+        Justification = "SQL LOWER lowercases user-facing data; the rule's normalization concern doesn't apply here.")]
+    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    {
+        var value = source.Run(getColumnValue);
+        if (value.IsNull)
+            return SqlValue.Null(value.Type);
+        if (!SqlType.IsStringCategory(value.Type))
+            throw new NotSupportedException($"LOWER expects a string operand; got {value.Type}.");
+        var lowered = value.AsString.ToLower(CultureInfo.InvariantCulture);
+        return SqlValue.FromString(value.Type, lowered);
+    }
+
+    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+
+#if DEBUG
+    public override string ToString() => $"LOWER({source})";
+#endif
+}

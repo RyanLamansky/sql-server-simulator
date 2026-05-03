@@ -10,19 +10,32 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal sealed class Heap
 {
+    /// <summary>
+    /// SQL Server's documented in-row record size limit. Rows whose encoded
+    /// length exceeds this fail at insert time; real SQL Server would push
+    /// variable-length columns to ROW_OVERFLOW pages, which the simulator
+    /// doesn't model yet.
+    /// </summary>
+    /// <remarks>
+    /// The page's physical capacity (<see cref="HeapPage.MaxRowPayload"/>) is
+    /// slightly larger; the gap accounts for SQL Server's per-record overhead
+    /// the simulator doesn't byte-for-byte reproduce.
+    /// </remarks>
+    public const int MaxRowSize = 8060;
+
     /// <summary>Pages in this heap, in allocation order. Index <c>i</c> is reachable via prev/next links.</summary>
     public readonly List<HeapPage> Pages = [];
 
     /// <summary>
     /// Appends a row's encoded bytes to the heap. The active (last) page is
     /// tried first; on no-fit, a new page is allocated and linked, and the row
-    /// goes there. Throws if the row exceeds <see cref="HeapPage.MaxRowPayload"/>
+    /// goes there. Throws if the row exceeds <see cref="MaxRowSize"/>
     /// (no overflow-page modeling yet).
     /// </summary>
     public void Insert(ReadOnlySpan<byte> row)
     {
-        if (row.Length > HeapPage.MaxRowPayload)
-            throw new NotSupportedException($"Row of {row.Length} bytes exceeds the per-page maximum of {HeapPage.MaxRowPayload}; row-overflow pages aren't modeled yet.");
+        if (row.Length > MaxRowSize)
+            throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; row-overflow pages aren't modeled yet.");
 
         if (this.Pages.Count > 0 && this.Pages[^1].TryInsert(row))
             return;

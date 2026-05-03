@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -13,7 +14,11 @@ internal sealed class Selection
     private Selection(SimulatedQueryResult results) => this.Results = results;
 
     /// <summary>
-    /// Creates a <see cref="Selection"/> from a series of tokens.
+    /// Creates a <see cref="Selection"/> from a series of tokens. Follows the
+    /// lookahead contract documented on <see cref="ParserContext"/>: on
+    /// return, <see cref="ParserContext.Token"/> is the first token not
+    /// consumed by the SELECT (typically <c>;</c>, <c>)</c> for a derived
+    /// table, or null at end of command).
     /// </summary>
     /// <param name="context">Manages the overall parsing state.</param>
     /// <param name="depth">The current depth of recursed selection, such as with derived tables. 0 for the top-level SELECT.</param>
@@ -22,9 +27,28 @@ internal sealed class Selection
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Selection Parse(ParserContext context, uint depth)
     {
+        var distinct = false;
         int? topCount = null;
 
-        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Top })
+        var firstToken = context.GetNextRequired();
+
+        // DISTINCT/ALL appear before TOP. SQL Server rejects `TOP n DISTINCT`
+        // at parse time (Msg 156), and the only other quantifier is ALL which
+        // is the implicit default — accept it but treat as no-op. Switch (vs
+        // chained ifs) lets the compiler emit a single ReservedKeyword type
+        // check for both arms.
+        switch (firstToken)
+        {
+            case ReservedKeyword { Keyword: Keyword.Distinct }:
+                distinct = true;
+                firstToken = context.GetNextRequired();
+                break;
+            case ReservedKeyword { Keyword: Keyword.All }:
+                firstToken = context.GetNextRequired();
+                break;
+        }
+
+        if (firstToken is ReservedKeyword { Keyword: Keyword.Top })
         {
             var resolved = Expression
                 .Parse(context.MoveNextRequiredReturnSelf())
@@ -36,12 +60,19 @@ internal sealed class Selection
 
         List<Expression> expressions = [];
         List<BooleanExpression> excluders = [];
+        List<OrderBySpec> orderBy = [];
 
         do
         {
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.From }:
+                    break;
+
+                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right }:
+                    // LEFT/RIGHT are reserved (for future JOIN) but valid as
+                    // function call heads inside a SELECT projection.
+                    expressions.Add(Expression.Parse(context));
                     break;
 
                 case ReservedKeyword { Keyword: not Keyword.Null } keyword:
@@ -66,6 +97,13 @@ internal sealed class Selection
                 case null:
                     goto ExitWhileTokenLoop;
 
+                // End of statement in a multi-statement batch. Leave the ';'
+                // as the current token so the outer dispatch loop sees it on
+                // its next iteration (where it's a no-op separator) and
+                // continues with whatever statement follows.
+                case Operator { Character: ';' }:
+                    goto ExitWhileTokenLoop;
+
                 case Operator { Character: ',' }:
                     continue;
 
@@ -87,13 +125,13 @@ internal sealed class Selection
                                 throw SimulatedSqlException.InvalidObjectName(tableName);
                             }
 
-                            ConsumeOptionalAliasAndWhere(context, excluders);
+                            ConsumeOptionalAliasWhereOrderBy(context, excluders, orderBy);
 
                             var heapColumnNames = new string[heapTable.Columns.Length];
                             for (var ci = 0; ci < heapColumnNames.Length; ci++)
                                 heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
-                            return new(BuildSqlProjection(heapColumnNames, heapTable.Schema, heapTable.Rows, expressions, excluders, topCount));
+                            return new(BuildSqlProjection(heapColumnNames, heapTable.Schema, heapTable.Rows, expressions, excluders, orderBy, distinct, topCount));
 
                         case Operator { Character: '(' }:
                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
@@ -102,45 +140,115 @@ internal sealed class Selection
                             if (Selection.Parse(context, depth + 1).Results is not SimulatedSqlResultSet derived)
                                 throw new InvalidOperationException("Inner SELECT produced a non-Pages result set; this should be unreachable.");
 
-                            ConsumeOptionalAliasAndWhere(context, excluders);
+                            ConsumeOptionalAliasWhereOrderBy(context, excluders, orderBy);
 
-                            return new(BuildSqlProjection(derived.ColumnNames, derived.Schema, derived.RowBytes, expressions, excluders, topCount));
+                            return new(BuildSqlProjection(derived.ColumnNames, derived.Schema, derived.RowBytes, expressions, excluders, orderBy, distinct, topCount));
                     }
 
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
-                case ReservedKeyword { Keyword: Keyword.Where }:
-                    excluders.Add(BooleanExpression.Parse(Expression.Parse(context.MoveNextRequiredReturnSelf()), context));
-                    continue;
+                case ReservedKeyword { Keyword: Keyword.Where or Keyword.Order }:
+                    ConsumeWhereAndOrderBy(context, excluders, orderBy);
+                    goto ExitWhileTokenLoop;
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
 
-        return new(BuildSynthesizedSqlRow(expressions, excluders, topCount));
+        return new(BuildSynthesizedSqlRow(expressions, excluders, orderBy, distinct, topCount));
     }
 
     /// <summary>
     /// After a FROM source (table name or derived table), parses an optional
     /// AS alias (the alias name is discarded — column resolution today is by
     /// last-component match, so the alias is informational), then any number
-    /// of WHERE clauses.
+    /// of WHERE clauses, then an optional ORDER BY clause.
     /// </summary>
-    private static void ConsumeOptionalAliasAndWhere(ParserContext context, List<BooleanExpression> excluders)
+    private static void ConsumeOptionalAliasWhereOrderBy(ParserContext context, List<BooleanExpression> excluders, List<OrderBySpec> orderBy)
     {
         var nextToken = context.GetNextOptional();
         if (nextToken is ReservedKeyword { Keyword: Keyword.As })
         {
             _ = context.GetNextRequired<Name>();
-            nextToken = context.GetNextOptional();
+            _ = context.GetNextOptional();
         }
 
-        while (nextToken is ReservedKeyword { Keyword: Keyword.Where })
+        ConsumeWhereAndOrderBy(context, excluders, orderBy);
+    }
+
+    /// <summary>
+    /// Reads zero or more WHERE clauses followed by an optional ORDER BY,
+    /// starting from <see cref="ParserContext.Token"/> already positioned at
+    /// the first lookahead token (e.g. WHERE, ORDER, ;, or null). On return,
+    /// <see cref="ParserContext.Token"/> is the first token after the last
+    /// consumed clause (typically ;, ), or null).
+    /// </summary>
+    /// <remarks>
+    /// Uses <see cref="ParserContext.Token"/> directly between clauses
+    /// instead of advancing with <see cref="ParserContext.GetNextOptional"/>
+    /// — sub-Parse helpers leave Token at the first un-consumed token per
+    /// the lookahead contract, and an extra advance here would silently swallow
+    /// the next clause's opening keyword.
+    /// </remarks>
+    private static void ConsumeWhereAndOrderBy(ParserContext context, List<BooleanExpression> excluders, List<OrderBySpec> orderBy)
+    {
+        while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             excluders.Add(BooleanExpression.Parse(Expression.Parse(context.MoveNextRequiredReturnSelf()), context));
-            nextToken = context.GetNextOptional();
         }
+
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            ParseOrderByItems(context, orderBy);
+        }
+    }
+
+    /// <summary>
+    /// Reads one or more ORDER BY items (comma separated). Each item is an
+    /// <see cref="Expression"/> followed by an optional <c>ASC</c>/<c>DESC</c>
+    /// keyword (default ASC). A pure positive-integer literal is recorded as
+    /// an ordinal reference into the projection rather than a constant
+    /// expression; constant non-integer expressions silently sort by their
+    /// constant (SQL Server's Msg 408 rejection isn't modeled).
+    /// </summary>
+    private static void ParseOrderByItems(ParserContext context, List<OrderBySpec> orderBy)
+    {
+        do
+        {
+            context.MoveNextRequired();
+            var expr = Expression.Parse(context);
+
+            var descending = false;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Asc })
+            {
+                context.MoveNextOptional();
+            }
+            else if (context.Token is ReservedKeyword { Keyword: Keyword.Desc })
+            {
+                descending = true;
+                context.MoveNextOptional();
+            }
+
+            // A bare integer literal is the ordinal form (validated against the
+            // projection count later in BuildSqlProjection). Anything else —
+            // including a constant arithmetic expression like `1+0` — falls
+            // through to per-row evaluation; SQL Server's Msg 408 rejection of
+            // constant ORDER BY expressions isn't modeled.
+            if (expr is Value valExpr
+                && valExpr.Constant.Type == SqlType.Int32
+                && !valExpr.Constant.IsNull)
+            {
+                orderBy.Add(OrderBySpec.FromOrdinal(valExpr.Constant.AsInt32, descending));
+            }
+            else
+            {
+                orderBy.Add(OrderBySpec.FromExpression(expr, descending));
+            }
+        }
+        while (context.Token is Operator { Character: ',' });
     }
 
     /// <summary>
@@ -150,9 +258,15 @@ internal sealed class Selection
     /// reader navigates it. Any <paramref name="excluders"/> are evaluated
     /// against the synthesized row; if any returns false the result is empty.
     /// <paramref name="topCount"/>, if set to zero, also suppresses the row.
+    /// <paramref name="distinct"/> and <paramref name="orderBy"/> are accepted
+    /// for syntactic completeness but are no-ops here — the result is at most
+    /// one row, so dedup and sort have no effect.
     /// </summary>
-    private static SimulatedSqlResultSet BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, int? topCount)
+    private static SimulatedSqlResultSet BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, bool distinct, int? topCount)
     {
+        _ = distinct;
+        _ = orderBy;
+
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
         var columnNames = new string[expressions.Count];
@@ -195,6 +309,8 @@ internal sealed class Selection
         IEnumerable<byte[]> sourceRows,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
+        List<OrderBySpec> orderBy,
+        bool distinct,
         int? topCount)
     {
         var outputSchema = new SqlType[expressions.Count];
@@ -222,7 +338,16 @@ internal sealed class Selection
             outputColumnNames[i] = expressions[i].Name;
         }
 
-        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, topCount));
+        // Validate ordinal ORDER BY items now that the projection count is
+        // known. SQL Server fires Msg 108 at parse time, before any rows are
+        // touched, so do the same.
+        for (var i = 0; i < orderBy.Count; i++)
+        {
+            if (orderBy[i].IsOrdinal && (orderBy[i].Ordinal < 1 || orderBy[i].Ordinal > expressions.Count))
+                throw SimulatedSqlException.OrderByPositionOutOfRange(orderBy[i].Ordinal);
+        }
+
+        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(
@@ -232,17 +357,63 @@ internal sealed class Selection
         List<Expression> expressions,
         List<BooleanExpression> excluders,
         SqlType[] outputSchema,
+        string[] outputColumnNames,
+        List<OrderBySpec> orderBy,
+        bool distinct,
         int? topCount)
     {
-        var remaining = topCount;
+        // Streaming path: no DISTINCT, no ORDER BY. TOP applies row-by-row.
+        if (!distinct && orderBy.Count == 0)
+        {
+            var remaining = topCount;
+            foreach (var rowBytes in sourceRows)
+            {
+                if (remaining == 0)
+                    yield break;
+
+                var bytes = rowBytes;
+
+                SqlValue ResolveColumn(List<string> name)
+                {
+                    var columnIndex = findSourceColumn(name);
+                    return columnIndex == -1
+                        ? throw SimulatedSqlException.InvalidColumnName(name)
+                        : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex);
+                }
+
+                var include = true;
+                foreach (var excluder in excluders)
+                {
+                    if (!excluder.Run(ResolveColumn))
+                    {
+                        include = false;
+                        break;
+                    }
+                }
+                if (!include)
+                    continue;
+
+                var projected = new SqlValue[expressions.Count];
+                for (var i = 0; i < expressions.Count; i++)
+                    projected[i] = expressions[i].Run(ResolveColumn);
+
+                yield return RowEncoder.EncodeRow(outputSchema, projected);
+
+                if (remaining is not null)
+                    remaining--;
+            }
+            yield break;
+        }
+
+        // Buffered path: DISTINCT and/or ORDER BY require the full row set
+        // before TOP can apply.
+        var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
+
         foreach (var rowBytes in sourceRows)
         {
-            if (remaining == 0)
-                yield break;
-
             var bytes = rowBytes;
 
-            SqlValue ResolveColumn(List<string> name)
+            SqlValue ResolveSource(List<string> name)
             {
                 var columnIndex = findSourceColumn(name);
                 return columnIndex == -1
@@ -253,7 +424,7 @@ internal sealed class Selection
             var include = true;
             foreach (var excluder in excluders)
             {
-                if (!excluder.Run(ResolveColumn))
+                if (!excluder.Run(ResolveSource))
                 {
                     include = false;
                     break;
@@ -264,12 +435,164 @@ internal sealed class Selection
 
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveColumn);
+                projected[i] = expressions[i].Run(ResolveSource);
 
-            yield return RowEncoder.EncodeRow(outputSchema, projected);
-
-            if (remaining is not null)
-                remaining--;
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, ResolveSource);
+            buffer.Add((projected, keys));
         }
+
+        IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> filtered = buffer;
+        if (distinct)
+        {
+            var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+            filtered = buffer.Where(item => seen.Add(item.Projected));
+        }
+
+        var materialized = filtered.ToList();
+
+        if (orderBy.Count > 0)
+            materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+
+        var taken = topCount is { } limit ? materialized.Take(limit) : materialized;
+        foreach (var (projected, _) in taken)
+            yield return RowEncoder.EncodeRow(outputSchema, projected);
+    }
+
+    /// <summary>
+    /// Evaluates each ORDER BY item against the current row. Ordinal items
+    /// index directly into the projected row. Expression items resolve column
+    /// references through an output-first resolver; without DISTINCT, names
+    /// not in the output fall back to source columns (matching SQL Server's
+    /// rule that ORDER BY can reference non-selected source columns). With
+    /// DISTINCT, source fallback would be ambiguous post-dedup so a missing
+    /// output match raises Msg 145.
+    /// </summary>
+    private static SqlValue[] ComputeOrderKeys(
+        List<OrderBySpec> orderBy,
+        SqlValue[] projected,
+        string[] outputColumnNames,
+        bool distinct,
+        Func<List<string>, SqlValue> resolveSource)
+    {
+        var keys = new SqlValue[orderBy.Count];
+        for (var i = 0; i < orderBy.Count; i++)
+        {
+            var spec = orderBy[i];
+            if (spec.IsOrdinal)
+            {
+                keys[i] = projected[spec.Ordinal - 1];
+                continue;
+            }
+
+            keys[i] = spec.Expr!.Run(name =>
+            {
+                var lastPart = name[^1];
+                for (var j = 0; j < outputColumnNames.Length; j++)
+                {
+                    if (Collation.Default.Equals(outputColumnNames[j], lastPart))
+                        return projected[j];
+                }
+                return distinct
+                    ? throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()
+                    : resolveSource(name);
+            });
+        }
+        return keys;
+    }
+
+    /// <summary>
+    /// Lexicographic compare of two key tuples per the per-key descending
+    /// flags. NULL is treated as the smallest value (NULL first under ASC,
+    /// NULL last under DESC), matching SQL Server. Cross-type keys are
+    /// promoted via <see cref="SqlType.Promote"/> before comparison.
+    /// </summary>
+    private static int CompareOrderKeys(SqlValue[] a, SqlValue[] b, List<OrderBySpec> orderBy)
+    {
+        for (var i = 0; i < a.Length; i++)
+        {
+            var lk = a[i];
+            var rk = b[i];
+            int c;
+            if (lk.IsNull && rk.IsNull)
+            {
+                c = 0;
+            }
+            else if (lk.IsNull)
+            {
+                c = -1;
+            }
+            else if (rk.IsNull)
+            {
+                c = 1;
+            }
+            else if (lk.Type == rk.Type)
+            {
+                c = lk.CompareTo(rk);
+            }
+            else
+            {
+                var common = SqlType.Promote(lk.Type, rk.Type);
+                c = lk.CoerceTo(common).CompareTo(rk.CoerceTo(common));
+            }
+
+            if (orderBy[i].Descending)
+                c = -c;
+            if (c != 0)
+                return c;
+        }
+        return 0;
+    }
+}
+
+/// <summary>
+/// One entry in an ORDER BY clause: either a positional ordinal (1-based
+/// index into the projection) or an arbitrary expression, plus the direction
+/// flag.
+/// </summary>
+internal readonly struct OrderBySpec
+{
+    public readonly Expression? Expr;
+    public readonly int Ordinal;
+    public readonly bool Descending;
+
+    public bool IsOrdinal => this.Expr is null;
+
+    private OrderBySpec(Expression? expr, int ordinal, bool descending)
+    {
+        this.Expr = expr;
+        this.Ordinal = ordinal;
+        this.Descending = descending;
+    }
+
+    public static OrderBySpec FromExpression(Expression expr, bool descending) => new(expr, 0, descending);
+    public static OrderBySpec FromOrdinal(int ordinal, bool descending) => new(null, ordinal, descending);
+}
+
+/// <summary>
+/// Equality comparer for projected rows (<see cref="SqlValue"/> tuples). Used
+/// by DISTINCT to dedupe based on the same equality semantics as the
+/// <c>=</c> operator: collation-aware string comparison, ANSI trailing-space
+/// padding, two NULLs of the same type compare equal, and
+/// <c>datetimeoffset</c> compares by UTC instant.
+/// </summary>
+internal sealed class RowEqualityComparer : IEqualityComparer<SqlValue[]>
+{
+    public static readonly RowEqualityComparer Instance = new();
+
+    public bool Equals(SqlValue[]? x, SqlValue[]? y)
+    {
+        if (ReferenceEquals(x, y)) return true;
+        if (x is null || y is null || x.Length != y.Length) return false;
+        for (var i = 0; i < x.Length; i++)
+            if (!x[i].Equals(y[i])) return false;
+        return true;
+    }
+
+    public int GetHashCode(SqlValue[] obj)
+    {
+        var hash = new HashCode();
+        foreach (var v in obj)
+            hash.Add(v);
+        return hash.ToHashCode();
     }
 }

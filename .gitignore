@@ -10,19 +10,5 @@ obj/
 # Don't want to be prescriptive about the user's development environment.
 .devcontainer/
 
-# The simplicity of this project structure enables AI tools to figure it out instantly.
-.claude/
-CLAUDE.md
-.codex/
-AGENTS.md
-.github/copilot-instructions.md
-.gemini/
-GEMINI.md
-.cursor/
-.cursorrules
-.aider*
-.windsurf/
-.windsurfrules
-
 # Suppress temporary files that might otherwise leak into a commit.
 tmp/

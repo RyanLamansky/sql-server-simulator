@@ -291,4 +291,67 @@ public class SelectTests
         Assert.AreEqual(3, reader[0]);
         Assert.AreEqual(1, reader[1]);
     }
+
+    [TestMethod]
+    public void MultipleSelects_SeparatedBySemicolon_ProduceMultipleResultSets()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select 1; select 2; select 3").ExecuteReader();
+
+        Assert.IsTrue(reader.Read()); Assert.AreEqual(1, reader[0]);
+        Assert.IsFalse(reader.Read());
+        Assert.IsTrue(reader.NextResult());
+        Assert.IsTrue(reader.Read()); Assert.AreEqual(2, reader[0]);
+        Assert.IsFalse(reader.Read());
+        Assert.IsTrue(reader.NextResult());
+        Assert.IsTrue(reader.Read()); Assert.AreEqual(3, reader[0]);
+        Assert.IsFalse(reader.Read());
+        Assert.IsFalse(reader.NextResult());
+    }
+
+    [TestMethod]
+    public void TrailingSemicolonOnTablelessSelect_IsAccepted()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        Assert.AreEqual(1, connection.CreateCommand("select 1;").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void RepeatedSemicolons_BetweenStatements_AreNoOps()
+    {
+        // Empty statement (`;` alone) is legal; consecutive semicolons collapse.
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select 1;; ;select 2").ExecuteReader();
+        Assert.IsTrue(reader.Read()); Assert.AreEqual(1, reader[0]);
+        Assert.IsTrue(reader.NextResult());
+        Assert.IsTrue(reader.Read()); Assert.AreEqual(2, reader[0]);
+    }
+
+    [TestMethod]
+    public void UnaryMinusBeforeFrom_DoesNotSwallowFromClause()
+    {
+        // The FROM keyword must survive a unary-minus projection: the
+        // expression parser cannot greedily consume past the projection's end.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values ( 1 ), ( 2 ), ( 3 )").ExecuteNonQuery();
+
+        using var reader = connection.CreateCommand("select -v from t").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add((int)reader[0]);
+        CollectionAssert.AreEquivalent(new[] { -1, -2, -3 }, values);
+    }
+
+    [TestMethod]
+    public void UnaryMinusInProjection_PreservesAlias()
+    {
+        // Same boundary case as UnaryMinusBeforeFrom_*: the alias token
+        // following a unary-minus expression must not be silently dropped.
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select -1 n").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(-1, reader[0]);
+        Assert.AreEqual("n", reader.GetName(0));
+    }
 }

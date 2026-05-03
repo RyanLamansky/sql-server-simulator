@@ -2,6 +2,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
+/// <summary>
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
+/// </summary>
 [TestClass]
 public class MixedTypeRowTests
 {
@@ -101,14 +106,90 @@ public class MixedTypeRowTests
     }
 
     [TestMethod]
-    public void Bit_Decoder_RejectsInvalidByte()
+    public void Encoder_RejectsValueTypeMismatch() =>
+        Throws<ArgumentException>(() => RowEncoder.EncodeRow([SqlType.BigInt], [42])); // 42 is Int32, schema is BigInt
+
+    [TestMethod]
+    public void EightBits_ShareSingleByte()
     {
-        var bytes = RowEncoder.EncodeRow([SqlType.Bit], [SqlValue.FromBoolean(true)]);
-        bytes[4] = 0x02;
-        _ = Throws<InvalidDataException>(() => RowDecoder.DecodeRow([SqlType.Bit], bytes));
+        // Eight consecutive bit columns should pack into one byte: alternating
+        // true/false yields 0b01010101 = 0x55. Fixed-section length = 1.
+        SqlType[] schema = [SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit];
+        SqlValue[] values =
+        [
+            SqlValue.FromBoolean(true), SqlValue.FromBoolean(false),
+            SqlValue.FromBoolean(true), SqlValue.FromBoolean(false),
+            SqlValue.FromBoolean(true), SqlValue.FromBoolean(false),
+            SqlValue.FromBoolean(true), SqlValue.FromBoolean(false),
+        ];
+        var bytes = RowEncoder.EncodeRow(schema, values);
+        AreEqual(0x55, bytes[4]);
+        AreEqual(5, BitConverter.ToUInt16(bytes, 2)); // fixedEnd = 4 + 1 (one packed byte)
+
+        var decoded = RowDecoder.DecodeRow(schema, bytes);
+        CollectionAssert.AreEqual(values, decoded);
     }
 
     [TestMethod]
-    public void Encoder_RejectsValueTypeMismatch() =>
-        Throws<ArgumentException>(() => RowEncoder.EncodeRow([SqlType.BigInt], [42])); // 42 is Int32, schema is BigInt
+    public void NineBits_RollOverToSecondByte()
+    {
+        // 9 consecutive bits → ceil(9/8) = 2 bytes for the fixed section.
+        var schema = new SqlType[9];
+        var values = new SqlValue[9];
+        for (var i = 0; i < 9; i++)
+        {
+            schema[i] = SqlType.Bit;
+            values[i] = SqlValue.FromBoolean(true);
+        }
+        var bytes = RowEncoder.EncodeRow(schema, values);
+        AreEqual(0xFF, bytes[4]); // first 8 bits all set
+        AreEqual(0x01, bytes[5]); // ninth bit at position 0 of second byte
+        AreEqual(6, BitConverter.ToUInt16(bytes, 2)); // fixedEnd = 4 + 2 packed bytes
+
+        var decoded = RowDecoder.DecodeRow(schema, bytes);
+        CollectionAssert.AreEqual(values, decoded);
+    }
+
+    [TestMethod]
+    public void NonBitFixedColumn_StartsNewBitRun()
+    {
+        // [bit, bit, int, bit] uses 1 + 4 + 1 = 6 bytes; the third bit can't
+        // share the first byte because the int between resets the run.
+        SqlType[] schema = [SqlType.Bit, SqlType.Bit, SqlType.Int32, SqlType.Bit];
+        SqlValue[] values = [SqlValue.FromBoolean(true), SqlValue.FromBoolean(true), 42, SqlValue.FromBoolean(true)];
+        var bytes = RowEncoder.EncodeRow(schema, values);
+        AreEqual(10, BitConverter.ToUInt16(bytes, 2)); // fixedEnd = 4 + (1 + 4 + 1)
+
+        var decoded = RowDecoder.DecodeRow(schema, bytes);
+        CollectionAssert.AreEqual(values, decoded);
+    }
+
+    [TestMethod]
+    public void VarColumn_DoesNotResetBitRun()
+    {
+        // Variable-length columns don't live in the fixed section, so they
+        // don't break a contiguous bit run. [bit, varchar, bit] still packs
+        // both bits into the same shared byte.
+        SqlType[] schema = [SqlType.Bit, SqlType.Varchar, SqlType.Bit];
+        SqlValue[] values = [SqlValue.FromBoolean(true), SqlValue.FromVarchar("x"), SqlValue.FromBoolean(true)];
+        var bytes = RowEncoder.EncodeRow(schema, values);
+        AreEqual(5, BitConverter.ToUInt16(bytes, 2)); // fixedEnd = 4 + 1 (one packed byte for both bits)
+        AreEqual(0b11, bytes[4]); // both bits set in shared byte
+
+        var decoded = RowDecoder.DecodeRow(schema, bytes);
+        CollectionAssert.AreEqual(values, decoded);
+    }
+
+    [TestMethod]
+    public void NullBit_StillOccupiesSlot()
+    {
+        // NULL bit columns reserve a bit slot (so subsequent bits stay
+        // aligned); the NULL bitmap distinguishes them from false.
+        SqlType[] schema = [SqlType.Bit, SqlType.Bit, SqlType.Bit];
+        SqlValue[] values = [SqlValue.FromBoolean(true), SqlValue.Null(SqlType.Bit), SqlValue.FromBoolean(true)];
+        var decoded = RowDecoder.DecodeRow(schema, RowEncoder.EncodeRow(schema, values));
+        IsTrue(decoded[0].AsBoolean);
+        IsTrue(decoded[1].IsNull);
+        IsTrue(decoded[2].AsBoolean);
+    }
 }

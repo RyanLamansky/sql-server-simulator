@@ -3,9 +3,24 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
-internal sealed class Reference(Name name) : Expression
+internal sealed class Reference : Expression
 {
-    private readonly List<string> name = [name.Value];
+    private readonly List<string> name;
+
+    public Reference(Name name)
+    {
+        this.name = [name.Value];
+    }
+
+    /// <summary>
+    /// Constructs a reference whose first part is a literal string. Used for
+    /// reserved-keyword function names (e.g. LEFT, RIGHT) that aren't tokenized
+    /// as <see cref="Name"/> but participate in the function-call dispatch.
+    /// </summary>
+    public Reference(string name)
+    {
+        this.name = [name];
+    }
 
     public override string Name => this.name[^1];
 

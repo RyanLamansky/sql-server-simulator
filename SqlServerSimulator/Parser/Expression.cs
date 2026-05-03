@@ -26,7 +26,10 @@ internal abstract class Expression
     public virtual byte Precedence => 0;
 
     /// <summary>
-    /// Converts the tokens from a command into a single expression.
+    /// Converts the tokens from a command into a single expression. Follows
+    /// the lookahead contract documented on <see cref="ParserContext"/>: on
+    /// return, <see cref="ParserContext.Token"/> is the first token not
+    /// consumed by the parsed expression.
     /// </summary>
     /// <param name="context">Manages the overall parsing state.</param>
     /// <returns>The parsed expression.</returns>
@@ -34,15 +37,35 @@ internal abstract class Expression
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Expression Parse(ParserContext context)
     {
-        var expression = context.Token switch
+        Expression expression;
+        switch (context.Token)
+        {
+            // Unary +/- delegate to a recursive Parse on the next token. That
+            // recursive call already runs the binary-operator lookahead loop
+            // and leaves context.Token at the first token NOT consumed by the
+            // operand. Returning here (instead of falling into the outer
+            // while loop) avoids a second GetNextOptional that would silently
+            // swallow the surrounding context's terminator (e.g. the `as` in
+            // CAST, the `from` in SELECT). AdjustForPrecedence on the outer
+            // unary `Subtract` still correctly rebalances `-1 + 2`-style
+            // continuations because the right side carries its operator tree.
+            case Operator { Character: '+' }:
+                return Expression.Parse(context.MoveNextRequiredReturnSelf());
+            case Operator { Character: '-' }:
+                return new Subtract(new Value(Storage.SqlValue.FromInt32(0)), context).AdjustForPrecedence();
+        }
+
+        expression = context.Token switch
         {
             Numeric number => new Value(number.Value),
+            Literal literal => new Value(literal.Value),
             AtPrefixedString atPrefixed => new Value(atPrefixed, context),
             DoubleAtPrefixedString doubleAtPrefixedString => new Value(doubleAtPrefixedString),
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
+            // LEFT and RIGHT are reserved (for future JOIN support) but
+            // dispatch as function calls when followed by '('.
+            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right } reserved => new Reference(reserved.ToString()),
             Name name => new Reference(name),
-            Operator { Character: '+' } => Expression.Parse(context.MoveNextRequiredReturnSelf()),
-            Operator { Character: '-' } => new Subtract(new Value(Storage.SqlValue.FromInt32(0)), context),
             Operator { Character: '(' } => new Parenthesized(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
         };
@@ -93,7 +116,9 @@ internal abstract class Expression
 
                         context.MoveNextRequired(); // Move past (
                         expression = ResolveBuiltIn(reference.Name, context);
-                        context.MoveNextOptional(); // Move past )
+                        // ResolveBuiltIn leaves context.Token at the closing ).
+                        // The next loop iteration's GetNextOptional advances
+                        // past it; advancing here would skip an extra token.
                         continue;
                     }
             }
@@ -137,6 +162,35 @@ internal abstract class Expression
             3 => uppercaseName switch
             {
                 "ABS" => new AbsoluteValue(context),
+                "LEN" => new Length(context),
+                _ => null
+            },
+            4 => uppercaseName switch
+            {
+                "CAST" => new Cast(context),
+                "LEFT" => new Left(context),
+                "TRIM" => new Trim(context),
+                _ => null
+            },
+            5 => uppercaseName switch
+            {
+                "LOWER" => new Lower(context),
+                "LTRIM" => new LeftTrim(context),
+                "RIGHT" => new Right(context),
+                "RTRIM" => new RightTrim(context),
+                "UPPER" => new Upper(context),
+                _ => null
+            },
+            7 => uppercaseName switch
+            {
+                "REPLACE" => new Replace(context),
+                "REVERSE" => new Reverse(context),
+                _ => null
+            },
+            9 => uppercaseName switch
+            {
+                "CHARINDEX" => new CharIndex(context),
+                "SUBSTRING" => new Substring(context),
                 _ => null
             },
             10 => uppercaseName switch

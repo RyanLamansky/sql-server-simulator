@@ -3,10 +3,14 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// Unit tests for <see cref="RowDecoder.DecodeColumn"/>, which the data reader
-/// uses to navigate row bytes one column at a time without materializing the
-/// whole row.
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
 /// </summary>
+/// <remarks>
+/// Covers <see cref="RowDecoder.DecodeColumn"/>, which the data reader uses to
+/// navigate row bytes one column at a time without materializing the whole row.
+/// </remarks>
 [TestClass]
 public sealed class DecodeColumnTests
 {

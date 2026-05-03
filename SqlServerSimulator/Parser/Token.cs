@@ -28,6 +28,27 @@ abstract class Token
     /// </summary>
     public ReadOnlySpan<char> Source => command.AsSpan(index, length);
 
+    /// <summary>
+    /// 1-based line number of this token within its source command. Lines are
+    /// delimited by <c>\n</c> (CR before it is folded into the same line, so
+    /// CRLF and LF behave the same). Used to render <c>"Line N"</c> prefixes
+    /// in error messages that mirror SQL Server's parse-time errors.
+    /// </summary>
+    public int LineNumber
+    {
+        get
+        {
+            var line = 1;
+            var prefix = command.AsSpan(0, index);
+            foreach (var c in prefix)
+            {
+                if (c == '\n')
+                    line++;
+            }
+            return line;
+        }
+    }
+
     // This is used for various error messages even though tokens are not directly accessible to user code.
     public sealed override string ToString() => command.Substring(index, length);
 

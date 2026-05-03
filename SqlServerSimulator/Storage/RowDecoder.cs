@@ -30,16 +30,31 @@ internal static class RowDecoder
         var fixedPos = 4;
         var varIndex = 0;
         var prevVarEnd = header.VarDataStart;
+        var bitByteOffset = -1;
+        var bitsInRun = 0;
 
         for (var i = 0; i < schema.Length; i++)
         {
             var isNull = IsNullColumn(bytes, header.BitmapStart, i);
 
-            if (schema[i].IsFixedLength)
+            if (schema[i] == SqlType.Bit)
+            {
+                if (bitsInRun % 8 == 0)
+                {
+                    bitByteOffset = fixedPos;
+                    fixedPos++;
+                }
+                values[i] = isNull
+                    ? SqlValue.Null(SqlType.Bit)
+                    : SqlValue.FromBoolean((bytes[bitByteOffset] & (1 << (bitsInRun % 8))) != 0);
+                bitsInRun++;
+            }
+            else if (schema[i].IsFixedLength)
             {
                 var width = schema[i].FixedLength;
                 values[i] = isNull ? SqlValue.Null(schema[i]) : schema[i].Decode(bytes.Slice(fixedPos, width));
                 fixedPos += width;
+                bitsInRun = 0;
             }
             else
             {
@@ -76,17 +91,35 @@ internal static class RowDecoder
         var fixedPos = 4;
         var varIndex = 0;
         var prevVarEnd = header.VarDataStart;
+        var bitByteOffset = -1;
+        var bitsInRun = 0;
 
         for (var i = 0; i <= ordinal; i++)
         {
             var isNull = IsNullColumn(bytes, header.BitmapStart, i);
 
-            if (schema[i].IsFixedLength)
+            if (schema[i] == SqlType.Bit)
+            {
+                if (bitsInRun % 8 == 0)
+                {
+                    bitByteOffset = fixedPos;
+                    fixedPos++;
+                }
+                if (i == ordinal)
+                {
+                    return isNull
+                        ? SqlValue.Null(SqlType.Bit)
+                        : SqlValue.FromBoolean((bytes[bitByteOffset] & (1 << (bitsInRun % 8))) != 0);
+                }
+                bitsInRun++;
+            }
+            else if (schema[i].IsFixedLength)
             {
                 var width = schema[i].FixedLength;
                 if (i == ordinal)
                     return isNull ? SqlValue.Null(schema[i]) : schema[i].Decode(bytes.Slice(fixedPos, width));
                 fixedPos += width;
+                bitsInRun = 0;
             }
             else
             {
@@ -117,12 +150,24 @@ internal static class RowDecoder
         var n = schema.Length;
         var fixedSectionLength = 0;
         var varColumnCount = 0;
+        var bitsInRun = 0;
         for (var i = 0; i < n; i++)
         {
-            if (schema[i].IsFixedLength)
+            if (schema[i] == SqlType.Bit)
+            {
+                if (bitsInRun % 8 == 0)
+                    fixedSectionLength++;
+                bitsInRun++;
+            }
+            else if (schema[i].IsFixedLength)
+            {
                 fixedSectionLength += schema[i].FixedLength;
+                bitsInRun = 0;
+            }
             else
+            {
                 varColumnCount++;
+            }
         }
 
         var expectedFixedEnd = 4 + fixedSectionLength;

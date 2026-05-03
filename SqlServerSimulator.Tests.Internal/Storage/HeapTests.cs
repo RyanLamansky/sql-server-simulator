@@ -2,6 +2,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
+/// <summary>
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
+/// </summary>
 [TestClass]
 public class HeapTests
 {
@@ -24,12 +29,12 @@ public class HeapTests
     }
 
     [TestMethod]
-    public void Insert_FillingPageThenOneMore_AllocatesSecondPageAndLinks()
+    public void Insert_RowsExceedingPageCapacity_AllocatesSecondPageAndLinks()
     {
         var heap = new Heap();
-        var big = new byte[HeapPage.MaxRowPayload];
-        heap.Insert(big);                 // page 0 is now exactly full
-        heap.Insert([42]);                // forces a new page
+        var big = new byte[Heap.MaxRowSize];
+        heap.Insert(big);                 // page 0 holds one max-sized row
+        heap.Insert(big);                 // forces a new page
 
         AreEqual(2, heap.Pages.Count);
         AreEqual(1, heap.Pages[0].NextPageIndex);
@@ -64,14 +69,23 @@ public class HeapTests
     }
 
     [TestMethod]
-    public void Insert_RowExceedingMaxPayload_Throws()
+    public void Insert_RowExceedingMaxRowSize_Throws()
     {
         var heap = new Heap();
-        var oversize = new byte[HeapPage.MaxRowPayload + 1];
+        var oversize = new byte[Heap.MaxRowSize + 1];
         _ = Throws<NotSupportedException>(() => heap.Insert(oversize));
 
         // No page should have been allocated.
         AreEqual(0, heap.Pages.Count);
+    }
+
+    [TestMethod]
+    public void Insert_RowAtMaxRowSize_Succeeds()
+    {
+        var heap = new Heap();
+        var row = new byte[Heap.MaxRowSize];
+        heap.Insert(row);
+        AreEqual(1, heap.RowCount);
     }
 
     [TestMethod]

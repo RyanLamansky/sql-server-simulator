@@ -4,7 +4,7 @@ internal sealed class Add(Expression left, ParserContext context) : TwoSidedExpr
 {
     public override byte Precedence => 3;
 
-    protected override Storage.SqlValue Run(Storage.SqlValue left, Storage.SqlValue right) => IntegerArithmetic(left, right, '+', static (a, b) => a + b);
+    protected override Storage.SqlValue Run(Storage.SqlValue left, Storage.SqlValue right) => AdditiveArithmetic(left, right, '+', "add", static (a, b) => a + b);
 
     protected override char Operator => '+';
 }

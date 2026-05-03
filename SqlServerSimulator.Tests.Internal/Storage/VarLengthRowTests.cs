@@ -2,6 +2,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
+/// <summary>
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
+/// </summary>
 [TestClass]
 public class VarLengthRowTests
 {
@@ -16,13 +21,29 @@ public class VarLengthRowTests
     }
 
     [TestMethod]
-    [DataRow("café")]            // 2-byte UTF-8 char
-    [DataRow("日本語")]            // 3-byte UTF-8 chars
-    [DataRow("🎉 emoji 🚀")]      // 4-byte UTF-8 chars (surrogate pairs in .NET)
-    public void Varchar_Utf8_RoundTrips(string value)
+    [DataRow("café")]              // every char is in CP1252 (é = 0xE9)
+    [DataRow("naïve résumé")]      // ï and é are in CP1252
+    [DataRow("€uro")]              // € = 0x80 in CP1252
+    public void Varchar_Cp1252_RoundTrips(string value)
     {
+        // The simulator's varchar uses Windows-1252 (matching the default
+        // SQL_Latin1_General_CP1_CI_AS collation); characters in CP1252
+        // round-trip exactly.
         var decoded = RowDecoder.DecodeRow([SqlType.Varchar], RowEncoder.EncodeRow([SqlType.Varchar], [SqlValue.FromVarchar(value)]));
         AreEqual(value, decoded[0].AsString);
+    }
+
+    [TestMethod]
+    [DataRow("日本語", "???")]              // CJK: each char replaced with '?'
+    [DataRow("🎉 emoji 🚀", "?? emoji ??")] // surrogate pairs each become two replacement bytes
+    [DataRow("Ω", "?")]                    // Greek omega isn't in CP1252
+    public void Varchar_OutOfCp1252_LossilyReplaced(string input, string expected)
+    {
+        // SQL Server's CP1252 collation can't represent characters outside
+        // Windows-1252; they're silently replaced with '?'. The simulator
+        // mirrors that lossy behavior — authentic over desirable.
+        var decoded = RowDecoder.DecodeRow([SqlType.Varchar], RowEncoder.EncodeRow([SqlType.Varchar], [SqlValue.FromVarchar(input)]));
+        AreEqual(expected, decoded[0].AsString);
     }
 
     [TestMethod]
@@ -199,4 +220,43 @@ public class VarLengthRowTests
         IsTrue(decoded[0].IsNull);
         AreSame(SqlType.SystemName, decoded[0].Type);
     }
+
+    [TestMethod]
+    public void Varbinary_RoundTrips()
+    {
+        var bytes = new byte[] { 0x00, 0x7F, 0x80, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF };
+        var decoded = RowDecoder.DecodeRow([SqlType.Varbinary], RowEncoder.EncodeRow([SqlType.Varbinary], [SqlValue.FromVarbinary(bytes)]));
+        AreSame(SqlType.Varbinary, decoded[0].Type);
+        CollectionAssert.AreEqual(bytes, decoded[0].AsBytes);
+    }
+
+    [TestMethod]
+    public void Varbinary_Empty_RoundTrips()
+    {
+        var decoded = RowDecoder.DecodeRow([SqlType.Varbinary], RowEncoder.EncodeRow([SqlType.Varbinary], [SqlValue.FromVarbinary([])]));
+        AreEqual(0, decoded[0].AsBytes.Length);
+    }
+
+    [TestMethod]
+    public void Varbinary_Null_RoundTrips()
+    {
+        var decoded = RowDecoder.DecodeRow([SqlType.Varbinary], RowEncoder.EncodeRow([SqlType.Varbinary], [SqlValue.Null(SqlType.Varbinary)]));
+        IsTrue(decoded[0].IsNull);
+        AreSame(SqlType.Varbinary, decoded[0].Type);
+    }
+
+    [TestMethod]
+    public void Varbinary_EquatesByContent()
+    {
+        // Two byte arrays with identical contents must compare equal as
+        // SqlValues — SQL Server compares varbinary by content, not reference.
+        var a = SqlValue.FromVarbinary([0x01, 0x02, 0x03]);
+        var b = SqlValue.FromVarbinary([0x01, 0x02, 0x03]);
+        AreEqual(a, b);
+        AreEqual(a.GetHashCode(), b.GetHashCode());
+    }
+
+    [TestMethod]
+    public void FromVarbinary_RejectsNullArgument() =>
+        Throws<ArgumentNullException>(() => SqlValue.FromVarbinary(null!));
 }

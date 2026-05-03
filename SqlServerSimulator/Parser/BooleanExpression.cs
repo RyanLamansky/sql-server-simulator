@@ -21,6 +21,12 @@ internal abstract class BooleanExpression
     {
     }
 
+    /// <summary>
+    /// Parses a comparison operator and its right-hand expression. Follows
+    /// the lookahead contract documented on <see cref="ParserContext"/>: on
+    /// return, <see cref="ParserContext.Token"/> is the first token not
+    /// consumed by the comparison.
+    /// </summary>
     public static BooleanExpression Parse(Expression left, ParserContext context) => context.Token switch
     {
         Operator { Character: '=' } => new EqualityExpression(left, context),

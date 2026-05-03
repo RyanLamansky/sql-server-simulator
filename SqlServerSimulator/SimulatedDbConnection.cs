@@ -11,11 +11,11 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }
 
-    public override string Database => throw new NotImplementedException();
+    public override string Database => "master";
 
-    public override string DataSource => throw new NotImplementedException();
+    public override string DataSource => "simulator";
 
-    public override string ServerVersion => throw new NotImplementedException();
+    public override string ServerVersion => "16.0.0";
 
     private ConnectionState state;
 

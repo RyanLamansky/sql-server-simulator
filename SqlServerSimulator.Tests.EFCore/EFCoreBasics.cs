@@ -1,4 +1,6 @@
-﻿namespace SqlServerSimulator;
+﻿using Microsoft.EntityFrameworkCore;
+
+namespace SqlServerSimulator;
 
 [TestClass]
 public class EFCoreBasics
@@ -58,10 +60,86 @@ public class EFCoreBasics
     [TestMethod]
     public void SingleOrDefault()
     {
-        const int storedValue = 6; // Until `Where` is supported, this won't pass if multiple rows exist.
+        const int storedValue = 6;
         using var context = new TestDbContext(storedValue);
         var receivedValue = context.Rows.Select(x => x.Id);
         Assert.AreEqual(storedValue, receivedValue.SingleOrDefault());
+    }
+
+    [TestMethod]
+    public void Single_WithWhereMatchingOneRow_Returns()
+    {
+        using var context = new TestDbContext(1, 2, 3);
+        var id = context.Rows.Where(r => r.Id == 2).Select(r => r.Id).Single();
+        Assert.AreEqual(2, id);
+    }
+
+    [TestMethod]
+    public void Single_WithPredicateMatchingOneRow_Returns()
+    {
+        using var context = new TestDbContext(1, 2, 3);
+        var id = context.Rows.Select(r => r.Id).Single(x => x == 3);
+        Assert.AreEqual(3, id);
+    }
+
+    [TestMethod]
+    public void Single_WithWhereMatchingMultipleRows_Throws()
+    {
+        // EF Core asks the simulator for `SELECT TOP 2 ...` so it can detect
+        // the cardinality violation client-side and raise InvalidOperationException
+        // — this verifies our TOP and WHERE composition land that response.
+        // Bypass the EF entity tracker (which would reject the duplicate Id
+        // primary key) by inserting via raw SQL.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table Rows ( Id int )");
+        _ = simulation.ExecuteNonQuery("insert Rows values (1),(2),(2),(3)");
+        using var context = new TestDbContext(simulation);
+        _ = Assert.Throws<InvalidOperationException>(() =>
+            context.Rows.Where(r => r.Id == 2).Select(r => r.Id).Single());
+    }
+
+    [TestMethod]
+    public void Single_WithWhereMatchingZeroRows_Throws()
+    {
+        using var context = new TestDbContext(1, 2, 3);
+        _ = Assert.Throws<InvalidOperationException>(() =>
+            context.Rows.Where(r => r.Id == 99).Select(r => r.Id).Single());
+    }
+
+    [TestMethod]
+    public void SingleOrDefault_WithWhereMatchingZeroRows_ReturnsDefault()
+    {
+        using var context = new TestDbContext(1, 2, 3);
+        var id = context.Rows.Where(r => r.Id == 99).Select(r => r.Id).SingleOrDefault();
+        Assert.AreEqual(0, id);
+    }
+
+    [TestMethod]
+    public void SingleOrDefault_WithWhereMatchingMultipleRows_Throws()
+    {
+        // See Single_WithWhereMatchingMultipleRows_Throws for the raw-SQL bypass rationale.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table Rows ( Id int )");
+        _ = simulation.ExecuteNonQuery("insert Rows values (1),(2),(2),(3)");
+        using var context = new TestDbContext(simulation);
+        _ = Assert.Throws<InvalidOperationException>(() =>
+            context.Rows.Where(r => r.Id == 2).Select(r => r.Id).SingleOrDefault());
+    }
+
+    [TestMethod]
+    public void SingleOrDefault_WithPredicateMatchingZeroRows_ReturnsDefault()
+    {
+        using var context = new TestDbContext(1, 2, 3);
+        var id = context.Rows.Select(r => r.Id).SingleOrDefault(x => x == 99);
+        Assert.AreEqual(0, id);
+    }
+
+    [TestMethod]
+    public async Task SingleAsync_WithWhereMatchingOneRow_Returns()
+    {
+        await using var context = new TestDbContext(1, 2, 3);
+        var id = await context.Rows.Where(r => r.Id == 2).Select(r => r.Id).SingleAsync(this.TestContext.CancellationToken);
+        Assert.AreEqual(2, id);
     }
 
     [TestMethod]

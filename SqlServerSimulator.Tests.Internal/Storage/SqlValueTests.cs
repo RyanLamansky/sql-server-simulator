@@ -2,6 +2,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
+/// <summary>
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
+/// </summary>
 [TestClass]
 public class SqlValueTests
 {
@@ -166,6 +171,60 @@ public class SqlValueTests
         Throws<OverflowException>(() => SqlValue.FromInt64(int.MaxValue + 1L).CoerceTo(SqlType.Int32));
 
     [TestMethod]
-    public void CoerceTo_BetweenStringAndInt_NotSupported() =>
-        Throws<NotSupportedException>(() => SqlValue.FromVarchar("42").CoerceTo(SqlType.Int32));
+    public void CoerceTo_VarcharToInt32_Parses()
+    {
+        var coerced = SqlValue.FromVarchar("42").CoerceTo(SqlType.Int32);
+        AreSame(SqlType.Int32, coerced.Type);
+        AreEqual(42, coerced.AsInt32);
+    }
+
+    [TestMethod]
+    public void Date_AsDate_OnNull_Throws() =>
+        Throws<InvalidOperationException>(() => SqlValue.Null(SqlType.Date).AsDate);
+
+    [TestMethod]
+    public void Date_AsDate_OnWrongType_Throws() =>
+        Throws<InvalidOperationException>(() => SqlValue.FromInt32(1).AsDate);
+
+    [TestMethod]
+    public void FromDateTime2_RejectsNonDateTime2Type() =>
+        Throws<ArgumentException>(() => SqlValue.FromDateTime2(SqlType.Int32, DateTime.UtcNow));
+
+    [TestMethod]
+    public void DateTime2_DifferentPrecisions_AreDistinctTypes()
+    {
+        // The reference-equality of Type tags isn't observable from SQL — this
+        // pins the per-precision singleton invariant Promote/CoerceTo rely on.
+        var v3 = SqlValue.FromDateTime2(SqlType.GetDateTime2(3), new DateTime(2026, 5, 4));
+        var v7 = SqlValue.FromDateTime2(SqlType.GetDateTime2(7), new DateTime(2026, 5, 4));
+        AreNotSame(v3.Type, v7.Type);
+        AreNotEqual(v3, v7);
+    }
+
+    [TestMethod]
+    public void FromTime_RejectsNonTimeType() =>
+        Throws<ArgumentException>(() => SqlValue.FromTime(SqlType.Int32, TimeSpan.Zero));
+
+    [TestMethod]
+    public void Time_DifferentPrecisions_AreDistinctTypes()
+    {
+        var v3 = SqlValue.FromTime(SqlType.GetTime(3), new TimeSpan(13, 45, 30));
+        var v7 = SqlValue.FromTime(SqlType.GetTime(7), new TimeSpan(13, 45, 30));
+        AreNotSame(v3.Type, v7.Type);
+        AreNotEqual(v3, v7);
+    }
+
+    [TestMethod]
+    public void FromDateTimeOffset_RejectsNonDateTimeOffsetType() =>
+        Throws<ArgumentException>(() => SqlValue.FromDateTimeOffset(SqlType.Int32, DateTimeOffset.UtcNow));
+
+    [TestMethod]
+    public void DateTimeOffset_DifferentPrecisions_AreDistinctTypes()
+    {
+        var v3 = SqlValue.FromDateTimeOffset(SqlType.GetDateTimeOffset(3), new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.Zero));
+        var v7 = SqlValue.FromDateTimeOffset(SqlType.GetDateTimeOffset(7), new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.Zero));
+        AreNotSame(v3.Type, v7.Type);
+        AreNotEqual(v3, v7);
+    }
+
 }

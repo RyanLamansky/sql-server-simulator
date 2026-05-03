@@ -4,13 +4,32 @@ using System.Collections.Frozen;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
 /// Organizes relevant information for parsing of SQL commands.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>Lookahead contract.</b> Every <c>Parse</c>-style helper in this
+/// namespace (e.g. <see cref="Expression.Parse(ParserContext)"/>,
+/// <see cref="Selection.Parse(ParserContext, uint)"/>,
+/// <see cref="BooleanExpression.Parse"/>) leaves <see cref="Token"/> at the
+/// first token it did <i>not</i> consume — its caller's lookahead position.
+/// A helper that reads up to and including a closing delimiter (e.g. a
+/// function call's <c>)</c>) leaves <see cref="Token"/> on that delimiter;
+/// the surrounding loop's next <see cref="GetNextOptional"/> /
+/// <see cref="MoveNext"/> advances past it. Callers must not "step back" or
+/// "step forward" to re-align after a Parse returns.
+/// </para>
+/// <para>
+/// This contract is what makes recursive descent compose. Violations show up
+/// as silently dropped tokens. When in doubt, read a token at the call site,
+/// decide whether to consume it, and never assume a previous Parse left the
+/// cursor "before" or "after" something the contract didn't promise.
+/// </para>
+/// </remarks>
 internal sealed class ParserContext(SimulatedDbCommand command)
 {
 #pragma warning disable CA2213 // Disposable fields should be disposed
@@ -22,9 +41,11 @@ internal sealed class ParserContext(SimulatedDbCommand command)
         command.CommandText;
 
     /// <summary>
-    /// The tokenizer position within <see cref="commandText"/>.
+    /// The tokenizer position within <see cref="commandText"/>: the next
+    /// un-read character. <see cref="MoveNext"/> advances this past the
+    /// returned token (see <see cref="Tokenizer"/>'s index contract).
     /// </summary>
-    private int index = -1;
+    private int index;
 
     /// <summary>
     /// The most recently identified token in the command string.
@@ -42,16 +63,7 @@ internal sealed class ParserContext(SimulatedDbCommand command)
         StringComparer.InvariantCultureIgnoreCase);
 
     private static SqlValue ConvertParameter(object? raw, SqlType type) =>
-        raw is null or DBNull ? SqlValue.Null(type)
-        : type == SqlType.Bit ? SqlValue.FromBoolean((bool)raw)
-        : type == SqlType.TinyInt ? SqlValue.FromByte(Convert.ToByte(raw, CultureInfo.InvariantCulture))
-        : type == SqlType.SmallInt ? SqlValue.FromInt16(Convert.ToInt16(raw, CultureInfo.InvariantCulture))
-        : type == SqlType.Int32 ? SqlValue.FromInt32(Convert.ToInt32(raw, CultureInfo.InvariantCulture))
-        : type == SqlType.BigInt ? SqlValue.FromInt64(Convert.ToInt64(raw, CultureInfo.InvariantCulture))
-        : type == SqlType.Varchar ? SqlValue.FromVarchar((string)raw)
-        : type == SqlType.NVarchar ? SqlValue.FromNVarchar((string)raw)
-        : type == SqlType.SystemName ? SqlValue.FromSystemName((string)raw)
-        : throw new NotSupportedException($"Don't know how to convert raw parameter value of type {raw.GetType().Name} to {type}.");
+        raw is null or DBNull ? SqlValue.Null(type) : type.ConvertParameter(raw);
 
     public Simulation Simulation => Command.simulation;
 
@@ -173,11 +185,9 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     {
         var command = this.commandText;
         Span<char> result = stackalloc char[command.Length + 2];
-        if (index < 0)
+        if (this.Token is { } token)
         {
-            result[0] = '»';
-            result[1] = '«';
-            command.CopyTo(result[2..]);
+            token.Highlight(result);
         }
         else if (index >= command.Length)
         {
@@ -187,8 +197,10 @@ internal sealed class ParserContext(SimulatedDbCommand command)
         }
         else
         {
-            System.Diagnostics.Debug.Assert(this.Token is not null);
-            this.Token.Highlight(result);
+            // Pre-MoveNext state: cursor at the start.
+            result[0] = '»';
+            result[1] = '«';
+            command.CopyTo(result[2..]);
         }
 
         return new string(result);

@@ -60,10 +60,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override DateTime GetDateTime(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override DateTime GetDateTime(int ordinal) => (DateTime)this[ordinal];
 
     public override decimal GetDecimal(int ordinal)
     {
@@ -123,20 +120,14 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override string GetString(int ordinal) => (string)this[ordinal];
 
-    public override object GetValue(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override object GetValue(int ordinal) => cursor.GetValueObject(ordinal) ?? DBNull.Value;
 
     public override int GetValues(object[] values)
     {
         throw new NotImplementedException();
     }
 
-    public override bool IsDBNull(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override bool IsDBNull(int ordinal) => cursor.GetValueObject(ordinal) is null;
 
     public override bool NextResult()
     {

@@ -2,6 +2,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
+/// <summary>
+/// Internal-only tests. If a behavior is reachable through SQL, write it in
+/// SqlServerSimulator.Tests instead — public-API tests survive refactors and
+/// catch regressions the way users will.
+/// </summary>
 [TestClass]
 public class RowRoundTripTests
 {
@@ -182,5 +187,42 @@ public class RowRoundTripTests
         var bytes = RowEncoder.EncodeRow([SqlType.Int32], [1]);
         bytes[2] = 0x09;
         _ = Throws<InvalidDataException>(() => RowDecoder.DecodeRow([SqlType.Int32], bytes));
+    }
+
+    [TestMethod]
+    public void EncodedSingleColumnDateRow_HasLength10()
+    {
+        // 4 (header) + 3 (one Date) + 2 (column count) + 1 (NULL bitmap byte) = 10.
+        AreEqual(10, RowEncoder.EncodeRow([SqlType.Date], [SqlValue.FromDate(new(2026, 5, 4))]).Length);
+    }
+
+    [TestMethod]
+    public void EncodedDateRow_StoresDayCountLittleEndian()
+    {
+        // 2026-05-04 is DateOnly.DayNumber = 739739 = 0x0B499B. Little-endian: 9B 49 0B.
+        var bytes = RowEncoder.EncodeRow([SqlType.Date], [SqlValue.FromDate(new(2026, 5, 4))]);
+        AreEqual(7, BitConverter.ToUInt16(bytes, 2));                   // fixed-length end offset (4 + 3)
+        CollectionAssert.AreEqual(new byte[] { 0x9B, 0x49, 0x0B }, bytes[4..7]);
+    }
+
+    [TestMethod]
+    public void EncodedSingleColumnDateTimeOffsetRow_PrecisionZero_HasLength15()
+    {
+        // 4 (header) + 8 (datetimeoffset(0): 3 time + 3 date + 2 offset) + 2 (column count) + 1 (NULL bitmap byte) = 15.
+        var type = SqlType.GetDateTimeOffset(0);
+        var value = SqlValue.FromDateTimeOffset(type, new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)));
+        AreEqual(15, RowEncoder.EncodeRow([type], [value]).Length);
+    }
+
+    [TestMethod]
+    public void EncodedDateTimeOffsetRow_StoresOffsetAsSignedLittleEndianMinutes()
+    {
+        // Layout at precision 0: 3-byte UTC time-of-day, 3-byte UTC day count, 2-byte signed offset minutes.
+        var type = SqlType.GetDateTimeOffset(0);
+        var value = SqlValue.FromDateTimeOffset(type, new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)));
+        var bytes = RowEncoder.EncodeRow([type], [value]);
+
+        AreEqual(12, BitConverter.ToUInt16(bytes, 2));                  // fixed-length end offset (4 + 8)
+        AreEqual(-420, BitConverter.ToInt16(bytes, 10));                // -07:00 in minutes
     }
 }

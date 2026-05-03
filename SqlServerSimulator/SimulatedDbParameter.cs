@@ -1,9 +1,34 @@
-﻿using System.Data;
+using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator;
 
+/// <summary>
+/// Provider-agnostic <see cref="DbParameter"/> for the simulator's command
+/// pipeline.
+/// </summary>
+/// <remarks>
+/// EF Core's SqlServer provider downcasts <see cref="DbParameter"/> to
+/// <c>SqlParameter</c> in type mappings that set a non-default
+/// <c>SqlDbType</c>. The simulator inherits abstract <see cref="DbParameter"/>
+/// (since <c>SqlParameter</c> is sealed) and stays free of
+/// <c>Microsoft.Data.SqlClient</c>, so those casts throw at <c>SaveChanges</c>.
+/// Raw <c>DbCommand</c> + <see cref="DbType"/> usage is unaffected, as are
+/// the EF Core mappings whose default <c>SqlDbType</c> matches the column's
+/// type (e.g. <see cref="DateTime"/> → <c>datetime2(N)</c>,
+/// <see cref="DateTimeOffset"/> → <c>datetimeoffset(N)</c>). The cases
+/// known to break under EF Core today are the newer or narrowed date/time
+/// mappings that have to override <c>SqlDbType</c>:
+/// <list type="bullet">
+/// <item><see cref="DateTime"/> → <c>date</c> (<c>SqlServerDateTimeTypeMapping</c>)</item>
+/// <item><see cref="DateTime"/> → <c>smalldatetime</c> (<c>SqlServerDateTimeTypeMapping</c>; same shared mapping)</item>
+/// <item><see cref="DateOnly"/> → <c>date</c> (<c>SqlServerDateOnlyTypeMapping</c>)</item>
+/// <item><see cref="TimeOnly"/> → <c>time(N)</c> (<c>SqlServerTimeOnlyTypeMapping</c>)</item>
+/// <item><see cref="TimeSpan"/> → <c>time(N)</c> (<c>SqlServerTimeSpanTypeMapping</c>)</item>
+/// </list>
+/// A planned <c>SqlServerSimulator.EFCore</c> adapter will close these gaps.
+/// </remarks>
 sealed class SimulatedDbParameter : DbParameter
 {
     private DbType? dbType;
@@ -18,6 +43,10 @@ sealed class SimulatedDbParameter : DbParameter
                 : this.Value switch
                 {
                     int => DbType.Int32,
+                    DateOnly => DbType.Date,
+                    DateTime => DbType.DateTime2,
+                    DateTimeOffset => DbType.DateTimeOffset,
+                    TimeOnly or TimeSpan => DbType.Time,
                     null => DbType.String,
                     _ => throw new ArgumentException($"No mapping exists from object type {this.Value.GetType().FullName} to a known managed provider native type."),
                 };
@@ -32,7 +61,14 @@ sealed class SimulatedDbParameter : DbParameter
     [AllowNull]
     public override string ParameterName { get; set; }
 
-    public override int Size { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    /// <summary>
+    /// EF Core's SQL Server type mappings set this on string parameters with
+    /// the destination column's declared max length. The simulator stores it
+    /// for round-trip but does not enforce truncation here — column-level
+    /// length enforcement happens at INSERT/UPDATE time against the schema's
+    /// authoritative <c>HeapColumn.MaxLength</c>.
+    /// </summary>
+    public override int Size { get; set; }
 
     [AllowNull]
     public override string SourceColumn { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }

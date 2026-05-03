@@ -31,11 +31,13 @@ internal static class RowEncoder
     /// <param name="schema">Per-column types; defines the row layout.</param>
     /// <param name="values">Per-column values; each value's type must match the corresponding schema entry (NULL is allowed regardless).</param>
     /// <remarks>
+    /// <para>
     /// Layout for a row of <c>N</c> columns, of which <c>V</c> are variable-length:
+    /// </para>
     /// <list type="table">
     /// <item><description>[0]                         TagA: 0x10 if V==0, 0x30 if V&gt;0 (NULL bitmap always present; var-length section conditional).</description></item>
     /// <item><description>[1]                         TagB: reserved (0x00).</description></item>
-    /// <item><description>[2-3]                       Fixed-length data end offset (UInt16 LE) — equal to <c>4 + sum(fixed widths)</c>.</description></item>
+    /// <item><description>[2-3]                       Fixed-length data end offset (UInt16 LE) — equal to <c>4 + sum(fixed widths, with bit packing)</c>.</description></item>
     /// <item><description>[4 .. fixedEnd)             Fixed-length data, in schema order, only for fixed-length columns; NULL slots are zero-filled.</description></item>
     /// <item><description>[fixedEnd .. +2)            Column count N (UInt16 LE).</description></item>
     /// <item><description>[+ ceil(N/8))               NULL bitmap; column <c>i</c> is NULL iff bit <c>i mod 8</c> of byte <c>i / 8</c> is set. Includes both fixed and var columns.</description></item>
@@ -43,6 +45,16 @@ internal static class RowEncoder
     /// <item><description>[+ 2*V)                     Var offset array — only when V&gt;0; entry <c>i</c> is the absolute byte position where var column <c>i</c>'s data ENDS. NULL var columns share the previous entry (zero-length data).</description></item>
     /// <item><description>[offsetArrayEnd ..)         Var-length data, packed in schema order — only when V&gt;0.</description></item>
     /// </list>
+    /// <para>
+    /// Bit columns share bytes within a contiguous run: each successive
+    /// <c>bit</c> column in a run takes the next bit slot in the current byte,
+    /// rolling over to a new byte every 8 bits. A non-bit fixed column ends
+    /// the run; a subsequent <c>bit</c> column starts a fresh byte. NULL bit
+    /// columns still occupy a slot (their value is undefined; the NULL bitmap
+    /// authoritatively indicates the NULL). This matches SQL Server in spirit
+    /// — bit columns share bytes — though the exact slot ordering is
+    /// simulator-defined.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="schema"/> is empty, lengths differ, or a value's type doesn't match its schema entry.</exception>
     public static byte[] EncodeRow(ReadOnlySpan<SqlType> schema, ReadOnlySpan<SqlValue> values)
@@ -57,15 +69,23 @@ internal static class RowEncoder
         var varColumnCount = 0;
         var varDataLength = 0;
         var varByteCounts = new int[n]; // indexed by schema position; 0 for fixed columns and NULL var columns
+        var bitsInRun = 0;
 
         for (var i = 0; i < n; i++)
         {
             if (!values[i].IsNull && values[i].Type != schema[i])
                 throw new ArgumentException($"Value at column {i} has type {values[i].Type}, schema declares {schema[i]}.", nameof(values));
 
-            if (schema[i].IsFixedLength)
+            if (schema[i] == SqlType.Bit)
+            {
+                if (bitsInRun % 8 == 0)
+                    fixedSectionLength++;
+                bitsInRun++;
+            }
+            else if (schema[i].IsFixedLength)
             {
                 fixedSectionLength += schema[i].FixedLength;
+                bitsInRun = 0;
             }
             else
             {
@@ -92,17 +112,31 @@ internal static class RowEncoder
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(2, 2), checked((ushort)fixedEnd));
 
         var fixedOffset = 4;
+        var bitByteOffset = -1;
+        bitsInRun = 0;
         for (var i = 0; i < n; i++)
         {
             if (values[i].IsNull)
                 bytes[bitmapStart + (i / 8)] |= (byte)(1 << (i % 8));
 
-            if (schema[i].IsFixedLength)
+            if (schema[i] == SqlType.Bit)
+            {
+                if (bitsInRun % 8 == 0)
+                {
+                    bitByteOffset = fixedOffset;
+                    fixedOffset++;
+                }
+                if (!values[i].IsNull && values[i].AsBoolean)
+                    bytes[bitByteOffset] |= (byte)(1 << (bitsInRun % 8));
+                bitsInRun++;
+            }
+            else if (schema[i].IsFixedLength)
             {
                 var width = schema[i].FixedLength;
                 if (!values[i].IsNull)
                     _ = schema[i].Encode(values[i], bytes.AsSpan(fixedOffset, width));
                 fixedOffset += width;
+                bitsInRun = 0;
             }
         }
 
