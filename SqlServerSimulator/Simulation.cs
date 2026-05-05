@@ -42,6 +42,28 @@ public sealed class Simulation
     internal readonly HashSet<int> TraceFlags = [];
 
     /// <summary>
+    /// Last identity value produced by an INSERT in this simulation —
+    /// the source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>.
+    /// SQL Server scopes these per session/scope; the simulator collapses
+    /// both to a single simulation-wide slot for the same reason
+    /// <see cref="TraceFlags"/> does.
+    /// </summary>
+    /// <remarks>
+    /// Cleared (set to <c>null</c>) by every INSERT that doesn't generate
+    /// or accept an identity value — matching SQL Server's behavior of
+    /// resetting <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c> when the
+    /// most recent statement didn't touch an identity column.
+    /// </remarks>
+    internal decimal? LastIdentity;
+
+    /// <summary>
+    /// Name of the table currently under <c>SET IDENTITY_INSERT ... ON</c>,
+    /// or <c>null</c> when no table is in that mode. SQL Server allows only
+    /// one table at a time per session; the simulator enforces the same.
+    /// </summary>
+    internal string? IdentityInsertTable;
+
+    /// <summary>
     /// Explicit override of the per-database <c>VERBOSE_TRUNCATION_WARNINGS</c>
     /// scoped configuration; <c>null</c> means follow the compatibility-level
     /// default. Set via
@@ -143,7 +165,7 @@ public sealed class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             return false;
 
-        var rawColumns = new List<(Name Name, Name TypeName, int? DeclaredMaxLength, int? DeclaredScale, bool Nullable)>();
+        var rawColumns = new List<(Name Name, Name TypeName, int? DeclaredMaxLength, int? DeclaredScale, bool Nullable, IdentityState? Identity)>();
         bool suppressAdvanceToken;
         do
         {
@@ -188,6 +210,12 @@ public sealed class Simulation
                 context.MoveNextRequired();
             }
 
+            IdentityState? identity = null;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Identity })
+            {
+                identity = ParseIdentitySpec(context, columnName.Value);
+            }
+
             bool nullable;
             if (context.Token is ReservedKeyword next)
             {
@@ -209,10 +237,10 @@ public sealed class Simulation
             else
             {
                 suppressAdvanceToken = true;
-                nullable = true;
+                nullable = identity is null;
             }
 
-            rawColumns.Add((columnName, type, declaredMaxLength, declaredScale, nullable));
+            rawColumns.Add((columnName, type, declaredMaxLength, declaredScale, nullable, identity));
         } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
 
         if (context.Token is not Operator { Character: ')' })
@@ -220,10 +248,21 @@ public sealed class Simulation
 
         var heapColumns = new HeapColumn[rawColumns.Count];
         var fixedWidthSum = 0;
+        var identityCount = 0;
         for (var i = 0; i < rawColumns.Count; i++)
         {
-            var (resolvedType, maxLength) = SqlType.GetByName(rawColumns[i].TypeName, rawColumns[i].DeclaredMaxLength, rawColumns[i].DeclaredScale, i + 1, rawColumns[i].Name.Value);
-            heapColumns[i] = new(rawColumns[i].Name.Value, resolvedType, maxLength, rawColumns[i].Nullable);
+            var raw = rawColumns[i];
+            var (resolvedType, maxLength) = SqlType.GetByName(raw.TypeName, raw.DeclaredMaxLength, raw.DeclaredScale, i + 1, raw.Name.Value);
+            if (raw.Identity is not null)
+            {
+                if (++identityCount > 1)
+                    throw SimulatedSqlException.MultipleIdentityColumns(tableName.Value);
+                if (raw.Nullable)
+                    throw SimulatedSqlException.IdentityOnNullableColumn(raw.Name.Value, tableName.Value);
+                if (resolvedType != SqlType.Int32 && resolvedType != SqlType.BigInt && resolvedType != SqlType.SmallInt && resolvedType != SqlType.TinyInt)
+                    throw SimulatedSqlException.IdentityInvalidType(raw.Name.Value);
+            }
+            heapColumns[i] = new(raw.Name.Value, resolvedType, maxLength, raw.Nullable, raw.Identity);
             if (resolvedType.IsFixedLength)
                 fixedWidthSum += resolvedType.FixedLength;
         }
@@ -242,6 +281,38 @@ public sealed class Simulation
     }
 
     /// <summary>
+    /// Parses the <c>IDENTITY [(seed, increment)]</c> property after a column's
+    /// data type. Enters with <see cref="ParserContext.Token"/> on the
+    /// <c>IDENTITY</c> keyword and leaves it on the next non-identity token
+    /// (a nullability keyword, comma, or the column-list's closing paren).
+    /// Bare <c>IDENTITY</c> is shorthand for <c>IDENTITY(1, 1)</c>.
+    /// </summary>
+    private static IdentityState ParseIdentitySpec(ParserContext context, string columnName)
+    {
+        long seed = 1;
+        long increment = 1;
+        var afterIdentity = context.GetNextRequired();
+        if (afterIdentity is Operator { Character: '(' })
+        {
+            context.MoveNextRequired();
+            seed = EvaluateLiteralBigInt(Expression.Parse(context));
+            if (context.Token is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            increment = EvaluateLiteralBigInt(Expression.Parse(context));
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+        return increment == 0
+            ? throw SimulatedSqlException.IdentityInvalidIncrement(columnName)
+            : new IdentityState(seed, increment);
+    }
+
+    private static long EvaluateLiteralBigInt(Expression expression) =>
+        expression.Run(name => throw SimulatedSqlException.InvalidColumnName(name)).CoerceTo(SqlType.BigInt).AsInt64;
+
+    /// <summary>
     /// INSERT processor. Parses the column subset and VALUES tuples, converts
     /// each value token to a <see cref="SqlValue"/> typed to its target column,
     /// encodes each row via <see cref="RowEncoder.EncodeRow"/>, and appends
@@ -249,6 +320,12 @@ public sealed class Simulation
     /// </summary>
     private static SimulatedNonQuery ProcessHeapInsert(HeapTable destinationTable, ParserContext context)
     {
+        var identityOrdinal = destinationTable.IdentityOrdinal;
+        var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
+        var identityInsertOn = identityColumn is not null
+            && context.Simulation.IdentityInsertTable is string activeTable
+            && Collation.Default.Equals(activeTable, destinationTable.Name);
+
         HeapColumn[] destinationColumns;
         if (context.GetNextRequired() is Operator { Character: '(' })
         {
@@ -276,7 +353,21 @@ public sealed class Simulation
         }
         else
         {
-            destinationColumns = [.. destinationTable.Columns];
+            // No column list: target every column except an identity one when
+            // IDENTITY_INSERT is OFF, matching SQL Server's "VALUES supplies
+            // non-identity columns" shorthand.
+            destinationColumns = (identityColumn is not null && !identityInsertOn)
+                ? [.. destinationTable.Columns.Where(c => c.Identity is null)]
+                : [.. destinationTable.Columns];
+        }
+
+        if (identityColumn is not null)
+        {
+            var identityListed = destinationColumns.Any(c => ReferenceEquals(c, identityColumn));
+            if (identityListed && !identityInsertOn)
+                throw SimulatedSqlException.CannotInsertExplicitIdentity(destinationTable.Name);
+            if (!identityListed && identityInsertOn)
+                throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
         }
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
@@ -311,6 +402,7 @@ public sealed class Simulation
 
         } while (context.GetNextOptional() is Operator { Character: ',' });
 
+        decimal? lastIdentityValue = null;
         foreach (var sourceRow in sourceRows)
         {
             var rowValues = new SqlValue[destinationTable.Columns.Length];
@@ -334,12 +426,57 @@ public sealed class Simulation
                 EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Simulation);
                 var coerced = CoerceForInsert(source, targetColumn.Type);
                 rowValues[ordinal] = coerced;
+
+                if (ReferenceEquals(targetColumn, identityColumn))
+                {
+                    var explicitValue = coerced.CoerceTo(SqlType.BigInt).AsInt64;
+                    identityColumn.Identity!.ObserveExplicit(explicitValue);
+                    lastIdentityValue = explicitValue;
+                }
+            }
+
+            if (identityColumn is not null && !destinationColumns.Any(c => ReferenceEquals(c, identityColumn)))
+            {
+                long generated;
+                try
+                {
+                    generated = identityColumn.Identity!.GenerateNext();
+                }
+                catch (OverflowException)
+                {
+                    throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+                }
+
+                rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
+                lastIdentityValue = generated;
             }
 
             destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Schema, rowValues));
         }
 
+        // Per SQL Server: any INSERT updates SCOPE_IDENTITY/@@IDENTITY —
+        // to the generated/explicit identity if the table has one, or to
+        // NULL otherwise (resetting state from a prior identity insert).
+        context.Simulation.LastIdentity = lastIdentityValue;
+
         return new SimulatedNonQuery(sourceRows.Count);
+    }
+
+    /// <summary>
+    /// Coerces an auto-generated identity <see cref="long"/> to the column's
+    /// declared integer type, raising the IDENTITY-specific Msg 8115 if the
+    /// next value won't fit.
+    /// </summary>
+    private static SqlValue CoerceForIdentity(long value, HeapColumn identityColumn)
+    {
+        try
+        {
+            return SqlValue.FromInt64(value).CoerceTo(identityColumn.Type);
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+        }
     }
 
     /// <summary>
@@ -418,7 +555,15 @@ public sealed class Simulation
 
     private static bool TryParseSet(ParserContext context)
     {
-        var setTarget = context.GetNextRequired<UnquotedString>().Value;
+        var afterSet = context.GetNextRequired();
+
+        if (afterSet is ReservedKeyword { Keyword: Keyword.Identity_Insert })
+            return TryParseSetIdentityInsert(context);
+
+        if (afterSet is not UnquotedString unquoted)
+            return false;
+
+        var setTarget = unquoted.Value;
         Span<char> upper = stackalloc char[setTarget.Length];
         return setTarget.ToUpperInvariant(upper) switch
         {
@@ -434,6 +579,36 @@ public sealed class Simulation
             },
             _ => false
         };
+    }
+
+    /// <summary>
+    /// Parses <c>SET IDENTITY_INSERT &lt;table&gt; ON|OFF</c>. ON sets the
+    /// session's active <c>IDENTITY_INSERT</c> target after verifying no
+    /// other table holds it (Msg 8107); OFF clears the target if it matches.
+    /// </summary>
+    private static bool TryParseSetIdentityInsert(ParserContext context)
+    {
+        if (context.GetNextRequired() is not StringToken tableNameToken)
+            return false;
+
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: var onOff } || onOff is not (Keyword.On or Keyword.Off))
+            return false;
+
+        var tableName = tableNameToken.Value;
+        if (!context.Simulation.HeapTables.TryGetValue(tableName, out var heapTable))
+            throw SimulatedSqlException.InvalidObjectName(tableNameToken);
+
+        if (onOff == Keyword.On)
+        {
+            if (context.Simulation.IdentityInsertTable is string held && !Collation.Default.Equals(held, heapTable.Name))
+                throw SimulatedSqlException.IdentityInsertAlreadyOn(held, heapTable.Name);
+            context.Simulation.IdentityInsertTable = heapTable.Name;
+        }
+        else if (Collation.Default.Equals(context.Simulation.IdentityInsertTable, heapTable.Name))
+        {
+            context.Simulation.IdentityInsertTable = null;
+        }
+        return true;
     }
 
     /// <summary>

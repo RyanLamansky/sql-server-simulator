@@ -22,6 +22,23 @@ internal sealed class HeapTable
     public readonly HeapColumn[] Columns;
 
     /// <summary>
+    /// Ordinal of the table's identity column, or <c>-1</c> if there isn't
+    /// one. SQL Server allows at most one identity column per table.
+    /// </summary>
+    public int IdentityOrdinal
+    {
+        get
+        {
+            for (var i = 0; i < this.Columns.Length; i++)
+            {
+                if (this.Columns[i].Identity is not null)
+                    return i;
+            }
+            return -1;
+        }
+    }
+
+    /// <summary>
     /// Per-column types in declaration order; the array passed to
     /// <see cref="RowEncoder.EncodeRow"/> and <see cref="RowDecoder.DecodeColumn"/>.
     /// </summary>

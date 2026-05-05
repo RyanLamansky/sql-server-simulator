@@ -60,7 +60,9 @@ internal abstract class Expression
             Numeric number => new Value(number.Value),
             Literal literal => new Value(literal.Value),
             AtPrefixedString atPrefixed => new Value(atPrefixed, context),
-            DoubleAtPrefixedString doubleAtPrefixedString => new Value(doubleAtPrefixedString),
+            DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() == AtAtKeyword.Identity
+                ? new LastIdentityExpression(context.Simulation)
+                : new Value(doubleAtPrefixedString),
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
             // LEFT and RIGHT are reserved (for future JOIN support) but
             // dispatch as function calls when followed by '('.
@@ -197,6 +199,16 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                _ => null
+            },
+            13 => uppercaseName switch
+            {
+                "IDENT_CURRENT" => new IdentCurrent(context),
+                _ => null
+            },
+            14 => uppercaseName switch
+            {
+                "SCOPE_IDENTITY" => new LastIdentityExpression(context),
                 _ => null
             },
             _ => (Expression?)null

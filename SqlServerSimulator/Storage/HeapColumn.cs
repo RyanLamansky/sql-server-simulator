@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Storage;
 /// <c>varchar</c>, UCS-2 code units for <c>nvarchar</c>.
 /// </para>
 /// </remarks>
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null)
 {
     public readonly string Name = name;
 
@@ -21,6 +21,12 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public readonly int? MaxLength = maxLength;
 
     public readonly bool Nullable = nullable;
+
+    /// <summary>
+    /// Non-null when the column was declared <c>IDENTITY(seed, increment)</c>;
+    /// owns the per-table counter and answers <c>IDENT_CURRENT</c>.
+    /// </summary>
+    public readonly IdentityState? Identity = identity;
 
 #if DEBUG
     public override string ToString() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";

@@ -111,6 +111,36 @@ internal class Product
     public decimal? Discount { get; set; }
 }
 
+/// <summary>
+/// Exercises the simulator's <c>IDENTITY</c> column support through EF Core.
+/// EF Core defaults int primary keys to <c>ValueGeneratedOnAdd</c>; with the
+/// SqlServer provider this means the column is created with <c>IDENTITY(1, 1)</c>
+/// and SaveChanges expects the database to generate the key on insert.
+/// </summary>
+internal class Widget
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "nvarchar(50)")]
+    public string Name { get; set; } = null!;
+}
+
+/// <summary>
+/// Counterpart to <see cref="Widget"/> with <see cref="DatabaseGeneratedOption.None"/>
+/// — EF Core treats <see cref="Id"/> as caller-supplied, so SaveChanges
+/// emits a plain INSERT (no <c>OUTPUT INSERTED</c>). Combined with
+/// <c>SET IDENTITY_INSERT Stickers ON</c>, the path exercises the
+/// simulator's identity-column INSERT through EF Core.
+/// </summary>
+internal class Sticker
+{
+    [DatabaseGenerated(DatabaseGeneratedOption.None)]
+    public int Id { get; set; }
+
+    [Column(TypeName = "nvarchar(20)")]
+    public string Tag { get; set; } = null!;
+}
+
 internal class TestDbContext(Simulation simulation) : DbContext
 {
     public Simulation Simulation { get; set; } = simulation;
@@ -134,6 +164,10 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Document> Documents => Set<Document>();
 
     public DbSet<Product> Products => Set<Product>();
+
+    public DbSet<Widget> Widgets => Set<Widget>();
+
+    public DbSet<Sticker> Stickers => Set<Sticker>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -203,6 +237,36 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Id int,
                     Price decimal(10, 2) not null,
                     Discount decimal(5, 4) null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateWidgetsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Widgets (
+                    Id int identity(1, 1) not null,
+                    Name nvarchar(50) not null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateStickersSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Stickers (
+                    Id int identity(1, 1) not null,
+                    Tag nvarchar(20) not null
                 )
                 """)
             .ExecuteNonQuery();

@@ -72,10 +72,11 @@ Heavy-hitters someone might assume work but don't. Source and `git log` are the 
 - Transactions / locks / MVCC.
 - Row-overflow / LOB pages and the `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` types they enable.
 - `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout. `money` / `smallmoney` are wired in raw SQL but unreachable through EF Core for the same `SqlParameter`-downcast reason as the date-only / time-only mappings — adding a money column to an EF entity breaks that entity's whole save path.
-- Identity columns.
 - `NEWSEQUENTIALID()` (deferred until `DEFAULT`-clause support exists in `CREATE TABLE`; the function is only valid in that context).
 - Pattern matching (`LIKE`) and `CONVERT`.
 - Cross-category `Promote` for integer ↔ string. Only CAST works for that pair.
 - EF Core compatibility: the SqlServer provider downcasts `DbParameter` to `SqlParameter` for some mappings — `DateTime → date`, `DateTime → smalldatetime`, `DateOnly`, `TimeOnly`, `TimeSpan`, and `decimal → money` / `decimal → smallmoney` (via `SqlServerDecimalTypeMapping`) all break at SaveChanges. See `SimulatedDbParameter` for the matrix; a `SqlServerSimulator.EFCore` adapter package is planned to close the gap.
+- `IDENTITY` columns work end-to-end in raw SQL (auto-generation, `SET IDENTITY_INSERT`, `SCOPE_IDENTITY()` / `@@IDENTITY` / `IDENT_CURRENT()`), but EF Core SaveChanges with an identity entity emits `INSERT ... OUTPUT INSERTED.Id` for single rows and `MERGE INTO ... OUTPUT` for multi-row writes — neither statement form is parsed yet, so EF Core identity inserts fail. `EFCoreIdentity` pins the gap as a regression test until OUTPUT/MERGE land.
+- Session-scoped state. `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, and `DBCC TRACEON(N)` flags all live on `Simulation` rather than per-connection. The simulator collapses session vs global scope until a real connection-scoped state model exists; revisit when transactions/locks/MVCC bring the per-session shape with them.
 - CAST to a smaller `varchar`/`nvarchar` than the value renders: SQL Server silently truncates; the simulator returns the full string.
 - Heap allocation tracking (IAM/PFS): the page list is flat.

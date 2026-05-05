@@ -500,4 +500,67 @@ internal sealed class SimulatedSqlException : DbException
     /// </summary>
     internal static SimulatedSqlException LengthOrPrecisionSpecificationInvalid(int requested, int line) =>
         new($"Line {line}: Length or precision specification {requested} is invalid.", 1001, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 544: an INSERT supplied an explicit value for
+    /// an identity column without first issuing <c>SET IDENTITY_INSERT ... ON</c>
+    /// for the destination table.
+    /// </summary>
+    internal static SimulatedSqlException CannotInsertExplicitIdentity(string tableName) =>
+        new($"Cannot insert explicit value for identity column in table '{tableName}' when IDENTITY_INSERT is set to OFF.", 544, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 545: <c>SET IDENTITY_INSERT ... ON</c> is
+    /// active, so the INSERT must list the identity column and supply an
+    /// explicit value rather than relying on auto-generation.
+    /// </summary>
+    internal static SimulatedSqlException ExplicitIdentityRequired(string tableName) =>
+        new($"Explicit value must be specified for identity column in table '{tableName}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", 545, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8107: <c>SET IDENTITY_INSERT</c> is already ON
+    /// for one table and another <c>SET IDENTITY_INSERT</c> targeted a
+    /// different table without first turning the first one OFF.
+    /// </summary>
+    internal static SimulatedSqlException IdentityInsertAlreadyOn(string heldTable, string requestedTable) =>
+        new($"IDENTITY_INSERT is already ON for table '{heldTable}'. Cannot perform SET operation for table '{requestedTable}'.", 8107, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8147: a column cannot be both <c>IDENTITY</c>
+    /// and <c>NULL</c>.
+    /// </summary>
+    internal static SimulatedSqlException IdentityOnNullableColumn(string columnName, string tableName) =>
+        new($"Could not create IDENTITY attribute on nullable column '{columnName}', table '{tableName}'.", 8147, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2749: the identity column's data type isn't in
+    /// the supported list (int/bigint/smallint/tinyint/decimal-or-numeric with
+    /// scale 0). The message text is the literal SQL Server wording.
+    /// </summary>
+    internal static SimulatedSqlException IdentityInvalidType(string columnName) =>
+        new($"Identity column '{columnName}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, unencrypted, and constrained to be nonnullable.", 2749, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2744: more than one column in a table was
+    /// declared with the <c>IDENTITY</c> property.
+    /// </summary>
+    internal static SimulatedSqlException MultipleIdentityColumns(string tableName) =>
+        new($"Multiple identity columns specified for table '{tableName}'. Only one identity column per table is allowed.", 2744, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2753: <c>IDENTITY(seed, 0)</c> — increment
+    /// must be non-zero (negative is allowed).
+    /// </summary>
+    internal static SimulatedSqlException IdentityInvalidIncrement(string columnName) =>
+        new($"Identity column '{columnName}' contains invalid INCREMENT.", 2753, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 8115's IDENTITY-specific wording: the next
+    /// identity value would overflow the column's underlying integer type.
+    /// Distinct from <see cref="ArithmeticOverflow"/> in only one word
+    /// (<c>IDENTITY</c> vs <c>expression</c>) but real SQL Server emits the
+    /// IDENTITY variant for this code path.
+    /// </summary>
+    internal static SimulatedSqlException IdentityOverflow(string targetTypeName) =>
+        new($"Arithmetic overflow error converting IDENTITY to data type {targetTypeName}.", 8115, 16, 1);
 }
