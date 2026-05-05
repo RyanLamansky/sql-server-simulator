@@ -64,9 +64,10 @@ internal abstract class Expression
                 ? new LastIdentityExpression(context.Simulation)
                 : new Value(doubleAtPrefixedString),
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
-            // LEFT and RIGHT are reserved (for future JOIN support) but
-            // dispatch as function calls when followed by '('.
-            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right } reserved => new Reference(reserved.ToString()),
+            // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved keywords
+            // but dispatch as function calls when followed by '(' — the
+            // surrounding loop hands the call shape off to ResolveBuiltIn.
+            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert } reserved => new Reference(reserved.ToString()),
             Name name => new Reference(name),
             Operator { Character: '(' } => new Parenthesized(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -186,6 +187,7 @@ internal abstract class Expression
             },
             7 => uppercaseName switch
             {
+                "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
                 _ => null
@@ -199,6 +201,11 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                _ => null
+            },
+            11 => uppercaseName switch
+            {
+                "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
                 _ => null
             },
             13 => uppercaseName switch

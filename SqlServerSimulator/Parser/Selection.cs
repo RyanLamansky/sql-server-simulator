@@ -69,9 +69,10 @@ internal sealed class Selection
                 case ReservedKeyword { Keyword: Keyword.From }:
                     break;
 
-                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right }:
-                    // LEFT/RIGHT are reserved (for future JOIN) but valid as
-                    // function call heads inside a SELECT projection.
+                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert }:
+                    // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved
+                    // keywords but valid as function-call heads inside a
+                    // SELECT projection.
                     expressions.Add(Expression.Parse(context));
                     break;
 

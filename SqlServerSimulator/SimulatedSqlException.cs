@@ -381,6 +381,25 @@ internal sealed class SimulatedSqlException : DbException
         new("Insufficient result space to convert uniqueidentifier value to char.", 8170, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 281: a non-zero, non-120/121 style number
+    /// passed to <c>CONVERT</c> when targeting a character string from a
+    /// date-like type. The <paramref name="sourceTypeWord"/> is the bare
+    /// family name SQL Server uses in the message — e.g. <c>"datetime"</c>,
+    /// <c>"datetime2"</c>, <c>"time"</c>, <c>"datetimeoffset"</c> — never
+    /// with precision suffix.
+    /// </summary>
+    internal static SimulatedSqlException InvalidStyleForCharacterString(int style, string sourceTypeWord) =>
+        new($"{style} is not a valid style number when converting from {sourceTypeWord} to a character string.", 281, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8116: an argument to a function has the wrong
+    /// data type — currently surfaced for <c>CONVERT</c>'s third (style)
+    /// argument when it isn't an integer.
+    /// </summary>
+    internal static SimulatedSqlException InvalidArgumentDataType(string sourceTypeWord, int argumentIndex, string functionName) =>
+        new($"Argument data type {sourceTypeWord} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 206: the binary expression's two operands
     /// belong to types that have no implicit conversion between them
     /// (e.g. <c>date = 0</c>, <c>time + 1</c>). Distinct from Msg 402

@@ -354,6 +354,64 @@ internal readonly partial struct SqlValue
     };
 
     /// <summary>
+    /// CONVERT-style string formatting for a date-like source. Implements
+    /// SQL Server styles <c>0</c>, <c>120</c>, and <c>121</c> only — anything
+    /// else raises Msg 281 with the source-family wording. Style <c>121</c>
+    /// matches the simulator's CAST default for date / datetime2 / time /
+    /// datetimeoffset, while style <c>0</c> switches those types to the
+    /// legacy <c>"Mar 15 2024 10:20AM"</c> presentation that <c>datetime</c>
+    /// and <c>smalldatetime</c> already use by default.
+    /// </summary>
+    /// <remarks>
+    /// Caller (the <c>CONVERT</c> expression) has already verified the
+    /// target is a character-string type; the method just emits the
+    /// formatted text and re-types it.
+    /// </remarks>
+    internal SqlValue CoerceDateTimeToStringWithStyle(SqlType target, int style) => this.Type switch
+    {
+        _ when this.Type == SqlType.Date => style is 0 or 120 or 121
+            ? FromString(target, this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+            : throw SimulatedSqlException.InvalidStyleForCharacterString(style, "date"),
+        _ when this.Type == SqlType.DateTime => style switch
+        {
+            0 => FromString(target, FormatLegacyDateTime(this.AsDateTime)),
+            120 => FromString(target, this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+            121 => FromString(target, this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)),
+            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetime"),
+        },
+        _ when this.Type == SqlType.SmallDateTime => style switch
+        {
+            0 => FromString(target, FormatLegacyDateTime(this.AsSmallDateTime)),
+            120 => FromString(target, this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+            121 => FromString(target, this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)),
+            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "smalldatetime"),
+        },
+        DateTime2SqlType srcDt2 => style switch
+        {
+            0 => FromString(target, FormatLegacyDateTime(this.AsDateTime2)),
+            120 => FromString(target, this.AsDateTime2.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+            121 => FromString(target, this.AsDateTime2.ToString(DateTime2Format(srcDt2.precision), CultureInfo.InvariantCulture)),
+            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetime2"),
+        },
+        TimeSqlType srcTime => style switch
+        {
+            0 => FromString(target, FormatLegacyTimeOfDay(this.AsTime)),
+            120 => FromString(target, FormatTime(this.AsTime, 0)),
+            121 => FromString(target, FormatTime(this.AsTime, srcTime.precision)),
+            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "time"),
+        },
+        DateTimeOffsetSqlType srcDto => style switch
+        {
+            0 => FromString(target, FormatLegacyDateTime(this.AsDateTimeOffset.DateTime)
+                + " " + this.AsDateTimeOffset.ToString("zzz", CultureInfo.InvariantCulture)),
+            120 => FromString(target, FormatDateTimeOffset(this.AsDateTimeOffset, 0)),
+            121 => FromString(target, FormatDateTimeOffset(this.AsDateTimeOffset, srcDto.precision)),
+            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetimeoffset"),
+        },
+        _ => throw new NotSupportedException($"CONVERT style codes aren't implemented for {this.Type}."),
+    };
+
+    /// <summary>
     /// Parses a string into an integer-family <see cref="SqlValue"/> matching
     /// SQL Server's CAST semantics. Empty / whitespace-only strings convert
     /// to 0. Leading <c>+</c>/<c>-</c> signs and surrounding whitespace are

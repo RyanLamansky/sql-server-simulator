@@ -125,6 +125,20 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
+    /// Time-of-day format for CONVERT style 0: <c>"h:mmtt"</c> with a
+    /// single-digit hour (no leading space) and no seconds. Distinct from
+    /// the time portion of <see cref="FormatLegacyDateTime"/>, which
+    /// right-aligns the hour in two characters because it sits inside a
+    /// fixed-width datetime string.
+    /// </summary>
+    private static string FormatLegacyTimeOfDay(TimeSpan value)
+    {
+        var hour12 = ((value.Hours + 11) % 12) + 1;
+        var ampm = value.Hours < 12 ? "AM" : "PM";
+        return string.Format(CultureInfo.InvariantCulture, "{0}:{1:00}{2}", hour12, value.Minutes, ampm);
+    }
+
+    /// <summary>
     /// Format SQL Server's legacy <c>datetime</c> emits when CAST to a string:
     /// <c>"MMM d yyyy h:mmtt"</c> with the day right-aligned in 2 chars
     /// (single-digit days get a leading space) and the 12-hour hour likewise
