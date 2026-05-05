@@ -309,6 +309,53 @@ internal sealed class SimulatedSqlException : DbException
         new("Conversion failed when converting from a character string to uniqueidentifier.", 8169, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 8114: a non-numeric value was passed to a
+    /// data-type conversion that demands a numeric form (typically
+    /// <c>CAST('abc' AS decimal/numeric/float)</c>). The fixed text uses
+    /// <c>"numeric"</c> for both decimal and numeric targets — verified
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ConvertingDataTypeError(SqlType source, string targetWord) =>
+        new($"Error converting data type {source} to {targetWord}.", 8114, 16, 5);
+
+    /// <summary>
+    /// Mimics SQL Server error 8115 in its decimal/numeric variant: scale-
+    /// truncated rounding produced a value whose integer part exceeds the
+    /// destination precision. Real-server text uses <c>"numeric"</c> for
+    /// both decimal and numeric targets.
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowToNumeric() =>
+        new("Arithmetic overflow error converting expression to data type numeric.", 8115, 16, 8);
+
+    /// <summary>
+    /// Mimics SQL Server error 8115 with a target-name slot — used by
+    /// money / smallmoney range overflows where the message text reads
+    /// <c>"... converting numeric to data type smallmoney"</c>. The numeric/
+    /// expression source-word matches what real SQL Server emits when the
+    /// overflow happens in the integer-to-target widening path.
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowToTarget(string targetTypeName) =>
+        new($"Arithmetic overflow error converting numeric to data type {targetTypeName}.", 8115, 16, 8);
+
+    /// <summary>
+    /// Mimics SQL Server error 235: a string couldn't be parsed as money /
+    /// smallmoney (e.g. <c>'5.5e2'</c>, <c>'abc'</c>). Distinct from
+    /// Msg 8114 (decimal/float source error); the money-specific text
+    /// emphasizes the "incorrect syntax" angle.
+    /// </summary>
+    internal static SimulatedSqlException CannotConvertCharToMoney() =>
+        new("Cannot convert a char value to money. The char value has incorrect syntax.", 235, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8134: division by zero in decimal / float /
+    /// money arithmetic. Integer division currently falls through .NET's
+    /// <see cref="DivideByZeroException"/> path; future integer-division
+    /// alignment can reuse this factory.
+    /// </summary>
+    internal static SimulatedSqlException DivideByZero() =>
+        new("Divide by zero error encountered.", 8134, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8170: a non-NULL <c>uniqueidentifier</c> was
     /// cast to a <c>char</c> / <c>varchar</c> destination too short to hold
     /// the 36-character formatted GUID. The <c>nchar</c> / <c>nvarchar</c>

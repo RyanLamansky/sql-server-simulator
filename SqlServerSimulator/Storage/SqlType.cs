@@ -10,9 +10,18 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal abstract class SqlType
 {
-    private protected SqlType()
+    private protected SqlType(SqlTypeCategory category)
     {
+        this.Category = category;
     }
+
+    /// <summary>
+    /// Coarse classification used by <see cref="Promote"/> and the binary-
+    /// expression dispatchers to dispatch in a single jump-table-friendly
+    /// step instead of repeated per-call category checks. Each concrete
+    /// type pins its category at construction.
+    /// </summary>
+    public readonly SqlTypeCategory Category;
 
     /// <summary>
     /// True for types whose stored bytes are a constant width, regardless of value.
@@ -56,19 +65,31 @@ internal abstract class SqlType
     /// SQL Server data-type precedence for implicit conversion. Higher means
     /// "wins" when a binary expression must pick a common type. The numeric
     /// values are simulator-internal; only their relative ordering matters.
+    /// Within the numeric family the SQL Server chart orders
+    /// <c>float &gt; real &gt; decimal/numeric &gt; money &gt; smallmoney
+    /// &gt; bigint &gt; int &gt; smallint &gt; tinyint &gt; bit</c>
+    /// (<c>decimal</c> and <c>numeric</c> share a slot; <c>numeric</c> is
+    /// just an alias).
     /// </summary>
     /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-type-precedence-transact-sql</remarks>
-    public int Precedence =>
-        this == BigInt ? 5
-        : this == Int32 ? 4
-        : this == SmallInt ? 3
-        : this == TinyInt ? 2
-        : this == Bit ? 1
-        : this == UniqueIdentifier ? 13
-        : this == SystemName ? 12
-        : this == NVarchar ? 11
-        : this == Varchar ? 10
-        : throw new NotSupportedException($"No precedence defined for {this}.");
+    public int Precedence => this switch
+    {
+        _ when this == UniqueIdentifier => 16,
+        _ when this == SystemName => 15,
+        _ when this == NVarchar => 14,
+        _ when this == Varchar => 13,
+        _ when this == Float => 9,
+        _ when this == Real => 8,
+        DecimalSqlType => 7,
+        _ when this == Money => 6,
+        _ when this == SmallMoney => 5,
+        _ when this == BigInt => 4,
+        _ when this == Int32 => 3,
+        _ when this == SmallInt => 2,
+        _ when this == TinyInt => 1,
+        _ when this == Bit => 0,
+        _ => throw new NotSupportedException($"No precedence defined for {this}."),
+    };
 
     /// <summary>
     /// Returns the higher-precedence type when <paramref name="a"/> and
@@ -79,55 +100,147 @@ internal abstract class SqlType
     /// aren't implemented; SQL Server allows those via implicit conversion
     /// but the simulator hasn't modeled them yet.
     /// </summary>
-    public static SqlType Promote(SqlType a, SqlType b)
+    /// <remarks>
+    /// Dispatch is structured as an outer switch on the left operand's
+    /// <see cref="Category"/> with each arm handing off to a helper that
+    /// switches on the right operand's category. Both switches are over
+    /// dense byte-typed enums, so the JIT can lower them to jump tables.
+    /// </remarks>
+    public static SqlType Promote(SqlType a, SqlType b) =>
+        a == b ? a : a.Category switch
+        {
+            SqlTypeCategory.Approximate => PromoteFromApproximate(a, b),
+            SqlTypeCategory.Decimal => PromoteFromDecimal(a, b),
+            SqlTypeCategory.Money => PromoteFromMoney(a, b),
+            SqlTypeCategory.Integer => PromoteFromInteger(a, b),
+            SqlTypeCategory.String => PromoteFromString(a, b),
+            SqlTypeCategory.DateTime => PromoteFromDateTime(a, b),
+            SqlTypeCategory.UniqueIdentifier => PromoteFromUniqueIdentifier(a, b),
+            _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+        };
+
+    /// <summary>
+    /// Approximate (float/real) wins over every other numeric or string
+    /// partner. When both sides are approximate, <c>float</c> wins over
+    /// <c>real</c>; same-type pairs short-circuit at the top of
+    /// <see cref="Promote"/>, so this only sees mixed approximate pairs.
+    /// </summary>
+    private static SqlType PromoteFromApproximate(SqlType a, SqlType b) => b.Category switch
     {
-        if (a == b)
-            return a;
+        SqlTypeCategory.Approximate => a == Float || b == Float ? Float : Real,
+        SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Integer or SqlTypeCategory.String => a,
+        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
 
-        // Date/time category — within-family widens to higher precision;
-        // cross-family follows SQL Server's precedence (datetimeoffset >
-        // datetime2 > datetime > smalldatetime > date), with `time` blocked
-        // from non-time partners by Msg 402 (matching the binary-comparison-
-        // operator rule).
-        if (IsDateTimeCategory(a) && IsDateTimeCategory(b))
-            return PromoteDateTime(a, b);
+    /// <summary>
+    /// Decimal vs decimal widens to the joint envelope. Decimal vs integer
+    /// or money canonicalizes the partner to its decimal equivalent
+    /// (bit→(1,0) … bigint→(19,0); money→(19,4); smallmoney→(10,4)) and
+    /// rerun the envelope rule. Decimal beats string (string parses).
+    /// </summary>
+    private static SqlType PromoteFromDecimal(SqlType a, SqlType b) => b.Category switch
+    {
+        SqlTypeCategory.Approximate => b,
+        SqlTypeCategory.Decimal => PromoteDecimalPair((DecimalSqlType)a, (DecimalSqlType)b),
+        SqlTypeCategory.Integer => PromoteDecimalPair((DecimalSqlType)a, IntegerAsDecimalType(b)),
+        SqlTypeCategory.Money => PromoteDecimalPair((DecimalSqlType)a, MoneyAsDecimalType(b)),
+        SqlTypeCategory.String => a,
+        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
 
-        // String ↔ date/time: SQL Server's data-type precedence puts every
-        // date/time type above varchar/nvarchar, so a string operand
-        // implicitly parses-and-coerces to the date/time partner. Bad-format
-        // strings surface from the existing CoerceTo parsers (Msg 241 / 295
-        // depending on the target).
-        if (IsStringCategory(a) && IsDateTimeCategory(b))
-            return b;
-        if (IsDateTimeCategory(a) && IsStringCategory(b))
-            return a;
+    /// <summary>
+    /// Money pairings: money vs money picks money over smallmoney; money
+    /// vs integer or string keeps the money type; money vs decimal goes
+    /// through <see cref="PromoteFromDecimal"/> with the operands swapped
+    /// so the decimal arm handles canonicalization; money vs float/real
+    /// promotes to float/real.
+    /// </summary>
+    private static SqlType PromoteFromMoney(SqlType a, SqlType b) => b.Category switch
+    {
+        SqlTypeCategory.Approximate => b,
+        SqlTypeCategory.Decimal => PromoteDecimalPair(MoneyAsDecimalType(a), (DecimalSqlType)b),
+        SqlTypeCategory.Money => a == Money || b == Money ? Money : SmallMoney,
+        SqlTypeCategory.Integer or SqlTypeCategory.String => a,
+        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
 
-        // Integer ↔ date/time: only the legacy types (datetime / smalldatetime)
-        // accept integers as days-since-1900-01-01. The newer types reject
-        // the pair with Msg 206 — the same operand-type-clash error SQL
-        // Server raises for `where date = 0` or `time + 1`.
-        if (IsIntegerCategory(a) && IsDateTimeCategory(b))
-            return b == DateTime || b == SmallDateTime ? b : throw SimulatedSqlException.OperandTypeClash(a, b);
-        if (IsDateTimeCategory(a) && IsIntegerCategory(b))
-            return a == DateTime || a == SmallDateTime ? a : throw SimulatedSqlException.OperandTypeClash(a, b);
+    /// <summary>
+    /// Integer vs each numeric / string / date-time category. Integer
+    /// canonicalizes to its decimal equivalent for decimal/money partners.
+    /// Integer vs date/time only succeeds for the legacy datetime types
+    /// (datetime, smalldatetime); other date/time types raise the
+    /// operand-type-clash error.
+    /// </summary>
+    private static SqlType PromoteFromInteger(SqlType a, SqlType b) => b.Category switch
+    {
+        SqlTypeCategory.Approximate => b,
+        SqlTypeCategory.Decimal => PromoteDecimalPair(IntegerAsDecimalType(a), (DecimalSqlType)b),
+        SqlTypeCategory.Money => b,
+        SqlTypeCategory.Integer => a.Precedence >= b.Precedence ? a : b,
+        SqlTypeCategory.DateTime => b == DateTime || b == SmallDateTime ? b : throw SimulatedSqlException.OperandTypeClash(a, b),
+        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
 
-        // String ↔ uniqueidentifier: SQL Server's data-type precedence puts
-        // uniqueidentifier above the string types, so a string operand
-        // implicitly parses-and-coerces to uniqueidentifier (bad-format
-        // strings surface from CoerceTo as Msg 8169). uniqueidentifier
-        // against any non-string partner has no implicit conversion and
-        // raises the operand-type-clash error.
-        if (a == UniqueIdentifier && IsStringCategory(b))
-            return a;
-        if (IsStringCategory(a) && b == UniqueIdentifier)
-            return b;
-        if (a == UniqueIdentifier || b == UniqueIdentifier)
-            throw SimulatedSqlException.OperandTypeClash(a, b);
+    /// <summary>
+    /// String vs each higher-precedence partner. The partner wins (the
+    /// string parses through that partner's CAST path); same-category
+    /// strings pick the higher precedence (sysname &gt; nvarchar &gt;
+    /// varchar). String vs uniqueidentifier promotes to uid; string vs
+    /// integer falls through to <see cref="NotSupportedException"/>
+    /// because that promotion path isn't modeled yet.
+    /// </summary>
+    private static SqlType PromoteFromString(SqlType a, SqlType b) => b.Category switch
+    {
+        SqlTypeCategory.Approximate or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier => b,
+        SqlTypeCategory.String => a.Precedence >= b.Precedence ? a : b,
+        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
 
-        var sameCategory = (IsIntegerCategory(a) && IsIntegerCategory(b)) || (IsStringCategory(a) && IsStringCategory(b));
-        return sameCategory
-            ? a.Precedence >= b.Precedence ? a : b
-            : throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}.");
+    /// <summary>
+    /// Date/time pairings dispatch to <see cref="PromoteDateTime"/>; date/
+    /// time vs string takes the date/time side (string parses); date/time
+    /// vs integer succeeds only for the legacy types.
+    /// </summary>
+    private static SqlType PromoteFromDateTime(SqlType a, SqlType b) => b.Category switch
+    {
+        SqlTypeCategory.DateTime => PromoteDateTime(a, b),
+        SqlTypeCategory.String => a,
+        SqlTypeCategory.Integer => a == DateTime || a == SmallDateTime ? a : throw SimulatedSqlException.OperandTypeClash(a, b),
+        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
+
+    /// <summary>
+    /// uniqueidentifier vs string promotes to uniqueidentifier (the string
+    /// parses); every other partner raises the operand-type-clash error.
+    /// </summary>
+    private static SqlType PromoteFromUniqueIdentifier(SqlType a, SqlType b) => b.Category switch
+    {
+        SqlTypeCategory.String => a,
+        _ => throw SimulatedSqlException.OperandTypeClash(a, b),
+    };
+
+    /// <summary>
+    /// Joint-envelope decimal promotion used by comparison / COALESCE-style
+    /// common-type decisions. Per-operator arithmetic precision/scale rules
+    /// (multiplication, division, etc.) live in the binary-expression layer.
+    /// </summary>
+    private static SqlType PromoteDecimalPair(DecimalSqlType a, DecimalSqlType b)
+    {
+        var scale = Math.Max(a.scale, b.scale);
+        var integerPart = Math.Max(a.precision - a.scale, b.precision - b.scale);
+        return GetDecimal(Math.Min(38, integerPart + scale), scale);
+    }
+
+    private static DecimalSqlType IntegerAsDecimalType(SqlType integer)
+    {
+        var (p, s) = IntegerAsDecimal(integer);
+        return DecimalSqlType.Get(p, s);
+    }
+
+    private static DecimalSqlType MoneyAsDecimalType(SqlType money)
+    {
+        var (p, s) = MoneyAsDecimal(money);
+        return DecimalSqlType.Get(p, s);
     }
 
     /// <summary>
@@ -182,12 +295,46 @@ internal abstract class SqlType
     };
 
     /// <summary>True for SQL integer-family types (bit, tinyint, smallint, int, bigint).</summary>
-    public static bool IsIntegerCategory(SqlType type) =>
-        type == Bit || type == TinyInt || type == SmallInt || type == Int32 || type == BigInt;
+    public static bool IsIntegerCategory(SqlType type) => type.Category == SqlTypeCategory.Integer;
+
+    /// <summary>True for SQL exact-numeric-family types (decimal/numeric, money, smallmoney).</summary>
+    public static bool IsExactNumericCategory(SqlType type) => type.Category is SqlTypeCategory.Decimal or SqlTypeCategory.Money;
+
+    /// <summary>True for SQL approximate-numeric-family types (float, real).</summary>
+    public static bool IsApproximateNumericCategory(SqlType type) => type.Category == SqlTypeCategory.Approximate;
+
+    /// <summary>True for SQL money-family types (money, smallmoney).</summary>
+    public static bool IsMoneyCategory(SqlType type) => type.Category == SqlTypeCategory.Money;
+
+    /// <summary>
+    /// SQL Server canonicalizes integer types into a decimal-equivalent
+    /// (precision, scale) for arithmetic with decimal: bit→(1,0),
+    /// tinyint→(3,0), smallint→(5,0), int→(10,0), bigint→(19,0). Verified
+    /// against SQL Server 2025; the precision values fall out of each
+    /// integer type's max representable decimal-digit count.
+    /// </summary>
+    public static (int Precision, int Scale) IntegerAsDecimal(SqlType type) =>
+        type == Bit ? (1, 0)
+        : type == TinyInt ? (3, 0)
+        : type == SmallInt ? (5, 0)
+        : type == Int32 ? (10, 0)
+        : type == BigInt ? (19, 0)
+        : throw new ArgumentException($"{type} is not an integer-family type.", nameof(type));
+
+    /// <summary>
+    /// Money / smallmoney canonicalize to <c>decimal(19, 4)</c> /
+    /// <c>decimal(10, 4)</c> for arithmetic precision-promotion. Verified
+    /// via probe: <c>money + decimal(5, 2) → decimal(8, 4)</c> matches the
+    /// formula <c>p = max(15, 3) + max(4, 2) + 1 = 16, s = max(4, 2) = 4</c>
+    /// once smallmoney's <c>(10, 4)</c> standin is plugged in.
+    /// </summary>
+    public static (int Precision, int Scale) MoneyAsDecimal(SqlType type) =>
+        type == Money ? (19, 4)
+        : type == SmallMoney ? (10, 4)
+        : throw new ArgumentException($"{type} is not a money-family type.", nameof(type));
 
     /// <summary>True for SQL string-family types (varchar, nvarchar, sysname).</summary>
-    public static bool IsStringCategory(SqlType type) =>
-        type == Varchar || type == NVarchar || type == SystemName;
+    public static bool IsStringCategory(SqlType type) => type.Category == SqlTypeCategory.String;
 
     public static readonly SqlType Int32 = new Int32SqlType();
 
@@ -337,9 +484,47 @@ internal abstract class SqlType
     /// </remarks>
     public static readonly SqlType UniqueIdentifier = new UniqueIdentifierSqlType();
 
+    /// <remarks>
+    /// SQL Server's <c>decimal(p, s)</c> / <c>numeric(p, s)</c>: exact-precision
+    /// fixed-point. Each (precision, scale) pair is a distinct singleton
+    /// reachable through <see cref="GetDecimal"/>; reference equality flows
+    /// the same way it does for date/time precision singletons. Precision
+    /// above 28 throws <see cref="NotSupportedException"/> — .NET decimal's
+    /// 28-29 digit limit doesn't extend to SQL Server's full 38, and the
+    /// arbitrary-precision mantissa needed to bridge isn't modeled yet.
+    /// </remarks>
+    public static SqlType GetDecimal(int precision, int scale) => DecimalSqlType.Get(precision, scale);
+
+    /// <remarks>
+    /// SQL Server's <c>float</c>: 8-byte IEEE 754 double. <c>float(N)</c>
+    /// with <c>N ≤ 24</c> resolves to <see cref="Real"/> instead — that
+    /// dispatch lives in <see cref="GetByName"/>.
+    /// </remarks>
+    public static readonly SqlType Float = new FloatSqlType();
+
+    /// <remarks>
+    /// SQL Server's <c>real</c>: 4-byte IEEE 754 single. Equivalent to
+    /// <c>float(24)</c>.
+    /// </remarks>
+    public static readonly SqlType Real = new RealSqlType();
+
+    /// <remarks>
+    /// SQL Server's <c>money</c>: 8-byte scaled signed integer with a fixed
+    /// scale of 4 decimal places. Range
+    /// <c>[-922337203685477.5808, 922337203685477.5807]</c> (matching
+    /// <see cref="long"/>).
+    /// </remarks>
+    public static readonly SqlType Money = new MoneySqlType();
+
+    /// <remarks>
+    /// SQL Server's <c>smallmoney</c>: 4-byte scaled signed integer with a
+    /// fixed scale of 4 decimal places. Range
+    /// <c>[-214748.3648, 214748.3647]</c>.
+    /// </remarks>
+    public static readonly SqlType SmallMoney = new SmallMoneySqlType();
+
     /// <summary>True for SQL date/time-family types (date, datetime, smalldatetime, datetime2, time, datetimeoffset).</summary>
-    public static bool IsDateTimeCategory(SqlType type) =>
-        type == Date || type == DateTime || type == SmallDateTime || type is DateTime2SqlType || type is TimeSqlType || type is DateTimeOffsetSqlType;
+    public static bool IsDateTimeCategory(SqlType type) => type.Category == SqlTypeCategory.DateTime;
 
     /// <summary>
     /// Resolves an ADO.NET <see cref="DbType"/> to its corresponding
@@ -369,6 +554,13 @@ internal abstract class SqlType
         DbType.Time => GetTime(7),
         DbType.DateTimeOffset => GetDateTimeOffset(7),
         DbType.Guid => UniqueIdentifier,
+        // DbType.Decimal / VarNumeric have no precision/scale on the
+        // DbType enum; default to decimal(18, 0) — the same fallback SQL
+        // Server applies when no parameters are declared.
+        DbType.Decimal or DbType.VarNumeric => GetDecimal(18, 0),
+        DbType.Double => Float,
+        DbType.Single => Real,
+        DbType.Currency => Money,
         _ => throw new NotSupportedException($"No SqlType mapping for DbType {dbType}."),
     };
 
@@ -383,7 +575,13 @@ internal abstract class SqlType
     /// otherwise null. Reused for <c>datetime2(N)</c> / <c>time(N)</c> /
     /// <c>datetimeoffset(N)</c> as the fractional-second precision (0-7),
     /// where the integer is interpreted by the type rather than stored on
-    /// the column.
+    /// the column. For <c>decimal(p, s)</c> / <c>numeric(p, s)</c> this
+    /// carries the precision <c>p</c>; the scale arrives separately on
+    /// <paramref name="declaredScale"/>.
+    /// </param>
+    /// <param name="declaredScale">
+    /// The second integer in a two-arg type spec — only <c>decimal(p, s)</c>
+    /// and <c>numeric(p, s)</c> use it today.
     /// </param>
     /// <param name="index">1-based column index. Used for column-context errors only.</param>
     /// <param name="columnName">
@@ -404,7 +602,7 @@ internal abstract class SqlType
     /// no length was supplied for a variable-length type, or the supplied length
     /// is out of range for the type.
     /// </exception>
-    public static (SqlType Type, int? MaxLength) GetByName(Name name, int? declaredMaxLength, int index, string? columnName)
+    public static (SqlType Type, int? MaxLength) GetByName(Name name, int? declaredMaxLength, int? declaredScale, int index, string? columnName)
     {
         Span<char> upper = stackalloc char[name.Span.Length];
         var resolvedName = name.Span.ToUpperInvariant(upper);
@@ -436,6 +634,29 @@ internal abstract class SqlType
                 : (GetDateTimeOffset(precision), null);
         }
 
+        // float(N) — N selects 4-byte real (N ≤ 24) or 8-byte float
+        // (N 25-53). Bare <c>float</c> defaults to N=53 (8 bytes).
+        if (resolvedName == 5 && upper.SequenceEqual("FLOAT"))
+        {
+            var mantissaBits = declaredMaxLength ?? 53;
+            return mantissaBits is < 1 or > 53
+                ? throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(mantissaBits, name.LineNumber)
+                : (mantissaBits <= 24 ? Real : Float, null);
+        }
+
+        // decimal(p, s) and numeric(p, s) — same backing type, parsed
+        // identically. Defaults match SQL Server: precision 18, scale 0.
+        if ((resolvedName == 7 && upper.SequenceEqual("DECIMAL")) || (resolvedName == 7 && upper.SequenceEqual("NUMERIC")))
+        {
+            var precision = declaredMaxLength ?? 18;
+            var scale = declaredScale ?? 0;
+            return precision is < 1 or > 38
+                ? throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(precision, name.LineNumber)
+                : scale < 0 || scale > precision
+                    ? throw SimulatedSqlException.InvalidScale(scale, name.LineNumber)
+                    : ((SqlType, int?))(GetDecimal(precision, scale), null);
+        }
+
         var resolved = resolvedName switch
         {
             3 => upper switch
@@ -447,6 +668,7 @@ internal abstract class SqlType
             4 => upper switch
             {
                 "DATE" => Date,
+                "REAL" => Real,
                 _ => null
             },
             6 => upper switch
@@ -470,6 +692,16 @@ internal abstract class SqlType
             9 => upper switch
             {
                 "VARBINARY" => Varbinary,
+                _ => null
+            },
+            5 => upper switch
+            {
+                "MONEY" => Money,
+                _ => null
+            },
+            10 => upper switch
+            {
+                "SMALLMONEY" => SmallMoney,
                 _ => null
             },
             13 => upper switch

@@ -86,6 +86,22 @@ internal class Document
     public Guid? OptionalKey { get; set; }
 }
 
+/// <summary>
+/// Exercises the simulator's <c>decimal(p, s)</c> column support through
+/// EF Core. <see cref="Price"/> uses <c>decimal(10, 2)</c> for a typical
+/// price scenario; <see cref="Discount"/> covers the nullable path.
+/// </summary>
+internal class Product
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "decimal(10, 2)")]
+    public decimal Price { get; set; }
+
+    [Column(TypeName = "decimal(5, 4)")]
+    public decimal? Discount { get; set; }
+}
+
 internal class TestDbContext(Simulation simulation) : DbContext
 {
     public Simulation Simulation { get; set; } = simulation;
@@ -107,6 +123,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Event> Events => Set<Event>();
 
     public DbSet<Document> Documents => Set<Document>();
+
+    public DbSet<Product> Products => Set<Product>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -157,6 +175,22 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Id int,
                     ExternalKey uniqueidentifier not null,
                     OptionalKey uniqueidentifier null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateProductsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Products (
+                    Id int,
+                    Price decimal(10, 2) not null,
+                    Discount decimal(5, 4) null
                 )
                 """)
             .ExecuteNonQuery();

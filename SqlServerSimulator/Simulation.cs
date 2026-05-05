@@ -143,7 +143,7 @@ public sealed class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             return false;
 
-        var rawColumns = new List<(Name Name, Name TypeName, int? DeclaredMaxLength, bool Nullable)>();
+        var rawColumns = new List<(Name Name, Name TypeName, int? DeclaredMaxLength, int? DeclaredScale, bool Nullable)>();
         bool suppressAdvanceToken;
         do
         {
@@ -152,6 +152,7 @@ public sealed class Simulation
             var type = context.GetNextRequired<Name>();
 
             int? declaredMaxLength = null;
+            int? declaredScale = null;
             context.MoveNextRequired();
             if (context.Token is Operator { Character: '(' })
             {
@@ -169,8 +170,20 @@ public sealed class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 }
 
-                if (context.GetNextRequired() is not Operator { Character: ')' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                switch (context.GetNextRequired())
+                {
+                    case Operator { Character: ',' }:
+                        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        declaredScale = scaleValue.AsInt32;
+                        if (context.GetNextRequired() is not Operator { Character: ')' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        break;
+                    case Operator { Character: ')' }:
+                        break;
+                    default:
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
 
                 context.MoveNextRequired();
             }
@@ -199,7 +212,7 @@ public sealed class Simulation
                 nullable = true;
             }
 
-            rawColumns.Add((columnName, type, declaredMaxLength, nullable));
+            rawColumns.Add((columnName, type, declaredMaxLength, declaredScale, nullable));
         } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
 
         if (context.Token is not Operator { Character: ')' })
@@ -209,7 +222,7 @@ public sealed class Simulation
         var fixedWidthSum = 0;
         for (var i = 0; i < rawColumns.Count; i++)
         {
-            var (resolvedType, maxLength) = SqlType.GetByName(rawColumns[i].TypeName, rawColumns[i].DeclaredMaxLength, i + 1, rawColumns[i].Name.Value);
+            var (resolvedType, maxLength) = SqlType.GetByName(rawColumns[i].TypeName, rawColumns[i].DeclaredMaxLength, rawColumns[i].DeclaredScale, i + 1, rawColumns[i].Name.Value);
             heapColumns[i] = new(rawColumns[i].Name.Value, resolvedType, maxLength, rawColumns[i].Nullable);
             if (resolvedType.IsFixedLength)
                 fixedWidthSum += resolvedType.FixedLength;

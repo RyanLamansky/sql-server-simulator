@@ -24,15 +24,50 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
         SqlType.Promote(left.GetSqlType(resolveColumnType), right.GetSqlType(resolveColumnType));
 
     /// <summary>
-    /// Evaluates an integer-family binary operation, promoting both operands to
-    /// SQL Server's common integer type before computing in <c>long</c> arithmetic
-    /// and narrowing the result back to that common type. NULL propagates.
+    /// Numeric binary-operator dispatcher. Despite the name, this is the
+    /// entry point for all numeric arithmetic — the SQL Server precedence
+    /// chart routes <c>float &gt; decimal &gt; money &gt; integer</c>, and
+    /// each family runs in its own helper. Dispatch is structured as an
+    /// outer switch on the left operand's <see cref="SqlTypeCategory"/>
+    /// with each arm a switch on the right operand's category, keeping the
+    /// hot path one byte-comparison deep and jump-table-friendly.
     /// </summary>
-    private protected static SqlValue IntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute)
-    {
-        if (!SqlType.IsIntegerCategory(left.Type) || !SqlType.IsIntegerCategory(right.Type))
-            throw new NotSupportedException($"Operator '{op}' currently supports only integer operands; got {left.Type} and {right.Type}.");
+    private protected static SqlValue IntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute) =>
+        left.Type.Category switch
+        {
+            SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
+            SqlTypeCategory.Decimal => right.Type.Category switch
+            {
+                SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
+                SqlTypeCategory.Decimal or SqlTypeCategory.Integer or SqlTypeCategory.Money => DecimalArithmetic(left, right, op),
+                _ => throw UnsupportedNumericPair(left, right, op),
+            },
+            SqlTypeCategory.Money => right.Type.Category switch
+            {
+                SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
+                SqlTypeCategory.Decimal => DecimalArithmetic(left, right, op),
+                SqlTypeCategory.Money or SqlTypeCategory.Integer => MoneyArithmetic(left, right, op),
+                _ => throw UnsupportedNumericPair(left, right, op),
+            },
+            SqlTypeCategory.Integer => right.Type.Category switch
+            {
+                SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
+                SqlTypeCategory.Decimal => DecimalArithmetic(left, right, op),
+                SqlTypeCategory.Money => MoneyArithmetic(left, right, op),
+                SqlTypeCategory.Integer => PureIntegerArithmetic(left, right, compute),
+                _ => throw UnsupportedNumericPair(left, right, op),
+            },
+            _ => throw UnsupportedNumericPair(left, right, op),
+        };
 
+    /// <summary>
+    /// Integer-only path: both sides are guaranteed integer-category.
+    /// Promotes to SQL Server's common integer type, runs the compute
+    /// callback in <c>long</c> arithmetic, and narrows the result back to
+    /// the common type. NULL propagates.
+    /// </summary>
+    private static SqlValue PureIntegerArithmetic(SqlValue left, SqlValue right, Func<long, long, long> compute)
+    {
         var common = SqlType.Promote(left.Type, right.Type);
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(common);
@@ -43,6 +78,134 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
             : common == SqlType.SmallInt ? SqlValue.FromInt16((short)result)
             : common == SqlType.Int32 ? SqlValue.FromInt32((int)result)
             : SqlValue.FromInt64(result);
+    }
+
+    private static NotSupportedException UnsupportedNumericPair(SqlValue left, SqlValue right, char op) =>
+        new($"Operator '{op}' currently supports only integer operands; got {left.Type} and {right.Type}.");
+
+    /// <summary>
+    /// Decimal arithmetic with SQL Server's per-operator precision/scale
+    /// formulas (verified against SQL Server 2025):
+    /// <list type="bullet">
+    /// <item><c>+</c>/<c>-</c>: <c>p = max(p1-s1, p2-s2) + max(s1,s2) + 1</c>,
+    /// <c>s = max(s1, s2)</c></item>
+    /// <item><c>*</c>: <c>p = p1+p2+1</c>, <c>s = s1+s2</c></item>
+    /// <item><c>/</c>: <c>s = max(6, s1+p2+1)</c>,
+    /// <c>p = p1-s1+s2+s</c></item>
+    /// <item><c>%</c>: <c>p = min(p1-s1, p2-s2) + max(s1,s2)</c>,
+    /// <c>s = max(s1, s2)</c></item>
+    /// </list>
+    /// Computed precision is capped at 38; excess scale is dropped, with a
+    /// floor of 6 for division. Integer operands canonicalize to their
+    /// equivalent decimal form (bit→(1,0), tinyint→(3,0), smallint→(5,0),
+    /// int→(10,0), bigint→(19,0)) before the formulas apply.
+    /// </summary>
+    private protected static SqlValue DecimalArithmetic(SqlValue left, SqlValue right, char op)
+    {
+        var (p1, s1) = AsDecimalPrecisionScale(left.Type);
+        var (p2, s2) = AsDecimalPrecisionScale(right.Type);
+
+        int resultPrecision, resultScale;
+        switch (op)
+        {
+            case '+' or '-':
+                resultPrecision = Math.Max(p1 - s1, p2 - s2) + Math.Max(s1, s2) + 1;
+                resultScale = Math.Max(s1, s2);
+                break;
+            case '*':
+                resultPrecision = p1 + p2 + 1;
+                resultScale = s1 + s2;
+                break;
+            case '/':
+                resultScale = Math.Max(6, s1 + p2 + 1);
+                resultPrecision = p1 - s1 + s2 + resultScale;
+                break;
+            case '%':
+                resultPrecision = Math.Min(p1 - s1, p2 - s2) + Math.Max(s1, s2);
+                resultScale = Math.Max(s1, s2);
+                break;
+            default:
+                throw new NotSupportedException($"Operator '{op}' on decimal operands isn't implemented.");
+        }
+
+        // 38-cap with scale-truncation. Division enforces a min scale of 6
+        // (SQL Server's documented division behavior — verified
+        // <c>d(38,30)/d(38,30) → d(38,6)</c>). Other operators allow scale
+        // to drop to 0; precision is always capped first.
+        if (resultPrecision > 38)
+        {
+            var minScale = op == '/' ? 6 : 0;
+            var excess = resultPrecision - 38;
+            resultScale = Math.Max(minScale, resultScale - excess);
+            resultPrecision = 38;
+        }
+        // Defensive clamp: scale shouldn't exceed precision (theoretically the
+        // formulas keep this invariant, but if the 38-cap dropped scale below
+        // zero, normalize back).
+        if (resultScale < 0)
+            resultScale = 0;
+
+        var resultType = SqlType.GetDecimal(resultPrecision, resultScale);
+        if (left.IsNull || right.IsNull)
+            return SqlValue.Null(resultType);
+
+        var l = ToDecimal(left);
+        var r = ToDecimal(right);
+
+        decimal raw;
+        try
+        {
+            raw = op switch
+            {
+                '+' => l + r,
+                '-' => l - r,
+                '*' => l * r,
+                '/' => l / r,
+                '%' => l % r,
+                _ => throw new NotSupportedException($"Operator '{op}'."),
+            };
+        }
+        catch (DivideByZeroException)
+        {
+            throw SimulatedSqlException.DivideByZero();
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflowToNumeric();
+        }
+
+        // .NET decimal.Round caps at 28 fractional digits; skip when the
+        // result-type scale is wider (the value can't have more fractional
+        // bits than .NET decimal stores).
+        var rounded = resultScale > 28 ? raw : decimal.Round(raw, resultScale, MidpointRounding.AwayFromZero);
+        // Final overflow check against the result type's declared precision.
+        // Cap integer-digit count at 28 for the same .NET-decimal-range
+        // reason — values that fit .NET decimal can't exceed 28 integer
+        // digits, so the overflow doesn't fire spuriously for high-precision
+        // result types.
+        var integerDigits = Math.Min(28, resultPrecision - resultScale);
+        var maxIntegerPart = Pow10Decimal(integerDigits) - 1;
+        return integerDigits < 28 && decimal.Abs(decimal.Truncate(rounded)) > maxIntegerPart
+            ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
+            : SqlValue.FromDecimal(resultType, rounded);
+    }
+
+    private static (int Precision, int Scale) AsDecimalPrecisionScale(SqlType type) =>
+        type is DecimalSqlType d ? (d.precision, d.scale)
+        : SqlType.IsMoneyCategory(type) ? SqlType.MoneyAsDecimal(type)
+        : SqlType.IntegerAsDecimal(type);
+
+    private static decimal ToDecimal(SqlValue v) =>
+        v.Type is DecimalSqlType ? v.AsDecimal
+        : SqlType.IsMoneyCategory(v.Type) ? v.AsMoney
+        : SqlValue.AsInt64Widened(v);
+
+    private static decimal Pow10Decimal(int n)
+    {
+        var result = 1m;
+        for (var i = 0; i < n; i++)
+            result *= 10m;
+        return result;
     }
 
     private protected static long ToInt64(SqlValue v) =>
@@ -63,6 +226,83 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
         SqlType.IsDateTimeCategory(left.Type) || SqlType.IsDateTimeCategory(right.Type)
             ? DateAdditiveArithmetic(left, right, operatorName, compute)
             : IntegerArithmetic(left, right, op, compute);
+
+    /// <summary>
+    /// Float / real arithmetic. Both sides convert to <see cref="double"/>;
+    /// result is <c>float</c> unless both operands were <c>real</c>, in
+    /// which case it stays <c>real</c>. Divide-by-zero raises Msg 8134 to
+    /// match the decimal path; native IEEE infinities/NaN aren't surfaced
+    /// (real SQL Server raises 8134 for divide-by-zero on float too,
+    /// verified earlier).
+    /// </summary>
+    /// <summary>
+    /// Money / smallmoney arithmetic. Result stays in money when both sides
+    /// are money or when one side is integer (verified <c>$5 + $3 → money</c>,
+    /// <c>$5 * 3 → money</c>). Same-money-pair preserves the wider of the
+    /// two; mixed money / smallmoney widens to money. Math runs on the
+    /// underlying decimal values; the result re-rounds half-away-from-zero
+    /// to scale 4 inside <see cref="SqlValue.FromMoney"/>.
+    /// </summary>
+    private protected static SqlValue MoneyArithmetic(SqlValue left, SqlValue right, char op)
+    {
+        var resultType = SqlType.IsMoneyCategory(left.Type) && SqlType.IsMoneyCategory(right.Type)
+            ? (left.Type == SqlType.Money || right.Type == SqlType.Money ? SqlType.Money : SqlType.SmallMoney)
+            : (SqlType.IsMoneyCategory(left.Type) ? left.Type : right.Type);
+        if (left.IsNull || right.IsNull)
+            return SqlValue.Null(resultType);
+
+        var l = MoneyOrIntegerToDecimal(left);
+        var r = MoneyOrIntegerToDecimal(right);
+        decimal raw;
+        try
+        {
+            raw = op switch
+            {
+                '+' => l + r,
+                '-' => l - r,
+                '*' => l * r,
+                '/' => r == 0m ? throw SimulatedSqlException.DivideByZero() : l / r,
+                '%' => r == 0m ? throw SimulatedSqlException.DivideByZero() : l % r,
+                _ => throw new NotSupportedException($"Operator '{op}' on money operands isn't implemented."),
+            };
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflowToTarget(resultType.ToString()!);
+        }
+        return SqlValue.FromMoney(resultType, raw);
+    }
+
+    private static decimal MoneyOrIntegerToDecimal(SqlValue v) =>
+        SqlType.IsMoneyCategory(v.Type) ? v.AsMoney : SqlValue.AsInt64Widened(v);
+
+    private protected static SqlValue ApproximateArithmetic(SqlValue left, SqlValue right, char op)
+    {
+        var resultIsReal = left.Type == SqlType.Real && right.Type == SqlType.Real;
+        var resultType = resultIsReal ? SqlType.Real : SqlType.Float;
+        if (left.IsNull || right.IsNull)
+            return SqlValue.Null(resultType);
+
+        var l = ToDouble(left);
+        var r = ToDouble(right);
+        var raw = op switch
+        {
+            '+' => l + r,
+            '-' => l - r,
+            '*' => l * r,
+            '/' => r == 0.0 ? throw SimulatedSqlException.DivideByZero() : l / r,
+            '%' => r == 0.0 ? throw SimulatedSqlException.DivideByZero() : l % r,
+            _ => throw new NotSupportedException($"Operator '{op}' on float operands isn't implemented."),
+        };
+        return resultIsReal ? SqlValue.FromSingle((float)raw) : SqlValue.FromDouble(raw);
+    }
+
+    private static double ToDouble(SqlValue v) =>
+        v.Type == SqlType.Float ? v.AsDouble
+        : v.Type == SqlType.Real ? v.AsSingle
+        : v.Type is DecimalSqlType ? (double)v.AsDecimal
+        : SqlType.IsMoneyCategory(v.Type) ? (double)v.AsMoney
+        : SqlValue.AsInt64Widened(v);
 
     /// <summary>
     /// Date arithmetic for <c>+</c> / <c>-</c>: works only when both

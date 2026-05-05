@@ -277,6 +277,34 @@ public sealed class LegacyDateTimeTests
     }
 
     [TestMethod]
+    [DataRow("0.5", "1900-01-01T12:00:00")]
+    [DataRow("1.25", "1900-01-02T06:00:00")]
+    [DataRow("1.5", "1900-01-02T12:00:00")]
+    [DataRow("-0.5", "1899-12-31T12:00:00")]
+    public void Cast_FractionalDecimalToDateTime_PicksUpTimeOfDay(string input, string expectedIso)
+    {
+        // Verified against SQL Server 2025: <c>cast(0.5 as datetime)</c>
+        // resolves to noon, <c>1.25</c> to 1900-01-02 06:00, etc.
+        var value = (DateTime)ExecuteScalar($"select cast({input} as datetime)")!;
+        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), value);
+    }
+
+    [TestMethod]
+    public void Cast_FractionalFloatToDateTime_PicksUpTimeOfDay()
+    {
+        var value = (DateTime)ExecuteScalar("select cast(cast(1.25 as float) as datetime)")!;
+        AreEqual(new DateTime(1900, 1, 2, 6, 0, 0), value);
+    }
+
+    [TestMethod]
+    public void Cast_FractionalToSmallDateTime_PicksUpTimeOfDay()
+    {
+        // smalldatetime has minute granularity; 0.5 days → noon exactly.
+        var value = (DateTime)ExecuteScalar("select cast(0.5 as smalldatetime)")!;
+        AreEqual(new DateTime(1900, 1, 1, 12, 0, 0), value);
+    }
+
+    [TestMethod]
     public void Cast_IntToDateTime_AboveMax_RaisesMsg8115()
     {
         var ex = Throws<DbException>(() => ExecuteScalar("select cast(2958464 as datetime)"));

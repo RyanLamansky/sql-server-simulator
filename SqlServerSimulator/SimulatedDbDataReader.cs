@@ -62,15 +62,9 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override DateTime GetDateTime(int ordinal) => (DateTime)this[ordinal];
 
-    public override decimal GetDecimal(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override decimal GetDecimal(int ordinal) => (decimal)this[ordinal];
 
-    public override double GetDouble(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override double GetDouble(int ordinal) => (double)this[ordinal];
 
     public override IEnumerator GetEnumerator()
     {
@@ -83,10 +77,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override float GetFloat(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override float GetFloat(int ordinal) => (float)this[ordinal];
 
     public override Guid GetGuid(int ordinal) => (Guid)this[ordinal];
 

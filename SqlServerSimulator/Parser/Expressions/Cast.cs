@@ -34,17 +34,32 @@ internal sealed class Cast : Expression
 
         var typeName = context.GetNextRequired<Name>();
 
-        // Optional (N) length specifier — accepted for parity with SQL Server
-        // syntax but not enforced as a value-level cap.
+        // Optional (N) or (P, S) length/precision specifier — accepted for
+        // parity with SQL Server syntax. Length is generally not enforced as
+        // a value-level cap; precision/scale are interpreted by the type.
         int? declaredMaxLength = null;
+        int? declaredScale = null;
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '(' })
         {
             if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numericValue })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             declaredMaxLength = numericValue.AsInt32;
-            if (context.GetNextRequired() is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var next = context.GetNextRequired();
+            switch (next)
+            {
+                case Operator { Character: ',' }:
+                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    declaredScale = scaleValue.AsInt32;
+                    if (context.GetNextRequired() is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case Operator { Character: ')' }:
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
             context.MoveNextRequired();
         }
 
@@ -54,7 +69,7 @@ internal sealed class Cast : Expression
         // Null columnName signals CAST context: errors use Msg 243 (unknown
         // type), 291 (length on fixed type), and the "type"/"convert
         // specification" wording for Msg 131 size errors.
-        var (resolved, max) = SqlType.GetByName(typeName, declaredMaxLength, 1, columnName: null);
+        var (resolved, max) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, columnName: null);
         this.targetType = resolved;
         this.targetMaxLength = max;
     }

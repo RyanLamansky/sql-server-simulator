@@ -48,6 +48,9 @@ sealed class SimulatedDbParameter : DbParameter
                     DateTimeOffset => DbType.DateTimeOffset,
                     TimeOnly or TimeSpan => DbType.Time,
                     Guid => DbType.Guid,
+                    decimal => DbType.Decimal,
+                    double => DbType.Double,
+                    float => DbType.Single,
                     null => DbType.String,
                     _ => throw new ArgumentException($"No mapping exists from object type {this.Value.GetType().FullName} to a known managed provider native type."),
                 };

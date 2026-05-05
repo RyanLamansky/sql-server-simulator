@@ -2,7 +2,7 @@ using System.Text;
 
 namespace SqlServerSimulator.Storage;
 
-internal sealed class VarcharSqlType : SqlType
+internal sealed class VarcharSqlType() : SqlType(SqlTypeCategory.String)
 {
     /// <remarks>
     /// CP1252 isn't part of the .NET default encodings on non-Windows
@@ -37,7 +37,7 @@ internal sealed class VarcharSqlType : SqlType
     public override string ToString() => "varchar";
 }
 
-internal sealed class NVarcharSqlType : SqlType
+internal sealed class NVarcharSqlType() : SqlType(SqlTypeCategory.String)
 {
     public override bool IsFixedLength => false;
 
@@ -52,7 +52,7 @@ internal sealed class NVarcharSqlType : SqlType
     public override string ToString() => "nvarchar";
 }
 
-internal sealed class SystemNameSqlType : SqlType
+internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 {
     public override bool IsFixedLength => false;
 
@@ -67,7 +67,7 @@ internal sealed class SystemNameSqlType : SqlType
     public override string ToString() => "sysname";
 }
 
-internal sealed class VarbinarySqlType : SqlType
+internal sealed class VarbinarySqlType() : SqlType(SqlTypeCategory.Other)
 {
     public override bool IsFixedLength => false;
 

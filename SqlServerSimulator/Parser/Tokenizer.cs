@@ -46,6 +46,7 @@ static class Tokenizer
             '/' => ParseForwardSlashOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
             '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or '=' or '&' or '|' or '^' or '>' or '<' or '!' => new Operator(command, index++),
+            '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
@@ -72,11 +73,44 @@ static class Tokenizer
         return UnquotedString.CheckReserved(command, start, index - start);
     }
 
+    /// <summary>
+    /// Parses a SQL numeric literal — integer (<c>123</c>), decimal-with-
+    /// fractional-part (<c>123.456</c>), or scientific (<c>1.5e2</c>,
+    /// <c>1E+10</c>). The starting digit is at <paramref name="index"/>;
+    /// scanning advances through fractional and exponent parts only when the
+    /// next character actually fits the grammar, so a digit followed by a
+    /// non-numeric <c>.</c> (e.g. <c>1.alias</c>) leaves the dot for the
+    /// outer expression parser. The token's typed value is computed inside
+    /// <see cref="Numeric"/>'s constructor.
+    /// </summary>
     private static Numeric ParseNumeric(string command, ref int index)
     {
         var start = index;
         while (++index < command.Length && command[index] is >= '0' and <= '9')
         {
+        }
+
+        // Fractional part: '.' followed by at least one digit. A bare '.'
+        // belongs to the surrounding expression (e.g. dotted-name reference).
+        if (index + 1 < command.Length && command[index] == '.' && command[index + 1] is >= '0' and <= '9')
+        {
+            index++;
+            while (index < command.Length && command[index] is >= '0' and <= '9')
+                index++;
+        }
+
+        // Exponent: 'e'/'E' followed by optional sign and at least one digit.
+        if (index < command.Length && (command[index] == 'e' || command[index] == 'E'))
+        {
+            var afterExp = index + 1;
+            if (afterExp < command.Length && (command[afterExp] == '+' || command[afterExp] == '-'))
+                afterExp++;
+            if (afterExp < command.Length && command[afterExp] is >= '0' and <= '9')
+            {
+                index = afterExp;
+                while (index < command.Length && command[index] is >= '0' and <= '9')
+                    index++;
+            }
         }
 
         return new(command, start, index - start);
@@ -218,6 +252,67 @@ static class Tokenizer
 
     private static bool IsHexDigit(char c) =>
         c is (>= '0' and <= '9') or (>= 'a' and <= 'f') or (>= 'A' and <= 'F');
+
+    /// <summary>
+    /// Parses a money literal: a single currency symbol followed by an
+    /// optional sign, optional digits, and an optional fractional part.
+    /// Lone currency symbols are valid (parse to <c>0.0000</c>) — verified
+    /// against SQL Server 2025. Scientific notation is not accepted (the
+    /// digit scanner stops at <c>e</c>/<c>E</c>).
+    /// </summary>
+    private static Literal ParseCurrencyLiteral(string command, ref int index)
+    {
+        var start = index;
+        index++; // consume the currency symbol
+        if (index < command.Length && (command[index] == '+' || command[index] == '-'))
+            index++;
+        // Skip optional whitespace between symbol/sign and digits — SQL
+        // Server accepts <c>$ 5</c>.
+        while (index < command.Length && command[index] is ' ' or '\t')
+            index++;
+        while (index < command.Length && command[index] is >= '0' and <= '9')
+            index++;
+        // SQL Server accepts <c>$5.</c> (lone trailing dot) — consume the
+        // dot here even when no fractional digits follow.
+        if (index < command.Length && command[index] == '.')
+        {
+            index++;
+            while (index < command.Length && command[index] is >= '0' and <= '9')
+                index++;
+        }
+        var body = command.AsSpan(start, index - start);
+        // Reuse the runtime money parser so the simulator has a single
+        // source of truth for money string parsing.
+        var value = SqlValue.FromMoney(SqlType.Money, ParseLiteralBody(body));
+        return new Literal(value, command, start, index - start);
+    }
+
+    /// <summary>
+    /// Lightweight parse for the literal-form body (currency symbol
+    /// already consumed). Produces a <see cref="decimal"/>; range checks
+    /// happen later inside <see cref="SqlValue.FromMoney"/>.
+    /// </summary>
+    private static decimal ParseLiteralBody(ReadOnlySpan<char> body)
+    {
+        // Strip the currency symbol that's always at index 0.
+        body = body[1..].Trim();
+        if (body.Length == 0)
+            return 0m;
+        var negative = false;
+        if (body[0] is '+' or '-')
+        {
+            negative = body[0] == '-';
+            body = body[1..].TrimStart();
+        }
+        return body.Length == 0 ? 0m
+            : decimal.TryParse(
+                body,
+                System.Globalization.NumberStyles.AllowDecimalPoint,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var d)
+                    ? (negative ? -d : d)
+                    : 0m;
+    }
 
     private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)
     {

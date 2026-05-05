@@ -3,7 +3,7 @@ using System.Globalization;
 
 namespace SqlServerSimulator.Storage;
 
-internal sealed class Int32SqlType : SqlType
+internal sealed class Int32SqlType() : SqlType(SqlTypeCategory.Integer)
 {
     public override bool IsFixedLength => true;
 
@@ -24,7 +24,7 @@ internal sealed class Int32SqlType : SqlType
     public override string ToString() => "int";
 }
 
-internal sealed class BigIntSqlType : SqlType
+internal sealed class BigIntSqlType() : SqlType(SqlTypeCategory.Integer)
 {
     public override bool IsFixedLength => true;
 
@@ -45,7 +45,7 @@ internal sealed class BigIntSqlType : SqlType
     public override string ToString() => "bigint";
 }
 
-internal sealed class SmallIntSqlType : SqlType
+internal sealed class SmallIntSqlType() : SqlType(SqlTypeCategory.Integer)
 {
     public override bool IsFixedLength => true;
 
@@ -69,7 +69,7 @@ internal sealed class SmallIntSqlType : SqlType
 /// <remarks>
 /// SQL Server's <c>tinyint</c> is unsigned 0-255, stored as a single byte.
 /// </remarks>
-internal sealed class TinyIntSqlType : SqlType
+internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer)
 {
     public override bool IsFixedLength => true;
 
@@ -98,7 +98,7 @@ internal sealed class TinyIntSqlType : SqlType
 /// completeness and are exercised only when bit values round-trip outside
 /// the row format.
 /// </remarks>
-internal sealed class BitSqlType : SqlType
+internal sealed class BitSqlType() : SqlType(SqlTypeCategory.Integer)
 {
     public override bool IsFixedLength => true;
 

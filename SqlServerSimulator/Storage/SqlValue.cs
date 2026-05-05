@@ -248,6 +248,57 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public static SqlValue FromGuid(Guid value) => new(SqlType.UniqueIdentifier, 0, value, isNull: false);
 
     /// <summary>
+    /// Non-NULL SQL <c>decimal(p, s)</c> value. The .NET <see cref="decimal"/>
+    /// payload is boxed in the reference slot; <paramref name="type"/> carries
+    /// the precision and scale identity. Caller is responsible for ensuring
+    /// the value already fits the declared scale (use
+    /// <see cref="CoerceTo(SqlType)"/> for the rounding-and-overflow path).
+    /// </summary>
+    public static SqlValue FromDecimal(SqlType type, decimal value) =>
+        type is not DecimalSqlType
+            ? throw new ArgumentException($"{type} is not a decimal type.", nameof(type))
+            : new(type, 0, value, isNull: false);
+
+    /// <summary>
+    /// Non-NULL SQL <c>money</c> / <c>smallmoney</c> value. The decimal
+    /// input is rounded half-away-from-zero to scale 4 and stored as a
+    /// scaled int64 (smallmoney is range-checked at encode time, since it
+    /// shares this representation with money).
+    /// </summary>
+    public static SqlValue FromMoney(SqlType type, decimal value)
+    {
+        if (type != SqlType.Money && type != SqlType.SmallMoney)
+            throw new ArgumentException($"{type} is not a money type.", nameof(type));
+        var scaled = decimal.Round(value * MoneySqlType.ScaleFactor, 0, MidpointRounding.AwayFromZero);
+        long units;
+        try
+        {
+            units = checked((long)scaled);
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflowToTarget(type.ToString()!);
+        }
+        return type == SqlType.SmallMoney && units is < int.MinValue or > int.MaxValue
+            ? throw SimulatedSqlException.ArithmeticOverflowToTarget("smallmoney")
+            : new(type, units, null, isNull: false);
+    }
+
+    /// <summary>
+    /// Internal constructor for the storage-layer decoder: the on-disk
+    /// scaled int has already been validated at encode time, so range checks
+    /// don't apply.
+    /// </summary>
+    internal static SqlValue FromMoneyScaledUnits(SqlType type, long units) =>
+        new(type, units, null, isNull: false);
+
+    /// <summary>Non-NULL SQL <c>float</c> value. The 8-byte payload lives in the primitive slot via <see cref="BitConverter.DoubleToInt64Bits"/>.</summary>
+    public static SqlValue FromDouble(double value) => new(SqlType.Float, BitConverter.DoubleToInt64Bits(value), null, isNull: false);
+
+    /// <summary>Non-NULL SQL <c>real</c> value. The 4-byte payload lives in the primitive slot via <see cref="BitConverter.SingleToInt32Bits"/>.</summary>
+    public static SqlValue FromSingle(float value) => new(SqlType.Real, BitConverter.SingleToInt32Bits(value), null, isNull: false);
+
+    /// <summary>
     /// Constructs a string-typed value of the given SQL type. Used by string
     /// functions (UPPER, LEFT, etc.) that preserve their input's string subtype.
     /// </summary>
@@ -329,6 +380,33 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not uniqueidentifier.")
             : (Guid)this.reference!;
 
+    /// <summary>Returns the value as <see cref="decimal"/>. Throws if NULL or not a decimal-typed value.</summary>
+    public decimal AsDecimal => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type is not DecimalSqlType
+            ? throw new InvalidOperationException($"Value is {this.Type}, not a decimal type.")
+            : (decimal)this.reference!;
+
+    /// <summary>Returns the money/smallmoney value as a <see cref="decimal"/> with scale 4.</summary>
+    public decimal AsMoney => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type != SqlType.Money && this.Type != SqlType.SmallMoney
+            ? throw new InvalidOperationException($"Value is {this.Type}, not a money type.")
+            : this.primitive / (decimal)MoneySqlType.ScaleFactor;
+
+    /// <summary>Returns the raw scaled-int64 representation of a money/smallmoney value (storage-layer use only).</summary>
+    internal long AsMoneyScaledUnits => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type != SqlType.Money && this.Type != SqlType.SmallMoney
+            ? throw new InvalidOperationException($"Value is {this.Type}, not a money type.")
+            : this.primitive;
+
+    /// <summary>Returns the value as <see cref="double"/>. Throws if NULL or not a float value.</summary>
+    public double AsDouble => this.As(SqlType.Float, BitConverter.Int64BitsToDouble);
+
+    /// <summary>Returns the value as <see cref="float"/>. Throws if NULL or not a real value.</summary>
+    public float AsSingle => this.As(SqlType.Real, p => BitConverter.Int32BitsToSingle((int)p));
+
     /// <summary>Returns the value as <see cref="DateTimeOffset"/>. Throws if NULL or not a datetimeoffset value.</summary>
     public DateTimeOffset AsDateTimeOffset => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
@@ -362,6 +440,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         TimeSqlType => this.AsTime,
         DateTimeOffsetSqlType => this.AsDateTimeOffset,
         var t when t == SqlType.UniqueIdentifier => this.AsGuid,
+        DecimalSqlType => this.AsDecimal,
+        var t when t == SqlType.Float => this.AsDouble,
+        var t when t == SqlType.Real => this.AsSingle,
+        var t when t == SqlType.Money || t == SqlType.SmallMoney => this.AsMoney,
         _ => throw new NotSupportedException($"No object representation for {this.Type}."),
     };
 
@@ -376,7 +458,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                     ? this.primitive == other.primitive
                     : this.Type == SqlType.UniqueIdentifier
                         ? (Guid)this.reference! == (Guid)other.reference!
-                        : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
+                        : this.Type is DecimalSqlType
+                            ? (decimal)this.reference! == (decimal)other.reference!
+                            : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
 
     /// <summary>
     /// Object equality that respects content for <c>byte[]</c> (varbinary) and
@@ -429,6 +513,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type is TimeSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is DateTimeOffsetSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type == SqlType.UniqueIdentifier ? new SqlGuid(this.AsGuid).CompareTo(new SqlGuid(other.AsGuid))
+        : this.Type is DecimalSqlType ? this.AsDecimal.CompareTo(other.AsDecimal)
+        : this.Type == SqlType.Float ? this.AsDouble.CompareTo(other.AsDouble)
+        : this.Type == SqlType.Real ? this.AsSingle.CompareTo(other.AsSingle)
+        : this.Type == SqlType.Money || this.Type == SqlType.SmallMoney ? this.primitive.CompareTo(other.primitive)
         : throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet.");
 
     public override bool Equals(object? obj) => obj is SqlValue other && this.Equals(other);
@@ -457,6 +545,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             // Identity is the Guid value alone; the unused primitive slot is zero.
             hash.Add((Guid)this.reference!);
         }
+        else if (this.Type is DecimalSqlType)
+        {
+            hash.Add((decimal)this.reference!);
+        }
         else if (this.reference is byte[] bytes)
         {
             hash.Add(this.primitive);
@@ -483,21 +575,27 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
 #if DEBUG
     public override string ToString() => this.IsNull ? $"NULL ({this.Type})" : $"{this.AsCurrentType()} ({this.Type})";
 
-    private string AsCurrentType() =>
-        this.Type == SqlType.Int32 ? this.AsInt32.ToString(CultureInfo.InvariantCulture) :
-        this.Type == SqlType.BigInt ? this.AsInt64.ToString(CultureInfo.InvariantCulture) :
-        this.Type == SqlType.SmallInt ? this.AsInt16.ToString(CultureInfo.InvariantCulture) :
-        this.Type == SqlType.TinyInt ? this.AsByte.ToString(CultureInfo.InvariantCulture) :
-        this.Type == SqlType.Bit ? (this.AsBoolean ? "1" : "0") :
-        this.Type == SqlType.Varchar || this.Type == SqlType.NVarchar || this.Type == SqlType.SystemName ? $"'{this.AsString}'" :
-        this.Type == SqlType.Varbinary ? $"0x{Convert.ToHexString(this.AsBytes)}" :
-        this.Type == SqlType.Date ? $"'{this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'" :
-        this.Type == SqlType.DateTime ? $"'{this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}'" :
-        this.Type == SqlType.SmallDateTime ? $"'{this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}'" :
-        this.Type is DateTime2SqlType dt2 ? $"'{this.AsDateTime2.ToString(DateTime2Format(dt2.precision), CultureInfo.InvariantCulture)}'" :
-        this.Type is TimeSqlType tt ? $"'{FormatTime(this.AsTime, tt.precision)}'" :
-        this.Type is DateTimeOffsetSqlType dto ? $"'{FormatDateTimeOffset(this.AsDateTimeOffset, dto.precision)}'" :
-        this.Type == SqlType.UniqueIdentifier ? $"'{this.AsGuid:D}'" :
-        "?";
+    private string AsCurrentType() => this.Type switch
+    {
+        _ when this.Type == SqlType.Int32 => this.AsInt32.ToString(CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.BigInt => this.AsInt64.ToString(CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.SmallInt => this.AsInt16.ToString(CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.TinyInt => this.AsByte.ToString(CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.Bit => this.AsBoolean ? "1" : "0",
+        _ when this.Type == SqlType.Varchar || this.Type == SqlType.NVarchar || this.Type == SqlType.SystemName => $"'{this.AsString}'",
+        _ when this.Type == SqlType.Varbinary => $"0x{Convert.ToHexString(this.AsBytes)}",
+        _ when this.Type == SqlType.Date => $"'{this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
+        _ when this.Type == SqlType.DateTime => $"'{this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}'",
+        _ when this.Type == SqlType.SmallDateTime => $"'{this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}'",
+        DateTime2SqlType dt2 => $"'{this.AsDateTime2.ToString(DateTime2Format(dt2.precision), CultureInfo.InvariantCulture)}'",
+        TimeSqlType tt => $"'{FormatTime(this.AsTime, tt.precision)}'",
+        DateTimeOffsetSqlType dto => $"'{FormatDateTimeOffset(this.AsDateTimeOffset, dto.precision)}'",
+        _ when this.Type == SqlType.UniqueIdentifier => $"'{this.AsGuid:D}'",
+        DecimalSqlType d => this.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.Float => this.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.Real => this.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+        _ => "?",
+    };
 #endif
 }

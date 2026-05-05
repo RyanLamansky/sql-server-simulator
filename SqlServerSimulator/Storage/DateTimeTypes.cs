@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 
 namespace SqlServerSimulator.Storage;
 
-internal sealed class DateSqlType : SqlType
+internal sealed class DateSqlType() : SqlType(SqlTypeCategory.DateTime)
 {
     public override bool IsFixedLength => true;
 
@@ -38,7 +38,7 @@ internal sealed class DateSqlType : SqlType
 /// <see cref="SqlValue"/>'s primitive slot, decoded on demand via
 /// <see cref="SqlValue.AsDateTime"/>.
 /// </summary>
-internal sealed class DateTimeSqlType : SqlType
+internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 {
     /// <summary>Reference date for the day-count portion of legacy datetime.</summary>
     public static readonly DateTime BaseDate = new(1900, 1, 1);
@@ -89,7 +89,7 @@ internal sealed class DateTimeSqlType : SqlType
 /// <see cref="SqlValue"/>'s primitive slot (always aligned to a minute
 /// boundary), decoded on demand via <see cref="SqlValue.AsSmallDateTime"/>.
 /// </summary>
-internal sealed class SmallDateTimeSqlType : SqlType
+internal sealed class SmallDateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 {
     /// <summary>Reference date for the day-count portion of smalldatetime.</summary>
     public static readonly DateTime BaseDate = new(1900, 1, 1);
@@ -144,7 +144,7 @@ internal sealed class SmallDateTimeSqlType : SqlType
 /// pattern-matches against it to read the precision-derived fields it needs
 /// (rounding unit, etc.) when constructing or rendering datetime2 values.
 /// </summary>
-internal sealed class DateTime2SqlType(int precision) : SqlType
+internal sealed class DateTime2SqlType(int precision) : SqlType(SqlTypeCategory.DateTime)
 {
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
@@ -194,7 +194,7 @@ internal sealed class DateTime2SqlType(int precision) : SqlType
 /// 10^-precision seconds since midnight, 3/4/5 bytes for N=0-2/3-4/5-7);
 /// no date portion is stored.
 /// </remarks>
-internal sealed class TimeSqlType(int precision) : SqlType
+internal sealed class TimeSqlType(int precision) : SqlType(SqlTypeCategory.DateTime)
 {
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
@@ -243,7 +243,7 @@ internal sealed class TimeSqlType(int precision) : SqlType
 /// pattern-matches against it for type-specific paths (rounding, formatting,
 /// cross-type cast targets).
 /// </summary>
-internal sealed class DateTimeOffsetSqlType(int precision) : SqlType
+internal sealed class DateTimeOffsetSqlType(int precision) : SqlType(SqlTypeCategory.DateTime)
 {
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;

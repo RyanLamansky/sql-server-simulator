@@ -61,6 +61,31 @@ internal readonly partial struct SqlValue
         if (this.Type == SqlType.UniqueIdentifier)
             return this.CoerceFromUniqueIdentifier(target);
 
+        // decimal/numeric crossings: integer↔decimal (within-precision),
+        // string↔decimal (parses with half-away-from-zero rounding),
+        // decimal↔decimal (scale change with the same rounding rule).
+        if (target is DecimalSqlType targetDecimal)
+            return this.CoerceToDecimal(targetDecimal);
+        if (this.Type is DecimalSqlType)
+            return this.CoerceFromDecimal(target);
+
+        // float / real crossings: any numeric or string source coerces in
+        // (string parses as double, decimal/integer widens). Targets accept
+        // truncation-toward-zero on float→integer and standard double→
+        // decimal conversion.
+        if (target == SqlType.Float || target == SqlType.Real)
+            return this.CoerceToApproximate(target);
+        if (SqlType.IsApproximateNumericCategory(this.Type))
+            return this.CoerceFromApproximate(target);
+
+        // money / smallmoney crossings: string parses with currency-symbol
+        // and thousands-comma stripping (Msg 235 on bad input), integer/
+        // decimal widen straight in via the scale-4 storage rep.
+        if (SqlType.IsMoneyCategory(target))
+            return this.CoerceToMoney(target);
+        if (SqlType.IsMoneyCategory(this.Type))
+            return this.CoerceFromMoney(target);
+
         // Date/time → integer: only the legacy types (datetime / smalldatetime)
         // round-trip through an integer day count; everything else throws
         // Msg 529 from inside the helper.
@@ -103,6 +128,10 @@ internal readonly partial struct SqlValue
         TimeSqlType => FromDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
         DateTimeOffsetSqlType => FromDateTime(this.AsDateTimeOffset.DateTime),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToDateTime(AsInt64Widened(this)),
+        DecimalSqlType => CoerceFractionalDaysToDateTime(this.AsDecimal),
+        _ when this.Type == SqlType.Float => CoerceFractionalDaysToDateTime((decimal)this.AsDouble),
+        _ when this.Type == SqlType.Real => CoerceFractionalDaysToDateTime((decimal)this.AsSingle),
+        _ when SqlType.IsMoneyCategory(this.Type) => CoerceFractionalDaysToDateTime(this.AsMoney),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {SqlType.DateTime}."),
     };
 
@@ -115,6 +144,10 @@ internal readonly partial struct SqlValue
         TimeSqlType => FromSmallDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
         DateTimeOffsetSqlType => FromSmallDateTime(this.AsDateTimeOffset.DateTime),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToSmallDateTime(AsInt64Widened(this)),
+        DecimalSqlType => CoerceFractionalDaysToSmallDateTime(this.AsDecimal),
+        _ when this.Type == SqlType.Float => CoerceFractionalDaysToSmallDateTime((decimal)this.AsDouble),
+        _ when this.Type == SqlType.Real => CoerceFractionalDaysToSmallDateTime((decimal)this.AsSingle),
+        _ when SqlType.IsMoneyCategory(this.Type) => CoerceFractionalDaysToSmallDateTime(this.AsMoney),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {SqlType.SmallDateTime}."),
     };
 
@@ -185,6 +218,30 @@ internal readonly partial struct SqlValue
         days is < 0 or > SmallDateTimeSqlType.MaxDayCount
             ? throw SimulatedSqlException.ArithmeticOverflow("smalldatetime")
             : FromSmallDateTimeUnchecked(SmallDateTimeSqlType.BaseDate.AddDays(days));
+
+    /// <summary>
+    /// Coerces a fractional day count (decimal / float / real / money source)
+    /// into legacy <c>datetime</c>. The whole part is days-since-1900-01-01;
+    /// the fractional part is fraction-of-a-day (verified <c>0.5 → noon</c>,
+    /// <c>1.25 → 1900-01-02 06:00:00</c>). The result is routed through
+    /// <see cref="FromDateTime(DateTime)"/> so it picks up the same
+    /// half-up rounding to legacy 1/300-second tick that string and direct
+    /// <c>DateTime</c> sources use.
+    /// </summary>
+    private static SqlValue CoerceFractionalDaysToDateTime(decimal days) =>
+        days is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount
+            ? throw SimulatedSqlException.ArithmeticOverflow("datetime")
+            : FromDateTime(DateTimeSqlType.BaseDate.AddTicks((long)decimal.Round(days * TimeSpan.TicksPerDay, 0, MidpointRounding.AwayFromZero)));
+
+    /// <summary>
+    /// Fractional-day counterpart of <see cref="CoerceIntegerDaysToSmallDateTime"/>.
+    /// Routes through <see cref="FromSmallDateTime(DateTime)"/> for
+    /// minute-boundary rounding.
+    /// </summary>
+    private static SqlValue CoerceFractionalDaysToSmallDateTime(decimal days) =>
+        days is < 0 or > SmallDateTimeSqlType.MaxDayCount
+            ? throw SimulatedSqlException.ArithmeticOverflow("smalldatetime")
+            : FromSmallDateTime(SmallDateTimeSqlType.BaseDate.AddTicks((long)decimal.Round(days * TimeSpan.TicksPerDay, 0, MidpointRounding.AwayFromZero)));
 
     /// <summary>
     /// Coerces a legacy <c>datetime</c> or <c>smalldatetime</c> value to an
@@ -368,6 +425,311 @@ internal readonly partial struct SqlValue
         : target == SqlType.SmallInt ? SimulatedSqlException.OverflowConvertingNarrowInt(sourceType, sourceValue, "INT2")
         : target == SqlType.Int32 ? SimulatedSqlException.OverflowConvertingToInt(sourceType, sourceValue)
         : SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+
+    private SqlValue CoerceToMoney(SqlType target) => this.Type switch
+    {
+        _ when SqlType.IsStringCategory(this.Type) => FromMoney(target, ParseMoneyString(this.AsString)),
+        _ when SqlType.IsIntegerCategory(this.Type) => FromMoney(target, AsInt64Widened(this)),
+        DecimalSqlType => FromMoney(target, this.AsDecimal),
+        _ when SqlType.IsMoneyCategory(this.Type) => FromMoney(target, this.AsMoney),
+        _ when this.Type == SqlType.Float => FromMoney(target, (decimal)this.AsDouble),
+        _ when this.Type == SqlType.Real => FromMoney(target, (decimal)this.AsSingle),
+        _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
+    };
+
+    private SqlValue CoerceFromMoney(SqlType target)
+    {
+        var m = this.AsMoney;
+        // Money → varchar uses 2 decimal places by default — the storage
+        // scale is 4 but the textual default is 2 (verified against SQL
+        // Server 2025: <c>$5.95 → '5.95'</c>, <c>$0 → '0.00'</c>,
+        // money max → <c>'922337203685477.58'</c>).
+        if (SqlType.IsStringCategory(target))
+            return FromString(target, m.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+        if (target is DecimalSqlType targetDecimal)
+            return FromDecimal(targetDecimal, RoundAndOverflowCheck(m, targetDecimal));
+        if (SqlType.IsMoneyCategory(target))
+            return FromMoney(target, m);
+        if (target == SqlType.Float)
+            return FromDouble((double)m);
+        if (target == SqlType.Real)
+            return FromSingle((float)m);
+        if (target == SqlType.DateTime)
+            return this.CoerceToDateTime();
+        if (target == SqlType.SmallDateTime)
+            return this.CoerceToSmallDateTime();
+        if (!SqlType.IsIntegerCategory(target))
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+
+        // Money → integer truncates toward zero (consistent with decimal/float).
+        var truncated = decimal.Truncate(m);
+        try
+        {
+            return target == SqlType.Bit ? FromBoolean(truncated != 0)
+                : target == SqlType.TinyInt ? FromByte(checked((byte)truncated))
+                : target == SqlType.SmallInt ? FromInt16(checked((short)truncated))
+                : target == SqlType.Int32 ? FromInt32(checked((int)truncated))
+                : FromInt64(checked((long)truncated));
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+        }
+    }
+
+    /// <summary>
+    /// Parses a string into a <see cref="decimal"/> for money-target CAST.
+    /// Strips a leading currency symbol from the documented set and any
+    /// thousands commas, accepts an optional sign in either pre- or
+    /// post-symbol position, then defers to <c>decimal.TryParse</c>
+    /// for the numeric body. Bad input raises Msg 235 (the money-specific
+    /// "Cannot convert a char value" message — distinct from Msg 8114
+    /// used by decimal / float). Verified against SQL Server 2025:
+    /// <list type="bullet">
+    /// <item><c>'5.95'</c>, <c>'$5.95'</c>, <c>'-$5.95'</c>, <c>'$-5.95'</c>
+    /// all valid</item>
+    /// <item><c>'  $5.95  '</c> (surrounding whitespace) valid</item>
+    /// <item><c>'$5,000.00'</c> (thousands comma) valid</item>
+    /// <item><c>'5.5e2'</c> rejected</item>
+    /// </list>
+    /// </summary>
+    private static decimal ParseMoneyString(string source)
+    {
+        var span = source.AsSpan().Trim();
+        // Optional sign before currency symbol.
+        var negative = false;
+        if (span.Length > 0 && (span[0] == '+' || span[0] == '-'))
+        {
+            negative = span[0] == '-';
+            span = span[1..];
+        }
+        // Optional currency symbol — drop one if present, else carry on.
+        if (span.Length > 0 && IsCurrencySymbol(span[0]))
+            span = span[1..];
+        // A second sign is allowed when the first slot held the symbol
+        // (e.g. <c>'$-5.95'</c>); otherwise a duplicate sign here would
+        // be a parse error.
+        if (span.Length > 0 && (span[0] == '+' || span[0] == '-'))
+        {
+            negative ^= span[0] == '-';
+            span = span[1..];
+        }
+        // Strip thousands commas — money parsing is lenient about them
+        // even though the literal grammar is not.
+        Span<char> buffer = stackalloc char[span.Length];
+        var written = 0;
+        foreach (var c in span)
+        {
+            if (c != ',')
+                buffer[written++] = c;
+        }
+        var body = buffer[..written];
+        // SQL Server's money parser does NOT accept scientific notation,
+        // and empty/whitespace-only bodies raise the money-specific Msg 235.
+        // Both conditions are folded into the single TryParse short-circuit
+        // so the analyzer's simplification rule stays satisfied.
+        return body.Length == 0
+            || body.IndexOfAny(['e', 'E']) >= 0
+            || !decimal.TryParse(
+                body,
+                System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingWhite | System.Globalization.NumberStyles.AllowTrailingWhite,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var d)
+                    ? throw SimulatedSqlException.CannotConvertCharToMoney()
+                    : negative ? -d : d;
+    }
+
+    /// <summary>
+    /// True for the currency symbols SQL Server accepts in <c>money</c>
+    /// literals and string-to-money CAST. Set was verified against SQL
+    /// Server 2025: dollar / cent / pound / yen / euro / Thai baht plus the
+    /// first half of the Unicode Currency Symbols block (U+20A0-U+20B1
+    /// inclusive — <c>₠</c> through <c>₱</c>). The newer Indian rupee
+    /// (<c>₹</c>, U+20B9) and beyond are rejected by SQL Server.
+    /// </summary>
+    private static bool IsCurrencySymbol(char c) =>
+        c is '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱');
+
+    private SqlValue CoerceToApproximate(SqlType target)
+    {
+        // Empty / whitespace-only strings → 0.0 (verified against SQL Server
+        // 2025; differs from decimal, where empty raises Msg 8114).
+        var d = this.Type switch
+        {
+            _ when SqlType.IsStringCategory(this.Type) => ParseStringToDouble(this.AsString, this.Type),
+            _ when SqlType.IsIntegerCategory(this.Type) => AsInt64Widened(this),
+            DecimalSqlType => (double)this.AsDecimal,
+            _ when this.Type == SqlType.Float => this.AsDouble,
+            _ when this.Type == SqlType.Real => this.AsSingle,
+            _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
+        };
+        return target == SqlType.Float ? FromDouble(d) : FromSingle((float)d);
+    }
+
+    private SqlValue CoerceFromApproximate(SqlType target)
+    {
+        var d = this.Type == SqlType.Float ? this.AsDouble : (double)this.AsSingle;
+        if (SqlType.IsStringCategory(target))
+            return FromString(target, FormatDouble(d, this.Type == SqlType.Float ? 15 : 7));
+        if (target is DecimalSqlType targetDecimal)
+            return FromDecimal(targetDecimal, RoundAndOverflowCheck((decimal)d, targetDecimal));
+        if (target == SqlType.DateTime)
+            return this.CoerceToDateTime();
+        if (target == SqlType.SmallDateTime)
+            return this.CoerceToSmallDateTime();
+        if (!SqlType.IsIntegerCategory(target))
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+
+        // Float → int truncates toward zero (verified 1.5 → 1, -1.5 → -1).
+        var truncated = Math.Truncate(d);
+        try
+        {
+            return target == SqlType.Bit ? FromBoolean(truncated != 0)
+                : target == SqlType.TinyInt ? FromByte(checked((byte)truncated))
+                : target == SqlType.SmallInt ? FromInt16(checked((short)truncated))
+                : target == SqlType.Int32 ? FromInt32(checked((int)truncated))
+                : FromInt64(checked((long)truncated));
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+        }
+    }
+
+    /// <summary>
+    /// Parses a string into a <see cref="double"/> using SQL Server's
+    /// <c>float</c> CAST rules: signed, decimal point optional, scientific
+    /// notation accepted, surrounding whitespace stripped. Empty / whitespace-
+    /// only strings return <c>0</c> (different from <c>decimal</c>, which
+    /// rejects empty). <c>'inf'</c>/<c>'NaN'</c> are also rejected
+    /// (verified Msg 8114 St 5 against SQL Server 2025).
+    /// </summary>
+    private static double ParseStringToDouble(string source, SqlType sourceType) =>
+        source.Trim() is var trimmed && trimmed.Length == 0
+            ? 0.0
+            : double.TryParse(
+                trimmed,
+                System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowLeadingSign,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var d) && !double.IsNaN(d) && !double.IsInfinity(d)
+                    ? d
+                    : throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "float");
+
+    /// <summary>
+    /// Formats a <see cref="double"/> using SQL Server's <c>float → varchar</c>
+    /// default representation. Switches to scientific notation outside the
+    /// 6-significant-figure plain-decimal range; the simulator approximates
+    /// this with .NET's <c>"G15"</c> (or <c>"G7"</c> for real). Exact matching
+    /// of SQL Server's lowercase-e / 3-digit-exponent textual form is
+    /// pending — the broader cast-length-not-enforced limitation already
+    /// applies here.
+    /// </summary>
+    private static string FormatDouble(double value, int significantDigits) =>
+        value.ToString("G" + significantDigits, System.Globalization.CultureInfo.InvariantCulture);
+
+    private SqlValue CoerceToDecimal(DecimalSqlType target) => this.Type switch
+    {
+        _ when SqlType.IsStringCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(ParseDecimal(this.AsString, this.Type), target)),
+        _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(AsInt64Widened(this), target)),
+        DecimalSqlType => FromDecimal(target, RoundAndOverflowCheck(this.AsDecimal, target)),
+        _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
+    };
+
+    private SqlValue CoerceFromDecimal(SqlType target)
+    {
+        var d = this.AsDecimal;
+        if (SqlType.IsStringCategory(target))
+            return FromString(target, FormatDecimal(d, ((DecimalSqlType)this.Type).scale));
+        if (target == SqlType.Float)
+            return FromDouble((double)d);
+        if (target == SqlType.Real)
+            return FromSingle((float)d);
+        if (SqlType.IsMoneyCategory(target))
+            return FromMoney(target, d);
+        if (target == SqlType.DateTime)
+            return this.CoerceToDateTime();
+        if (target == SqlType.SmallDateTime)
+            return this.CoerceToSmallDateTime();
+        if (!SqlType.IsIntegerCategory(target))
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+
+        // Decimal → integer truncates toward zero (verified against
+        // SQL Server 2025: 1.5 → 1, -1.5 → -1, 0.5 → 0). Range overflow
+        // raises the standard Msg 8115 with the target type name.
+        var truncated = decimal.Truncate(d);
+        try
+        {
+            return target == SqlType.Bit ? FromBoolean(truncated != 0)
+                : target == SqlType.TinyInt ? FromByte(checked((byte)truncated))
+                : target == SqlType.SmallInt ? FromInt16(checked((short)truncated))
+                : target == SqlType.Int32 ? FromInt32(checked((int)truncated))
+                : FromInt64(checked((long)truncated));
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+        }
+    }
+
+    /// <summary>
+    /// Rounds a value to the target decimal's scale (half-away-from-zero,
+    /// matching SQL Server 2025 — verified <c>'12.345' → 12.35</c>,
+    /// <c>'-12.345' → -12.35</c>) and validates against the target's
+    /// precision. Overflow surfaces as Msg 8115 ("Arithmetic overflow error
+    /// converting to data type numeric.") to match the real-server text.
+    /// </summary>
+    private static decimal RoundAndOverflowCheck(decimal value, DecimalSqlType target)
+    {
+        // .NET decimal.Round caps at 28 fractional digits. For targets with
+        // larger declared scale, no actual rounding is needed (the input
+        // value can't have more fractional digits than .NET decimal stores
+        // anyway); skip the call.
+        var rounded = target.scale > 28 ? value : decimal.Round(value, target.scale, MidpointRounding.AwayFromZero);
+        // Cap integer-digit count at 28 for the overflow check — Pow10Decimal
+        // would itself overflow .NET decimal beyond that. Values that fit
+        // .NET decimal can't exceed 28 integer digits anyway.
+        var integerDigits = Math.Min(28, target.precision - target.scale);
+        var maxIntegerPart = Pow10Decimal(integerDigits) - 1;
+        return integerDigits < 28 && decimal.Abs(decimal.Truncate(rounded)) > maxIntegerPart
+            ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
+            : rounded;
+    }
+
+    private static decimal Pow10Decimal(int n)
+    {
+        var result = 1m;
+        for (var i = 0; i < n; i++)
+            result *= 10m;
+        return result;
+    }
+
+    /// <summary>
+    /// Formats a decimal value with exactly <paramref name="scale"/> trailing
+    /// fractional digits — matching SQL Server's <c>decimal → varchar</c>
+    /// rendering, which always emits the declared scale (verified
+    /// <c>decimal(10,5) 0 → "0.00000"</c>, <c>decimal(10,0) 100 → "100"</c>).
+    /// </summary>
+    private static string FormatDecimal(decimal value, int scale) =>
+        value.ToString(scale == 0 ? "0" : "0." + new string('0', scale), System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Parses a string into a <see cref="decimal"/> using SQL Server's CAST
+    /// rules: signed, decimal point optional on either side, scientific
+    /// notation accepted, surrounding whitespace stripped. Empty / whitespace-
+    /// only strings raise Msg 8114 (not 0 — verified against SQL Server 2025;
+    /// distinct from float, where empty → 0).
+    /// </summary>
+    private static decimal ParseDecimal(string source, SqlType sourceType)
+    {
+        var trimmed = source.Trim();
+        return decimal.TryParse(
+            trimmed,
+            System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowLeadingSign,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var d)
+                ? d
+                : throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "numeric");
+    }
 
     private SqlValue CoerceToUniqueIdentifier() => this.Type switch
     {
