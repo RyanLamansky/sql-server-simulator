@@ -77,7 +77,9 @@ internal abstract class SqlType
         _ when this == UniqueIdentifier => 16,
         _ when this == SystemName => 15,
         _ when this == NVarchar => 14,
-        _ when this == Varchar => 13,
+        NCharSqlType => 13,
+        _ when this == Varchar => 12,
+        CharSqlType => 11,
         _ when this == Float => 9,
         _ when this == Real => 8,
         DecimalSqlType => 7,
@@ -185,14 +187,22 @@ internal abstract class SqlType
     /// String vs each higher-precedence partner. The partner wins (the
     /// string parses through that partner's CAST path); same-category
     /// strings pick the higher precedence (sysname &gt; nvarchar &gt;
-    /// varchar). String vs uniqueidentifier promotes to uid; string vs
-    /// integer falls through to <see cref="NotSupportedException"/>
-    /// because that promotion path isn't modeled yet.
+    /// nchar &gt; varchar &gt; char). For two parameterized siblings of
+    /// the same kind (e.g. char(5) vs char(10)), the longer length wins so
+    /// the shorter side doesn't truncate. String vs uniqueidentifier
+    /// promotes to uid; string vs integer falls through to
+    /// <see cref="NotSupportedException"/> because that promotion path
+    /// isn't modeled yet.
     /// </summary>
     private static SqlType PromoteFromString(SqlType a, SqlType b) => b.Category switch
     {
         SqlTypeCategory.Approximate or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier => b,
-        SqlTypeCategory.String => a.Precedence >= b.Precedence ? a : b,
+        SqlTypeCategory.String => (a, b) switch
+        {
+            (CharSqlType ca, CharSqlType cb) => ca.length >= cb.length ? a : b,
+            (NCharSqlType na, NCharSqlType nb) => na.length >= nb.length ? a : b,
+            _ => a.Precedence >= b.Precedence ? a : b,
+        },
         _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
     };
 
@@ -485,6 +495,24 @@ internal abstract class SqlType
     public static readonly SqlType UniqueIdentifier = new UniqueIdentifierSqlType();
 
     /// <remarks>
+    /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
+    /// length is a distinct singleton reachable through this accessor.
+    /// </remarks>
+    public static SqlType GetChar(int length) => CharSqlType.Get(length);
+
+    /// <remarks>
+    /// SQL Server's <c>nchar(N)</c>: fixed-length UTF-16 string. Each declared
+    /// length is a distinct singleton reachable through this accessor.
+    /// </remarks>
+    public static SqlType GetNChar(int length) => NCharSqlType.Get(length);
+
+    /// <remarks>
+    /// SQL Server's <c>binary(N)</c>: fixed-length raw bytes. Each declared
+    /// length is a distinct singleton reachable through this accessor.
+    /// </remarks>
+    public static SqlType GetBinary(int length) => BinarySqlType.Get(length);
+
+    /// <remarks>
     /// SQL Server's <c>decimal(p, s)</c> / <c>numeric(p, s)</c>: exact-precision
     /// fixed-point. Each (precision, scale) pair is a distinct singleton
     /// reachable through <see cref="GetDecimal"/>; reference equality flows
@@ -542,6 +570,15 @@ internal abstract class SqlType
         DbType.Int64 => BigInt,
         DbType.AnsiString => Varchar,
         DbType.String => NVarchar,
+        // Fixed-length string DbTypes map to their variable-length cousins at
+        // the parameter boundary: the parameter carries the raw string content,
+        // and the destination column's <c>char(N)</c> / <c>nchar(N)</c> type
+        // drives padding/truncation at INSERT/UPDATE time via the same pipeline
+        // that handles oversize varchar/nvarchar inputs. EF Core's
+        // <c>SqlServerStringTypeMapping</c> sets these for properties marked
+        // <c>HasColumnType("char(N)")</c> or <c>"nchar(N)"</c>.
+        DbType.AnsiStringFixedLength => Varchar,
+        DbType.StringFixedLength => NVarchar,
         DbType.Binary => Varbinary,
         DbType.Date => Date,
         // DbType.DateTime is the legacy 1/300-second type; explicit opt-in.
@@ -657,6 +694,18 @@ internal abstract class SqlType
                     : ((SqlType, int?))(GetDecimal(precision, scale), null);
         }
 
+        // Fixed-length char/nchar/binary parameterize on the declared length —
+        // dispatched here ahead of the generic fixed/variable-length switch
+        // because (a) IsFixedLength is true (so the generic "no width allowed"
+        // path would reject the parameter) and (b) SQL Server picks different
+        // defaults by context: 1 in column declarations, 30 in CAST.
+        if (resolvedName == 4 && upper.SequenceEqual("CHAR"))
+            return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "char", GetChar);
+        if (resolvedName == 5 && upper.SequenceEqual("NCHAR"))
+            return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 4000, isNvarcharCousin: true, "nchar", GetNChar);
+        if (resolvedName == 6 && upper.SequenceEqual("BINARY"))
+            return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "binary", GetBinary);
+
         var resolved = resolvedName switch
         {
             3 => upper switch
@@ -745,11 +794,39 @@ internal abstract class SqlType
             {
                 (not null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumColumn(columnName, declared),
                 (not null, false) => SimulatedSqlException.SizeExceedsMaximumColumn(columnName, declared, max),
-                (null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumCast(declared),
-                (null, false) => SimulatedSqlException.SizeExceedsMaximumCast(resolved, declared, max),
+                (null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumCast("nvarchar", declared),
+                (null, false) => SimulatedSqlException.SizeExceedsMaximumCast(resolved.ToString()!, declared, max),
             };
         }
         return (resolved, declared);
+    }
+
+    /// <summary>
+    /// Resolves a parameterized fixed-length string/binary type
+    /// (<c>char(N)</c>, <c>nchar(N)</c>, <c>binary(N)</c>) to its singleton
+    /// instance. Defaults match SQL Server's two-context rule: declared length
+    /// 1 in a column declaration, 30 in a CAST expression — the
+    /// <paramref name="columnName"/> parameter (null in CAST context) selects
+    /// between them. Validation and error variants mirror the var* siblings:
+    /// 0 raises Msg 1001 first, oversize raises Msg 131 (varchar/varbinary
+    /// wording) or 2717 (nchar wording).
+    /// </summary>
+    private static (SqlType Type, int? MaxLength) ResolveFixedString(int? declaredMaxLength, string? columnName, int line, int max, bool isNvarcharCousin, string typeName, Func<int, SqlType> factory)
+    {
+        if (declaredMaxLength == 0)
+            throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(0, line);
+        var declared = declaredMaxLength ?? (columnName is null ? 30 : 1);
+        if (declared < 1 || declared > max)
+        {
+            throw (columnName, isNvarcharCousin) switch
+            {
+                (not null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumColumn(columnName, declared),
+                (not null, false) => SimulatedSqlException.SizeExceedsMaximumColumn(columnName, declared, max),
+                (null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumCast(typeName, declared),
+                (null, false) => SimulatedSqlException.SizeExceedsMaximumCast(typeName, declared, max),
+            };
+        }
+        return (factory(declared), declared);
     }
 
     /// <summary>

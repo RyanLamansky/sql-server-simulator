@@ -245,6 +245,43 @@ public class EFCoreStrings
     }
 
     [TestMethod]
+    public void Insert_FixedLengthChar_RoundTripsWithPadding()
+    {
+        // char(5) is the simulator's fixed-length CP1252 type. EF Core maps
+        // strings to it via Column(TypeName="char(5)"); SaveChanges goes through
+        // SqlServerStringTypeMapping which sets SqlDbType.Char on the parameter.
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
+
+        _ = context.People.Add(new Person { Id = 1, Name = "Iris", Tag = "hi" });
+        _ = context.SaveChanges();
+
+        Assert.AreEqual("hi   ", context.People.Select(p => p.Tag).FirstOrDefault());
+    }
+
+    [TestMethod]
+    public void Insert_FixedLengthNChar_RoundTripsWithPadding()
+    {
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
+
+        _ = context.People.Add(new Person { Id = 1, Name = "Jane", Initials = "JD" });
+        _ = context.SaveChanges();
+
+        Assert.AreEqual("JD ", context.People.Select(p => p.Initials).FirstOrDefault());
+    }
+
+    [TestMethod]
+    public void Insert_FixedLengthBinary_RoundTripsWithZeroPadding()
+    {
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
+
+        _ = context.People.Add(new Person { Id = 1, Name = "Karl", Stamp = [0xCA, 0xFE] });
+        _ = context.SaveChanges();
+
+        var read = context.People.Select(p => p.Stamp).FirstOrDefault();
+        CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE, 0, 0 }, read);
+    }
+
+    [TestMethod]
     public void Insert_MultipleRows_RoundTripsBothColumns()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());

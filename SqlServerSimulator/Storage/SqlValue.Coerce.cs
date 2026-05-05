@@ -54,6 +54,22 @@ internal readonly partial struct SqlValue
         if (SqlType.IsIntegerCategory(this.Type) && SqlType.IsStringCategory(target))
             return FromString(target, FormatIntegerToString(this));
 
+        // String ↔ string crossings: same content, target's encoding and
+        // padding rules. char(N) / nchar(N) targets pad with U+0020 if shorter
+        // and silently truncate if longer (matching CAST). The INSERT/UPDATE
+        // pipeline pre-checks source length against char/nchar/varchar/nvarchar
+        // column maxes so the truncation case raises Msg 2628 / 8152 before
+        // reaching this point.
+        if (SqlType.IsStringCategory(this.Type) && SqlType.IsStringCategory(target))
+            return FromString(target, this.AsString);
+
+        // Binary ↔ binary crossings: binary(N) pads or truncates; varbinary
+        // wraps the source bytes unchanged.
+        if (this.Type is VarbinarySqlType or BinarySqlType && target is BinarySqlType targetBinary)
+            return FromBinary(targetBinary, this.AsBytes);
+        if (this.Type is BinarySqlType && target == SqlType.Varbinary)
+            return FromVarbinary(this.AsBytes);
+
         // uniqueidentifier crossings: only string ↔ uid and varbinary ↔ uid
         // are allowed. Every other source/target pair surfaces as Msg 529.
         if (target == SqlType.UniqueIdentifier)
@@ -734,7 +750,7 @@ internal readonly partial struct SqlValue
     private SqlValue CoerceToUniqueIdentifier() => this.Type switch
     {
         _ when SqlType.IsStringCategory(this.Type) => FromGuid(ParseGuid(this.AsString)),
-        _ when this.Type == SqlType.Varbinary => FromGuid(VarbinaryToGuid(this.AsBytes)),
+        VarbinarySqlType or BinarySqlType => FromGuid(VarbinaryToGuid(this.AsBytes)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, SqlType.UniqueIdentifier),
     };
 
@@ -742,6 +758,7 @@ internal readonly partial struct SqlValue
     {
         _ when SqlType.IsStringCategory(target) => FromString(target, this.AsGuid.ToString("D").ToUpperInvariant()),
         _ when target == SqlType.Varbinary => FromVarbinary(this.AsGuid.ToByteArray()),
+        BinarySqlType binTarget => FromBinary(binTarget, this.AsGuid.ToByteArray()),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
 

@@ -143,11 +143,15 @@ internal sealed class SimulatedSqlException : DbException
         new($"The size ({requested}) given to the column '{columnName}' exceeds the maximum allowed for any data type ({max}).", 131, 15, 2);
 
     /// <summary>
-    /// Mimics SQL Server error 131 in CAST form for
-    /// <c>varchar</c> / <c>varbinary</c>. Class 15 / State 3.
+    /// Mimics SQL Server error 131 in CAST form for <c>varchar</c> /
+    /// <c>varbinary</c> / <c>char</c> / <c>binary</c>. Class 15 / State 3.
+    /// The message always names the family root (no <c>(N)</c> suffix); callers
+    /// of parameterized types must pass the bare name explicitly because the
+    /// resolved <see cref="SqlType"/>'s <see cref="object.ToString"/> renders
+    /// the suffix for debug contexts.
     /// </summary>
-    internal static SimulatedSqlException SizeExceedsMaximumCast(SqlType type, int requested, int max) =>
-        new($"The size ({requested}) given to the type '{type}' exceeds the maximum allowed for any data type ({max}).", 131, 15, 3);
+    internal static SimulatedSqlException SizeExceedsMaximumCast(string typeName, int requested, int max) =>
+        new($"The size ({requested}) given to the type '{typeName}' exceeds the maximum allowed for any data type ({max}).", 131, 15, 3);
 
     /// <summary>
     /// Mimics SQL Server error 2717: an <c>nvarchar</c> column exceeds the
@@ -159,11 +163,13 @@ internal sealed class SimulatedSqlException : DbException
         new($"The size ({requested}) given to the parameter '{columnName}' exceeds the maximum allowed (4000).", 2717, 16, 2);
 
     /// <summary>
-    /// Mimics SQL Server error 131 in CAST form for <c>nvarchar</c>. Class 16
-    /// / State 1; uses "convert specification" wording.
+    /// Mimics SQL Server error 131 in CAST form for <c>nvarchar</c> /
+    /// <c>nchar</c>. Class 16 / State 1; uses "convert specification" wording.
+    /// The type name is parameterized so <c>nchar(N)</c> casts produce the
+    /// matching <c>'nchar'</c> wording (verified against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException NVarcharSizeExceedsMaximumCast(int requested) =>
-        new($"The size ({requested}) given to the convert specification 'nvarchar' exceeds the maximum allowed for any data type (4000).", 131, 16, 1);
+    internal static SimulatedSqlException NVarcharSizeExceedsMaximumCast(string typeName, int requested) =>
+        new($"The size ({requested}) given to the convert specification '{typeName}' exceeds the maximum allowed for any data type (4000).", 131, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's verbose truncation error (Msg 2628): a string value

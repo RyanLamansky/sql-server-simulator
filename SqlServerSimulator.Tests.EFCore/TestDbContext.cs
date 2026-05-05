@@ -26,6 +26,15 @@ internal class Person
 
     [Column(TypeName = "varbinary(64)")]
     public byte[]? Avatar { get; set; }
+
+    [Column(TypeName = "char(5)")]
+    public string? Tag { get; set; }
+
+    [Column(TypeName = "nchar(3)")]
+    public string? Initials { get; set; }
+
+    [Column(TypeName = "binary(4)")]
+    public byte[]? Stamp { get; set; }
 }
 
 /// <summary>
@@ -158,7 +167,10 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Id int,
                     Name nvarchar(50) not null,
                     Code varchar(10) null,
-                    Avatar varbinary(64) null
+                    Avatar varbinary(64) null,
+                    Tag char(5) null,
+                    Initials nchar(3) null,
+                    Stamp binary(4) null
                 )
                 """)
             .ExecuteNonQuery();

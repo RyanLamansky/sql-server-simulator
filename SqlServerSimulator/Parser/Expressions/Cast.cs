@@ -81,15 +81,17 @@ internal sealed class Cast : Expression
         // uniqueidentifier → too-narrow string: SQL Server raises a target-
         // specific error rather than silently truncating. char/varchar use
         // Msg 8170 with its dedicated text; nchar/nvarchar use the generic
-        // arithmetic-overflow Msg 8115. NULLs pass through silently.
+        // arithmetic-overflow Msg 8115 (verified against SQL Server 2025: the
+        // message names "nvarchar" for both nchar and nvarchar targets).
+        // NULLs pass through silently.
         if (!value.IsNull
             && value.Type == SqlType.UniqueIdentifier
             && this.targetMaxLength is int max
             && max < 36)
         {
-            if (this.targetType == SqlType.Varchar)
+            if (this.targetType == SqlType.Varchar || this.targetType is CharSqlType)
                 throw SimulatedSqlException.InsufficientResultSpaceForUniqueIdentifier();
-            if (this.targetType == SqlType.NVarchar)
+            if (this.targetType == SqlType.NVarchar || this.targetType is NCharSqlType)
                 throw SimulatedSqlException.ArithmeticOverflow("nvarchar");
         }
 
