@@ -133,6 +133,30 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     }
 
     /// <summary>
+    /// Classifies the current <see cref="Token"/> as a
+    /// <see cref="ContextualKeyword"/>: returns the matching value if
+    /// <see cref="Token"/> is an unquoted identifier whose text matches one
+    /// of the contextual-keyword names case-insensitively, otherwise
+    /// returns <see cref="ContextualKeyword._"/> (zero / default). Useful
+    /// for switch-style dispatch on positions that accept several optional
+    /// keywords (e.g. DBCC <c>TRACEON</c>/<c>TRACEOFF</c>).
+    /// </summary>
+    public ContextualKeyword AsContextual() =>
+        this.Token is UnquotedString u
+        && Enum.TryParse<ContextualKeyword>(u.Span, ignoreCase: true, out var keyword)
+        && keyword != ContextualKeyword._
+        ? keyword
+        : ContextualKeyword._;
+
+    /// <summary>
+    /// Returns true when <see cref="Token"/> is an unquoted identifier that
+    /// matches the given <paramref name="expected"/> contextual keyword
+    /// (case-insensitive). Use for required-keyword guards in parser flows;
+    /// for switch-on-classification, see <see cref="AsContextual"/>.
+    /// </summary>
+    public bool MatchContextual(ContextualKeyword expected) => AsContextual() == expected;
+
+    /// <summary>
     /// Advances <see cref="Token"/> to the next token in the enumeration, throwing an exception if the end was reached instead.
     /// </summary>
     /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>

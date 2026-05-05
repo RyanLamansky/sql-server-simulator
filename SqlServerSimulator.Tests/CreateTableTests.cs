@@ -352,4 +352,31 @@ public class CreateTableTests
         var x = Assert.Throws<DbException>(() => command.ExecuteNonQuery());
         Assert.AreEqual($"Line 1: Specified scale {precision} is invalid.", x.Message);
     }
+
+    /// <summary>
+    /// Identifiers that match contextual keywords (the parser-side enum
+    /// covering OUTPUT, USING, MATCHED, MAX, etc.) must still work as column
+    /// names — the architecture classifies contextual keywords at parse time
+    /// in keyword-expecting positions only, so identifier positions are
+    /// unaffected. <c>Output</c>, <c>Using</c>, <c>Matched</c>, and <c>Max</c>
+    /// are the most likely real-world collisions.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Output")]
+    [DataRow("Using")]
+    [DataRow("Matched")]
+    [DataRow("Max")]
+    [DataRow("Configuration")]
+    public void ContextualKeywordsAsColumnNames_RoundTrip(string columnName)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( {columnName} int )");
+        _ = simulation.ExecuteNonQuery($"insert into t ({columnName}) values (42)");
+
+        using var reader = simulation
+            .CreateCommand($"select {columnName} from t where {columnName} = 42")
+            .ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(42, reader.GetInt32(0));
+    }
 }

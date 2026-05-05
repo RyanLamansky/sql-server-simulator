@@ -188,7 +188,7 @@ public sealed class Simulation
                 {
                     declaredMaxLength = numericValue.AsInt32;
                 }
-                else if (lengthToken is UnquotedString unquoted && unquoted.Span.Equals("MAX", StringComparison.OrdinalIgnoreCase))
+                else if (context.MatchContextual(ContextualKeyword.Max))
                 {
                     throw new NotSupportedException($"{type}(MAX) and other LOB types aren't modeled yet.");
                 }
@@ -492,7 +492,7 @@ public sealed class Simulation
     /// <param name="sourceColumnNames">For MERGE only: the source alias's column names. <see langword="null"/> for plain INSERT.</param>
     private static OutputProjection? TryParseOutputClause(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames)
     {
-        if (context.Token is not UnquotedString unquoted || !unquoted.Span.Equals("OUTPUT", StringComparison.OrdinalIgnoreCase))
+        if (!context.MatchContextual(ContextualKeyword.Output))
             return null;
 
         var expressions = new List<Expression>();
@@ -628,7 +628,8 @@ public sealed class Simulation
             ? table
             : throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
 
-        if (context.GetNextRequired() is not UnquotedString usingKw || !usingKw.Span.Equals("USING", StringComparison.OrdinalIgnoreCase))
+        context.MoveNextRequired();
+        if (!context.MatchContextual(ContextualKeyword.Using))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -694,7 +695,7 @@ public sealed class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
             {
                 context.MoveNextRequired();
-                if (context.Token is not UnquotedString matchedKw || !matchedKw.Span.Equals("MATCHED", StringComparison.OrdinalIgnoreCase))
+                if (!context.MatchContextual(ContextualKeyword.Matched))
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Then })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -750,7 +751,7 @@ public sealed class Simulation
                 {
                     context.MoveNextOptional();
                 }
-                if (context.Token is UnquotedString tail && !tail.Span.Equals("OUTPUT", StringComparison.OrdinalIgnoreCase))
+                if (context.Token is UnquotedString && !context.MatchContextual(ContextualKeyword.Output))
                     context.MoveNextOptional();
             }
         }
@@ -1080,7 +1081,7 @@ public sealed class Simulation
             return false;
 
         var afterDatabase = context.GetNextRequired();
-        if (afterDatabase is UnquotedString unquoted && unquoted.Span.Equals("SCOPED", StringComparison.OrdinalIgnoreCase))
+        if (context.MatchContextual(ContextualKeyword.Scoped))
             return TryParseAlterDatabaseScopedConfiguration(context);
 
         // Otherwise a database name (or CURRENT). The simulator has one
@@ -1094,10 +1095,8 @@ public sealed class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             return false;
 
-        if (context.GetNextRequired() is not UnquotedString option)
-            return false;
-
-        if (!option.Span.Equals("COMPATIBILITY_LEVEL", StringComparison.OrdinalIgnoreCase))
+        context.MoveNextRequired();
+        if (!context.MatchContextual(ContextualKeyword.Compatibility_Level))
             return false;
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
@@ -1116,19 +1115,15 @@ public sealed class Simulation
 
     private bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
     {
-        if (context.GetNextRequired() is not UnquotedString configToken
-            || !configToken.Span.Equals("CONFIGURATION", StringComparison.OrdinalIgnoreCase))
-        {
+        context.MoveNextRequired();
+        if (!context.MatchContextual(ContextualKeyword.Configuration))
             return false;
-        }
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             return false;
 
-        if (context.GetNextRequired() is not UnquotedString option)
-            return false;
-
-        if (!option.Span.Equals("VERBOSE_TRUNCATION_WARNINGS", StringComparison.OrdinalIgnoreCase))
+        context.MoveNextRequired();
+        if (!context.MatchContextual(ContextualKeyword.Verbose_Truncation_Warnings))
             return false;
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
@@ -1149,16 +1144,14 @@ public sealed class Simulation
     /// </summary>
     private bool TryParseDbcc(ParserContext context)
     {
-        if (context.GetNextRequired() is not UnquotedString action)
-            return false;
-
+        context.MoveNextRequired();
         bool turningOn;
-        if (action.Span.Equals("TRACEON", StringComparison.OrdinalIgnoreCase))
-            turningOn = true;
-        else if (action.Span.Equals("TRACEOFF", StringComparison.OrdinalIgnoreCase))
-            turningOn = false;
-        else
-            return false;
+        switch (context.AsContextual())
+        {
+            case ContextualKeyword.TraceOn: turningOn = true; break;
+            case ContextualKeyword.TraceOff: turningOn = false; break;
+            default: return false;
+        }
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
             return false;
