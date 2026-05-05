@@ -54,6 +54,13 @@ internal readonly partial struct SqlValue
         if (SqlType.IsIntegerCategory(this.Type) && SqlType.IsStringCategory(target))
             return FromString(target, FormatIntegerToString(this));
 
+        // uniqueidentifier crossings: only string ↔ uid and varbinary ↔ uid
+        // are allowed. Every other source/target pair surfaces as Msg 529.
+        if (target == SqlType.UniqueIdentifier)
+            return this.CoerceToUniqueIdentifier();
+        if (this.Type == SqlType.UniqueIdentifier)
+            return this.CoerceFromUniqueIdentifier(target);
+
         // Date/time → integer: only the legacy types (datetime / smalldatetime)
         // round-trip through an integer day count; everything else throws
         // Msg 529 from inside the helper.
@@ -361,6 +368,54 @@ internal readonly partial struct SqlValue
         : target == SqlType.SmallInt ? SimulatedSqlException.OverflowConvertingNarrowInt(sourceType, sourceValue, "INT2")
         : target == SqlType.Int32 ? SimulatedSqlException.OverflowConvertingToInt(sourceType, sourceValue)
         : SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+
+    private SqlValue CoerceToUniqueIdentifier() => this.Type switch
+    {
+        _ when SqlType.IsStringCategory(this.Type) => FromGuid(ParseGuid(this.AsString)),
+        _ when this.Type == SqlType.Varbinary => FromGuid(VarbinaryToGuid(this.AsBytes)),
+        _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, SqlType.UniqueIdentifier),
+    };
+
+    private SqlValue CoerceFromUniqueIdentifier(SqlType target) => target switch
+    {
+        _ when SqlType.IsStringCategory(target) => FromString(target, this.AsGuid.ToString("D").ToUpperInvariant()),
+        _ when target == SqlType.Varbinary => FromVarbinary(this.AsGuid.ToByteArray()),
+        _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
+    };
+
+    /// <summary>
+    /// Parses a string into a <see cref="Guid"/> matching SQL Server's
+    /// <c>uniqueidentifier</c> CAST rules. Accepts the <c>D</c>
+    /// (<c>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</c>) and <c>B</c> (the same
+    /// surrounded by braces) forms, case-insensitive on hex, with trailing
+    /// whitespace allowed but leading whitespace rejected. Every parse
+    /// failure surfaces as the same Msg 8169.
+    /// </summary>
+    private static Guid ParseGuid(string source)
+    {
+        // .NET's Guid.TryParseExact silently trims leading whitespace; SQL
+        // Server's CAST does not. Reject the leading-whitespace case
+        // explicitly before delegating.
+        if (source.Length > 0 && source[0] == ' ')
+            throw SimulatedSqlException.ConversionFailedFromStringToUniqueIdentifier();
+        var trimmed = source.TrimEnd();
+        return Guid.TryParseExact(trimmed, "D", out var g) || Guid.TryParseExact(trimmed, "B", out g)
+            ? g
+            : throw SimulatedSqlException.ConversionFailedFromStringToUniqueIdentifier();
+    }
+
+    /// <summary>
+    /// Builds a <see cref="Guid"/> from a varbinary payload, mirroring SQL
+    /// Server's lenient length handling: payloads shorter than 16 bytes are
+    /// right-padded with zeros, longer payloads are truncated to the first
+    /// 16 bytes. No length error is raised.
+    /// </summary>
+    private static Guid VarbinaryToGuid(byte[] bytes)
+    {
+        Span<byte> buffer = stackalloc byte[16];
+        bytes.AsSpan(0, Math.Min(16, bytes.Length)).CopyTo(buffer);
+        return new Guid(buffer);
+    }
 
     /// <summary>
     /// Formats an integer-family value as a SQL-Server-compatible string:

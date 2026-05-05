@@ -88,10 +88,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override Guid GetGuid(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override Guid GetGuid(int ordinal) => (Guid)this[ordinal];
 
     public override short GetInt16(int ordinal) => (short)this[ordinal];
 

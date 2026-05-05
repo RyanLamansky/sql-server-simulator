@@ -176,6 +176,7 @@ internal abstract class Expression
             {
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
+                "NEWID" => new NewId(context),
                 "RIGHT" => new Right(context),
                 "RTRIM" => new RightTrim(context),
                 "UPPER" => new Upper(context),

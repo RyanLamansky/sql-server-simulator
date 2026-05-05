@@ -72,7 +72,8 @@ Heavy-hitters someone might assume work but don't. Source and `git log` are the 
 - Transactions / locks / MVCC.
 - Row-overflow / LOB pages and the `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` types they enable.
 - Decimal / numeric / float / real / money types. (Also blocks fractional-day `cast(0.5 as datetime)`.)
-- `uniqueidentifier`, fixed-length `char(N)` / `nchar(N)` / `binary(N)`, and identity columns.
+- Fixed-length `char(N)` / `nchar(N)` / `binary(N)`, and identity columns.
+- `NEWSEQUENTIALID()` (deferred until `DEFAULT`-clause support exists in `CREATE TABLE`; the function is only valid in that context).
 - Pattern matching (`LIKE`) and `CONVERT`.
 - Cross-category `Promote` for `varchar` ↔ `nvarchar` and integer ↔ string. Only CAST works for those pairs.
 - EF Core compatibility: the SqlServer provider downcasts `DbParameter` to `SqlParameter` for some mappings — `DateTime → date`, `DateTime → smalldatetime`, `DateOnly`, `TimeOnly`, `TimeSpan` all break at SaveChanges. See `SimulatedDbParameter` for the matrix; a `SqlServerSimulator.EFCore` adapter package is planned to close the gap.

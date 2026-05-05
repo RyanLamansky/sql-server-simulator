@@ -67,6 +67,25 @@ internal class Event
 
 }
 
+/// <summary>
+/// Exercises the simulator's <c>uniqueidentifier</c> column support through
+/// EF Core. <see cref="ExternalKey"/> is the natural-key identifier (a
+/// freshly minted <see cref="Guid"/>); <see cref="OptionalKey"/> covers the
+/// nullable column path. Pinning <see cref="Id"/> on a separate
+/// <see cref="int"/> primary key keeps EF's tracker out of the
+/// uniqueidentifier-comparison story so the tests focus on the type itself.
+/// </summary>
+internal class Document
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "uniqueidentifier")]
+    public Guid ExternalKey { get; set; }
+
+    [Column(TypeName = "uniqueidentifier")]
+    public Guid? OptionalKey { get; set; }
+}
+
 internal class TestDbContext(Simulation simulation) : DbContext
 {
     public Simulation Simulation { get; set; } = simulation;
@@ -86,6 +105,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Person> People => Set<Person>();
 
     public DbSet<Event> Events => Set<Event>();
+
+    public DbSet<Document> Documents => Set<Document>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -120,6 +141,22 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Name nvarchar(50) not null,
                     Code varchar(10) null,
                     Avatar varbinary(64) null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateDocumentsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Documents (
+                    Id int,
+                    ExternalKey uniqueidentifier not null,
+                    OptionalKey uniqueidentifier null
                 )
                 """)
             .ExecuteNonQuery();

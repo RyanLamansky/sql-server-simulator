@@ -7,9 +7,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>CAST(expr AS type)</c>: routes the source value through
 /// <see cref="SqlValue.CoerceTo"/>. The target type is resolved by
 /// <see cref="SqlType.GetByName"/>; a length specifier (e.g.
-/// <c>varchar(10)</c>) is parsed but not enforced — column-level max length
-/// lives on <see cref="HeapColumn"/>, not on <see cref="SqlValue"/>, so a
-/// cast-time length cap would need a separate carrier.
+/// <c>varchar(10)</c>) is parsed and validated but generally not enforced as
+/// a value-level cap — see the broader cast-length limitation in CLAUDE.md.
+/// The one place the simulator does enforce it is the
+/// <c>uniqueidentifier → char/varchar/nchar/nvarchar</c> path, where SQL
+/// Server fires Msg 8170 / 8115 for sub-36-character destinations rather
+/// than silently truncating.
 /// </summary>
 /// <remarks>
 /// Cross-category coercions (string ↔ numeric) propagate
@@ -21,6 +24,7 @@ internal sealed class Cast : Expression
 {
     private readonly Expression source;
     private readonly SqlType targetType;
+    private readonly int? targetMaxLength;
 
     public Cast(ParserContext context)
     {
@@ -50,13 +54,30 @@ internal sealed class Cast : Expression
         // Null columnName signals CAST context: errors use Msg 243 (unknown
         // type), 291 (length on fixed type), and the "type"/"convert
         // specification" wording for Msg 131 size errors.
-        var (resolved, _) = SqlType.GetByName(typeName, declaredMaxLength, 1, columnName: null);
+        var (resolved, max) = SqlType.GetByName(typeName, declaredMaxLength, 1, columnName: null);
         this.targetType = resolved;
+        this.targetMaxLength = max;
     }
 
     public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
+
+        // uniqueidentifier → too-narrow string: SQL Server raises a target-
+        // specific error rather than silently truncating. char/varchar use
+        // Msg 8170 with its dedicated text; nchar/nvarchar use the generic
+        // arithmetic-overflow Msg 8115. NULLs pass through silently.
+        if (!value.IsNull
+            && value.Type == SqlType.UniqueIdentifier
+            && this.targetMaxLength is int max
+            && max < 36)
+        {
+            if (this.targetType == SqlType.Varchar)
+                throw SimulatedSqlException.InsufficientResultSpaceForUniqueIdentifier();
+            if (this.targetType == SqlType.NVarchar)
+                throw SimulatedSqlException.ArithmeticOverflow("nvarchar");
+        }
+
         try
         {
             return value.CoerceTo(targetType);

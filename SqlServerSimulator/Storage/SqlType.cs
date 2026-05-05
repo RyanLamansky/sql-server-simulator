@@ -64,6 +64,7 @@ internal abstract class SqlType
         : this == SmallInt ? 3
         : this == TinyInt ? 2
         : this == Bit ? 1
+        : this == UniqueIdentifier ? 13
         : this == SystemName ? 12
         : this == NVarchar ? 11
         : this == Varchar ? 10
@@ -109,6 +110,19 @@ internal abstract class SqlType
             return b == DateTime || b == SmallDateTime ? b : throw SimulatedSqlException.OperandTypeClash(a, b);
         if (IsDateTimeCategory(a) && IsIntegerCategory(b))
             return a == DateTime || a == SmallDateTime ? a : throw SimulatedSqlException.OperandTypeClash(a, b);
+
+        // String ↔ uniqueidentifier: SQL Server's data-type precedence puts
+        // uniqueidentifier above the string types, so a string operand
+        // implicitly parses-and-coerces to uniqueidentifier (bad-format
+        // strings surface from CoerceTo as Msg 8169). uniqueidentifier
+        // against any non-string partner has no implicit conversion and
+        // raises the operand-type-clash error.
+        if (a == UniqueIdentifier && IsStringCategory(b))
+            return a;
+        if (IsStringCategory(a) && b == UniqueIdentifier)
+            return b;
+        if (a == UniqueIdentifier || b == UniqueIdentifier)
+            throw SimulatedSqlException.OperandTypeClash(a, b);
 
         var sameCategory = (IsIntegerCategory(a) && IsIntegerCategory(b)) || (IsStringCategory(a) && IsStringCategory(b));
         return sameCategory
@@ -312,6 +326,17 @@ internal abstract class SqlType
     /// </remarks>
     public static readonly SqlType SmallDateTime = new SmallDateTimeSqlType();
 
+    /// <remarks>
+    /// SQL Server's <c>uniqueidentifier</c>: 16-byte fixed-length GUID. On-disk
+    /// byte layout matches <see cref="Guid.TryWriteBytes(Span{byte})"/>'s
+    /// output — Data1/Data2/Data3 little-endian, final 8 bytes raw — so
+    /// encode and decode delegate straight to the BCL. Comparison uses
+    /// SQL Server's quirky permutation (last 6 bytes most significant) via
+    /// <see cref="System.Data.SqlTypes.SqlGuid.CompareTo(System.Data.SqlTypes.SqlGuid)"/>,
+    /// which is incompatible with .NET's natural <see cref="Guid.CompareTo(Guid)"/>.
+    /// </remarks>
+    public static readonly SqlType UniqueIdentifier = new UniqueIdentifierSqlType();
+
     /// <summary>True for SQL date/time-family types (date, datetime, smalldatetime, datetime2, time, datetimeoffset).</summary>
     public static bool IsDateTimeCategory(SqlType type) =>
         type == Date || type == DateTime || type == SmallDateTime || type is DateTime2SqlType || type is TimeSqlType || type is DateTimeOffsetSqlType;
@@ -343,6 +368,7 @@ internal abstract class SqlType
         // TimeSpan and TimeOnly via DbType.Time.
         DbType.Time => GetTime(7),
         DbType.DateTimeOffset => GetDateTimeOffset(7),
+        DbType.Guid => UniqueIdentifier,
         _ => throw new NotSupportedException($"No SqlType mapping for DbType {dbType}."),
     };
 
@@ -449,6 +475,11 @@ internal abstract class SqlType
             13 => upper switch
             {
                 "SMALLDATETIME" => SmallDateTime,
+                _ => null
+            },
+            16 => upper switch
+            {
+                "UNIQUEIDENTIFIER" => UniqueIdentifier,
                 _ => null
             },
             _ => null,

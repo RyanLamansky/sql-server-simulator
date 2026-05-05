@@ -1,3 +1,4 @@
+using System.Data.SqlTypes;
 #if DEBUG
 using System.Globalization;
 #endif
@@ -238,6 +239,15 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
+    /// Non-NULL SQL <c>uniqueidentifier</c> value. The 16-byte payload is
+    /// boxed into the reference slot (mirroring the <see cref="DateTimeOffset"/>
+    /// pattern); equality and ordering route through
+    /// <see cref="SqlGuid"/> to honor SQL Server's quirky uniqueidentifier
+    /// sort order rather than .NET's natural <see cref="Guid.CompareTo(Guid)"/>.
+    /// </summary>
+    public static SqlValue FromGuid(Guid value) => new(SqlType.UniqueIdentifier, 0, value, isNull: false);
+
+    /// <summary>
     /// Constructs a string-typed value of the given SQL type. Used by string
     /// functions (UPPER, LEFT, etc.) that preserve their input's string subtype.
     /// </summary>
@@ -312,6 +322,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not a time type.")
             : new TimeSpan(this.primitive);
 
+    /// <summary>Returns the value as <see cref="Guid"/>. Throws if NULL or not a uniqueidentifier value.</summary>
+    public Guid AsGuid => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type != SqlType.UniqueIdentifier
+            ? throw new InvalidOperationException($"Value is {this.Type}, not uniqueidentifier.")
+            : (Guid)this.reference!;
+
     /// <summary>Returns the value as <see cref="DateTimeOffset"/>. Throws if NULL or not a datetimeoffset value.</summary>
     public DateTimeOffset AsDateTimeOffset => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
@@ -344,6 +361,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // accessors. EF's TimeOnly mapping reads through GetFieldValue<TimeOnly>().
         TimeSqlType => this.AsTime,
         DateTimeOffsetSqlType => this.AsDateTimeOffset,
+        var t when t == SqlType.UniqueIdentifier => this.AsGuid,
         _ => throw new NotSupportedException($"No object representation for {this.Type}."),
     };
 
@@ -356,7 +374,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                 ? Collation.Default.Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
                 : this.Type is DateTimeOffsetSqlType
                     ? this.primitive == other.primitive
-                    : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
+                    : this.Type == SqlType.UniqueIdentifier
+                        ? (Guid)this.reference! == (Guid)other.reference!
+                        : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
 
     /// <summary>
     /// Object equality that respects content for <c>byte[]</c> (varbinary) and
@@ -408,6 +428,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type is DateTime2SqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is TimeSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is DateTimeOffsetSqlType ? this.primitive.CompareTo(other.primitive)
+        : this.Type == SqlType.UniqueIdentifier ? new SqlGuid(this.AsGuid).CompareTo(new SqlGuid(other.AsGuid))
         : throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet.");
 
     public override bool Equals(object? obj) => obj is SqlValue other && this.Equals(other);
@@ -430,6 +451,11 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         {
             // Equality is by UTC instant; the offset isn't part of identity.
             hash.Add(this.primitive);
+        }
+        else if (this.Type == SqlType.UniqueIdentifier)
+        {
+            // Identity is the Guid value alone; the unused primitive slot is zero.
+            hash.Add((Guid)this.reference!);
         }
         else if (this.reference is byte[] bytes)
         {
@@ -471,6 +497,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         this.Type is DateTime2SqlType dt2 ? $"'{this.AsDateTime2.ToString(DateTime2Format(dt2.precision), CultureInfo.InvariantCulture)}'" :
         this.Type is TimeSqlType tt ? $"'{FormatTime(this.AsTime, tt.precision)}'" :
         this.Type is DateTimeOffsetSqlType dto ? $"'{FormatDateTimeOffset(this.AsDateTimeOffset, dto.precision)}'" :
+        this.Type == SqlType.UniqueIdentifier ? $"'{this.AsGuid:D}'" :
         "?";
 #endif
 }

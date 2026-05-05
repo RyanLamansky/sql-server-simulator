@@ -300,6 +300,25 @@ internal sealed class SimulatedSqlException : DbException
         new("Conversion failed when converting character string to smalldatetime data type.", 295, 16, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 8169: a string couldn't be parsed as a
+    /// <c>uniqueidentifier</c>. SQL Server uses a single fixed message
+    /// regardless of why (bad format, wrong length, leading whitespace,
+    /// parens-instead-of-braces) — verified against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ConversionFailedFromStringToUniqueIdentifier() =>
+        new("Conversion failed when converting from a character string to uniqueidentifier.", 8169, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 8170: a non-NULL <c>uniqueidentifier</c> was
+    /// cast to a <c>char</c> / <c>varchar</c> destination too short to hold
+    /// the 36-character formatted GUID. The <c>nchar</c> / <c>nvarchar</c>
+    /// counterpart raises Msg 8115 (the generic arithmetic-overflow path)
+    /// instead — verified against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InsufficientResultSpaceForUniqueIdentifier() =>
+        new("Insufficient result space to convert uniqueidentifier value to char.", 8170, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 206: the binary expression's two operands
     /// belong to types that have no implicit conversion between them
     /// (e.g. <c>date = 0</c>, <c>time + 1</c>). Distinct from Msg 402
