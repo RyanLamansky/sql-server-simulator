@@ -563,4 +563,12 @@ internal sealed class SimulatedSqlException : DbException
     /// </summary>
     internal static SimulatedSqlException IdentityOverflow(string targetTypeName) =>
         new($"Arithmetic overflow error converting IDENTITY to data type {targetTypeName}.", 8115, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4104: the OUTPUT clause references an
+    /// identifier that doesn't exist in either the INSERTED/DELETED virtual
+    /// tables or the MERGE source alias.
+    /// </summary>
+    internal static SimulatedSqlException MultiPartIdentifierCouldNotBeBound(string name) =>
+        new($"The multi-part identifier \"{name}\" could not be bound.", 4104, 16, 1);
 }
