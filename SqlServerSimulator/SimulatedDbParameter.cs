@@ -43,6 +43,7 @@ sealed class SimulatedDbParameter : DbParameter
                 : this.Value switch
                 {
                     int => DbType.Int32,
+                    string => DbType.String,
                     DateOnly => DbType.Date,
                     DateTime => DbType.DateTime2,
                     DateTimeOffset => DbType.DateTimeOffset,

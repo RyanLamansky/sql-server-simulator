@@ -1,5 +1,7 @@
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SqlServerSimulator.Parser;
 
@@ -48,8 +50,23 @@ internal abstract class BooleanExpression
             Operator { Character: '<' } => new GreaterThanOrEqualExpression(left, context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
         },
+        ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: false),
+        ReservedKeyword { Keyword: Keyword.Not } => context.GetNextRequired() switch
+        {
+            ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: true),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        },
         _ => throw SimulatedSqlException.SyntaxErrorNear(context),
     };
+
+    private static LikeExpression ParseLike(Expression left, ParserContext context, bool negated)
+    {
+        var pattern = Expression.Parse(context.MoveNextRequiredReturnSelf());
+        Expression? escape = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Escape })
+            escape = Expression.Parse(context.MoveNextRequiredReturnSelf());
+        return new LikeExpression(left, pattern, escape, negated);
+    }
 
     /// <summary>
     /// Evaluates the expression. Any NULL operand yields <c>false</c>
@@ -138,6 +155,178 @@ internal abstract class BooleanExpression
 
 #if DEBUG
         public override string ToString() => $"{left} <= {right}";
+#endif
+    }
+
+    /// <summary>
+    /// SQL Server <c>LIKE</c> / <c>NOT LIKE</c> with optional <c>ESCAPE</c>
+    /// clause. Pattern translation produces a .NET <see cref="Regex"/> rebuilt
+    /// per evaluation; pre-compilation/caching is left for later. Trailing-space
+    /// behavior (subject's leftover U+0020 spaces accepted but pattern's must
+    /// match) is encoded by anchoring the regex with <c>[ ]*$</c>. Wildcards
+    /// inside <c>[...]</c> classes are taken literally; <c>[]</c> and reversed
+    /// ranges (<c>[c-a]</c>) and unterminated <c>[</c> all produce never-match
+    /// translations to mirror SQL Server's silent failure.
+    /// </summary>
+    private sealed class LikeExpression(Expression left, Expression right, Expression? escape, bool negated) : BooleanExpression(left, right)
+    {
+        private readonly Expression? escape = escape;
+        private readonly bool negated = negated;
+
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue)
+        {
+            var l = left.Run(getColumnValue);
+            var r = right.Run(getColumnValue);
+            if (l.IsNull || r.IsNull)
+                return false;
+
+            if (l.Type.Category != SqlTypeCategory.String || r.Type.Category != SqlTypeCategory.String)
+                throw SimulatedSqlException.OperandTypeClash(l.Type, r.Type);
+
+            char? escapeChar = null;
+            if (this.escape is not null)
+            {
+                var e = this.escape.Run(getColumnValue);
+                if (e.IsNull)
+                    return false;
+                if (e.Type.Category != SqlTypeCategory.String)
+                    throw SimulatedSqlException.OperandTypeClash(l.Type, e.Type);
+                var s = e.AsString;
+                if (s.Length != 1)
+                    throw SimulatedSqlException.InvalidEscapeCharacter(s);
+                escapeChar = s[0];
+            }
+
+            var matched = LikeToRegex(r.AsString, escapeChar).IsMatch(l.AsString);
+            return matched ^ this.negated;
+        }
+
+        /// <summary>
+        /// Translates a SQL Server <c>LIKE</c> pattern to a <see cref="Regex"/>.
+        /// Anchors with <c>^...[ ]*$</c> so the subject's trailing U+0020
+        /// spaces are accepted (matching SQL Server's documented behavior;
+        /// only literal space, not tab or LF/CR, is treated as a trailing
+        /// blank). <see cref="RegexOptions.Singleline"/> makes <c>.</c> (the
+        /// translation for <c>_</c>) and <c>.*</c> (for <c>%</c>) match
+        /// newlines, matching the probed behavior.
+        /// </summary>
+        private static Regex LikeToRegex(string pattern, char? escapeChar)
+        {
+            var sb = new StringBuilder(pattern.Length + 8);
+            _ = sb.Append('^');
+
+            var i = 0;
+            while (i < pattern.Length)
+            {
+                var c = pattern[i];
+
+                if (escapeChar.HasValue && c == escapeChar.Value)
+                {
+                    // Escape consumes the next char as a literal. A trailing
+                    // escape (nothing after) is itself taken literally; the
+                    // probed `'a' LIKE 'a!' ESCAPE '!'` returned 0 because
+                    // the resulting pattern is two chars (`a` + literal `!`)
+                    // against a one-char subject.
+                    if (i + 1 < pattern.Length)
+                    {
+                        _ = sb.Append(Regex.Escape(pattern[i + 1].ToString()));
+                        i += 2;
+                    }
+                    else
+                    {
+                        _ = sb.Append(Regex.Escape(c.ToString()));
+                        i++;
+                    }
+                    continue;
+                }
+
+                switch (c)
+                {
+                    case '%':
+                        _ = sb.Append(".*");
+                        i++;
+                        break;
+                    case '_':
+                        _ = sb.Append('.');
+                        i++;
+                        break;
+                    case '[':
+                        i = TranslateClass(pattern, i, sb);
+                        break;
+                    default:
+                        _ = sb.Append(Regex.Escape(c.ToString()));
+                        i++;
+                        break;
+                }
+            }
+
+            // \z (absolute end-of-string) rather than $ — .NET's $ matches
+            // before a final \n even outside Multiline mode, which would let
+            // 'abc\n' incorrectly match a no-trailing-space pattern.
+            _ = sb.Append("[ ]*\\z");
+            return new Regex(sb.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        }
+
+        /// <summary>
+        /// Translates a single <c>[...]</c> character class starting at
+        /// <paramref name="start"/> (the position of <c>[</c>). Returns the
+        /// position after the closing <c>]</c>. Three never-match cases emit
+        /// <c>(?!)</c> (always-fails lookahead): unterminated <c>[</c>, empty
+        /// <c>[]</c>, and reversed ranges (<c>[c-a]</c>) — all confirmed by
+        /// real-server probing. The <c>[^]</c> any-char form translates to
+        /// <c>.</c> because .NET regex doesn't accept <c>[^]</c> directly.
+        /// </summary>
+        private static int TranslateClass(string pattern, int start, StringBuilder sb)
+        {
+            var contentStart = start + 1;
+            var end = pattern.IndexOf(']', contentStart);
+            if (end < 0)
+            {
+                _ = sb.Append("(?!)");
+                return pattern.Length;
+            }
+
+            var content = pattern.AsSpan(contentStart, end - contentStart);
+            if (content.IsEmpty)
+            {
+                _ = sb.Append("(?!)");
+                return end + 1;
+            }
+            if (content is "^")
+            {
+                _ = sb.Append('.');
+                return end + 1;
+            }
+
+            // Detect a reversed range like [c-a]: any range whose end char
+            // sorts below its start char is treated as never-match. Ranges
+            // are 3-char windows (X-Y) where the leading and trailing chars
+            // aren't themselves at the start/end of the class (a leading or
+            // trailing '-' is a literal hyphen, per SQL Server docs).
+            for (var j = 1; j < content.Length - 1; j++)
+            {
+                if (content[j] == '-' && content[j - 1] > content[j + 1])
+                {
+                    _ = sb.Append("(?!)");
+                    return end + 1;
+                }
+            }
+
+            _ = sb.Append('[');
+            foreach (var cc in content)
+            {
+                if (cc is '\\' or ']')
+                    _ = sb.Append('\\');
+                _ = sb.Append(cc);
+            }
+            _ = sb.Append(']');
+            return end + 1;
+        }
+
+#if DEBUG
+        public override string ToString() => this.escape is null
+            ? $"{left} {(this.negated ? "NOT LIKE" : "LIKE")} {right}"
+            : $"{left} {(this.negated ? "NOT LIKE" : "LIKE")} {right} ESCAPE {this.escape}";
 #endif
     }
 }

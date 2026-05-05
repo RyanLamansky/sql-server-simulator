@@ -273,6 +273,15 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 
     /// <summary>
+    /// Mimics SQL Server error 506: the <c>ESCAPE</c> clause of a <c>LIKE</c>
+    /// predicate received a value that wasn't exactly one character (empty,
+    /// multi-char). The displayed value is whatever the expression evaluated
+    /// to; SQL Server quotes it with double quotes in the message.
+    /// </summary>
+    internal static SimulatedSqlException InvalidEscapeCharacter(string value) =>
+        new($"The invalid escape character \"{value}\" was specified in a LIKE predicate.", 506, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 105: a string literal opened with <c>'</c> was
     /// never closed before end of input.
     /// </summary>
