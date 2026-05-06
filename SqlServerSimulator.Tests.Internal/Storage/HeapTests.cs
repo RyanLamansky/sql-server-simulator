@@ -14,7 +14,7 @@ public class HeapTests
     public void NewHeap_HasNoPagesUntilFirstInsert()
     {
         var heap = new Heap();
-        AreEqual(0, heap.Pages.Count);
+        IsEmpty(heap.Pages);
         AreEqual(0, heap.RowCount);
         IsFalse(heap.EnumerateRows().Any());
     }
@@ -24,7 +24,7 @@ public class HeapTests
     {
         var heap = new Heap();
         heap.Insert([1, 2, 3]);
-        AreEqual(1, heap.Pages.Count);
+        HasCount(1, heap.Pages);
         AreEqual(1, heap.RowCount);
     }
 
@@ -36,7 +36,7 @@ public class HeapTests
         heap.Insert(big);                 // page 0 holds one max-sized row
         heap.Insert(big);                 // forces a new page
 
-        AreEqual(2, heap.Pages.Count);
+        HasCount(2, heap.Pages);
         AreEqual(1, heap.Pages[0].NextPageIndex);
         AreEqual(-1, heap.Pages[0].PrevPageIndex);
         AreEqual(0, heap.Pages[1].PrevPageIndex);
@@ -60,10 +60,10 @@ public class HeapTests
             heap.Insert(row);
         }
 
-        IsTrue(heap.Pages.Count >= 2, "Expected the heap to span at least two pages.");
+        IsGreaterThanOrEqualTo(2, heap.Pages.Count, "Expected the heap to span at least two pages.");
 
         var rowsRead = heap.EnumerateRows().ToList();
-        AreEqual(rowsInserted.Count, rowsRead.Count);
+        HasCount(rowsInserted.Count, rowsRead);
         for (var i = 0; i < rowsInserted.Count; i++)
             CollectionAssert.AreEqual(rowsInserted[i], rowsRead[i]);
     }
@@ -76,7 +76,7 @@ public class HeapTests
         _ = Throws<NotSupportedException>(() => heap.Insert(oversize));
 
         // No page should have been allocated.
-        AreEqual(0, heap.Pages.Count);
+        IsEmpty(heap.Pages);
     }
 
     [TestMethod]

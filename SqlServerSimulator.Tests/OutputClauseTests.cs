@@ -105,7 +105,7 @@ public class OutputClauseTests
 
         var ex = Assert.Throws<DbException>(() =>
             simulation.ExecuteScalar("insert into t output a values (1)"));
-        StringAssert.Contains(ex.Message, "could not be bound");
+        Assert.Contains("could not be bound", ex.Message);
     }
 
     [TestMethod]
@@ -117,7 +117,7 @@ public class OutputClauseTests
 
         var ex = Assert.Throws<DbException>(() =>
             simulation.ExecuteScalar("insert into t output deleted.id values (1)"));
-        StringAssert.Contains(ex.Message, "could not be bound");
+        Assert.Contains("could not be bound", ex.Message);
     }
 
     [TestMethod]
@@ -188,7 +188,7 @@ public class OutputClauseTests
         while (reader.Read())
             rows.Add((reader.GetInt32(0), reader.GetInt32(1)));
         rows.Sort((x, y) => x.Pos.CompareTo(y.Pos));
-        Assert.AreEqual(2, rows.Count);
+        Assert.HasCount(2, rows);
         Assert.AreEqual(0, rows[0].Pos);
         Assert.AreEqual(1, rows[1].Pos);
         Assert.AreEqual(1, rows[0].Id);

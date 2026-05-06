@@ -128,7 +128,7 @@ public class RoundTripTests
 
         using var reader = connection.CreateCommand("select b, ti, si, i from t").ExecuteReader();
         IsTrue(reader.Read());
-        Assert.AreEqual(true, reader[0]);
+        Assert.IsTrue((bool)reader[0]);
         Assert.AreEqual((byte)200, reader[1]);
         Assert.AreEqual((short)-1, reader[2]);
         Assert.AreEqual(12345, reader[3]);

@@ -3,7 +3,7 @@ namespace SqlServerSimulator.Storage;
 /// <summary>
 /// A user table: schema is <see cref="HeapColumn"/>s typed in
 /// <see cref="SqlType"/>; rows are stored in an 8KB-page <see cref="Heap"/>
-/// whose page bytes are produced by <see cref="RowEncoder.EncodeRow"/>.
+/// whose page bytes are produced by <see cref="RowEncoder"/>.
 /// </summary>
 internal sealed class HeapTable
 {
@@ -40,7 +40,7 @@ internal sealed class HeapTable
 
     /// <summary>
     /// Per-column types in declaration order; the array passed to
-    /// <see cref="RowEncoder.EncodeRow"/> and <see cref="RowDecoder.DecodeColumn"/>.
+    /// <see cref="RowEncoder"/> and <see cref="RowDecoder"/>.
     /// </summary>
     public readonly SqlType[] Schema;
 

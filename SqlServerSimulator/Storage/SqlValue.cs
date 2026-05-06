@@ -84,6 +84,27 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.Varbinary, 0, value, isNull: false);
     }
 
+    /// <summary>Non-NULL SQL deprecated <c>text</c> value. Encoded as CP1252 bytes; same in-memory shape as <see cref="FromVarchar"/>.</summary>
+    public static SqlValue FromText(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(SqlType.Text, 0, value, isNull: false);
+    }
+
+    /// <summary>Non-NULL SQL deprecated <c>ntext</c> value. Encoded as UTF-16 LE bytes.</summary>
+    public static SqlValue FromNText(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(SqlType.NText, 0, value, isNull: false);
+    }
+
+    /// <summary>Non-NULL SQL deprecated <c>image</c> value. Same caller-owns-the-bytes contract as <see cref="FromVarbinary"/>.</summary>
+    public static SqlValue FromImage(byte[] value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(SqlType.Image, 0, value, isNull: false);
+    }
+
     /// <summary>
     /// Non-NULL SQL <c>char(N)</c> value. The .NET string is normalized to the
     /// declared length: shorter inputs are right-padded with U+0020, longer
@@ -359,6 +380,8 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         type == SqlType.Varchar ? FromVarchar(value)
         : type == SqlType.NVarchar ? FromNVarchar(value)
         : type == SqlType.SystemName ? FromSystemName(value)
+        : type == SqlType.Text ? FromText(value)
+        : type == SqlType.NText ? FromNText(value)
         : type is CharSqlType ? FromChar(type, value)
         : type is NCharSqlType ? FromNChar(type, value)
         : throw new ArgumentException($"{type} is not a string type.", nameof(type));
@@ -397,11 +420,11 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not a string type.")
             : (string)this.reference!;
 
-    /// <summary>Returns the value as <see cref="byte"/><c>[]</c>. Throws if NULL or not a binary/varbinary value.</summary>
+    /// <summary>Returns the value as <see cref="byte"/><c>[]</c>. Throws if NULL or not a binary/varbinary/image value.</summary>
     public byte[] AsBytes => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
-        : this.Type is not (VarbinarySqlType or BinarySqlType)
-            ? throw new InvalidOperationException($"Value is {this.Type}, not varbinary or binary.")
+        : this.Type is not (VarbinarySqlType or BinarySqlType or ImageSqlType)
+            ? throw new InvalidOperationException($"Value is {this.Type}, not varbinary, binary, or image.")
             : (byte[])this.reference!;
 
     /// <summary>Returns the value as <see cref="DateOnly"/>. Throws if NULL or wrong type.</summary>
@@ -481,7 +504,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         var t when t == SqlType.TinyInt => this.AsByte,
         var t when t == SqlType.Bit => this.AsBoolean,
         { Category: SqlTypeCategory.String } => this.AsString,
-        VarbinarySqlType or BinarySqlType => this.AsBytes,
+        VarbinarySqlType or BinarySqlType or ImageSqlType => this.AsBytes,
         // SqlClient surfaces a date column as DateTime at midnight (Kind=Unspecified)
         // when read via the untyped accessors. EF's DateOnly mapping reads
         // through GetDateTime and converts on its own.
@@ -561,7 +584,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type == SqlType.TinyInt ? this.AsByte.CompareTo(other.AsByte)
         : this.Type == SqlType.Bit ? this.AsBoolean.CompareTo(other.AsBoolean)
         : IsStringTypeRef(this.Type) ? Collation.Default.Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
-        : this.Type is VarbinarySqlType or BinarySqlType ? this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes)
+        : this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType ? this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes)
         : this.Type == SqlType.Date ? this.primitive.CompareTo(other.primitive)
         : this.Type == SqlType.DateTime ? this.primitive.CompareTo(other.primitive)
         : this.Type == SqlType.SmallDateTime ? this.primitive.CompareTo(other.primitive)
@@ -639,7 +662,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.TinyInt => this.AsByte.ToString(CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Bit => this.AsBoolean ? "1" : "0",
         { Category: SqlTypeCategory.String } => $"'{this.AsString}'",
-        VarbinarySqlType or BinarySqlType => $"0x{Convert.ToHexString(this.AsBytes)}",
+        VarbinarySqlType or BinarySqlType or ImageSqlType => $"0x{Convert.ToHexString(this.AsBytes)}",
         _ when this.Type == SqlType.Date => $"'{this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         _ when this.Type == SqlType.DateTime => $"'{this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}'",
         _ when this.Type == SqlType.SmallDateTime => $"'{this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}'",

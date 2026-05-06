@@ -83,11 +83,17 @@ internal abstract class BooleanExpression
     /// Evaluates both sides, applies SQL Server type promotion to a common
     /// type, and invokes the comparator. Cross-category type pairs surface as
     /// <see cref="NotSupportedException"/> via <see cref="SqlType.Promote"/>.
+    /// LOB-typed operands (<c>text</c>, <c>ntext</c>, <c>image</c>) raise
+    /// Msg 402 rather than being routed through promotion — SQL Server rejects
+    /// them in any comparison/equality slot, and the operator name is woven
+    /// into the message via the caller-supplied <paramref name="operatorName"/>.
     /// </summary>
-    private static bool ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, Func<SqlValue, SqlValue, bool> compare)
+    private static bool ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare)
     {
         var l = left.Run(getColumnValue);
         var r = right.Run(getColumnValue);
+        if (l.Type.IsLob || r.Type.IsLob)
+            throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
         if (l.IsNull || r.IsNull)
             return false;
 
@@ -101,7 +107,7 @@ internal abstract class BooleanExpression
     private sealed class EqualityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            ComparePromoted(left, right, getColumnValue, static (l, r) => l.Equals(r));
+            ComparePromoted(left, right, getColumnValue, "equal to", static (l, r) => l.Equals(r));
 
 #if DEBUG
         public override string ToString() => $"{left} = {right}";
@@ -111,7 +117,7 @@ internal abstract class BooleanExpression
     private sealed class InequalityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            ComparePromoted(left, right, getColumnValue, static (l, r) => !l.Equals(r));
+            ComparePromoted(left, right, getColumnValue, "not equal to", static (l, r) => !l.Equals(r));
 
 #if DEBUG
         public override string ToString() => $"{left} <> {right}";
@@ -121,7 +127,7 @@ internal abstract class BooleanExpression
     private sealed class GreaterThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) > 0);
+            ComparePromoted(left, right, getColumnValue, "greater than", static (l, r) => l.CompareTo(r) > 0);
 
 #if DEBUG
         public override string ToString() => $"{left} > {right}";
@@ -131,7 +137,7 @@ internal abstract class BooleanExpression
     private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) >= 0);
+            ComparePromoted(left, right, getColumnValue, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
 
 #if DEBUG
         public override string ToString() => $"{left} >= {right}";
@@ -141,7 +147,7 @@ internal abstract class BooleanExpression
     private sealed class LessThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) < 0);
+            ComparePromoted(left, right, getColumnValue, "less than", static (l, r) => l.CompareTo(r) < 0);
 
 #if DEBUG
         public override string ToString() => $"{left} < {right}";
@@ -151,7 +157,7 @@ internal abstract class BooleanExpression
     private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            ComparePromoted(left, right, getColumnValue, static (l, r) => l.CompareTo(r) <= 0);
+            ComparePromoted(left, right, getColumnValue, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
 
 #if DEBUG
         public override string ToString() => $"{left} <= {right}";

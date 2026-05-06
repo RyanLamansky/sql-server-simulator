@@ -115,8 +115,8 @@ public class InsertTests
         _ = connection.CreateCommand("create table t ( v tinyint )").ExecuteNonQuery();
         var insert = connection.CreateCommand("insert t values ( 300 )");
         var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        StringAssert.Contains(ex.Message, "Arithmetic overflow");
-        StringAssert.Contains(ex.Message, "tinyint");
+        Assert.Contains("Arithmetic overflow", ex.Message);
+        Assert.Contains("tinyint", ex.Message);
     }
 
     [TestMethod]
@@ -148,7 +148,7 @@ public class InsertTests
         AddTypedParameter(insert, "p", DbType.Int32, 300);
 
         var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        StringAssert.Contains(ex.Message, "Arithmetic overflow");
+        Assert.Contains("Arithmetic overflow", ex.Message);
     }
 
     [TestMethod]

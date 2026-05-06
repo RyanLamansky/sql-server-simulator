@@ -86,7 +86,7 @@ public class StringLiteralTests
         // SQL Server accepts 0x with no hex body as a zero-length varbinary;
         // the simulator follows.
         var bytes = (byte[])new Simulation().ExecuteScalar("select 0x")!;
-        AreEqual(0, bytes.Length);
+        IsEmpty(bytes);
     }
 
     [TestMethod]
@@ -103,7 +103,7 @@ public class StringLiteralTests
     public void StringLiteral_Unclosed_RaisesError()
     {
         var ex = Throws<System.Data.Common.DbException>(() => new Simulation().ExecuteReader("select 1 where 'unclosed = 1").EnumerateRecords().ToArray());
-        StringAssert.Contains(ex.Message, "Unclosed quotation mark");
+        Assert.Contains("Unclosed quotation mark", ex.Message);
     }
 
     [TestMethod]

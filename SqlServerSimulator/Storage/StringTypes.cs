@@ -69,6 +69,80 @@ internal sealed class VarbinarySqlType() : SqlType(SqlTypeCategory.Other)
 }
 
 /// <summary>
+/// SQL Server's deprecated <c>text</c> type: variable-length CP1252 string,
+/// stored off-row in LOB pages. Supports <c>LIKE</c>, <c>IS NULL</c>, and
+/// <c>CAST</c>/<c>CONVERT</c> to <c>varchar</c>/<c>nvarchar</c>; comparison
+/// (<c>=</c>, <c>&lt;&gt;</c>, etc.) raises Msg 402, and ORDER BY / GROUP BY
+/// / DISTINCT raise Msg 306. Encoded identically to <c>varchar</c> (CP1252
+/// bytes); the type identity is what gates the operation restrictions.
+/// </summary>
+internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
+{
+    public override bool IsFixedLength => false;
+
+    public override bool IsLob => true;
+
+    public override int GetVariableByteCount(SqlValue value) => CharSqlType.Cp1252Encoder.GetByteCount(value.AsString);
+
+    public override int Encode(SqlValue value, Span<byte> destination) => CharSqlType.Cp1252Encoder.GetBytes(value.AsString, destination);
+
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromText(CharSqlType.Cp1252Encoder.GetString(source));
+
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromText((string)raw);
+
+    public override string ToString() => "text";
+}
+
+/// <summary>
+/// SQL Server's deprecated <c>ntext</c> type: variable-length UTF-16 LE
+/// string, stored off-row in LOB pages. Same operation restrictions as
+/// <see cref="TextSqlType"/>.
+/// </summary>
+internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
+{
+    public override bool IsFixedLength => false;
+
+    public override bool IsLob => true;
+
+    public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
+
+    public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
+
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNText(Encoding.Unicode.GetString(source));
+
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNText((string)raw);
+
+    public override string ToString() => "ntext";
+}
+
+/// <summary>
+/// SQL Server's deprecated <c>image</c> type: variable-length raw bytes,
+/// stored off-row in LOB pages. Same operation restrictions as
+/// <see cref="TextSqlType"/>.
+/// </summary>
+internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
+{
+    public override bool IsFixedLength => false;
+
+    public override bool IsLob => true;
+
+    public override int GetVariableByteCount(SqlValue value) => value.AsBytes.Length;
+
+    public override int Encode(SqlValue value, Span<byte> destination)
+    {
+        var bytes = value.AsBytes;
+        bytes.CopyTo(destination);
+        return bytes.Length;
+    }
+
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromImage(source.ToArray());
+
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromImage((byte[])raw);
+
+    public override string ToString() => "image";
+}
+
+/// <summary>
 /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string, declared length
 /// 1-8000 bytes. Each declared length is a distinct singleton (mirroring the
 /// <c>decimal(p, s)</c> pattern); reference equality flows through the type-

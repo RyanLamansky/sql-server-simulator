@@ -154,7 +154,7 @@ public sealed class UniqueIdentifierTests
         var literal = sourceTypeSql == "date" ? "'2024-01-01'" : "0";
         var ex = Throws<DbException>(() => ExecuteScalar(
             $"select cast(cast({literal} as {sourceTypeSql}) as uniqueidentifier)"));
-        StringAssert.StartsWith(ex.Message, $"Explicit conversion from data type {sourceTypeSql} to uniqueidentifier is not allowed.");
+        Assert.StartsWith($"Explicit conversion from data type {sourceTypeSql} to uniqueidentifier is not allowed.", ex.Message);
     }
 
     [TestMethod]
@@ -271,7 +271,7 @@ public sealed class UniqueIdentifierTests
         // existing Msg 2716 path.
         var simulation = new Simulation();
         var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("create table t (id uniqueidentifier(16))"));
-        StringAssert.Contains(ex.Message, "Cannot specify a column width on data type uniqueidentifier");
+        Assert.Contains("Cannot specify a column width on data type uniqueidentifier", ex.Message);
     }
 
     [TestMethod]

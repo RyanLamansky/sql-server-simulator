@@ -110,6 +110,28 @@ internal class Product
 }
 
 /// <summary>
+/// Exercises the simulator's <c>nvarchar(MAX)</c> / <c>varchar(MAX)</c> /
+/// <c>varbinary(MAX)</c> support through EF Core — the LOB-eligible MAX
+/// siblings of the bounded var types. EF Core's default mapping for an
+/// unannotated <c>string</c> property is <c>nvarchar(max)</c>, so this
+/// entity is also a regression check for the simulator handling that
+/// default without a length annotation.
+/// </summary>
+internal class Article
+{
+    public int Id { get; set; }
+
+    // Default EF mapping for string is nvarchar(max).
+    public string Body { get; set; } = null!;
+
+    [Column(TypeName = "varchar(max)")]
+    public string? Summary { get; set; }
+
+    [Column(TypeName = "varbinary(max)")]
+    public byte[]? Attachment { get; set; }
+}
+
+/// <summary>
 /// Exercises the simulator's <c>IDENTITY</c> column support through EF Core.
 /// EF Core defaults int primary keys to <c>ValueGeneratedOnAdd</c>; with the
 /// SqlServer provider this means the column is created with <c>IDENTITY(1, 1)</c>
@@ -162,6 +184,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Document> Documents => Set<Document>();
 
     public DbSet<Product> Products => Set<Product>();
+
+    public DbSet<Article> Articles => Set<Article>();
 
     public DbSet<Widget> Widgets => Set<Widget>();
 
@@ -219,6 +243,23 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Id int,
                     ExternalKey uniqueidentifier not null,
                     OptionalKey uniqueidentifier null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateArticlesSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Articles (
+                    Id int,
+                    Body nvarchar(max) not null,
+                    Summary varchar(max) null,
+                    Attachment varbinary(max) null
                 )
                 """)
             .ExecuteNonQuery();

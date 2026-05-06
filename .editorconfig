@@ -17,4 +17,15 @@ dotnet_diagnostic.IDE0040.severity = none # Add accessibility modifiers
 dotnet_diagnostic.IDE0061.severity = none # Use block body for local function
 dotnet_diagnostic.IDE0072.severity = none # Add missing cases
 
+dotnet_diagnostic.MSTEST0017.severity = error # Assertion arguments should be passed in the correct order (expected then actual)
+dotnet_diagnostic.MSTEST0024.severity = error # Do not store TestContext in a static or readonly field
+dotnet_diagnostic.MSTEST0025.severity = error # Use 'Assert.Fail' instead of always-failing constructs
+dotnet_diagnostic.MSTEST0026.severity = error # Avoid conditional access in assertions
+dotnet_diagnostic.MSTEST0032.severity = error # Review or remove the assertion as its condition is known to be always true
+dotnet_diagnostic.MSTEST0036.severity = error # Don't compare strings using '==' operator in tests
+dotnet_diagnostic.MSTEST0037.severity = error # Use proper Assert methods (avoid generic Assert.AreEqual on known types)
+dotnet_diagnostic.MSTEST0038.severity = error # Don't use 'Assert.AreSame' / 'Assert.AreNotSame' with value types
+dotnet_diagnostic.MSTEST0039.severity = error # Use 'Assert.Throws<T>' over the legacy 'Assert.ThrowsException<T>'
+dotnet_diagnostic.MSTEST0042.severity = error # Duplicate attribute
+dotnet_diagnostic.MSTEST0046.severity = error # Use 'Assert.Contains' instead of 'StringAssert.Contains'
 dotnet_diagnostic.MSTEST0049.severity = error # Flow TestContext.CancellationToken to async operations

@@ -100,7 +100,7 @@ public class MixedTypeRowTests
         SqlType[] schema = [SqlType.TinyInt, SqlType.SmallInt, SqlType.Int32, SqlType.BigInt, SqlType.Bit];
         // 1 + 2 + 4 + 8 + 1 = 16 bytes of fixed data; plus 4 header + 2 column count + 1 NULL bitmap = 23.
         var bytes = RowEncoder.EncodeRow(schema, [SqlValue.FromByte(0), SqlValue.FromInt16(0), 0, SqlValue.FromInt64(0L), SqlValue.FromBoolean(false)]);
-        AreEqual(23, bytes.Length);
+        HasCount(23, bytes);
         AreEqual(20, BitConverter.ToUInt16(bytes, 2)); // fixed-end = 4 + 16
         AreEqual(5, BitConverter.ToUInt16(bytes, 20)); // column count
     }

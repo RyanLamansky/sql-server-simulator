@@ -152,7 +152,7 @@ public class VarLengthRowTests
         //   [9-10] offset array entry 0 = absolute end = 13
         //   [11-12] var data: "hi"
         var bytes = RowEncoder.EncodeRow([SqlType.Varchar], [SqlValue.FromVarchar("hi")]);
-        AreEqual(13, bytes.Length);
+        HasCount(13, bytes);
         AreEqual(0x30, bytes[0]);
         AreEqual(0x00, bytes[1]);
         AreEqual(4, BitConverter.ToUInt16(bytes, 2));
@@ -234,7 +234,7 @@ public class VarLengthRowTests
     public void Varbinary_Empty_RoundTrips()
     {
         var decoded = RowDecoder.DecodeRow([SqlType.Varbinary], RowEncoder.EncodeRow([SqlType.Varbinary], [SqlValue.FromVarbinary([])]));
-        AreEqual(0, decoded[0].AsBytes.Length);
+        IsEmpty(decoded[0].AsBytes);
     }
 
     [TestMethod]

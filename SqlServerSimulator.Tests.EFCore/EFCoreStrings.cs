@@ -84,9 +84,9 @@ public class EFCoreStrings
 
         var ex = Assert.Throws<DbUpdateException>(() => context.SaveChanges());
         Assert.IsNotNull(ex.InnerException);
-        StringAssert.Contains(ex.InnerException.Message, "would be truncated");
-        StringAssert.Contains(ex.InnerException.Message, "People");
-        StringAssert.Contains(ex.InnerException.Message, "Name");
+        Assert.Contains("would be truncated", ex.InnerException.Message);
+        Assert.Contains("People", ex.InnerException.Message);
+        Assert.Contains("Name", ex.InnerException.Message);
     }
 
     [TestMethod]
@@ -143,9 +143,9 @@ public class EFCoreStrings
 
         var ex = Assert.Throws<DbUpdateException>(() => context.SaveChanges());
         Assert.IsNotNull(ex.InnerException);
-        StringAssert.Contains(ex.InnerException.Message, "would be truncated");
-        StringAssert.Contains(ex.InnerException.Message, "Avatar");
-        StringAssert.Contains(ex.InnerException.Message, "0x"); // hex prefix, not string
+        Assert.Contains("would be truncated", ex.InnerException.Message);
+        Assert.Contains("Avatar", ex.InnerException.Message);
+        Assert.Contains("0x", ex.InnerException.Message); // hex prefix, not string
     }
 
     [TestMethod]

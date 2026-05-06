@@ -43,7 +43,7 @@ partial class Simulation
     /// </remarks>
     private static void EnforceMaxLength(SqlValue source, HeapColumn column, string tableName, Simulation simulation)
     {
-        if (source.IsNull || column.MaxLength is not int max)
+        if (source.IsNull || column.MaxLength is not int max || max == SqlType.MaxLengthSentinel)
             return;
 
         int actual;

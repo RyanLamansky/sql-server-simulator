@@ -17,13 +17,28 @@ internal static class RowDecoder
     private const byte TagA_VarSection = 0x20;
 
     /// <summary>
-    /// Decodes every column of a row against a known schema.
+    /// <see cref="SqlType"/>-only entry point. LOB-eligibility is determined
+    /// by <see cref="SqlType.IsLob"/> alone — sufficient for
+    /// <c>text</c>/<c>ntext</c>/<c>image</c>, but MAX siblings of
+    /// varchar/nvarchar/varbinary need the
+    /// <see cref="DecodeRow(ReadOnlySpan{HeapColumn}, ReadOnlySpan{byte}, Heap?)"/>
+    /// overload to surface as LOB-eligible.
     /// </summary>
-    /// <param name="schema">Per-column types; must match the schema used to encode the row.</param>
-    /// <param name="bytes">The encoded row bytes.</param>
-    /// <exception cref="ArgumentException"><paramref name="schema"/> is empty.</exception>
-    /// <exception cref="InvalidDataException">The bytes are not a valid row for the given schema.</exception>
     public static SqlValue[] DecodeRow(ReadOnlySpan<SqlType> schema, ReadOnlySpan<byte> bytes)
+    {
+        var columns = new HeapColumn[schema.Length];
+        for (var i = 0; i < schema.Length; i++)
+            columns[i] = new HeapColumn(string.Empty, schema[i], maxLength: null, nullable: true);
+        return DecodeRow(columns, bytes, lobStore: null);
+    }
+
+    /// <summary>
+    /// Column-aware row decode. <paramref name="lobStore"/> resolves any
+    /// off-row LOB pointers; pass <c>null</c> only when the encoded row is
+    /// known to have all LOB-eligible columns inline (e.g. projection result
+    /// sets).
+    /// </summary>
+    public static SqlValue[] DecodeRow(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes, Heap? lobStore = null)
     {
         var header = ValidateHeader(schema, bytes);
         var values = new SqlValue[schema.Length];
@@ -37,7 +52,7 @@ internal static class RowDecoder
         {
             var isNull = IsNullColumn(bytes, header.BitmapStart, i);
 
-            if (schema[i] == SqlType.Bit)
+            if (schema[i].Type == SqlType.Bit)
             {
                 if (bitsInRun % 8 == 0)
                 {
@@ -49,10 +64,10 @@ internal static class RowDecoder
                     : SqlValue.FromBoolean((bytes[bitByteOffset] & (1 << (bitsInRun % 8))) != 0);
                 bitsInRun++;
             }
-            else if (schema[i].IsFixedLength)
+            else if (schema[i].Type.IsFixedLength)
             {
-                var width = schema[i].FixedLength;
-                values[i] = isNull ? SqlValue.Null(schema[i]) : schema[i].Decode(bytes.Slice(fixedPos, width));
+                var width = schema[i].Type.FixedLength;
+                values[i] = isNull ? SqlValue.Null(schema[i].Type) : schema[i].Type.Decode(bytes.Slice(fixedPos, width));
                 fixedPos += width;
                 bitsInRun = 0;
             }
@@ -62,7 +77,9 @@ internal static class RowDecoder
                 if (end < prevVarEnd)
                     throw new InvalidDataException($"Var offset {end} at index {varIndex} regresses past previous {prevVarEnd}.");
 
-                values[i] = isNull ? SqlValue.Null(schema[i]) : schema[i].Decode(bytes[prevVarEnd..end]);
+                values[i] = isNull
+                    ? SqlValue.Null(schema[i].Type)
+                    : DecodeVarValue(schema[i], bytes[prevVarEnd..end], lobStore);
                 prevVarEnd = end;
                 varIndex++;
             }
@@ -76,13 +93,19 @@ internal static class RowDecoder
     /// other columns. The data reader uses this to navigate row bytes directly
     /// per <see cref="System.Data.Common.DbDataReader"/> accessor call.
     /// </summary>
-    /// <param name="schema">Per-column types; must match the schema used to encode the row.</param>
-    /// <param name="bytes">The encoded row bytes.</param>
-    /// <param name="ordinal">Zero-based column index within <paramref name="schema"/>.</param>
-    /// <exception cref="ArgumentException"><paramref name="schema"/> is empty.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="ordinal"/> is out of range.</exception>
-    /// <exception cref="InvalidDataException">The bytes are not a valid row for the given schema.</exception>
     public static SqlValue DecodeColumn(ReadOnlySpan<SqlType> schema, ReadOnlySpan<byte> bytes, int ordinal)
+    {
+        var columns = new HeapColumn[schema.Length];
+        for (var i = 0; i < schema.Length; i++)
+            columns[i] = new HeapColumn(string.Empty, schema[i], maxLength: null, nullable: true);
+        return DecodeColumn(columns, bytes, ordinal, lobStore: null);
+    }
+
+    /// <summary>
+    /// Column-aware single-column decode. <paramref name="lobStore"/> resolves
+    /// any off-row LOB pointers.
+    /// </summary>
+    public static SqlValue DecodeColumn(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes, int ordinal, Heap? lobStore = null)
     {
         if ((uint)ordinal >= (uint)schema.Length)
             throw new ArgumentOutOfRangeException(nameof(ordinal), $"Ordinal {ordinal} is out of range for schema of {schema.Length} columns.");
@@ -98,7 +121,7 @@ internal static class RowDecoder
         {
             var isNull = IsNullColumn(bytes, header.BitmapStart, i);
 
-            if (schema[i] == SqlType.Bit)
+            if (schema[i].Type == SqlType.Bit)
             {
                 if (bitsInRun % 8 == 0)
                 {
@@ -113,11 +136,11 @@ internal static class RowDecoder
                 }
                 bitsInRun++;
             }
-            else if (schema[i].IsFixedLength)
+            else if (schema[i].Type.IsFixedLength)
             {
-                var width = schema[i].FixedLength;
+                var width = schema[i].Type.FixedLength;
                 if (i == ordinal)
-                    return isNull ? SqlValue.Null(schema[i]) : schema[i].Decode(bytes.Slice(fixedPos, width));
+                    return isNull ? SqlValue.Null(schema[i].Type) : schema[i].Type.Decode(bytes.Slice(fixedPos, width));
                 fixedPos += width;
                 bitsInRun = 0;
             }
@@ -128,7 +151,11 @@ internal static class RowDecoder
                     throw new InvalidDataException($"Var offset {end} at index {varIndex} regresses past previous {prevVarEnd}.");
 
                 if (i == ordinal)
-                    return isNull ? SqlValue.Null(schema[i]) : schema[i].Decode(bytes[prevVarEnd..end]);
+                {
+                    return isNull
+                        ? SqlValue.Null(schema[i].Type)
+                        : DecodeVarValue(schema[i], bytes[prevVarEnd..end], lobStore);
+                }
                 prevVarEnd = end;
                 varIndex++;
             }
@@ -137,12 +164,36 @@ internal static class RowDecoder
         throw new InvalidOperationException("Unreachable: loop terminates on hit.");
     }
 
+    private static SqlValue DecodeVarValue(HeapColumn column, ReadOnlySpan<byte> payload, Heap? lobStore)
+    {
+        if (!column.IsLob)
+            return column.Type.Decode(payload);
+
+        if (payload.Length == 0)
+            throw new InvalidDataException($"LOB-eligible column has zero-byte payload but isn't NULL; the marker prefix is required.");
+
+        var marker = payload[0];
+        return marker switch
+        {
+            RowEncoder.LobInlineMarker => column.Type.Decode(payload[1..]),
+            RowEncoder.LobPointerMarker when lobStore is null
+                => throw new InvalidDataException($"LOB pointer in row, but no LOB store was provided to resolve it."),
+            RowEncoder.LobPointerMarker
+                => lobStore.ReadLobChain(
+                    BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(1, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(5, 4)),
+                    column.Type,
+                    static (span, type) => type.Decode(span)),
+            _ => throw new InvalidDataException($"Unknown LOB marker byte 0x{marker:X2}."),
+        };
+    }
+
     private static bool IsNullColumn(ReadOnlySpan<byte> bytes, int bitmapStart, int ordinal) =>
         (bytes[bitmapStart + (ordinal / 8)] & (1 << (ordinal % 8))) != 0;
 
     private readonly record struct RowHeader(int BitmapStart, int VarOffsetArrayStart, int VarDataStart);
 
-    private static RowHeader ValidateHeader(ReadOnlySpan<SqlType> schema, ReadOnlySpan<byte> bytes)
+    private static RowHeader ValidateHeader(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes)
     {
         if (schema.Length == 0)
             throw new ArgumentException("Schema must have at least one column.", nameof(schema));
@@ -153,15 +204,15 @@ internal static class RowDecoder
         var bitsInRun = 0;
         for (var i = 0; i < n; i++)
         {
-            if (schema[i] == SqlType.Bit)
+            if (schema[i].Type == SqlType.Bit)
             {
                 if (bitsInRun % 8 == 0)
                     fixedSectionLength++;
                 bitsInRun++;
             }
-            else if (schema[i].IsFixedLength)
+            else if (schema[i].Type.IsFixedLength)
             {
-                fixedSectionLength += schema[i].FixedLength;
+                fixedSectionLength += schema[i].Type.FixedLength;
                 bitsInRun = 0;
             }
             else

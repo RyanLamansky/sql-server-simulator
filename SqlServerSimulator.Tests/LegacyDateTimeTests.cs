@@ -185,7 +185,7 @@ public sealed class LegacyDateTimeTests
         var rows = new List<DateTime>();
         while (reader.Read())
             rows.Add(reader.GetDateTime(0));
-        AreEqual(2, rows.Count);
+        HasCount(2, rows);
         AreEqual(new DateTime(1900, 1, 1), rows[0]);
         // .998 rounds half-up to the next tick boundary, materializing at
         // 9_966_666 100-ns ticks past 12:00:00 (SQL Server displays this as
@@ -235,7 +235,7 @@ public sealed class LegacyDateTimeTests
         var ids = new List<int>();
         while (reader.Read())
             ids.Add(reader.GetInt32(0));
-        AreEqual(2, ids.Count);
+        HasCount(2, ids);
     }
 
     [TestMethod]
@@ -248,7 +248,7 @@ public sealed class LegacyDateTimeTests
         var ids = new List<int>();
         while (reader.Read())
             ids.Add(reader.GetInt32(0));
-        AreEqual(1, ids.Count);
+        HasCount(1, ids);
         AreEqual(1, ids[0]);
     }
 
@@ -359,8 +359,8 @@ public sealed class LegacyDateTimeTests
     [TestMethod]
     public void Cast_DateTimeToBit_NonZeroIsTrue()
     {
-        AreEqual(false, ExecuteScalar("select cast(cast('1900-01-01' as datetime) as bit)"));
-        AreEqual(true, ExecuteScalar("select cast(cast('1900-01-02' as datetime) as bit)"));
+        IsFalse(ExecuteScalar<bool>("select cast(cast('1900-01-01' as datetime) as bit)"));
+        IsTrue(ExecuteScalar<bool>("select cast(cast('1900-01-02' as datetime) as bit)"));
     }
 
     [TestMethod]

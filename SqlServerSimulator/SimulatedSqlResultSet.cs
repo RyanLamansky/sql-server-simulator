@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Tabular query result whose rows are encoded byte arrays in the page-row
 /// format. The reader navigates the row's bytes directly via
-/// <see cref="RowDecoder.DecodeColumn"/> on each accessor call, never
+/// <see cref="RowDecoder"/> on each accessor call, never
 /// rehydrating the row into <see cref="SqlValue"/>[].
 /// </summary>
 internal sealed class SimulatedSqlResultSet(SqlType[] schema, string[] columnNames, IEnumerable<byte[]> rowBytes) : SimulatedQueryResult

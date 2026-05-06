@@ -511,6 +511,17 @@ internal sealed class SimulatedSqlException : DbException
         new("ORDER BY items must appear in the select list if SELECT DISTINCT is specified.", 145, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 306: a <c>text</c>, <c>ntext</c>, or
+    /// <c>image</c> column appeared in a context that requires comparison or
+    /// sorting (ORDER BY, GROUP BY, DISTINCT, or as an operand the simulator
+    /// would otherwise route to <see cref="IComparable"/>). <c>LIKE</c> and
+    /// <c>IS NULL</c>/<c>IS NOT NULL</c> are exempt and dispatch through
+    /// their dedicated paths before this check fires.
+    /// </summary>
+    internal static SimulatedSqlException LobTypesCannotBeComparedOrSorted() =>
+        new("The text, ntext, and image data types cannot be compared or sorted, except when using IS NULL or LIKE operator.", 306, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 108: a positional <c>ORDER BY</c> ordinal
     /// (e.g. <c>order by 0</c>, <c>order by 5</c> with only 3 columns) is
     /// outside the projection's column count. The validation is 1-based.

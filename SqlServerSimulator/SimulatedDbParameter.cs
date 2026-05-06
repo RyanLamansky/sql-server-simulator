@@ -43,6 +43,7 @@ sealed class SimulatedDbParameter : DbParameter
                 {
                     int => DbType.Int32,
                     string => DbType.String,
+                    byte[] => DbType.Binary,
                     DateOnly => DbType.Date,
                     DateTime => DbType.DateTime2,
                     DateTimeOffset => DbType.DateTimeOffset,

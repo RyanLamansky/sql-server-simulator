@@ -20,7 +20,7 @@ public class HeapPageTests
         AreEqual((ushort)HeapPage.HeaderSize, page.FreeSpacePointer);
         AreEqual(-1, page.NextPageIndex);
         AreEqual(-1, page.PrevPageIndex);
-        AreEqual(HeapPage.PageSize, page.Bytes.Length);
+        HasCount(HeapPage.PageSize, page.Bytes);
     }
 
     [TestMethod]
@@ -37,7 +37,7 @@ public class HeapPageTests
         AreEqual((ushort)HeapPage.HeaderSize, slot0);
 
         var rows = page.EnumerateRows().ToList();
-        AreEqual(1, rows.Count);
+        HasCount(1, rows);
         CollectionAssert.AreEqual(new byte[] { 0x80, 0x81, 0x82 }, rows[0]);
     }
 
@@ -52,7 +52,7 @@ public class HeapPageTests
         AreEqual((ushort)3, page.SlotCount);
 
         var rows = page.EnumerateRows().ToList();
-        AreEqual(3, rows.Count);
+        HasCount(3, rows);
         CollectionAssert.AreEqual(new byte[] { 0x80 }, rows[0]);
         CollectionAssert.AreEqual(new byte[] { 0x90, 0x91 }, rows[1]);
         CollectionAssert.AreEqual(new byte[] { 0xA0, 0xA1, 0xA2 }, rows[2]);
@@ -83,7 +83,7 @@ public class HeapPageTests
         AreEqual(0, page.FreeSpace);
 
         var rows = page.EnumerateRows().ToList();
-        AreEqual(1, rows.Count);
+        HasCount(1, rows);
         CollectionAssert.AreEqual(big, rows[0]);
     }
 

@@ -29,6 +29,28 @@ internal abstract class SqlType
     public abstract bool IsFixedLength { get; }
 
     /// <summary>
+    /// True for types that always store their content off-row in a LOB page
+    /// chain — currently <c>text</c>, <c>ntext</c>, <c>image</c>. The MAX
+    /// variants of <c>varchar</c>/<c>nvarchar</c>/<c>varbinary</c> are LOB-
+    /// eligible at the <em>column</em> level (when <c>HeapColumn.MaxLength</c>
+    /// is the <see cref="MaxLengthSentinel"/>) but the <see cref="SqlType"/>
+    /// instance itself isn't always-LOB; row-level decisions consult both
+    /// signals via <c>HeapColumn.IsLob</c>.
+    /// </summary>
+    public virtual bool IsLob => false;
+
+    /// <summary>
+    /// Sentinel value used in <see cref="HeapColumn.MaxLength"/> /
+    /// <c>declaredMaxLength</c> / cast <c>targetMaxLength</c> to signal MAX
+    /// length for <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c> /
+    /// <c>varbinary(MAX)</c>. <c>text</c>, <c>ntext</c>, and <c>image</c> are
+    /// always-LOB and don't accept a length spec; their <see cref="HeapColumn.MaxLength"/>
+    /// is also set to the sentinel for symmetry, even though the column
+    /// declaration didn't carry an explicit MAX.
+    /// </summary>
+    public const int MaxLengthSentinel = -1;
+
+    /// <summary>
     /// Byte width for fixed-length types. Throws for variable-length types.
     /// </summary>
     public virtual int FixedLength => throw new NotSupportedException($"{this} is variable-length; FixedLength is undefined.");
@@ -76,8 +98,10 @@ internal abstract class SqlType
     {
         _ when this == UniqueIdentifier => 16,
         _ when this == SystemName => 15,
+        _ when this == NText => 14,
         _ when this == NVarchar => 14,
         NCharSqlType => 13,
+        _ when this == Text => 12,
         _ when this == Varchar => 12,
         CharSqlType => 11,
         _ when this == Float => 9,
@@ -389,6 +413,27 @@ internal abstract class SqlType
     /// receiving it from <see cref="SqlValue.AsBytes"/>.
     /// </remarks>
     public static readonly SqlType Varbinary = new VarbinarySqlType();
+
+    /// <remarks>
+    /// SQL Server's deprecated <c>text</c> type: <c>varchar</c>-shaped CP1252
+    /// storage, always off-row in a LOB chain. Encodes identically to
+    /// <see cref="Varchar"/>; the distinct singleton exists so the
+    /// expression layer can apply the operation restrictions Msg 402
+    /// (no comparison) and Msg 306 (no sort/group/distinct).
+    /// </remarks>
+    public static readonly SqlType Text = new TextSqlType();
+
+    /// <remarks>
+    /// SQL Server's deprecated <c>ntext</c> type: <c>nvarchar</c>-shaped UTF-16
+    /// storage, always off-row. Same restrictions as <see cref="Text"/>.
+    /// </remarks>
+    public static readonly SqlType NText = new NTextSqlType();
+
+    /// <remarks>
+    /// SQL Server's deprecated <c>image</c> type: <c>varbinary</c>-shaped raw
+    /// bytes, always off-row. Same restrictions as <see cref="Text"/>.
+    /// </remarks>
+    public static readonly SqlType Image = new ImageSqlType();
 
     /// <remarks>
     /// SQL Server's <c>date</c>: 3-byte fixed-length storage representing days
@@ -718,6 +763,14 @@ internal abstract class SqlType
             {
                 "DATE" => Date,
                 "REAL" => Real,
+                "TEXT" => Text,
+                _ => null
+            },
+            5 => upper switch
+            {
+                "MONEY" => Money,
+                "NTEXT" => NText,
+                "IMAGE" => Image,
                 _ => null
             },
             6 => upper switch
@@ -741,11 +794,6 @@ internal abstract class SqlType
             9 => upper switch
             {
                 "VARBINARY" => Varbinary,
-                _ => null
-            },
-            5 => upper switch
-            {
-                "MONEY" => Money,
                 _ => null
             },
             10 => upper switch
@@ -772,8 +820,22 @@ internal abstract class SqlType
         // any per-type validation (e.g. varchar(0), datetime(0)). datetime2 /
         // time / datetimeoffset are unaffected because their N=0 cases are
         // dispatched ahead of this branch (precision 0 is valid there).
+        // declaredMaxLength == MaxLengthSentinel is the MAX path (varchar/
+        // nvarchar/varbinary only), which skips the zero check.
         if (declaredMaxLength == 0)
             throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(0, name.LineNumber);
+
+        // text/ntext/image are always-LOB and don't accept a length spec.
+        // The MaxLength field on the resulting column is set to the sentinel
+        // for symmetry with the explicit-MAX path on varchar/nvarchar/varbinary.
+        if (resolved.IsLob)
+        {
+            return declaredMaxLength is not null
+                ? throw (columnName is not null
+                    ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
+                    : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
+                : (resolved, MaxLengthSentinel);
+        }
 
         if (resolved.IsFixedLength)
         {
@@ -783,6 +845,13 @@ internal abstract class SqlType
                     : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
                 : (resolved, null);
         }
+
+        // varchar(MAX) / nvarchar(MAX) / varbinary(MAX): the LOB-eligible form
+        // of the same SqlType singleton. HeapColumn.MaxLength carries the
+        // sentinel; row-level encoder uses it to route the column through LOB
+        // storage when present.
+        if (declaredMaxLength == MaxLengthSentinel)
+            return (resolved, MaxLengthSentinel);
 
         // Variable-length string types are bounded per type; SQL Server defaults
         // a missing length to 1 (with a warning the simulator does not raise).

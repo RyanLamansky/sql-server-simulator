@@ -196,7 +196,7 @@ public sealed class SmallDateTimeTests
         var rows = new List<DateTime>();
         while (reader.Read())
             rows.Add(reader.GetDateTime(0));
-        AreEqual(3, rows.Count);
+        HasCount(3, rows);
         AreEqual(new DateTime(1900, 1, 1), rows[0]);
         AreEqual(new DateTime(2024, 1, 15, 12, 31, 0), rows[1]);
         AreEqual(new DateTime(2079, 6, 6, 23, 59, 0), rows[2]);
@@ -245,7 +245,7 @@ public sealed class SmallDateTimeTests
         var ids = new List<int>();
         while (reader.Read())
             ids.Add(reader.GetInt32(0));
-        AreEqual(2, ids.Count);
+        HasCount(2, ids);
     }
 
     [TestMethod]

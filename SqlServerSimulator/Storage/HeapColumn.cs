@@ -23,6 +23,15 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public readonly bool Nullable = nullable;
 
     /// <summary>
+    /// True for columns whose values flow through LOB-chain storage rather
+    /// than the row's variable section: <c>text</c>, <c>ntext</c>, <c>image</c>
+    /// (always-LOB types) plus <c>varchar(MAX)</c>, <c>nvarchar(MAX)</c>,
+    /// <c>varbinary(MAX)</c> (when <see cref="MaxLength"/> is the
+    /// <see cref="SqlType.MaxLengthSentinel"/>).
+    /// </summary>
+    public bool IsLob => this.Type.IsLob || this.MaxLength == SqlType.MaxLengthSentinel;
+
+    /// <summary>
     /// Non-null when the column was declared <c>IDENTITY(seed, increment)</c>;
     /// owns the per-table counter and answers <c>IDENT_CURRENT</c>.
     /// </summary>

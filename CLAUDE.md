@@ -12,7 +12,7 @@ High-fidelity SQL Server simulation, eventually including transactions, locks, M
 
 When SQL Server's actual behavior is quirky or lossy (CP1252's silent `?` replacement for out-of-codepage characters, ANSI trailing-space padding for `=`, `LEN` excluding trailing spaces), mirror it rather than "fixing" it — authenticity over desirability is what makes the simulator a faithful stand-in.
 
-The overall plan is incremental and non-specific: pick the lowest-effort path that unlocks the most useful application compatibility next. Transactions / locks / MVCC, the `varchar(MAX)` family — both are eventual targets, but the order is opportunistic, driven by what's blocking the user's actual application stand-ins. Over time, this accretion gets the simulator to "most apps just work"; near term, work flows to the smallest unlock for the biggest cohort of pain points.
+The overall plan is incremental and non-specific: pick the lowest-effort path that unlocks the most useful application compatibility next. Transactions / locks / MVCC are the next obvious eventual target; order is opportunistic, driven by what's blocking the user's actual application stand-ins. Over time, this accretion gets the simulator to "most apps just work"; near term, work flows to the smallest unlock for the biggest cohort of pain points.
 
 ## Public API surface
 
@@ -20,7 +20,7 @@ The overall plan is incremental and non-specific: pick the lowest-effort path th
 
 ## Architecture shape
 
-One backend: page-format storage. User tables hold a heap of 8KB pages; rows are encoded as bytes via a row encoder/decoder and navigated column-by-column without rehydrating whole rows. The type system has its own `SqlType`/`SqlValue` pair. Expression evaluation has separate paths for runtime evaluation and static type-of resolution (for projection planning).
+One backend: page-format storage. User tables hold a heap of 8KB pages; rows are encoded as bytes via a row encoder/decoder and navigated column-by-column without rehydrating whole rows. Oversize values for the LOB-eligible types (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` / `text` / `ntext` / `image`) flow through a parallel chain of 8KB LOB pages on the same heap; the row stores an inline marker plus a chain-head pointer. The type system has its own `SqlType`/`SqlValue` pair. Expression evaluation has separate paths for runtime evaluation and static type-of resolution (for projection planning).
 
 Top-level subsystems (in `SqlServerSimulator/`):
 - `Storage/` — pages, row encoder/decoder, types, values
@@ -56,7 +56,7 @@ Each test project has an `AssemblyHooks.cs` with a `static [TestClass]` hosting 
 Every test project uses `[assembly: Parallelize(Scope = ExecutionScope.MethodLevel)]`. New test projects should follow.
 
 ### Exception types
-`SimulatedSqlException` mirrors a real SQL Server error — its number, class, state, and message format. Use it when the simulator's behavior matches SQL Server's: invalid SQL, type mismatches, constraint violations, oversize column declarations, truncation. `NotSupportedException` is for valid SQL Server features the simulator hasn't built yet (row-overflow pages, `varchar(MAX)`, etc.); name the unmodeled feature in the message. The distinction matters to users debugging tests against the simulator: "this is invalid SQL" should look different from "this works against real SQL Server but not yet here."
+`SimulatedSqlException` mirrors a real SQL Server error — its number, class, state, and message format. Use it when the simulator's behavior matches SQL Server's: invalid SQL, type mismatches, constraint violations, oversize column declarations, truncation. `NotSupportedException` is for valid SQL Server features the simulator hasn't built yet; name the unmodeled feature in the message. The distinction matters to users debugging tests against the simulator: "this is invalid SQL" should look different from "this works against real SQL Server but not yet here."
 
 ### Commit messages
 Single sentence with period. Concrete artifacts named where useful. Squashes capture the intended end state, not the working steps.
@@ -72,13 +72,14 @@ Prefer public-API tests when the behavior is reachable from SQL — they exercis
 Heavy-hitters someone might assume work but don't. Source and `git log` are the truth for what's done; this list is for what isn't.
 
 - Transactions / locks / MVCC.
-- Row-overflow / LOB pages and the `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` types they enable.
+- Row-overflow pages for ordinary `varchar(N)`/`nvarchar(N)`/`varbinary(N)` columns aren't modeled — rows whose declared bounded var values together exceed 8060 bytes still fail at insert. The MAX siblings (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)`) and the always-LOB types (`text` / `ntext` / `image`) bypass the row-size limit through their own LOB-chain pages.
+- `text` / `ntext` / `image` operation restrictions: comparison (Msg 402) and ORDER BY / DISTINCT (Msg 306) are enforced; function-level restrictions (e.g. `LEN(ntext)` raising Msg 8116) and the legacy `READTEXT`/`WRITETEXT`/`UPDATETEXT` family aren't modeled.
 - `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout.
 - `NEWSEQUENTIALID()` (deferred until `DEFAULT`-clause support exists in `CREATE TABLE`; the function is only valid in that context).
 - `CONVERT` / `TRY_CONVERT` style-code coverage. Only styles `0`, `120`, and `121` are wired up for date-like sources targeting a character string (the EF Core code-generation defaults). Other style numbers raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date-parsing styles aren't modeled.
 - `LIKE` `COLLATE` override. The default collation (case-insensitive, Latin1_General-shaped) is what every `LIKE` runs under; explicit `COLLATE` clauses on the predicate aren't parsed yet.
 - Cross-category `Promote` for integer ↔ string. Only CAST works for that pair.
-- EF Core compatibility: the `SqlServerSimulator.EFCore` adapter (`UseSqlServerSimulator(...)`) covers the seven `SqlParameter`-downcast pairs — `DateOnly → date`, `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly → time(N)`, `TimeSpan → time(N)`, `decimal → money`, `decimal → smallmoney`. Without the adapter (plain `UseSqlServer`), those mappings still throw at SaveChanges as before. Other type pairs the SqlServer provider supports but aren't modeled here (e.g. `hierarchyid`, `geography`, `geometry`, `rowversion`) are not bridged.
+- EF Core compatibility: the `SqlServerSimulator.EFCore` adapter (`UseSqlServerSimulator(...)`) covers the seven `SqlParameter`-downcast pairs — `DateOnly → date`, `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly → time(N)`, `TimeSpan → time(N)`, `decimal → money`, `decimal → smallmoney`. Without the adapter (plain `UseSqlServer`), those mappings still throw at SaveChanges as before. The MAX-string family (default-mapped `string` → `nvarchar(max)`, `[Column(TypeName = "varchar(max)")]`, `[Column(TypeName = "varbinary(max)")]`) flows through plain `UseSqlServer` without needing the adapter. Other type pairs the SqlServer provider supports but aren't modeled here (e.g. `hierarchyid`, `geography`, `geometry`, `rowversion`) are not bridged.
 - `OUTPUT` and `MERGE` are scoped to the EF Core SaveChanges shape: `INSERT ... OUTPUT INSERTED.<col>` (single-row) and `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch). `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, OUTPUT on UPDATE/DELETE, `INSERTED.*` star expansion, MERGE source subqueries, MERGE target with column refs in `ON`, the `WHEN MATCHED` UPDATE/DELETE branches, and `$action` aren't supported. The `WHEN MATCHED` branch parses syntactically but throws `NotSupportedException` if the per-row predicate ever evaluates true.
 - Session-scoped state. `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, and `DBCC TRACEON(N)` flags all live on `Simulation` rather than per-connection. The simulator collapses session vs global scope until a real connection-scoped state model exists; revisit when transactions/locks/MVCC bring the per-session shape with them.
 - CAST to a smaller `varchar`/`nvarchar` than the value renders: SQL Server silently truncates; the simulator returns the full string.

@@ -158,8 +158,8 @@ public class LikeTests
         var simulation = new Simulation();
         var ex = Assert.Throws<DbException>(() =>
             simulation.ExecuteScalar("select 1 where 'a' like 'a' escape 'xy'"));
-        StringAssert.Contains(ex.Message, "invalid escape character");
-        StringAssert.Contains(ex.Message, "\"xy\"");
+        Assert.Contains("invalid escape character", ex.Message);
+        Assert.Contains("\"xy\"", ex.Message);
     }
 
     [TestMethod]
@@ -168,7 +168,7 @@ public class LikeTests
         var simulation = new Simulation();
         var ex = Assert.Throws<DbException>(() =>
             simulation.ExecuteScalar("select 1 where 'a' like 'a' escape ''"));
-        StringAssert.Contains(ex.Message, "invalid escape character");
+        Assert.Contains("invalid escape character", ex.Message);
     }
 
     [TestMethod]
@@ -179,7 +179,7 @@ public class LikeTests
         var simulation = new Simulation();
         var ex = Assert.Throws<DbException>(() =>
             simulation.ExecuteScalar("select 1 where 123 like '1%'"));
-        StringAssert.Contains(ex.Message, "Operand type clash");
+        Assert.Contains("Operand type clash", ex.Message);
     }
 
     [TestMethod]

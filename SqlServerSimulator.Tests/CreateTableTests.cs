@@ -97,18 +97,17 @@ public class CreateTableTests
     }
 
     [TestMethod]
-    public void CreateTableVarcharMaxRejected()
+    public void CreateTableVarcharMaxAccepted()
     {
-        // varchar(MAX) / LOB types are not yet modeled; the simulator should
-        // surface a clean "not yet supported" rather than a silent failure.
+        // varchar(MAX) declares a LOB-eligible column; the row encoder routes
+        // values that don't fit inline through the table's LOB-chain pages.
         var simulation = new Simulation();
 
         using var connection = simulation.CreateDbConnection();
         using var command = connection.CreateCommand("create table t ( v varchar(max) )");
 
         connection.Open();
-        var x = Assert.Throws<NotSupportedException>(() => command.ExecuteNonQuery());
-        StringAssert.Contains(x.Message, "MAX");
+        Assert.AreEqual(-1, command.ExecuteNonQuery());
     }
 
     [TestMethod]
@@ -168,8 +167,8 @@ public class CreateTableTests
 
         connection.Open();
         var x = Assert.Throws<DbException>(() => command.ExecuteNonQuery());
-        StringAssert.Contains(x.Message, "row size");
-        StringAssert.Contains(x.Message, "8060");
+        Assert.Contains("row size", x.Message);
+        Assert.Contains("8060", x.Message);
     }
 
     [TestMethod]
@@ -187,7 +186,7 @@ public class CreateTableTests
     }
 
     [TestMethod]
-    public void CreateTableVarbinaryMaxRejected()
+    public void CreateTableVarbinaryMaxAccepted()
     {
         var simulation = new Simulation();
 
@@ -195,8 +194,7 @@ public class CreateTableTests
         using var command = connection.CreateCommand("create table t ( v varbinary(max) )");
 
         connection.Open();
-        var x = Assert.Throws<NotSupportedException>(() => command.ExecuteNonQuery());
-        StringAssert.Contains(x.Message, "MAX");
+        Assert.AreEqual(-1, command.ExecuteNonQuery());
     }
 
     [TestMethod]

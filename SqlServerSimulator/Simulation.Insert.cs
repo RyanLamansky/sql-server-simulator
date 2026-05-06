@@ -28,7 +28,7 @@ partial class Simulation
     /// INSERT processor. Parses the column subset, optional <c>OUTPUT</c>
     /// clause, and VALUES tuples; converts each value token to a
     /// <see cref="SqlValue"/> typed to its target column; encodes each row
-    /// via <see cref="RowEncoder.EncodeRow"/> and appends the bytes to
+    /// via <see cref="RowEncoder"/> and appends the bytes to
     /// <paramref name="destinationTable"/>'s heap. When <c>OUTPUT</c> is
     /// present, the projected per-row results stream out as a
     /// <see cref="SimulatedSqlResultSet"/> (consumed by
@@ -171,7 +171,7 @@ partial class Simulation
                 lastIdentityValue = generated;
             }
 
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Schema, rowValues));
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Columns, rowValues, destinationTable.Heap));
 
             if (output is { } o)
                 outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues: null));

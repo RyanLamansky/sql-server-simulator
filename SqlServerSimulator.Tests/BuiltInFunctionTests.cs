@@ -111,7 +111,7 @@ public sealed class BuiltInFunctionTests
     public void NegativeLength_RaisesMsg537(string expression)
     {
         var ex = Throws<DbException>(() => ExecuteScalar($"select {expression}"));
-        StringAssert.Contains(ex.Message, "Invalid length parameter");
+        Assert.Contains("Invalid length parameter", ex.Message);
     }
 
     [TestMethod]

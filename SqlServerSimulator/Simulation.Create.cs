@@ -37,18 +37,11 @@ partial class Simulation
             if (context.Token is Operator { Character: '(' })
             {
                 var lengthToken = context.GetNextRequired();
-                if (lengthToken is Numeric { Value: { IsNull: false } numericValue })
-                {
-                    declaredMaxLength = numericValue.AsInt32;
-                }
-                else if (context.MatchContextual(ContextualKeyword.Max))
-                {
-                    throw new NotSupportedException($"{type}(MAX) and other LOB types aren't modeled yet.");
-                }
-                else
-                {
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
+                declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
+                    ? numericValue.AsInt32
+                    : context.MatchContextual(ContextualKeyword.Max)
+                        ? SqlType.MaxLengthSentinel
+                        : throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 switch (context.GetNextRequired())
                 {

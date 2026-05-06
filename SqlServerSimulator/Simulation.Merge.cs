@@ -274,7 +274,7 @@ partial class Simulation
                 lastIdentityValue = generated;
             }
 
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Schema, rowValues));
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Columns, rowValues, destinationTable.Heap));
             insertedCount++;
 
             if (output is { } o)

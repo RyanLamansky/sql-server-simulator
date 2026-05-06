@@ -69,7 +69,7 @@ public class DistinctTests
         while (reader.Read())
             rows.Add((string)reader[0]);
         // ANSI padding makes 'a' and 'a   ' a single distinct value.
-        AreEqual(2, rows.Count);
+        HasCount(2, rows);
         AreEqual("b", rows[1]);
     }
 
@@ -86,7 +86,7 @@ public class DistinctTests
         while (reader.Read())
             rows.Add((DateTimeOffset)reader[0]);
         // All three rows refer to 2026-05-04 13:45:30 UTC; DISTINCT keeps one.
-        AreEqual(1, rows.Count);
+        HasCount(1, rows);
         AreEqual(new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.Zero), rows[0].ToUniversalTime());
     }
 

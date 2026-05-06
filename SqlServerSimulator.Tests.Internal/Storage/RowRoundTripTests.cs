@@ -20,7 +20,7 @@ public class RowRoundTripTests
     {
         var bytes = RowEncoder.EncodeRow([SqlType.Int32], [value]);
         var decoded = RowDecoder.DecodeRow([SqlType.Int32], bytes);
-        AreEqual(1, decoded.Length);
+        HasCount(1, decoded);
         AreEqual(SqlValue.FromInt32(value), decoded[0]);
     }
 
@@ -29,7 +29,7 @@ public class RowRoundTripTests
     {
         var bytes = RowEncoder.EncodeRow([SqlType.Int32], [SqlValue.Null(SqlType.Int32)]);
         var decoded = RowDecoder.DecodeRow([SqlType.Int32], bytes);
-        AreEqual(1, decoded.Length);
+        HasCount(1, decoded);
         IsTrue(decoded[0].IsNull);
         AreEqual(SqlType.Int32, decoded[0].Type);
     }
@@ -103,15 +103,15 @@ public class RowRoundTripTests
     public void EncodedSingleColumnRow_HasLength11()
     {
         // 4 (header) + 4 (one Int32) + 2 (column count) + 1 (NULL bitmap byte) = 11.
-        AreEqual(11, RowEncoder.EncodeRow([SqlType.Int32], [42]).Length);
-        AreEqual(11, RowEncoder.EncodeRow([SqlType.Int32], [SqlValue.Null(SqlType.Int32)]).Length);
+        HasCount(11, RowEncoder.EncodeRow([SqlType.Int32], [42]));
+        HasCount(11, RowEncoder.EncodeRow([SqlType.Int32], [SqlValue.Null(SqlType.Int32)]));
     }
 
     [TestMethod]
     public void EncodedTwoColumnRow_HasLength15()
     {
         // 4 (header) + 8 (two Int32s) + 2 (column count) + 1 (NULL bitmap byte) = 15.
-        AreEqual(15, RowEncoder.EncodeRow([SqlType.Int32, SqlType.Int32], [1, 2]).Length);
+        HasCount(15, RowEncoder.EncodeRow([SqlType.Int32, SqlType.Int32], [1, 2]));
     }
 
     [TestMethod]
@@ -193,7 +193,7 @@ public class RowRoundTripTests
     public void EncodedSingleColumnDateRow_HasLength10()
     {
         // 4 (header) + 3 (one Date) + 2 (column count) + 1 (NULL bitmap byte) = 10.
-        AreEqual(10, RowEncoder.EncodeRow([SqlType.Date], [SqlValue.FromDate(new(2026, 5, 4))]).Length);
+        HasCount(10, RowEncoder.EncodeRow([SqlType.Date], [SqlValue.FromDate(new(2026, 5, 4))]));
     }
 
     [TestMethod]
@@ -211,7 +211,7 @@ public class RowRoundTripTests
         // 4 (header) + 8 (datetimeoffset(0): 3 time + 3 date + 2 offset) + 2 (column count) + 1 (NULL bitmap byte) = 15.
         var type = SqlType.GetDateTimeOffset(0);
         var value = SqlValue.FromDateTimeOffset(type, new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)));
-        AreEqual(15, RowEncoder.EncodeRow([type], [value]).Length);
+        HasCount(15, RowEncoder.EncodeRow([type], [value]));
     }
 
     [TestMethod]

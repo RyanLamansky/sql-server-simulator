@@ -19,8 +19,8 @@ public class CompatibilityLevelTests
         // Fresh simulations default to compatibility level 170 (SQL Server 2025);
         // verbose truncation is the default at any level >= 160.
         var ex = AssertTruncates(connection => { /* no compat override */ });
-        StringAssert.Contains(ex.Message, "would be truncated in table");
-        StringAssert.Contains(ex.Message, "Truncated value");
+        Assert.Contains("would be truncated in table", ex.Message);
+        Assert.Contains("Truncated value", ex.Message);
     }
 
     [TestMethod]
@@ -43,7 +43,7 @@ public class CompatibilityLevelTests
             using var alter = connection.CreateCommand("alter database master set compatibility_level = 160");
             _ = alter.ExecuteNonQuery();
         });
-        StringAssert.Contains(ex.Message, "would be truncated in table");
+        Assert.Contains("would be truncated in table", ex.Message);
     }
 
     [TestMethod]
@@ -54,7 +54,7 @@ public class CompatibilityLevelTests
             _ = connection.CreateCommand("alter database master set compatibility_level = 150").ExecuteNonQuery();
             _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
         });
-        StringAssert.Contains(ex.Message, "would be truncated in table");
+        Assert.Contains("would be truncated in table", ex.Message);
     }
 
     [TestMethod]
@@ -89,7 +89,7 @@ public class CompatibilityLevelTests
             _ = connection.CreateCommand("alter database master set compatibility_level = 150").ExecuteNonQuery();
             _ = connection.CreateCommand("alter database scoped configuration set verbose_truncation_warnings = on").ExecuteNonQuery();
         });
-        StringAssert.Contains(ex.Message, "would be truncated in table");
+        Assert.Contains("would be truncated in table", ex.Message);
     }
 
     [TestMethod]

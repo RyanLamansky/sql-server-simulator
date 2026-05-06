@@ -98,7 +98,7 @@ public sealed class MoneyTests
     public void Cast_OverflowToSmallMoney_RaisesMsg8115()
     {
         var ex = Throws<DbException>(() => ExecuteScalar("select cast(214748.3648 as smallmoney)"));
-        StringAssert.Contains(ex.Message, "smallmoney");
+        Assert.Contains("smallmoney", ex.Message);
     }
 
     [TestMethod]

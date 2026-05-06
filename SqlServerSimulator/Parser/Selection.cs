@@ -132,7 +132,7 @@ internal sealed class Selection
                             for (var ci = 0; ci < heapColumnNames.Length; ci++)
                                 heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
-                            return new(BuildSqlProjection(heapColumnNames, heapTable.Schema, heapTable.Rows, expressions, excluders, orderBy, distinct, topCount));
+                            return new(BuildSqlProjection(heapColumnNames, heapTable.Columns, heapTable.Heap, heapTable.Rows, expressions, excluders, orderBy, distinct, topCount));
 
                         case Operator { Character: '(' }:
                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
@@ -143,7 +143,15 @@ internal sealed class Selection
 
                             ConsumeOptionalAliasWhereOrderBy(context, excluders, orderBy);
 
-                            return new(BuildSqlProjection(derived.ColumnNames, derived.Schema, derived.RowBytes, expressions, excluders, orderBy, distinct, topCount));
+                            // Inner SELECT result rows are LOB-inline (projections never
+                            // emit LOB pointers because they have no destination Heap),
+                            // so build a HeapColumn[] schema from the SqlType[] so the
+                            // decoder still strips marker bytes for text/ntext/image
+                            // columns; lobStore is null because no chain to follow.
+                            var derivedColumns = new HeapColumn[derived.Schema.Length];
+                            for (var ci = 0; ci < derivedColumns.Length; ci++)
+                                derivedColumns[ci] = new HeapColumn(string.Empty, derived.Schema[ci], maxLength: null, nullable: true);
+                            return new(BuildSqlProjection(derived.ColumnNames, derivedColumns, lobStore: null, derived.RowBytes, expressions, excluders, orderBy, distinct, topCount));
                     }
 
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -294,7 +302,7 @@ internal sealed class Selection
     /// <summary>
     /// Builds the result for a SELECT-FROM-source query (a heap table or a
     /// derived table). Each input row is decoded column-by-column on demand
-    /// via <see cref="RowDecoder.DecodeColumn"/>; each projection expression
+    /// via <see cref="RowDecoder"/>; each projection expression
     /// is evaluated against that row through <see cref="Expression.Run"/>;
     /// the resulting values are re-encoded into a fresh output row.
     /// </summary>
@@ -306,7 +314,8 @@ internal sealed class Selection
     /// </remarks>
     private static SimulatedSqlResultSet BuildSqlProjection(
         string[] sourceColumnNames,
-        SqlType[] sourceSchema,
+        HeapColumn[] sourceSchema,
+        Heap? lobStore,
         IEnumerable<byte[]> sourceRows,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
@@ -330,7 +339,7 @@ internal sealed class Selection
         SqlType ResolveColumnType(List<string> name)
         {
             var idx = FindSourceColumn(name);
-            return idx == -1 ? throw SimulatedSqlException.InvalidColumnName(name) : sourceSchema[idx];
+            return idx == -1 ? throw SimulatedSqlException.InvalidColumnName(name) : sourceSchema[idx].Type;
         }
 
         for (var i = 0; i < expressions.Count; i++)
@@ -348,11 +357,34 @@ internal sealed class Selection
                 throw SimulatedSqlException.OrderByPositionOutOfRange(orderBy[i].Ordinal);
         }
 
-        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
+        // Msg 306: text/ntext/image can't appear in a sort or distinct slot.
+        // ORDER BY: ordinal items index into the output schema; expression
+        // items resolve through the same column type machinery the projection
+        // already used. DISTINCT is row-level dedup, so any LOB output column
+        // is fatal.
+        if (distinct)
+        {
+            for (var i = 0; i < outputSchema.Length; i++)
+            {
+                if (outputSchema[i].IsLob)
+                    throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
+            }
+        }
+        for (var i = 0; i < orderBy.Count; i++)
+        {
+            var keyType = orderBy[i].IsOrdinal
+                ? outputSchema[orderBy[i].Ordinal - 1]
+                : orderBy[i].Expr!.GetSqlType(ResolveColumnType);
+            if (keyType.IsLob)
+                throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
+        }
+
+        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, lobStore, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(
-        SqlType[] sourceSchema,
+        HeapColumn[] sourceSchema,
+        Heap? lobStore,
         IEnumerable<byte[]> sourceRows,
         Func<List<string>, int> findSourceColumn,
         List<Expression> expressions,
@@ -379,7 +411,7 @@ internal sealed class Selection
                     var columnIndex = findSourceColumn(name);
                     return columnIndex == -1
                         ? throw SimulatedSqlException.InvalidColumnName(name)
-                        : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex);
+                        : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex, lobStore);
                 }
 
                 var include = true;
@@ -419,7 +451,7 @@ internal sealed class Selection
                 var columnIndex = findSourceColumn(name);
                 return columnIndex == -1
                     ? throw SimulatedSqlException.InvalidColumnName(name)
-                    : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex);
+                    : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex, lobStore);
             }
 
             var include = true;

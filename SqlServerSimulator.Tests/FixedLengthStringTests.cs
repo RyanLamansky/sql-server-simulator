@@ -125,7 +125,7 @@ public sealed class FixedLengthStringTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (b binary(5))");
         var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t values (0x010203040506)"));
-        StringAssert.StartsWith(ex.Message, "String or binary data would be truncated in table 't', column 'b'.");
+        Assert.StartsWith("String or binary data would be truncated in table 't', column 'b'.", ex.Message);
     }
 
     [TestMethod]

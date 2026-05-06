@@ -107,7 +107,7 @@ public class EFCoreDateTime
         _ = context.SaveChanges();
 
         var rows = context.Events.OrderBy(e => e.Id).Select(e => new { e.CreatedAt, e.Updated }).ToArray();
-        Assert.AreEqual(2, rows.Length);
+        Assert.HasCount(2, rows);
         Assert.AreEqual(a, rows[0].CreatedAt);
         Assert.AreEqual(b, rows[0].Updated);
         Assert.AreEqual(b, rows[1].CreatedAt);

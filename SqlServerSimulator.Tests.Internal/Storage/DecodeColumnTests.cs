@@ -8,8 +8,8 @@ namespace SqlServerSimulator.Storage;
 /// catch regressions the way users will.
 /// </summary>
 /// <remarks>
-/// Covers <see cref="RowDecoder.DecodeColumn"/>, which the data reader uses to
-/// navigate row bytes one column at a time without materializing the whole row.
+/// Covers <see cref="RowDecoder"/>, which the data reader uses to navigate
+/// row bytes one column at a time without materializing the whole row.
 /// </remarks>
 [TestClass]
 public sealed class DecodeColumnTests

@@ -64,11 +64,15 @@ internal readonly partial struct SqlValue
             return FromString(target, this.AsString);
 
         // Binary ↔ binary crossings: binary(N) pads or truncates; varbinary
-        // wraps the source bytes unchanged.
-        if (this.Type is VarbinarySqlType or BinarySqlType && target is BinarySqlType targetBinary)
+        // wraps the source bytes unchanged. image (the deprecated always-LOB
+        // type) shares the byte-bag shape, so any binary source can land in
+        // an image target and image rebinds back to varbinary/binary.
+        if (this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType && target is BinarySqlType targetBinary)
             return FromBinary(targetBinary, this.AsBytes);
-        if (this.Type is BinarySqlType && target == SqlType.Varbinary)
+        if (this.Type is BinarySqlType or ImageSqlType && target == SqlType.Varbinary)
             return FromVarbinary(this.AsBytes);
+        if (this.Type is VarbinarySqlType or BinarySqlType && target == SqlType.Image)
+            return FromImage(this.AsBytes);
 
         // uniqueidentifier crossings: only string ↔ uid and varbinary ↔ uid
         // are allowed. Every other source/target pair surfaces as Msg 529.

@@ -63,9 +63,12 @@ internal sealed class Cast : Expression
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '(' })
         {
-            if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numericValue })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            declaredMaxLength = numericValue.AsInt32;
+            var lengthToken = context.GetNextRequired();
+            declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
+                ? numericValue.AsInt32
+                : context.MatchContextual(ContextualKeyword.Max)
+                    ? SqlType.MaxLengthSentinel
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ',' }:
