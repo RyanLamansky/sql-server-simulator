@@ -110,6 +110,22 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override object GetValue(int ordinal) => cursor.GetValueObject(ordinal) ?? DBNull.Value;
 
+    /// <summary>
+    /// Adds the unboxing conversions real <c>SqlClient</c> performs for the
+    /// CLR-only types EF Core asks about explicitly: <c>date</c> values are
+    /// stored as <see cref="DateTime"/> but EF requests <see cref="DateOnly"/>;
+    /// <c>time</c> values are stored as <see cref="TimeSpan"/> but EF
+    /// requests <see cref="TimeOnly"/>. Anything else falls through to the
+    /// base implementation, which is a plain unboxing cast.
+    /// </summary>
+    public override T GetFieldValue<T>(int ordinal) =>
+        cursor.GetValueObject(ordinal) switch
+        {
+            DateTime dt when typeof(T) == typeof(DateOnly) => (T)(object)DateOnly.FromDateTime(dt),
+            TimeSpan ts when typeof(T) == typeof(TimeOnly) => (T)(object)TimeOnly.FromTimeSpan(ts),
+            _ => base.GetFieldValue<T>(ordinal),
+        };
+
     public override int GetValues(object[] values)
     {
         throw new NotImplementedException();

@@ -39,13 +39,11 @@ internal class Person
 
 /// <summary>
 /// Exercises the simulator's <c>datetime</c>, <c>datetime2</c>, and
-/// <c>datetimeoffset</c> column support through EF Core. CLR-side properties
-/// are <see cref="DateTime"/> and <see cref="DateTimeOffset"/> only;
-/// <see cref="DateOnly"/>, <see cref="TimeOnly"/>, <see cref="TimeSpan"/>,
-/// <c>DateTime → date</c>, and <c>DateTime → smalldatetime</c> remain
-/// unreachable through EF Core's SqlServer provider because those mappings
-/// downcast <see cref="System.Data.Common.DbParameter"/> to <c>SqlParameter</c>.
-/// See <see cref="SimulatedDbParameter"/> for the full compatibility matrix.
+/// <c>datetimeoffset</c> column support through EF Core. The narrowed
+/// date/time pairs (<c>date</c>, <c>smalldatetime</c>, <c>time</c>,
+/// <see cref="DateOnly"/>, <see cref="TimeOnly"/>, <see cref="TimeSpan"/>)
+/// require the SqlServerSimulator EF Core adapter and are covered on a
+/// separate entity by <see cref="AdapterTestDbContext"/>.
 /// </summary>
 internal class Event
 {

@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SqlServerSimulator\SqlServerSimulator.csproj" />
+    <ProjectReference Include="..\SqlServerSimulator.EFCore\SqlServerSimulator.EFCore.csproj" />
   </ItemGroup>
     
   <ItemGroup>

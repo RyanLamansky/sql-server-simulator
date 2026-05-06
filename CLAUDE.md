@@ -12,7 +12,7 @@ High-fidelity SQL Server simulation, eventually including transactions, locks, M
 
 When SQL Server's actual behavior is quirky or lossy (CP1252's silent `?` replacement for out-of-codepage characters, ANSI trailing-space padding for `=`, `LEN` excluding trailing spaces), mirror it rather than "fixing" it — authenticity over desirability is what makes the simulator a faithful stand-in.
 
-The overall plan is incremental and non-specific: pick the lowest-effort path that unlocks the most useful application compatibility next. Transactions / locks / MVCC, the `varchar(MAX)` family, the EF Core adapter — all of these are eventual targets, but the order is opportunistic, driven by what's blocking the user's actual application stand-ins. Over time, this accretion gets the simulator to "most apps just work"; near term, work flows to the smallest unlock for the biggest cohort of pain points.
+The overall plan is incremental and non-specific: pick the lowest-effort path that unlocks the most useful application compatibility next. Transactions / locks / MVCC, the `varchar(MAX)` family — both are eventual targets, but the order is opportunistic, driven by what's blocking the user's actual application stand-ins. Over time, this accretion gets the simulator to "most apps just work"; near term, work flows to the smallest unlock for the biggest cohort of pain points.
 
 ## Public API surface
 
@@ -26,6 +26,8 @@ Top-level subsystems (in `SqlServerSimulator/`):
 - `Storage/` — pages, row encoder/decoder, types, values
 - `Parser/` — tokenizer, expression tree, query planner
 - root — `Simulated*` implementations of `DbCommand`/`DbConnection`/`DbDataReader`/etc., plus `Simulation` itself
+
+`SqlServerSimulator.EFCore/` is a sibling package whose only public surface is `UseSqlServerSimulator(DbContextOptionsBuilder, DbConnection)`. It registers an `IRelationalTypeMappingSourcePlugin` that substitutes provider-agnostic mappings for the (CLR type, store type) pairs whose default `SqlServer`-provider mappings downcast `DbParameter` to `SqlParameter`: `DateOnly` / `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly` / `TimeSpan → time(N)`, and `decimal → money` / `smallmoney`.
 
 Test projects: main feature tests, internal-access tests for storage/parser internals, EF Core integration (the oracle), and analyzer tests.
 
@@ -71,12 +73,12 @@ Heavy-hitters someone might assume work but don't. Source and `git log` are the 
 
 - Transactions / locks / MVCC.
 - Row-overflow / LOB pages and the `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` types they enable.
-- `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout. `money` / `smallmoney` are wired in raw SQL but unreachable through EF Core for the same `SqlParameter`-downcast reason as the date-only / time-only mappings — adding a money column to an EF entity breaks that entity's whole save path.
+- `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout.
 - `NEWSEQUENTIALID()` (deferred until `DEFAULT`-clause support exists in `CREATE TABLE`; the function is only valid in that context).
 - `CONVERT` / `TRY_CONVERT` style-code coverage. Only styles `0`, `120`, and `121` are wired up for date-like sources targeting a character string (the EF Core code-generation defaults). Other style numbers raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date-parsing styles aren't modeled.
 - `LIKE` `COLLATE` override. The default collation (case-insensitive, Latin1_General-shaped) is what every `LIKE` runs under; explicit `COLLATE` clauses on the predicate aren't parsed yet.
 - Cross-category `Promote` for integer ↔ string. Only CAST works for that pair.
-- EF Core compatibility: the SqlServer provider downcasts `DbParameter` to `SqlParameter` for some mappings — `DateTime → date`, `DateTime → smalldatetime`, `DateOnly`, `TimeOnly`, `TimeSpan`, and `decimal → money` / `decimal → smallmoney` (via `SqlServerDecimalTypeMapping`) all break at SaveChanges. See `SimulatedDbParameter` for the matrix; a `SqlServerSimulator.EFCore` adapter package is planned to close the gap.
+- EF Core compatibility: the `SqlServerSimulator.EFCore` adapter (`UseSqlServerSimulator(...)`) covers the seven `SqlParameter`-downcast pairs — `DateOnly → date`, `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly → time(N)`, `TimeSpan → time(N)`, `decimal → money`, `decimal → smallmoney`. Without the adapter (plain `UseSqlServer`), those mappings still throw at SaveChanges as before. Other type pairs the SqlServer provider supports but aren't modeled here (e.g. `hierarchyid`, `geography`, `geometry`, `rowversion`) are not bridged.
 - `OUTPUT` and `MERGE` are scoped to the EF Core SaveChanges shape: `INSERT ... OUTPUT INSERTED.<col>` (single-row) and `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch). `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, OUTPUT on UPDATE/DELETE, `INSERTED.*` star expansion, MERGE source subqueries, MERGE target with column refs in `ON`, the `WHEN MATCHED` UPDATE/DELETE branches, and `$action` aren't supported. The `WHEN MATCHED` branch parses syntactically but throws `NotSupportedException` if the per-row predicate ever evaluates true.
 - Session-scoped state. `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, and `DBCC TRACEON(N)` flags all live on `Simulation` rather than per-connection. The simulator collapses session vs global scope until a real connection-scoped state model exists; revisit when transactions/locks/MVCC bring the per-session shape with them.
 - CAST to a smaller `varchar`/`nvarchar` than the value renders: SQL Server silently truncates; the simulator returns the full string.

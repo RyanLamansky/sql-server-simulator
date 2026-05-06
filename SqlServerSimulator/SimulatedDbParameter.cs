@@ -17,17 +17,16 @@ namespace SqlServerSimulator;
 /// Raw <c>DbCommand</c> + <see cref="DbType"/> usage is unaffected, as are
 /// the EF Core mappings whose default <c>SqlDbType</c> matches the column's
 /// type (e.g. <see cref="DateTime"/> → <c>datetime2(N)</c>,
-/// <see cref="DateTimeOffset"/> → <c>datetimeoffset(N)</c>). The cases
-/// known to break under EF Core today are the newer or narrowed date/time
-/// mappings that have to override <c>SqlDbType</c>:
-/// <list type="bullet">
-/// <item><see cref="DateTime"/> → <c>date</c> (<c>SqlServerDateTimeTypeMapping</c>)</item>
-/// <item><see cref="DateTime"/> → <c>smalldatetime</c> (<c>SqlServerDateTimeTypeMapping</c>; same shared mapping)</item>
-/// <item><see cref="DateOnly"/> → <c>date</c> (<c>SqlServerDateOnlyTypeMapping</c>)</item>
-/// <item><see cref="TimeOnly"/> → <c>time(N)</c> (<c>SqlServerTimeOnlyTypeMapping</c>)</item>
-/// <item><see cref="TimeSpan"/> → <c>time(N)</c> (<c>SqlServerTimeSpanTypeMapping</c>)</item>
-/// </list>
-/// A planned <c>SqlServerSimulator.EFCore</c> adapter will close these gaps.
+/// <see cref="DateTimeOffset"/> → <c>datetimeoffset(N)</c>). The seven
+/// pairs that historically broke — <see cref="DateTime"/> → <c>date</c>,
+/// <see cref="DateTime"/> → <c>smalldatetime</c>, <see cref="DateOnly"/>
+/// → <c>date</c>, <see cref="TimeOnly"/> / <see cref="TimeSpan"/> →
+/// <c>time(N)</c>, and <see cref="decimal"/> → <c>money</c> /
+/// <c>smallmoney</c> — are unblocked by the
+/// <c>SqlServerSimulator.EFCore</c> adapter, which registers a type-mapping
+/// plugin that substitutes provider-agnostic mappings on the affected
+/// pairs. Without the adapter (plain <c>UseSqlServer</c>) those casts
+/// still throw.
 /// </remarks>
 sealed class SimulatedDbParameter : DbParameter
 {
