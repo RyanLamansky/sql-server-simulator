@@ -74,16 +74,16 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
-    /// Either a parenthesized sub-predicate or a single comparison. A leading
-    /// <c>(</c> at the atom level is unambiguously treated as a boolean
-    /// group: the body is recursively parsed as a full predicate via
-    /// <see cref="ParseOr"/> and the closing <c>)</c> is required. Arithmetic
-    /// parens still work inside an expression operand (e.g.
-    /// <c>where col = (a + 1)</c>) — the right-hand side hits
-    /// <see cref="Expression.Parse"/> which has its own <c>Parenthesized</c>
-    /// dispatch. The pattern that doesn't survive this choice is
-    /// <c>where (arith) cmp rhs</c>; SQL Server accepts that, the simulator
-    /// surfaces it as a syntax error.
+    /// Either a parenthesized sub-predicate, an <c>EXISTS (SELECT ...)</c>
+    /// subquery, or a single comparison. A leading <c>(</c> at the atom
+    /// level is unambiguously treated as a boolean group: the body is
+    /// recursively parsed as a full predicate via <see cref="ParseOr"/> and
+    /// the closing <c>)</c> is required. Arithmetic parens still work inside
+    /// an expression operand (e.g. <c>where col = (a + 1)</c>) — the
+    /// right-hand side hits <see cref="Expression.Parse"/> which has its own
+    /// <c>Parenthesized</c> dispatch. The pattern that doesn't survive this
+    /// choice is <c>where (arith) cmp rhs</c>; SQL Server accepts that, the
+    /// simulator surfaces it as a syntax error.
     /// </summary>
     private static BooleanExpression ParseAtom(ParserContext context)
     {
@@ -96,7 +96,29 @@ internal abstract class BooleanExpression
             context.MoveNextOptional(); // closing `)` is the predicate's last meaningful token; what follows may be end-of-input
             return inner;
         }
-        return ParseComparison(Expression.Parse(context), context);
+        return context.Token is ReservedKeyword { Keyword: Keyword.Exists }
+            ? ParseExists(context)
+            : ParseComparison(Expression.Parse(context), context);
+    }
+
+    /// <summary>
+    /// Parses <c>EXISTS (SELECT ...)</c>. Entered with
+    /// <see cref="ParserContext.Token"/> on the <c>EXISTS</c> keyword;
+    /// consumes through the closing <c>)</c> and leaves the token on the
+    /// next un-consumed token. Unlike <c>IN (SELECT ...)</c>, EXISTS doesn't
+    /// constrain the inner SELECT's column count — it counts rows only.
+    /// </summary>
+    private static ExistsExpression ParseExists(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return new ExistsExpression(inner);
     }
 
     /// <summary>
@@ -168,23 +190,37 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
-    /// Parses the <c>[NOT] IN (val1, val2, ...)</c> suffix after an
-    /// expression. Entered with <see cref="ParserContext.Token"/> on the
-    /// <c>IN</c> keyword; consumes <c>IN</c>, the opening <c>(</c>, the
-    /// comma-separated expression list, and the closing <c>)</c>. Leaves the
-    /// token on the next un-consumed token. The subquery form <c>IN (SELECT
-    /// ...)</c> isn't modeled — only literal/expression lists.
+    /// Parses the <c>[NOT] IN (...)</c> suffix after an expression. Entered
+    /// with <see cref="ParserContext.Token"/> on the <c>IN</c> keyword;
+    /// consumes <c>IN</c>, the opening <c>(</c>, either a comma-separated
+    /// expression list or a single nested <c>SELECT</c>, and the closing
+    /// <c>)</c>. Leaves the token on the next un-consumed token. The
+    /// subquery form requires the inner SELECT to project exactly one column
+    /// (Msg 116); SQL Server only relaxes this for EXISTS.
     /// </summary>
-    private static InExpression ParseInList(Expression left, ParserContext context, bool negated)
+    private static BooleanExpression ParseInList(Expression left, ParserContext context, bool negated)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var candidates = new List<Expression>();
-        do
+        context.MoveNextRequired();
+
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
+        {
+            var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            if (inner.Schema.Length != 1)
+                throw SimulatedSqlException.SubqueryNotIntroducedWithExists();
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            return new InSubqueryExpression(left, inner, negated);
+        }
+
+        var candidates = new List<Expression> { Expression.Parse(context) };
+        while (context.Token is Operator { Character: ',' })
         {
             context.MoveNextRequired();
             candidates.Add(Expression.Parse(context));
-        } while (context.Token is Operator { Character: ',' });
+        }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
@@ -306,6 +342,60 @@ internal abstract class BooleanExpression
             var keyword = negated ? "NOT IN" : "IN";
             return $"{source.DebugDisplay()} {keyword} ({string.Join(", ", candidates.Select(c => c.DebugDisplay()))})";
         }
+    }
+
+    /// <summary>
+    /// <c>EXISTS (SELECT ...)</c>: true iff the inner SELECT returns at
+    /// least one row. Two-valued (never UNKNOWN — row-count semantics) and
+    /// indifferent to the inner row's column values, including NULLs.
+    /// Re-executes the inner plan per outer row, threading the caller's
+    /// resolver as the inner's outer scope so correlated references resolve
+    /// up the chain.
+    /// </summary>
+    private sealed class ExistsExpression(Selection inner) : BooleanExpression
+    {
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+            inner.Execute(getColumnValue).RowBytes.Any();
+
+        internal override string DebugDisplay() => "EXISTS (...)";
+    }
+
+    /// <summary>
+    /// <c>expr [NOT] IN (SELECT ...)</c>: equivalent to a chain of
+    /// promote-and-equal comparisons against each row of the single-column
+    /// inner SELECT, OR-combined (or AND-of-not for <c>NOT IN</c>). NULL
+    /// semantics mirror the literal-list <see cref="InExpression"/> exactly:
+    /// NULL LHS → UNKNOWN; non-NULL LHS with a match → true (NULLs in the
+    /// list don't change the answer); non-NULL LHS with no match but at
+    /// least one NULL row → UNKNOWN; non-NULL LHS, no match, no NULL row →
+    /// false. Re-executes the inner plan per outer row, threading the
+    /// caller's resolver for correlated references.
+    /// </summary>
+    private sealed class InSubqueryExpression(Expression source, Selection inner, bool negated) : BooleanExpression
+    {
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        {
+            var src = source.Run(getColumnValue);
+            if (src.IsNull)
+                return null;
+
+            var sawNull = false;
+            var resultSet = inner.Execute(getColumnValue);
+            foreach (var rowBytes in resultSet.RowBytes)
+            {
+                var rowValue = RowDecoder.DecodeColumn(resultSet.Schema, rowBytes, 0);
+                if (rowValue.IsNull)
+                {
+                    sawNull = true;
+                    continue;
+                }
+                if (CompareValuesPromoted(src, rowValue, "equal to", static (l, r) => l.Equals(r)) == true)
+                    return !negated;
+            }
+            return sawNull ? null : negated;
+        }
+
+        internal override string DebugDisplay() => $"{source.DebugDisplay()} {(negated ? "NOT IN" : "IN")} (...)";
     }
 
     /// <summary>

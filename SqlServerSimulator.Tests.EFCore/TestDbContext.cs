@@ -254,6 +254,36 @@ internal class Sticker
     public string Tag { get; set; } = null!;
 }
 
+/// <summary>
+/// Parent in the parent/child pair used to exercise EF Core's correlated
+/// subquery emission. EF Core's <c>Any</c>/<c>Contains</c> over another
+/// DbSet inside a WHERE predicate translates to <c>EXISTS</c>/<c>IN
+/// (SELECT)</c>; the simulator needs to handle both.
+/// </summary>
+internal class Customer
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "nvarchar(50)")]
+    public string Name { get; set; } = null!;
+}
+
+/// <summary>
+/// Child entity referencing <see cref="Customer"/> by id without an explicit
+/// navigation property — EF Core still emits the correlated subquery pattern
+/// when the test query uses an explicit comparison
+/// (<c>o.CustomerId == c.Id</c>) inside <c>Any</c>/<c>Contains</c>.
+/// </summary>
+internal class CustomerOrder
+{
+    public int Id { get; set; }
+
+    public int CustomerId { get; set; }
+
+    [Column(TypeName = "decimal(10, 2)")]
+    public decimal Amount { get; set; }
+}
+
 internal class TestDbContext(Simulation simulation) : DbContext
 {
     public Simulation Simulation { get; set; } = simulation;
@@ -316,6 +346,10 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Filter> Filters => Set<Filter>();
 
     public DbSet<StockItem> StockItems => Set<StockItem>();
+
+    public DbSet<Customer> Customers => Set<Customer>();
+
+    public DbSet<CustomerOrder> CustomerOrders => Set<CustomerOrder>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -483,6 +517,26 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     NullableC int null,
                     IsActive bit not null,
                     Status nvarchar(20) null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateCustomersSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Customers (
+                    Id int identity(1, 1) not null primary key,
+                    Name nvarchar(50) not null
+                );
+                create table CustomerOrders (
+                    Id int identity(1, 1) not null primary key,
+                    CustomerId int not null,
+                    Amount decimal(10, 2) not null
                 )
                 """)
             .ExecuteNonQuery();

@@ -1,0 +1,88 @@
+namespace SqlServerSimulator;
+
+/// <summary>
+/// End-to-end regression tests for EF Core's subquery emission patterns:
+/// LINQ <c>Any</c> against another DbSet inside a WHERE predicate
+/// translates to <c>EXISTS (SELECT 1 ...)</c>; LINQ <c>Contains</c> over a
+/// subquery projection translates to <c>IN (SELECT ...)</c>. Validates the
+/// simulator's correlated-subquery support against the SqlServer provider's
+/// actual emit shapes.
+/// </summary>
+[TestClass]
+public class EFCoreSubquery
+{
+    public TestContext TestContext { get; set; } = null!;
+
+    private static TestDbContext SeededContext()
+    {
+        var context = new TestDbContext(TestDbContext.CreateCustomersSimulation());
+        context.Customers.AddRange(
+            new Customer { Name = "alpha" },
+            new Customer { Name = "beta" },
+            new Customer { Name = "gamma" });
+        _ = context.SaveChanges();
+        // Customer ids are 1, 2, 3 after the IDENTITY assignment.
+        context.CustomerOrders.AddRange(
+            new CustomerOrder { CustomerId = 1, Amount = 10m },
+            new CustomerOrder { CustomerId = 1, Amount = 20m },
+            new CustomerOrder { CustomerId = 2, Amount = 30m });
+        _ = context.SaveChanges();
+        return context;
+    }
+
+    [TestMethod]
+    public void Where_AnyCorrelated_EmitsExistsSubquery()
+    {
+        // EF Core translates `Any` against another DbSet to `WHERE EXISTS
+        // (SELECT 1 FROM CustomerOrders o WHERE o.CustomerId = c.Id)`.
+        // Customers 1 and 2 have orders; customer 3 doesn't.
+        using var context = SeededContext();
+        var ids = context.Customers
+            .Where(c => context.CustomerOrders.Any(o => o.CustomerId == c.Id))
+            .OrderBy(c => c.Id)
+            .Select(c => c.Id)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { 1, 2 }, ids);
+    }
+
+    [TestMethod]
+    public void Where_NotAnyCorrelated_EmitsNotExistsSubquery()
+    {
+        // The complement: customers without any order → only id 3.
+        using var context = SeededContext();
+        var ids = context.Customers
+            .Where(c => !context.CustomerOrders.Any(o => o.CustomerId == c.Id))
+            .OrderBy(c => c.Id)
+            .Select(c => c.Id)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { 3 }, ids);
+    }
+
+    [TestMethod]
+    public void Where_ContainsSubquery_EmitsInSelect()
+    {
+        // EF Core translates `Contains` against a subquery to `IN (SELECT
+        // ...)`. The subquery projects CustomerId from CustomerOrders;
+        // customers with at least one order match.
+        using var context = SeededContext();
+        var ids = context.Customers
+            .Where(c => context.CustomerOrders.Select(o => o.CustomerId).Contains(c.Id))
+            .OrderBy(c => c.Id)
+            .Select(c => c.Id)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { 1, 2 }, ids);
+    }
+
+    [TestMethod]
+    public void Where_AnyWithAdditionalPredicate_FiltersInsideSubquery()
+    {
+        // Inner WHERE is also correlated: only customers with an order >= 25.
+        using var context = SeededContext();
+        var ids = context.Customers
+            .Where(c => context.CustomerOrders.Any(o => o.CustomerId == c.Id && o.Amount >= 25m))
+            .OrderBy(c => c.Id)
+            .Select(c => c.Id)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { 2 }, ids);
+    }
+}

@@ -14,7 +14,7 @@ namespace SqlServerSimulator.Parser;
 /// <para>
 /// <b>Lookahead contract.</b> Every <c>Parse</c>-style helper in this
 /// namespace (e.g. <see cref="Expression.Parse(ParserContext)"/>,
-/// <see cref="Selection.Parse(ParserContext, uint)"/>,
+/// <see cref="Selection.Parse"/>,
 /// <see cref="BooleanExpression.Parse"/>) leaves <see cref="Token"/> at the
 /// first token it did <i>not</i> consume — its caller's lookahead position.
 /// A helper that reads up to and including a closing delimiter (e.g. a
@@ -73,6 +73,17 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// and clears it. Nested SELECT scopes each get their own list.
     /// </summary>
     public List<Expressions.AggregateExpression>? AggregateCollector;
+
+    /// <summary>
+    /// Parse-time chain of outer-scope column-type resolvers, used to plan
+    /// the output schema of a correlated subquery whose projection references
+    /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s
+    /// FROM-source dispatch around the WHERE / GROUP BY / HAVING parse so
+    /// any nested EXISTS / IN(SELECT) parser sees the chained resolver and
+    /// passes it down. Each level captures the prior value so the chain
+    /// recurses naturally; null means the top-level scope.
+    /// </summary>
+    public Func<List<string>, SqlType>? OuterTypeResolver;
 
     private readonly FrozenDictionary<string, SqlValue> variables = command
         .Parameters

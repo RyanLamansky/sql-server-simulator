@@ -180,7 +180,7 @@ public sealed partial class Simulation
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Select }:
-                    yield return Selection.Parse(context, 0).Results;
+                    yield return Selection.Parse(context, 0).Execute();
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Insert }:

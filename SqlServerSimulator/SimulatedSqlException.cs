@@ -260,6 +260,14 @@ internal sealed class SimulatedSqlException : DbException
 
     internal static SimulatedSqlException InvalidObjectName(StringToken name) => new($"Invalid object name {name}.", 208, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 116 — fired when an IN(SELECT) subquery
+    /// projects more than one column. EXISTS doesn't trip this; only
+    /// constructs that need a single value per row do.
+    /// </summary>
+    internal static SimulatedSqlException SubqueryNotIntroducedWithExists() =>
+        new("Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.", 116, 16, 1);
+
     internal static SimulatedSqlException MissingEndCommentMark() => new("Missing end comment mark '*/'.", 113, 15, 1);
 
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
