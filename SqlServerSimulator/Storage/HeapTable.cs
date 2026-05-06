@@ -11,15 +11,52 @@ internal sealed class HeapTable
     {
         this.Name = name;
         this.Columns = columns;
-        var schema = new SqlType[columns.Length];
+
+        var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
-            schema[i] = columns[i].Type;
+        {
+            if (columns[i].IsStored)
+                storedCount++;
+        }
+        var storedColumns = new HeapColumn[storedCount];
+        var schema = new SqlType[storedCount];
+        var storageOrdinals = new int[columns.Length];
+        var s = 0;
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (columns[i].IsStored)
+            {
+                storedColumns[s] = columns[i];
+                schema[s] = columns[i].Type;
+                storageOrdinals[i] = s;
+                s++;
+            }
+            else
+            {
+                storageOrdinals[i] = -1;
+            }
+        }
+        this.StoredColumns = storedColumns;
         this.Schema = schema;
+        this.StorageOrdinals = storageOrdinals;
     }
 
     public readonly string Name;
 
+    /// <summary>
+    /// Full column set in declaration order, the surface area used for name
+    /// binding and SQL-ordinal addressing. Includes non-persisted computed
+    /// columns; those have <see cref="StorageOrdinals"/> entry <c>-1</c>.
+    /// </summary>
     public readonly HeapColumn[] Columns;
+
+    /// <summary>
+    /// Subset of <see cref="Columns"/> that participates in row storage —
+    /// regular columns plus persisted computed columns. The schema passed
+    /// to <see cref="RowEncoder"/> and <see cref="RowDecoder"/>; ordinals
+    /// here index into the encoded row's column slots.
+    /// </summary>
+    public readonly HeapColumn[] StoredColumns;
 
     /// <summary>
     /// Ordinal of the table's identity column, or <c>-1</c> if there isn't
@@ -39,8 +76,18 @@ internal sealed class HeapTable
     }
 
     /// <summary>
-    /// Per-column types in declaration order; the array passed to
-    /// <see cref="RowEncoder"/> and <see cref="RowDecoder"/>.
+    /// Storage-ordinal mapping: <c>StorageOrdinals[i]</c> is the index in
+    /// <see cref="StoredColumns"/> of <c>Columns[i]</c>, or <c>-1</c> when
+    /// <c>Columns[i]</c> is a non-persisted computed column with no row
+    /// slot. Identity on regular tables (no computed columns) collapses to
+    /// <c>StorageOrdinals[i] == i</c>.
+    /// </summary>
+    public readonly int[] StorageOrdinals;
+
+    /// <summary>
+    /// Stored-column types in storage order; the array passed to
+    /// <see cref="RowEncoder"/> and <see cref="RowDecoder"/>. Length matches
+    /// <see cref="StoredColumns"/>, not <see cref="Columns"/>.
     /// </summary>
     public readonly SqlType[] Schema;
 

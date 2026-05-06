@@ -163,6 +163,27 @@ internal class Token
 }
 
 /// <summary>
+/// Exercises the simulator's computed-column support through EF Core. The
+/// <see cref="Total"/> property is wired in <c>OnModelCreating</c> with
+/// <c>HasComputedColumnSql</c>, which sets <see cref="DatabaseGeneratedOption.Computed"/>:
+/// EF Core omits the column from INSERTs and recovers the server-assigned
+/// value through <c>OUTPUT INSERTED.Total</c> on SaveChanges.
+/// </summary>
+internal class Receipt
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "decimal(10, 2)")]
+    public decimal Subtotal { get; set; }
+
+    [Column(TypeName = "decimal(10, 2)")]
+    public decimal Tax { get; set; }
+
+    [Column(TypeName = "decimal(10, 2)")]
+    public decimal Total { get; set; }
+}
+
+/// <summary>
 /// Counterpart to <see cref="Widget"/> with <see cref="DatabaseGeneratedOption.None"/>
 /// — EF Core treats <see cref="Id"/> as caller-supplied, so SaveChanges
 /// emits a plain INSERT (no <c>OUTPUT INSERTED</c>). Combined with
@@ -201,6 +222,14 @@ internal class TestDbContext(Simulation simulation) : DbContext
         _ = modelBuilder.Entity<Token>()
             .Property(t => t.Id)
             .HasDefaultValueSql("newsequentialid()");
+
+        // Pin the Receipt.Total decimal as a server-computed column. EF Core
+        // recognizes this as DatabaseGeneratedOption.Computed and stops
+        // including the column in INSERTs; SaveChanges reads the value back
+        // via OUTPUT INSERTED.Total.
+        _ = modelBuilder.Entity<Receipt>()
+            .Property(r => r.Total)
+            .HasComputedColumnSql("[Subtotal] + [Tax]", stored: false);
     }
 
     public DbSet<TestRow> Rows => Set<TestRow>();
@@ -220,6 +249,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Token> Tokens => Set<Token>();
 
     public DbSet<Sticker> Stickers => Set<Sticker>();
+
+    public DbSet<Receipt> Receipts => Set<Receipt>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -336,6 +367,23 @@ internal class TestDbContext(Simulation simulation) : DbContext
                 create table Tokens (
                     Id uniqueidentifier not null default newsequentialid(),
                     Label nvarchar(50) not null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateReceiptsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Receipts (
+                    Id int identity(1, 1) not null,
+                    Subtotal decimal(10, 2) not null,
+                    Tax decimal(10, 2) not null,
+                    Total as Subtotal + Tax
                 )
                 """)
             .ExecuteNonQuery();

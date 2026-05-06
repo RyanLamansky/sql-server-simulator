@@ -55,6 +55,8 @@ partial class Simulation
                 var columnName = column.Value;
                 var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
                     ?? throw SimulatedSqlException.InvalidColumnName(columnName);
+                if (tableColumn.Computed is not null)
+                    throw SimulatedSqlException.ColumnCannotBeModified(tableColumn.Name);
                 usedColumns.Add(tableColumn);
 
                 var separator = context.GetNextRequired();
@@ -70,12 +72,12 @@ partial class Simulation
         }
         else
         {
-            // No column list: target every column except an identity one when
-            // IDENTITY_INSERT is OFF, matching SQL Server's "VALUES supplies
-            // non-identity columns" shorthand.
+            // No column list: target every regular column (skip identity when
+            // IDENTITY_INSERT is OFF and skip every computed column — neither
+            // is a writable destination from the VALUES side).
             destinationColumns = (identityColumn is not null && !identityInsertOn)
-                ? [.. destinationTable.Columns.Where(c => c.Identity is null)]
-                : [.. destinationTable.Columns];
+                ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null)]
+                : [.. destinationTable.Columns.Where(c => c.Computed is null)];
         }
 
         if (identityColumn is not null)
@@ -127,7 +129,7 @@ partial class Simulation
         {
             var rowValues = new SqlValue[destinationTable.Columns.Length];
             for (var i = 0; i < rowValues.Length; i++)
-                rowValues[i] = SqlValue.Null(destinationTable.Schema[i]);
+                rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
 
             // Defaults run only for columns not in the destination column list:
             // when an INSERT supplies an explicit value (including explicit
@@ -194,7 +196,14 @@ partial class Simulation
                 lastIdentityValue = generated;
             }
 
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Columns, rowValues, destinationTable.Heap));
+            // Evaluate computed columns now — both persisted (whose result
+            // gets stored) and non-persisted (whose result OUTPUT may reference
+            // and which the row's full SqlValue array needs filled). Refs in
+            // the expression bind only to stored columns thanks to Msg 1759
+            // at CREATE TABLE.
+            EvaluateComputedColumns(destinationTable, rowValues);
+
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, rowValues), destinationTable.Heap));
 
             if (output is { } o)
                 outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues: null));

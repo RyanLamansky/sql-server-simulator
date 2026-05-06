@@ -23,17 +23,34 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             return false;
 
-        var heapColumns = new List<HeapColumn>();
-        var fixedWidthSum = 0;
+        // Two-pass column resolution: regular columns build a HeapColumn during
+        // pass 1; computed columns leave a placeholder entry plus an entry in
+        // pendingComputed to be resolved after the column list is closed (so
+        // forward column references inside computed expressions can bind).
+        var heapColumns = new List<HeapColumn?>();
+        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var identityCount = 0;
         do
         {
             var columnName = context.GetNextRequired<Name>();
-            var typeName = context.GetNextRequired<Name>();
+            context.MoveNextRequired();
+
+            if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+            {
+                context.MoveNextRequired();
+                var computed = Expression.Parse(context);
+                var (persisted, computedNullable) = ParseComputedSuffix(context);
+                pendingComputed.Add((heapColumns.Count, columnName.Value, computed, persisted, computedNullable));
+                heapColumns.Add(null);
+                continue;
+            }
+
+            if (context.Token is not Name typeName)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
 
             int? declaredMaxLength = null;
             int? declaredScale = null;
-            context.MoveNextRequired();
             if (context.Token is Operator { Character: '(' })
             {
                 var lengthToken = context.GetNextRequired();
@@ -109,26 +126,106 @@ partial class Simulation
                     throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
             }
 
-            if (resolvedType.IsFixedLength)
-                fixedWidthSum += resolvedType.FixedLength;
-
             heapColumns.Add(new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression));
         } while (context.Token is Operator { Character: ',' });
 
         if (context.Token is not Operator { Character: ')' })
             return false;
 
-        // Schemas whose fixed-width columns alone exceed SQL Server's 8060-byte
-        // in-row limit can never hold a row; reject at CREATE TABLE (Msg 1701).
-        // The variable-width-aware warning path is deferred until warning
-        // infrastructure exists.
+        // Pass 2: resolve computed columns now that every column's name has
+        // been seen. The resolver throws Msg 1759 for any reference to another
+        // computed column (including persisted) and Msg 207 for an unknown
+        // name; valid references resolve to the source column's SqlType so
+        // <see cref="Expression.GetSqlType"/> can infer the computed column's
+        // own type.
+        SqlType ResolveComputedReference(List<string> reference)
+        {
+            var leaf = reference[^1];
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, leaf))
+                {
+                    return existing.Computed is not null
+                        ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, tableName.Value)
+                        : existing.Type;
+                }
+                if (heapColumns[i] is null)
+                {
+                    foreach (var pending in pendingComputed)
+                    {
+                        if (pending.Index == i && Collation.Default.Equals(pending.Name, leaf))
+                            throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, tableName.Value);
+                    }
+                }
+            }
+            throw SimulatedSqlException.InvalidColumnName(reference);
+        }
+
+        foreach (var pending in pendingComputed)
+        {
+            var resolvedType = pending.Expression.GetSqlType(ResolveComputedReference);
+            heapColumns[pending.Index] = new HeapColumn(
+                pending.Name,
+                resolvedType,
+                maxLength: null,
+                nullable: pending.Nullable,
+                computedExpression: pending.Expression,
+                isPersisted: pending.Persisted);
+        }
+
+        // Schemas whose fixed-width stored columns alone exceed SQL Server's
+        // 8060-byte in-row limit can never hold a row; reject at CREATE TABLE
+        // (Msg 1701). Persisted computed columns of fixed-length type
+        // contribute; non-persisted computed columns have no row storage.
+        var fixedWidthSum = 0;
+        for (var i = 0; i < heapColumns.Count; i++)
+        {
+            var column = heapColumns[i]!;
+            if (column.IsStored && column.Type.IsFixedLength)
+                fixedWidthSum += column.Type.FixedLength;
+        }
         if (fixedWidthSum > Heap.MaxRowSize)
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Value, fixedWidthSum, Heap.MaxRowSize);
 
-        var heapTable = new HeapTable(tableName.Value, [.. heapColumns]);
+        var heapTable = new HeapTable(tableName.Value, [.. heapColumns!]);
         return this.HeapTables.TryAdd(heapTable.Name, heapTable)
             ? true
             : throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
+    }
+
+    /// <summary>
+    /// Parses the optional suffix of a computed-column declaration (after the
+    /// expression): bare empty, <c>PERSISTED</c>, or <c>PERSISTED NOT NULL</c>.
+    /// Any other constraint keyword in this position (<c>IDENTITY</c>,
+    /// <c>DEFAULT</c>, bare <c>NULL</c>/<c>NOT NULL</c>, or <c>PERSISTED NULL</c>)
+    /// raises Msg 8183 — real SQL Server's blanket "computed columns must be
+    /// persisted to carry a NULL/NOT NULL/CHECK/FK constraint" error.
+    /// </summary>
+    private static (bool Persisted, bool Nullable) ParseComputedSuffix(ParserContext context)
+    {
+        var persisted = false;
+        bool? nullable = null;
+        while (true)
+        {
+            if (!persisted && context.MatchContextual(ContextualKeyword.Persisted))
+            {
+                persisted = true;
+                context.MoveNextRequired();
+                continue;
+            }
+            if (persisted && !nullable.HasValue && context.Token is ReservedKeyword { Keyword: Keyword.Not })
+            {
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                nullable = false;
+                context.MoveNextRequired();
+                continue;
+            }
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Identity or Keyword.Default or Keyword.Not or Keyword.Null })
+                throw SimulatedSqlException.ComputedColumnConstraintRequiresPersisted();
+            break;
+        }
+        return (persisted, nullable ?? true);
     }
 
     /// <summary>

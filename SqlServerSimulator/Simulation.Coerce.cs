@@ -94,4 +94,61 @@ partial class Simulation
             throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
     }
+
+    /// <summary>
+    /// Walks the table's computed columns and fills their slots in
+    /// <paramref name="rowValues"/> by evaluating each expression against the
+    /// current row's stored-column values. Computed-of-computed references
+    /// are rejected at CREATE TABLE (Msg 1759), so every reference inside a
+    /// computed expression resolves to a regular column already present in
+    /// <paramref name="rowValues"/>. Both persisted and non-persisted slots
+    /// are filled — persisted slots feed <see cref="ProjectStoredValues"/>
+    /// for encoding, non-persisted slots feed any <c>OUTPUT INSERTED.&lt;col&gt;</c>
+    /// projection.
+    /// </summary>
+    private static void EvaluateComputedColumns(HeapTable destinationTable, SqlValue[] rowValues)
+    {
+        for (var i = 0; i < destinationTable.Columns.Length; i++)
+        {
+            var column = destinationTable.Columns[i];
+            if (column.Computed is null)
+                continue;
+
+            SqlValue ResolveByName(List<string> reference)
+            {
+                var leaf = reference[^1];
+                for (var k = 0; k < destinationTable.Columns.Length; k++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[k].Name, leaf))
+                        return rowValues[k];
+                }
+                throw SimulatedSqlException.InvalidColumnName(reference);
+            }
+
+            rowValues[i] = CoerceForInsert(column.Computed.Run(ResolveByName), column.Type);
+        }
+    }
+
+    /// <summary>
+    /// Subsets the row's full-column SqlValue array down to just the values
+    /// that participate in row storage, in storage-ordinal order — the shape
+    /// <see cref="RowEncoder.EncodeRow(ReadOnlySpan{HeapColumn}, ReadOnlySpan{SqlValue}, Heap?)"/>
+    /// expects when handed
+    /// <see cref="HeapTable.StoredColumns"/>. Non-persisted computed columns
+    /// have no storage slot and are dropped here.
+    /// </summary>
+    private static SqlValue[] ProjectStoredValues(HeapTable destinationTable, SqlValue[] rowValues)
+    {
+        if (destinationTable.StoredColumns.Length == destinationTable.Columns.Length)
+            return rowValues;
+
+        var stored = new SqlValue[destinationTable.StoredColumns.Length];
+        for (var i = 0; i < destinationTable.Columns.Length; i++)
+        {
+            var ordinal = destinationTable.StorageOrdinals[i];
+            if (ordinal >= 0)
+                stored[ordinal] = rowValues[i];
+        }
+        return stored;
+    }
 }

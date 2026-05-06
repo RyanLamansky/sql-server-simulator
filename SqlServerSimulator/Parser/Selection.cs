@@ -132,7 +132,7 @@ internal sealed class Selection
                             for (var ci = 0; ci < heapColumnNames.Length; ci++)
                                 heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
-                            return new(BuildSqlProjection(heapColumnNames, heapTable.Columns, heapTable.Heap, heapTable.Rows, expressions, excluders, orderBy, distinct, topCount));
+                            return new(BuildSqlProjection(heapColumnNames, heapTable.Columns, heapTable.StoredColumns, heapTable.StorageOrdinals, heapTable.Heap, heapTable.Rows, expressions, excluders, orderBy, distinct, topCount));
 
                         case Operator { Character: '(' }:
                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
@@ -151,7 +151,7 @@ internal sealed class Selection
                             var derivedColumns = new HeapColumn[derived.Schema.Length];
                             for (var ci = 0; ci < derivedColumns.Length; ci++)
                                 derivedColumns[ci] = new HeapColumn(string.Empty, derived.Schema[ci], maxLength: null, nullable: true);
-                            return new(BuildSqlProjection(derived.ColumnNames, derivedColumns, lobStore: null, derived.RowBytes, expressions, excluders, orderBy, distinct, topCount));
+                            return new(BuildSqlProjection(derived.ColumnNames, derivedColumns, derivedColumns, storageOrdinals: null, lobStore: null, derived.RowBytes, expressions, excluders, orderBy, distinct, topCount));
                     }
 
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -315,6 +315,8 @@ internal sealed class Selection
     private static SimulatedSqlResultSet BuildSqlProjection(
         string[] sourceColumnNames,
         HeapColumn[] sourceSchema,
+        HeapColumn[] storedSchema,
+        int[]? storageOrdinals,
         Heap? lobStore,
         IEnumerable<byte[]> sourceRows,
         List<Expression> expressions,
@@ -379,11 +381,13 @@ internal sealed class Selection
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
 
-        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, lobStore, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
+        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(
         HeapColumn[] sourceSchema,
+        HeapColumn[] storedSchema,
+        int[]? storageOrdinals,
         Heap? lobStore,
         IEnumerable<byte[]> sourceRows,
         Func<List<string>, int> findSourceColumn,
@@ -411,7 +415,7 @@ internal sealed class Selection
                     var columnIndex = findSourceColumn(name);
                     return columnIndex == -1
                         ? throw SimulatedSqlException.InvalidColumnName(name)
-                        : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex, lobStore);
+                        : DecodeOrCompute(sourceSchema, storedSchema, storageOrdinals, columnIndex, bytes, lobStore, ResolveColumn);
                 }
 
                 var include = true;
@@ -451,7 +455,7 @@ internal sealed class Selection
                 var columnIndex = findSourceColumn(name);
                 return columnIndex == -1
                     ? throw SimulatedSqlException.InvalidColumnName(name)
-                    : RowDecoder.DecodeColumn(sourceSchema, bytes, columnIndex, lobStore);
+                    : DecodeOrCompute(sourceSchema, storedSchema, storageOrdinals, columnIndex, bytes, lobStore, ResolveSource);
             }
 
             var include = true;
@@ -490,6 +494,31 @@ internal sealed class Selection
         foreach (var (projected, _) in taken)
             yield return RowEncoder.EncodeRow(outputSchema, projected);
     }
+
+    /// <summary>
+    /// Resolves a single column reference at <paramref name="columnIndex"/>
+    /// in <paramref name="sourceSchema"/> for the row at <paramref name="bytes"/>.
+    /// Stored columns (regular plus persisted-computed) decode directly via
+    /// <see cref="RowDecoder.DecodeColumn(ReadOnlySpan{HeapColumn}, ReadOnlySpan{byte}, int, Heap?)"/>
+    /// at their storage ordinal. Non-persisted computed columns evaluate
+    /// their expression through <paramref name="resolveByName"/> — the
+    /// recursive references inside the expression bind back through the same
+    /// caller's resolver, but are guaranteed by Msg 1759 to land only on
+    /// stored columns.
+    /// </summary>
+    private static SqlValue DecodeOrCompute(
+        HeapColumn[] sourceSchema,
+        HeapColumn[] storedSchema,
+        int[]? storageOrdinals,
+        int columnIndex,
+        byte[] bytes,
+        Heap? lobStore,
+        Func<List<string>, SqlValue> resolveByName) =>
+        storageOrdinals is null
+            ? RowDecoder.DecodeColumn(storedSchema, bytes, columnIndex, lobStore)
+            : sourceSchema[columnIndex].Computed is { } computedExpr && !sourceSchema[columnIndex].IsPersisted
+                ? computedExpr.Run(resolveByName)
+                : RowDecoder.DecodeColumn(storedSchema, bytes, storageOrdinals[columnIndex], lobStore);
 
     /// <summary>
     /// Evaluates each ORDER BY item against the current row. Ordinal items

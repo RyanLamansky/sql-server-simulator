@@ -172,6 +172,8 @@ partial class Simulation
                 ?? throw SimulatedSqlException.SyntaxErrorNear(context);
             insertColumns2[i] = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, colName))
                 ?? throw SimulatedSqlException.InvalidColumnName(colName);
+            if (insertColumns2[i].Computed is not null)
+                throw SimulatedSqlException.ColumnCannotBeModified(insertColumns2[i].Name);
         }
 
         var output = TryParseOutputClause(context, destinationTable, (sourceAlias, [.. sourceColumnNames], sourceSchema));
@@ -230,7 +232,7 @@ partial class Simulation
             // WHEN NOT MATCHED: insert one row.
             var rowValues = new SqlValue[destinationTable.Columns.Length];
             for (var i = 0; i < rowValues.Length; i++)
-                rowValues[i] = SqlValue.Null(destinationTable.Schema[i]);
+                rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
 
             // Defaults run only for columns absent from the INSERT branch's
             // column list — same rule as plain INSERT (see ProcessHeapInsert).
@@ -294,7 +296,9 @@ partial class Simulation
                 lastIdentityValue = generated;
             }
 
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.Columns, rowValues, destinationTable.Heap));
+            EvaluateComputedColumns(destinationTable, rowValues);
+
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, rowValues), destinationTable.Heap));
             insertedCount++;
 
             if (output is { } o)

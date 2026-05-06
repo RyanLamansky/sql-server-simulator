@@ -294,6 +294,35 @@ internal sealed class SimulatedSqlException : DbException
         new("The newsequentialid() built-in function can only be used in a DEFAULT expression for a column of type 'uniqueidentifier' in a CREATE TABLE or ALTER TABLE statement. It cannot be combined with other operators to form a complex scalar expression.", 302, 16, 0);
 
     /// <summary>
+    /// Mimics SQL Server error 271: an INSERT or UPDATE targeted a column
+    /// that the engine doesn't allow direct writes to — the canonical case
+    /// here is a computed column. Message is verbatim from SQL Server 2025;
+    /// the UNION-result wording is part of the standard text even though the
+    /// simulator only triggers it from the computed-column path.
+    /// </summary>
+    internal static SimulatedSqlException ColumnCannotBeModified(string columnName) =>
+        new($"The column \"{columnName}\" cannot be modified because it is either a computed column or is the result of a UNION operator.", 271, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1759: a computed column's expression refers
+    /// to another computed column. SQL Server forbids this regardless of
+    /// PERSISTED on either side; the simulator validates the rule during
+    /// CREATE TABLE's two-pass column resolution.
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnReferencedInComputed(string referencedColumn, string tableName) =>
+        new($"Computed column '{referencedColumn}' in table '{tableName}' is not allowed to be used in another computed-column definition.", 1759, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 8183: the column-constraint set declared on
+    /// a computed column is incompatible with non-persisted storage. SQL
+    /// Server fires this for IDENTITY, DEFAULT, explicit NULL/NOT NULL on a
+    /// non-persisted computed column, and PERSISTED-with-explicit-NULL.
+    /// Message text is fixed.
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnConstraintRequiresPersisted() =>
+        new("Only UNIQUE or PRIMARY KEY constraints can be created on computed columns, while CHECK, FOREIGN KEY, and NOT NULL constraints require that computed columns be persisted.", 8183, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 506: the <c>ESCAPE</c> clause of a <c>LIKE</c>
     /// predicate received a value that wasn't exactly one character (empty,
     /// multi-char). The displayed value is whatever the expression evaluated

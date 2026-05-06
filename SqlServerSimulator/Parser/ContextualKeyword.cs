@@ -25,6 +25,7 @@ enum ContextualKeyword
     Matched,
     Max,
     Output,
+    Persisted,
     Scoped,
     TraceOff,
     TraceOn,
