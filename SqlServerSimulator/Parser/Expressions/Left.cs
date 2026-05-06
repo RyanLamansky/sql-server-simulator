@@ -39,7 +39,5 @@ internal sealed class Left : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"LEFT({source}, {count})";
-#endif
+    internal override string DebugDisplay() => $"LEFT({source.DebugDisplay()}, {count.DebugDisplay()})";
 }

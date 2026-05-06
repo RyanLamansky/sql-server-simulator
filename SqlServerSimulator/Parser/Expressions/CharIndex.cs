@@ -54,7 +54,7 @@ internal sealed class CharIndex : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
 
-#if DEBUG
-    public override string ToString() => start is null ? $"CHARINDEX({needle}, {haystack})" : $"CHARINDEX({needle}, {haystack}, {start})";
-#endif
+    internal override string DebugDisplay() => start is null
+        ? $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()})"
+        : $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()}, {start.DebugDisplay()})";
 }

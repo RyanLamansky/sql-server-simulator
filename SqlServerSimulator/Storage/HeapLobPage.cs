@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 
 namespace SqlServerSimulator.Storage;
 
@@ -29,6 +30,7 @@ namespace SqlServerSimulator.Storage;
 /// in CLAUDE.md.
 /// </para>
 /// </remarks>
+[DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapLobPage
 {
     public const int PageSize = 8192;
@@ -79,7 +81,5 @@ internal sealed class HeapLobPage
         this.NextPageIndex = -1;
     }
 
-#if DEBUG
-    public override string ToString() => $"HeapLobPage(type=0x{this.PageType:X2}, payloadLen={this.PayloadLength}, next={this.NextPageIndex})";
-#endif
+    internal string DebugDisplay() => $"HeapLobPage(type=0x{this.PageType:X2}, payloadLen={this.PayloadLength}, next={this.NextPageIndex})";
 }

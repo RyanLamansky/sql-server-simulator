@@ -18,7 +18,5 @@ internal sealed class NamedExpression(Expression expression, string name) : Expr
 
     public override Storage.SqlType GetSqlType(Func<List<string>, Storage.SqlType> resolveColumnType) => this.expression.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"{expression} {name}";
-#endif
+    internal override string DebugDisplay() => $"{expression.DebugDisplay()} {name}";
 }

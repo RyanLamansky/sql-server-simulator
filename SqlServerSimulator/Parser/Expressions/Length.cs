@@ -33,7 +33,5 @@ internal sealed class Length(ParserContext context) : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
 
-#if DEBUG
-    public override string ToString() => $"LEN({source})";
-#endif
+    internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
 }

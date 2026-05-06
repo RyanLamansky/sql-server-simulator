@@ -1,7 +1,6 @@
 using System.Data.SqlTypes;
-#if DEBUG
+using System.Diagnostics;
 using System.Globalization;
-#endif
 
 namespace SqlServerSimulator.Storage;
 
@@ -21,6 +20,7 @@ namespace SqlServerSimulator.Storage;
 /// <see cref="SqlType"/> documents which field it uses.
 /// </para>
 /// </remarks>
+[DebuggerDisplay("{DebugDisplay(),nq}")]
 internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<SqlValue>
 {
     private readonly long primitive;
@@ -651,8 +651,15 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return !left.Equals(right);
     }
 
-#if DEBUG
-    public override string ToString() => this.IsNull ? $"NULL ({this.Type})" : $"{this.AsCurrentType()} ({this.Type})";
+    /// <summary>
+    /// Diagnostic-only string rendering, surfaced via
+    /// <see cref="DebuggerDisplayAttribute"/>. NOT user-visible — production
+    /// paths produce purpose-built formats (CAST-to-varchar, error-message
+    /// rendering, key-violation rendering) instead. Internal so callers in
+    /// the same project (e.g. <see cref="Parser.Expressions.Value.DebugDisplay"/>)
+    /// can compose it; not for use across assemblies.
+    /// </summary>
+    internal string DebugDisplay() => this.IsNull ? $"NULL ({this.Type})" : $"{this.AsCurrentType()} ({this.Type})";
 
     private string AsCurrentType() => this.Type switch
     {
@@ -676,5 +683,4 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
         _ => "?",
     };
-#endif
 }

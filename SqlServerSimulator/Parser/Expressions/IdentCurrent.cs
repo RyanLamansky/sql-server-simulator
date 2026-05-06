@@ -42,7 +42,5 @@ internal sealed class IdentCurrent : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => ResultType;
 
-#if DEBUG
-    public override string ToString() => $"IDENT_CURRENT('{this.tableName}')";
-#endif
+    internal override string DebugDisplay() => $"IDENT_CURRENT('{this.tableName}')";
 }

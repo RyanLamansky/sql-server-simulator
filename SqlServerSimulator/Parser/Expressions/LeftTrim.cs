@@ -24,7 +24,5 @@ internal sealed class LeftTrim(ParserContext context) : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"LTRIM({source})";
-#endif
+    internal override string DebugDisplay() => $"LTRIM({source.DebugDisplay()})";
 }

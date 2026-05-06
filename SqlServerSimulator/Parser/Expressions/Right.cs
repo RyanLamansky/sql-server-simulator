@@ -39,7 +39,5 @@ internal sealed class Right : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"RIGHT({source}, {count})";
-#endif
+    internal override string DebugDisplay() => $"RIGHT({source.DebugDisplay()}, {count.DebugDisplay()})";
 }

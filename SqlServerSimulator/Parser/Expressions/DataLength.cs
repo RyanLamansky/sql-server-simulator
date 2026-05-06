@@ -21,7 +21,5 @@ internal sealed class DataLength(ParserContext context) : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
 
-#if DEBUG
-    public override string ToString() => $"DATALENGTH({source})";
-#endif
+    internal override string DebugDisplay() => $"DATALENGTH({source.DebugDisplay()})";
 }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using SqlServerSimulator.Parser;
 
 namespace SqlServerSimulator.Storage;
@@ -14,6 +15,7 @@ namespace SqlServerSimulator.Storage;
 /// <c>varchar</c>, UCS-2 code units for <c>nvarchar</c>.
 /// </para>
 /// </remarks>
+[DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false)
 {
     public readonly string Name = name;
@@ -73,7 +75,5 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public bool IsStored => this.Computed is null || this.IsPersisted;
 
-#if DEBUG
-    public override string ToString() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
-#endif
+    internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

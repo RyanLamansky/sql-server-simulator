@@ -100,12 +100,10 @@ internal sealed class ConvertExpression : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => this.targetType;
 
-#if DEBUG
-    public override string ToString() =>
+    internal override string DebugDisplay() =>
         this.style is null
-            ? $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source})"
-            : $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source}, {this.style})";
-#endif
+            ? $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()})"
+            : $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()}, {this.style.DebugDisplay()})";
 
     /// <summary>
     /// Set of <see cref="SimulatedSqlException.Number"/> values that

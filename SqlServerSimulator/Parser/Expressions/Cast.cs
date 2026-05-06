@@ -44,9 +44,7 @@ internal sealed class Cast : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => targetType;
 
-#if DEBUG
-    public override string ToString() => $"CAST({source} AS {targetType})";
-#endif
+    internal override string DebugDisplay() => $"CAST({source.DebugDisplay()} AS {targetType})";
 
     /// <summary>
     /// Parses the optional <c>(length)</c> or <c>(precision, scale)</c> spec

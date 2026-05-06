@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
@@ -5,6 +7,7 @@ namespace SqlServerSimulator.Storage;
 /// <see cref="SqlType"/>; rows are stored in an 8KB-page <see cref="Heap"/>
 /// whose page bytes are produced by <see cref="RowEncoder"/>.
 /// </summary>
+[DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable
 {
     public HeapTable(string name, HeapColumn[] columns, KeyConstraint[]? keyConstraints = null)
@@ -106,7 +109,5 @@ internal sealed class HeapTable
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();
 
-#if DEBUG
-    public override string ToString() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
-#endif
+    internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
 }

@@ -26,7 +26,5 @@ internal sealed class Upper(ParserContext context) : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"UPPER({source})";
-#endif
+    internal override string DebugDisplay() => $"UPPER({source.DebugDisplay()})";
 }

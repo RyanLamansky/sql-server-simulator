@@ -33,7 +33,5 @@ internal sealed class LastIdentityExpression : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => ResultType;
 
-#if DEBUG
-    public override string ToString() => "SCOPE_IDENTITY()";
-#endif
+    internal override string DebugDisplay() => "SCOPE_IDENTITY()";
 }

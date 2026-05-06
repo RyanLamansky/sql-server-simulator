@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 
 namespace SqlServerSimulator.Storage;
 
@@ -32,6 +33,7 @@ namespace SqlServerSimulator.Storage;
 /// matches the publicly documented record format.
 /// </para>
 /// </remarks>
+[DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapPage
 {
     public const int PageSize = 8192;
@@ -121,7 +123,5 @@ internal sealed class HeapPage
         }
     }
 
-#if DEBUG
-    public override string ToString() => $"HeapPage(type=0x{this.PageType:X2}, slots={this.SlotCount}, freePtr={this.FreeSpacePointer}, prev={this.PrevPageIndex}, next={this.NextPageIndex})";
-#endif
+    internal string DebugDisplay() => $"HeapPage(type=0x{this.PageType:X2}, slots={this.SlotCount}, freePtr={this.FreeSpacePointer}, prev={this.PrevPageIndex}, next={this.NextPageIndex})";
 }

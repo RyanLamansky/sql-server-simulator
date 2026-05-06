@@ -36,7 +36,5 @@ internal sealed class Value : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => this.Constant.Type;
 
-#if DEBUG
-    public override string ToString() => this.Constant.ToString();
-#endif
+    internal override string DebugDisplay() => this.Constant.DebugDisplay();
 }

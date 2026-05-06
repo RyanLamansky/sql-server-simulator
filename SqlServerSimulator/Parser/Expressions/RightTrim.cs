@@ -23,7 +23,5 @@ internal sealed class RightTrim(ParserContext context) : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"RTRIM({source})";
-#endif
+    internal override string DebugDisplay() => $"RTRIM({source.DebugDisplay()})";
 }

@@ -376,7 +376,5 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
 
     protected abstract char Operator { get; }
 
-#if DEBUG
-    public sealed override string ToString() => $"{left} {Operator} {right}";
-#endif
+    internal sealed override string DebugDisplay() => $"{left.DebugDisplay()} {Operator} {right.DebugDisplay()}";
 }

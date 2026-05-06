@@ -41,7 +41,5 @@ internal sealed class Replace : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => input.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"REPLACE({input}, {oldValue}, {newValue})";
-#endif
+    internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
 }

@@ -19,7 +19,5 @@ internal sealed class NewId : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 
-#if DEBUG
-    public override string ToString() => "NEWID()";
-#endif
+    internal override string DebugDisplay() => "NEWID()";
 }

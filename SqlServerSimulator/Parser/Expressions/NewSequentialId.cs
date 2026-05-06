@@ -34,7 +34,5 @@ internal sealed class NewSequentialId : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 
-#if DEBUG
-    public override string ToString() => "NEWSEQUENTIALID()";
-#endif
+    internal override string DebugDisplay() => "NEWSEQUENTIALID()";
 }

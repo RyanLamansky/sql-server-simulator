@@ -1,4 +1,5 @@
-﻿using SqlServerSimulator.Parser.Expressions;
+﻿using System.Diagnostics;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 
 namespace SqlServerSimulator.Parser;
@@ -6,6 +7,7 @@ namespace SqlServerSimulator.Parser;
 /// <summary>
 /// Contains the logic described by a SQL command and computes its results.
 /// </summary>
+[DebuggerDisplay("{DebugDisplay(),nq}")]
 internal abstract class Expression
 {
     private protected Expression()
@@ -153,9 +155,14 @@ internal abstract class Expression
     /// <param name="resolveColumnType">Callback that, given a multi-part column name, returns its declared type or throws if unresolvable.</param>
     public abstract Storage.SqlType GetSqlType(Func<List<string>, Storage.SqlType> resolveColumnType);
 
-#if DEBUG
-    public abstract override string ToString();
-#endif
+    /// <summary>
+    /// Diagnostic-only string rendering, surfaced to debuggers via
+    /// <see cref="DebuggerDisplayAttribute"/>. Production paths must not call
+    /// this — they should produce purpose-built formats (Msg-shaped error
+    /// text, CAST-to-varchar, etc.) instead. Kept non-public so accidental
+    /// production use fails to compile.
+    /// </summary>
+    internal abstract string DebugDisplay();
 
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {

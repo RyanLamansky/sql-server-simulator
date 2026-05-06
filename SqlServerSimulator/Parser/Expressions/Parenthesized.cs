@@ -11,7 +11,5 @@ internal sealed class Parenthesized(ParserContext context) : Expression
 
     public override Storage.SqlType GetSqlType(Func<List<string>, Storage.SqlType> resolveColumnType) => wrapped.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"( {wrapped} )";
-#endif
+    internal override string DebugDisplay() => $"( {wrapped.DebugDisplay()} )";
 }

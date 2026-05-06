@@ -30,7 +30,5 @@ internal sealed class Reference : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => resolveColumnType(this.name);
 
-#if DEBUG
-    public override string ToString() => string.Join('.', name);
-#endif
+    internal override string DebugDisplay() => string.Join('.', name);
 }

@@ -28,7 +28,5 @@ internal sealed class Lower(ParserContext context) : Expression
 
     public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
-#if DEBUG
-    public override string ToString() => $"LOWER({source})";
-#endif
+    internal override string DebugDisplay() => $"LOWER({source.DebugDisplay()})";
 }
