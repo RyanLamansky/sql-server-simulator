@@ -74,7 +74,6 @@ Heavy-hitters someone might assume work but don't. Source and `git log` are the 
 - Transactions / locks / MVCC.
 - `text` / `ntext` / `image` operation restrictions: comparison (Msg 402) and ORDER BY / DISTINCT (Msg 306) are enforced; function-level restrictions (e.g. `LEN(ntext)` raising Msg 8116) and the legacy `READTEXT`/`WRITETEXT`/`UPDATETEXT` family aren't modeled.
 - `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout.
-- `NEWSEQUENTIALID()` (deferred until `DEFAULT`-clause support exists in `CREATE TABLE`; the function is only valid in that context).
 - `CONVERT` / `TRY_CONVERT` style-code coverage. Only styles `0`, `120`, and `121` are wired up for date-like sources targeting a character string (the EF Core code-generation defaults). Other style numbers raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date-parsing styles aren't modeled.
 - `LIKE` `COLLATE` override. The default collation (case-insensitive, Latin1_General-shaped) is what every `LIKE` runs under; explicit `COLLATE` clauses on the predicate aren't parsed yet.
 - Cross-category `Promote` for integer ↔ string. Only CAST works for that pair.

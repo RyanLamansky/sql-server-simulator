@@ -1,3 +1,5 @@
+using SqlServerSimulator.Parser;
+
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
@@ -12,7 +14,7 @@ namespace SqlServerSimulator.Storage;
 /// <c>varchar</c>, UCS-2 code units for <c>nvarchar</c>.
 /// </para>
 /// </remarks>
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null)
 {
     public readonly string Name = name;
 
@@ -36,6 +38,13 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// owns the per-table counter and answers <c>IDENT_CURRENT</c>.
     /// </summary>
     public readonly IdentityState? Identity = identity;
+
+    /// <summary>
+    /// Parsed <c>DEFAULT</c> expression — non-null when the column declared
+    /// one. Evaluated per-row in the INSERT path whenever the column is
+    /// omitted from the destination list, replacing the implicit-NULL fill.
+    /// </summary>
+    public readonly Expression? Default = defaultExpression;
 
 #if DEBUG
     public override string ToString() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";

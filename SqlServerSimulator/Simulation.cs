@@ -3,6 +3,7 @@ using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 using System.Collections.Concurrent;
 using System.Data.Common;
+using System.Security.Cryptography;
 
 namespace SqlServerSimulator;
 
@@ -24,6 +25,7 @@ public sealed partial class Simulation
     /// </summary>
     public Simulation()
     {
+        RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
     }
 
     /// <summary>
@@ -99,6 +101,55 @@ public sealed partial class Simulation
     /// immutable.
     /// </summary>
     internal static Dictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
+
+    /// <summary>
+    /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for
+    /// <see cref="GenerateNewSequentialId"/>. Filled once at construction —
+    /// stands in for SQL Server's "MAC address + boot timestamp" anchor that
+    /// distinguishes one server's sequence from another's.
+    /// </summary>
+    private readonly byte[] newSequentialIdAnchor = new byte[12];
+
+    /// <summary>
+    /// Monotonic counter for <see cref="GenerateNewSequentialId"/>; each call
+    /// reserves the next value via <see cref="Interlocked.Increment(ref long)"/>
+    /// and packs it into raw bytes [0..3] of the produced GUID.
+    /// </summary>
+    private long newSequentialIdCounter;
+
+    /// <summary>
+    /// Produces the next <c>NEWSEQUENTIALID()</c> value: a
+    /// <see cref="Guid"/> whose comparison under SQL Server's
+    /// <c>uniqueidentifier</c> ordering rules is strictly greater than
+    /// every value previously returned for this <see cref="Simulation"/>.
+    /// </summary>
+    /// <remarks>
+    /// SQL Server's <c>uniqueidentifier</c> compares group-by-group from
+    /// most significant to least: bytes <c>[10..15]</c>, then <c>[8..9]</c>,
+    /// then <c>[6..7]</c>, then <c>[4..5]</c>, then <c>[0..3]</c>; within
+    /// each group the lower-indexed byte is more significant. To get
+    /// strict monotonicity the simulator fixes bytes <c>[4..15]</c> for the
+    /// lifetime of the simulation and packs an incrementing 64-bit counter
+    /// into bytes <c>[0..3]</c> big-endian (raw byte 0 = MSB, raw byte 3 =
+    /// LSB). Each increment lands in the comparison-LSB position
+    /// (raw byte 3) and carries propagate left toward higher comparison
+    /// significance — matching real SQL Server's per-call delta.
+    /// Monotonicity holds for the first 2^32 calls; beyond that the counter
+    /// wraps and the cycle restarts. The GUID is constructed via
+    /// <see cref="Guid(ReadOnlySpan{byte}, bool)"/> with <c>bigEndian</c>
+    /// true, so its display order matches the raw byte order assembled here.
+    /// </remarks>
+    internal Guid GenerateNewSequentialId()
+    {
+        var counter = (uint)Interlocked.Increment(ref this.newSequentialIdCounter);
+        Span<byte> bytes = stackalloc byte[16];
+        bytes[0] = (byte)(counter >> 24);
+        bytes[1] = (byte)(counter >> 16);
+        bytes[2] = (byte)(counter >> 8);
+        bytes[3] = (byte)counter;
+        this.newSequentialIdAnchor.CopyTo(bytes[4..]);
+        return new Guid(bytes, bigEndian: true);
+    }
 
     /// <summary>
     /// Top-level statement dispatch. Iterates through the command's tokens,

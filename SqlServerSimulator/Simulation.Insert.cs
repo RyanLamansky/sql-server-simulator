@@ -129,6 +129,29 @@ partial class Simulation
             for (var i = 0; i < rowValues.Length; i++)
                 rowValues[i] = SqlValue.Null(destinationTable.Schema[i]);
 
+            // Defaults run only for columns not in the destination column list:
+            // when an INSERT supplies an explicit value (including explicit
+            // NULL), the column's DEFAULT must not fire. This also keeps
+            // sequence-advancing defaults (NEWSEQUENTIALID) from being burned
+            // on rows that already provide the value.
+            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            {
+                var column = destinationTable.Columns[i];
+                if (column.Default is null) continue;
+                var listed = false;
+                for (var j = 0; j < destinationColumns.Length; j++)
+                {
+                    if (ReferenceEquals(destinationColumns[j], column))
+                    {
+                        listed = true;
+                        break;
+                    }
+                }
+                if (listed) continue;
+                var defaultValue = column.Default.Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                rowValues[i] = CoerceForInsert(defaultValue, column.Type);
+            }
+
             for (var i = 0; i < destinationColumns.Length; i++)
             {
                 var targetColumn = destinationColumns[i];

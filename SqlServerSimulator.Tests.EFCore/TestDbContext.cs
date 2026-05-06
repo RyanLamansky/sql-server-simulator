@@ -146,6 +146,23 @@ internal class Widget
 }
 
 /// <summary>
+/// Exercises the simulator's <c>NEWSEQUENTIALID()</c> default-clause support
+/// through EF Core. <see cref="Id"/> is wired in <c>OnModelCreating</c> with
+/// <c>HasDefaultValueSql("newsequentialid()")</c> so EF Core defers GUID
+/// generation to the server (otherwise the SqlServer convention installs
+/// <c>SequentialGuidValueGenerator</c> client-side and the simulator's
+/// default expression never fires).
+/// </summary>
+internal class Token
+{
+    [Column(TypeName = "uniqueidentifier")]
+    public Guid Id { get; set; }
+
+    [Column(TypeName = "nvarchar(50)")]
+    public string Label { get; set; } = null!;
+}
+
+/// <summary>
 /// Counterpart to <see cref="Widget"/> with <see cref="DatabaseGeneratedOption.None"/>
 /// — EF Core treats <see cref="Id"/> as caller-supplied, so SaveChanges
 /// emits a plain INSERT (no <c>OUTPUT INSERTED</c>). Combined with
@@ -175,6 +192,17 @@ internal class TestDbContext(Simulation simulation) : DbContext
         _ = optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
     }
 
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Pin the Token.Id GUID to the server-side NEWSEQUENTIALID() default.
+        // Without this, the SqlServer EF convention installs
+        // SequentialGuidValueGenerator on the client and the database default
+        // never fires.
+        _ = modelBuilder.Entity<Token>()
+            .Property(t => t.Id)
+            .HasDefaultValueSql("newsequentialid()");
+    }
+
     public DbSet<TestRow> Rows => Set<TestRow>();
 
     public DbSet<Person> People => Set<Person>();
@@ -188,6 +216,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Article> Articles => Set<Article>();
 
     public DbSet<Widget> Widgets => Set<Widget>();
+
+    public DbSet<Token> Tokens => Set<Token>();
 
     public DbSet<Sticker> Stickers => Set<Sticker>();
 
@@ -291,6 +321,21 @@ internal class TestDbContext(Simulation simulation) : DbContext
                 create table Widgets (
                     Id int identity(1, 1) not null,
                     Name nvarchar(50) not null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateTokensSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Tokens (
+                    Id uniqueidentifier not null default newsequentialid(),
+                    Label nvarchar(50) not null
                 )
                 """)
             .ExecuteNonQuery();

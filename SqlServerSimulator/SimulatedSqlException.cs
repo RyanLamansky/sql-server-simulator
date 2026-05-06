@@ -283,6 +283,17 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 
     /// <summary>
+    /// Mimics SQL Server error 302: <c>newsequentialid()</c> appeared anywhere
+    /// other than as the entire DEFAULT expression of a <c>uniqueidentifier</c>
+    /// column. Wording verified against SQL Server 2025 — the simulator
+    /// surfaces this whenever the parser sees the call outside that narrow
+    /// context, including bare <c>SELECT NEWSEQUENTIALID()</c> and uses
+    /// nested inside an arithmetic / function expression.
+    /// </summary>
+    internal static SimulatedSqlException NewSequentialIdNotInDefault() =>
+        new("The newsequentialid() built-in function can only be used in a DEFAULT expression for a column of type 'uniqueidentifier' in a CREATE TABLE or ALTER TABLE statement. It cannot be combined with other operators to form a complex scalar expression.", 302, 16, 0);
+
+    /// <summary>
     /// Mimics SQL Server error 506: the <c>ESCAPE</c> clause of a <c>LIKE</c>
     /// predicate received a value that wasn't exactly one character (empty,
     /// multi-char). The displayed value is whatever the expression evaluated

@@ -232,6 +232,26 @@ partial class Simulation
             for (var i = 0; i < rowValues.Length; i++)
                 rowValues[i] = SqlValue.Null(destinationTable.Schema[i]);
 
+            // Defaults run only for columns absent from the INSERT branch's
+            // column list — same rule as plain INSERT (see ProcessHeapInsert).
+            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            {
+                var column = destinationTable.Columns[i];
+                if (column.Default is null) continue;
+                var listed = false;
+                for (var j = 0; j < insertColumns2.Length; j++)
+                {
+                    if (ReferenceEquals(insertColumns2[j], column))
+                    {
+                        listed = true;
+                        break;
+                    }
+                }
+                if (listed) continue;
+                var defaultValue = column.Default.Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                rowValues[i] = CoerceForInsert(defaultValue, column.Type);
+            }
+
             for (var i = 0; i < insertColumns2.Length; i++)
             {
                 var targetColumn = insertColumns2[i];

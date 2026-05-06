@@ -52,6 +52,17 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// </summary>
     public Token? Token;
 
+    /// <summary>
+    /// True while an <c>Expression.Parse</c> call is running for a
+    /// <c>CREATE TABLE</c> column's <c>DEFAULT</c> clause. Set by the
+    /// CREATE-TABLE parser around the call to
+    /// <see cref="Expression.Parse(ParserContext)"/> and cleared in
+    /// <c>finally</c>. Built-in functions whose grammar restricts them to
+    /// DEFAULT clauses (currently <c>NEWSEQUENTIALID</c>) inspect this flag
+    /// and raise Msg 302 when it isn't set.
+    /// </summary>
+    public bool InDefaultClause;
+
     private readonly FrozenDictionary<string, SqlValue> variables = command
         .Parameters
         .Cast<DbParameter>()

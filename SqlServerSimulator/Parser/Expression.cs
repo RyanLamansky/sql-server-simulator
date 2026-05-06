@@ -218,6 +218,11 @@ internal abstract class Expression
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
                 _ => null
             },
+            15 => uppercaseName switch
+            {
+                "NEWSEQUENTIALID" => new NewSequentialId(context),
+                _ => null
+            },
             _ => (Expression?)null
         } ?? throw SimulatedSqlException.UnrecognizedBuiltInFunction(name);
     }

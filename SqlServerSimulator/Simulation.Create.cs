@@ -23,13 +23,13 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             return false;
 
-        var rawColumns = new List<(Name Name, Name TypeName, int? DeclaredMaxLength, int? DeclaredScale, bool Nullable, IdentityState? Identity)>();
-        bool suppressAdvanceToken;
+        var heapColumns = new List<HeapColumn>();
+        var fixedWidthSum = 0;
+        var identityCount = 0;
         do
         {
-            suppressAdvanceToken = false;
             var columnName = context.GetNextRequired<Name>();
-            var type = context.GetNextRequired<Name>();
+            var typeName = context.GetNextRequired<Name>();
 
             int? declaredMaxLength = null;
             int? declaredScale = null;
@@ -61,62 +61,62 @@ partial class Simulation
                 context.MoveNextRequired();
             }
 
+            // Loop over the column-constraint clauses (IDENTITY, NULL/NOT NULL,
+            // DEFAULT) in any order. Each branch leaves Token at the first
+            // un-consumed token; the loop exits when that token isn't a
+            // recognized constraint keyword (typically the comma separating
+            // columns or the column-list's closing paren).
             IdentityState? identity = null;
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Identity })
+            bool? nullable = null;
+            Expression? defaultExpression = null;
+            while (true)
             {
-                identity = ParseIdentitySpec(context, columnName.Value);
-            }
-
-            bool nullable;
-            if (context.Token is ReservedKeyword next)
-            {
-                switch (next.Keyword)
+                switch (context.Token)
                 {
-                    case Keyword.Not:
+                    case ReservedKeyword { Keyword: Keyword.Identity } when identity is null:
+                        identity = ParseIdentitySpec(context, columnName.Value);
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.Not } when !nullable.HasValue:
                         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
-
                         nullable = false;
-                        break;
-                    case Keyword.Null:
+                        context.MoveNextRequired();
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
                         nullable = true;
-                        break;
-                    default:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
+                        context.MoveNextRequired();
+                        context.InDefaultClause = true;
+                        try { defaultExpression = Expression.Parse(context); }
+                        finally { context.InDefaultClause = false; }
+                        continue;
                 }
-            }
-            else
-            {
-                suppressAdvanceToken = true;
-                nullable = identity is null;
+                break;
             }
 
-            rawColumns.Add((columnName, type, declaredMaxLength, declaredScale, nullable, identity));
-        } while ((suppressAdvanceToken ? context.Token : context.GetNextRequired()) is Operator { Character: ',' });
+            var actualNullable = nullable ?? (identity is null);
+            var (resolvedType, maxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, heapColumns.Count + 1, columnName.Value);
 
-        if (context.Token is not Operator { Character: ')' })
-            return false;
-
-        var heapColumns = new HeapColumn[rawColumns.Count];
-        var fixedWidthSum = 0;
-        var identityCount = 0;
-        for (var i = 0; i < rawColumns.Count; i++)
-        {
-            var raw = rawColumns[i];
-            var (resolvedType, maxLength) = SqlType.GetByName(raw.TypeName, raw.DeclaredMaxLength, raw.DeclaredScale, i + 1, raw.Name.Value);
-            if (raw.Identity is not null)
+            if (identity is not null)
             {
                 if (++identityCount > 1)
                     throw SimulatedSqlException.MultipleIdentityColumns(tableName.Value);
-                if (raw.Nullable)
-                    throw SimulatedSqlException.IdentityOnNullableColumn(raw.Name.Value, tableName.Value);
+                if (actualNullable)
+                    throw SimulatedSqlException.IdentityOnNullableColumn(columnName.Value, tableName.Value);
                 if (resolvedType != SqlType.Int32 && resolvedType != SqlType.BigInt && resolvedType != SqlType.SmallInt && resolvedType != SqlType.TinyInt)
-                    throw SimulatedSqlException.IdentityInvalidType(raw.Name.Value);
+                    throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
             }
-            heapColumns[i] = new(raw.Name.Value, resolvedType, maxLength, raw.Nullable, raw.Identity);
+
             if (resolvedType.IsFixedLength)
                 fixedWidthSum += resolvedType.FixedLength;
-        }
+
+            heapColumns.Add(new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression));
+        } while (context.Token is Operator { Character: ',' });
+
+        if (context.Token is not Operator { Character: ')' })
+            return false;
 
         // Schemas whose fixed-width columns alone exceed SQL Server's 8060-byte
         // in-row limit can never hold a row; reject at CREATE TABLE (Msg 1701).
@@ -125,7 +125,7 @@ partial class Simulation
         if (fixedWidthSum > Heap.MaxRowSize)
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Value, fixedWidthSum, Heap.MaxRowSize);
 
-        var heapTable = new HeapTable(tableName.Value, heapColumns);
+        var heapTable = new HeapTable(tableName.Value, [.. heapColumns]);
         return this.HeapTables.TryAdd(heapTable.Name, heapTable)
             ? true
             : throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
