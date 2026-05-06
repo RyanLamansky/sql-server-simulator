@@ -203,7 +203,9 @@ partial class Simulation
             // at CREATE TABLE.
             EvaluateComputedColumns(destinationTable, rowValues);
 
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, rowValues), destinationTable.Heap));
+            var storedValues = ProjectStoredValues(destinationTable, rowValues);
+            EnforceKeyConstraints(destinationTable, storedValues);
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap));
 
             if (output is { } o)
                 outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues: null));

@@ -29,10 +29,24 @@ partial class Simulation
         // forward column references inside computed expressions can bind).
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
+        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
         var identityCount = 0;
         do
         {
-            var columnName = context.GetNextRequired<Name>();
+            context.MoveNextRequired();
+
+            // Table-level constraint: `CONSTRAINT name PRIMARY KEY|UNIQUE (cols)`
+            // or unnamed `PRIMARY KEY|UNIQUE (cols)`. Forks before the column
+            // path because PRIMARY/UNIQUE/CONSTRAINT are reserved keywords and
+            // would otherwise collide with the leading-name expectation.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique })
+            {
+                ParseTableLevelKeyConstraint(context, heapColumns, pendingKeys, pendingComputed);
+                continue;
+            }
+
+            if (context.Token is not Name columnName)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.As })
@@ -79,13 +93,15 @@ partial class Simulation
             }
 
             // Loop over the column-constraint clauses (IDENTITY, NULL/NOT NULL,
-            // DEFAULT) in any order. Each branch leaves Token at the first
-            // un-consumed token; the loop exits when that token isn't a
-            // recognized constraint keyword (typically the comma separating
-            // columns or the column-list's closing paren).
+            // DEFAULT, PRIMARY KEY/UNIQUE) in any order. Each branch leaves
+            // Token at the first un-consumed token; the loop exits when that
+            // token isn't a recognized constraint keyword (typically the comma
+            // separating columns or the column-list's closing paren).
             IdentityState? identity = null;
             bool? nullable = null;
             Expression? defaultExpression = null;
+            var inlineKeyKind = (KeyConstraintKind?)null;
+            string? inlineKeyName = null;
             while (true)
             {
                 switch (context.Token)
@@ -109,12 +125,34 @@ partial class Simulation
                         try { defaultExpression = Expression.Parse(context); }
                         finally { context.InDefaultClause = false; }
                         continue;
+                    case ReservedKeyword { Keyword: Keyword.Constraint } when inlineKeyKind is null:
+                        if (context.GetNextRequired() is not Name namedConstraint)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        inlineKeyName = namedConstraint.Value;
+                        context.MoveNextRequired();
+                        if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
+                        inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                        continue;
                 }
                 break;
             }
 
+            if (inlineKeyKind == KeyConstraintKind.PrimaryKey)
+            {
+                if (nullable == true)
+                    throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName.Value);
+                nullable = false;
+            }
+
             var actualNullable = nullable ?? (identity is null);
             var (resolvedType, maxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, heapColumns.Count + 1, columnName.Value);
+
+            if (inlineKeyKind is KeyConstraintKind kind)
+                pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count]));
 
             if (identity is not null)
             {
@@ -187,7 +225,8 @@ partial class Simulation
         if (fixedWidthSum > Heap.MaxRowSize)
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Value, fixedWidthSum, Heap.MaxRowSize);
 
-        var heapTable = new HeapTable(tableName.Value, [.. heapColumns!]);
+        var keyConstraints = ResolveKeyConstraints(tableName.Value, heapColumns!, pendingKeys);
+        var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints);
         return this.HeapTables.TryAdd(heapTable.Name, heapTable)
             ? true
             : throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
@@ -259,4 +298,188 @@ partial class Simulation
 
     private static long EvaluateLiteralBigInt(Expression expression) =>
         expression.Run(name => throw SimulatedSqlException.InvalidColumnName(name)).CoerceTo(SqlType.BigInt).AsInt64;
+
+    /// <summary>
+    /// Parses the inline column-constraint shape <c>(PRIMARY KEY|UNIQUE) [CLUSTERED|NONCLUSTERED]</c>,
+    /// entered with <see cref="ParserContext.Token"/> on the <c>PRIMARY</c> or
+    /// <c>UNIQUE</c> keyword. Consumes the trailing <c>KEY</c> for PK and the
+    /// optional clustering modifier (which the simulator accepts and ignores
+    /// because it has no index storage to attach the modifier to). Returns
+    /// the parsed kind; leaves <see cref="ParserContext.Token"/> on the next
+    /// constraint keyword, comma, or closing paren.
+    /// </summary>
+    private static KeyConstraintKind ParseInlineKeyKindAndModifiers(ParserContext context)
+    {
+        KeyConstraintKind kind;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Primary })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Key })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            kind = KeyConstraintKind.PrimaryKey;
+        }
+        else
+        {
+            kind = KeyConstraintKind.Unique;
+        }
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Clustered or Keyword.NonClustered })
+            context.MoveNextRequired();
+        return kind;
+    }
+
+    /// <summary>
+    /// Parses a table-level <c>[CONSTRAINT name] (PRIMARY KEY|UNIQUE) [CLUSTERED|NONCLUSTERED] (col [, col ...])</c>
+    /// element, entered with <see cref="ParserContext.Token"/> on the leading
+    /// <c>CONSTRAINT</c>, <c>PRIMARY</c>, or <c>UNIQUE</c>. Resolves each named
+    /// column to its index in <paramref name="heapColumns"/> and queues the
+    /// constraint into <paramref name="pendingKeys"/>; final validation
+    /// (multiple-PK, key-on-LOB, PK NULL flip) runs after the column list
+    /// closes. Leaves <see cref="ParserContext.Token"/> on the trailing comma
+    /// or closing paren of the column-element list.
+    /// </summary>
+    private static void ParseTableLevelKeyConstraint(
+        ParserContext context,
+        List<HeapColumn?> heapColumns,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed)
+    {
+        string? constraintName = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint })
+        {
+            if (context.GetNextRequired() is not Name nameToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            constraintName = nameToken.Value;
+            context.MoveNextRequired();
+        }
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var kind = ParseInlineKeyKindAndModifiers(context);
+
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var ordinals = new List<int>();
+        do
+        {
+            if (context.GetNextRequired() is not Name keyColumn)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var found = -1;
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, keyColumn.Value))
+                {
+                    found = i;
+                    break;
+                }
+                if (heapColumns[i] is null)
+                {
+                    foreach (var pending in pendingComputed)
+                    {
+                        if (pending.Index == i && Collation.Default.Equals(pending.Name, keyColumn.Value))
+                            throw new NotSupportedException("PRIMARY KEY/UNIQUE on a computed column.");
+                    }
+                }
+            }
+            if (found < 0)
+                throw SimulatedSqlException.InvalidColumnName(keyColumn.Value);
+            ordinals.Add(found);
+
+            // Optional ASC/DESC after each column — accept and ignore.
+            context.MoveNextRequired();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
+                context.MoveNextRequired();
+        } while (context.Token is Operator { Character: ',' });
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        pendingKeys.Add((kind, constraintName, [.. ordinals]));
+    }
+
+    /// <summary>
+    /// Validates the queued PK/UNIQUE constraints against the resolved column
+    /// list and translates them into <see cref="KeyConstraint"/> records keyed
+    /// by storage ordinal. Enforces SQL Server's compile-time rules: at most
+    /// one PRIMARY KEY per table (Msg 8110), no PK on a column whose declared
+    /// nullability is NULL (Msg 8111 — also fires for table-level PK on a
+    /// column declared NULL), no key column of LOB type (Msg 1919). Generates
+    /// a SQL-Server-shaped auto name for any unnamed constraint
+    /// (<c>PK__&lt;table&gt;__&lt;hex&gt;</c> / <c>UQ__&lt;table&gt;__&lt;hex&gt;</c>).
+    /// Computed columns are not yet supported as key participants — those
+    /// raise <see cref="NotSupportedException"/>.
+    /// </summary>
+    private static KeyConstraint[] ResolveKeyConstraints(
+        string tableName,
+        List<HeapColumn> heapColumns,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys)
+    {
+        if (pendingKeys.Count == 0)
+            return [];
+
+        var primaryKeyCount = 0;
+        var resolved = new KeyConstraint[pendingKeys.Count];
+        for (var c = 0; c < pendingKeys.Count; c++)
+        {
+            var pending = pendingKeys[c];
+            if (pending.Kind == KeyConstraintKind.PrimaryKey && ++primaryKeyCount > 1)
+                throw SimulatedSqlException.MultiplePrimaryKey(tableName);
+
+            var storageOrdinals = new int[pending.FullOrdinals.Length];
+            for (var i = 0; i < pending.FullOrdinals.Length; i++)
+            {
+                var fullOrdinal = pending.FullOrdinals[i];
+                var column = heapColumns[fullOrdinal];
+                if (column.Computed is not null)
+                    throw new NotSupportedException("PRIMARY KEY/UNIQUE on a computed column.");
+                if (column.IsLob)
+                    throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
+                if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)
+                    throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
+
+                var storageOrdinal = 0;
+                for (var k = 0; k < fullOrdinal; k++)
+                {
+                    if (heapColumns[k].IsStored)
+                        storageOrdinal++;
+                }
+                storageOrdinals[i] = storageOrdinal;
+            }
+
+            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals);
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// Generates the auto-name SQL Server uses for an unnamed PK/UNIQUE
+    /// constraint: <c>PK__&lt;tablefirst8&gt;__&lt;16hex&gt;</c> /
+    /// <c>UQ__&lt;tablefirst8&gt;__&lt;16hex&gt;</c>. The 16-hex suffix is a
+    /// deterministic FNV-1a 64-bit hash of the table name plus participating
+    /// column names — stable across simulator runs (so tests can assert on it
+    /// when needed) and shaped like a real-server auto-name (so violation
+    /// messages look authentic). The simulator doesn't reproduce SQL Server's
+    /// object-id-derived suffix because that would require modeling system
+    /// catalog allocations.
+    /// </summary>
+    private static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, List<HeapColumn> heapColumns)
+    {
+        const ulong fnvOffset = 14695981039346656037;
+        const ulong fnvPrime = 1099511628211;
+        var h = fnvOffset;
+        foreach (var ch in tableName)
+            h = (h ^ ch) * fnvPrime;
+        h = (h ^ (byte)':') * fnvPrime;
+        foreach (var i in fullOrdinals)
+        {
+            foreach (var ch in heapColumns[i].Name)
+                h = (h ^ ch) * fnvPrime;
+            h = (h ^ (byte)',') * fnvPrime;
+        }
+        var prefix = kind == KeyConstraintKind.PrimaryKey ? "PK__" : "UQ__";
+        var truncated = tableName.Length > 8 ? tableName[..8] : tableName;
+        return $"{prefix}{truncated}__{h:X16}";
+    }
 }

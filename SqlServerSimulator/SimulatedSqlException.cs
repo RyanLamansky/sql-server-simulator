@@ -660,4 +660,42 @@ internal sealed class SimulatedSqlException : DbException
     /// </summary>
     internal static SimulatedSqlException MultiPartIdentifierCouldNotBeBound(string name) =>
         new($"The multi-part identifier \"{name}\" could not be bound.", 4104, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8110: more than one column or table-level
+    /// PRIMARY KEY clause was declared in a CREATE TABLE.
+    /// </summary>
+    internal static SimulatedSqlException MultiplePrimaryKey(string tableName) =>
+        new($"Cannot add multiple PRIMARY KEY constraints to table '{tableName}'.", 8110, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 8111: a PRIMARY KEY constraint named a column
+    /// that allows NULLs. Real SQL Server fires this only when the column was
+    /// explicitly declared <c>NULL</c>; bare PK with no nullability stated
+    /// silently flips the column to NOT NULL instead.
+    /// </summary>
+    internal static SimulatedSqlException PrimaryKeyOnNullableColumn(string tableName) =>
+        new($"Cannot define PRIMARY KEY constraint on nullable column in table '{tableName}'.", 8111, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1919: a column whose type SQL Server doesn't
+    /// allow as a key column appeared in a PRIMARY KEY or UNIQUE constraint.
+    /// Triggers for <c>text</c>, <c>ntext</c>, <c>image</c>, and any
+    /// <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c> / <c>varbinary(MAX)</c>.
+    /// </summary>
+    internal static SimulatedSqlException KeyColumnInvalidType(string columnName, string tableName) =>
+        new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2627: an INSERT or UPDATE produced a row whose
+    /// PRIMARY KEY or UNIQUE-constraint key tuple already existed in the
+    /// table. SQL Server uses Msg 2627 for both PK and UNIQUE *constraint*
+    /// violations (Msg 2601 is for unique-index violations from
+    /// <c>CREATE UNIQUE INDEX</c>, which the simulator doesn't model).
+    /// <paramref name="kindWord"/> selects between <c>"PRIMARY KEY"</c> and
+    /// <c>"UNIQUE KEY"</c>; <paramref name="formattedKeyValues"/> is the
+    /// rendered tuple text without enclosing parens (e.g. <c>"1, &lt;NULL&gt;"</c>).
+    /// </summary>
+    internal static SimulatedSqlException ViolationOfKeyConstraint(string kindWord, string constraintName, string tableName, string formattedKeyValues) =>
+        new($"Violation of {kindWord} constraint '{constraintName}'. Cannot insert duplicate key in object 'dbo.{tableName}'. The duplicate key value is ({formattedKeyValues}).", 2627, 14, 1);
 }

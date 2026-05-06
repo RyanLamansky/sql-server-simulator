@@ -7,10 +7,11 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal sealed class HeapTable
 {
-    public HeapTable(string name, HeapColumn[] columns)
+    public HeapTable(string name, HeapColumn[] columns, KeyConstraint[]? keyConstraints = null)
     {
         this.Name = name;
         this.Columns = columns;
+        this.KeyConstraints = keyConstraints ?? [];
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -90,6 +91,14 @@ internal sealed class HeapTable
     /// <see cref="StoredColumns"/>, not <see cref="Columns"/>.
     /// </summary>
     public readonly SqlType[] Schema;
+
+    /// <summary>
+    /// PRIMARY KEY and UNIQUE constraints declared in the CREATE TABLE
+    /// statement, in declaration order. Enforced linear-scan at INSERT/MERGE
+    /// by <c>EnforceKeyConstraints</c>; SQL Server's NULLs-equal-for-UNIQUE
+    /// rule applies. Empty when the table declares neither.
+    /// </summary>
+    public readonly KeyConstraint[] KeyConstraints;
 
     /// <summary>The page-backed row store. Insert via <see cref="Heap.Insert"/>; iterate via <see cref="Heap.EnumerateRows"/>.</summary>
     public readonly Heap Heap = new();

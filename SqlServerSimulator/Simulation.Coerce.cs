@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -151,4 +153,90 @@ partial class Simulation
         }
         return stored;
     }
+
+    /// <summary>
+    /// Linear-scans the table's heap for a row whose key tuple equals the new
+    /// row's, raising Msg 2627 with the offending constraint's name on the
+    /// first match. Skips when the table has no PK/UNIQUE constraints.
+    /// SqlValue equality already handles SQL Server's NULLs-equal-for-UNIQUE
+    /// rule (two NULLs collide; one NULL and one non-NULL don't), so the loop
+    /// just delegates per column. Comparison is collation-aware for string
+    /// columns thanks to <see cref="SqlValue.Equals(SqlValue)"/>'s ANSI-padded
+    /// path. <paramref name="storedRowValues"/> is the row's values in
+    /// storage-ordinal order (the output of <see cref="ProjectStoredValues"/>);
+    /// existing rows are decoded one key column at a time so we don't pay the
+    /// cost of materializing whole rows for tables that have just a small
+    /// composite key.
+    /// </summary>
+    private static void EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] storedRowValues)
+    {
+        if (destinationTable.KeyConstraints.Length == 0)
+            return;
+
+        var storedColumns = destinationTable.StoredColumns;
+        var lobStore = destinationTable.Heap;
+
+        foreach (var rowBytes in destinationTable.Heap.EnumerateRows())
+        {
+            foreach (var constraint in destinationTable.KeyConstraints)
+            {
+                var allEqual = true;
+                for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
+                {
+                    var ord = constraint.StorageOrdinals[i];
+                    var existing = RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
+                    if (!existing.Equals(storedRowValues[ord]))
+                    {
+                        allEqual = false;
+                        break;
+                    }
+                }
+                if (allEqual)
+                {
+                    var sb = new StringBuilder();
+                    for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
+                    {
+                        if (i > 0)
+                            _ = sb.Append(", ");
+                        _ = sb.Append(FormatKeyValue(storedRowValues[constraint.StorageOrdinals[i]]));
+                    }
+                    throw SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, destinationTable.Name, sb.ToString());
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Renders a key-tuple slot the way SQL Server's Msg 2627 does: NULL as
+    /// <c>&lt;NULL&gt;</c>, strings raw (no enclosing quotes), numerics in
+    /// invariant culture, byte arrays as <c>0x</c>-prefixed hex, date/time
+    /// values in their canonical ISO forms. Every key-eligible type is
+    /// covered explicitly — un-modeled types throw rather than reaching for
+    /// the debugger-only <see cref="object.ToString"/>, since the convention
+    /// here is that production paths never depend on debug-only formatting.
+    /// </summary>
+    private static string FormatKeyValue(SqlValue value) =>
+        value.IsNull ? "<NULL>"
+        : value.Type.Category == SqlTypeCategory.String ? value.AsString
+        : value.Type switch
+        {
+            _ when value.Type == SqlType.Int32 => value.AsInt32.ToString(CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.BigInt => value.AsInt64.ToString(CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.SmallInt => value.AsInt16.ToString(CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.TinyInt => value.AsByte.ToString(CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.Bit => value.AsBoolean ? "1" : "0",
+            _ when value.Type == SqlType.UniqueIdentifier => value.AsGuid.ToString("D", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.Date => value.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.DateTime => value.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.SmallDateTime => value.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
+            DateTime2SqlType => value.AsDateTime2.ToString("yyyy-MM-dd HH:mm:ss.fffffff", CultureInfo.InvariantCulture),
+            TimeSqlType => value.AsTime.ToString("c", CultureInfo.InvariantCulture),
+            DateTimeOffsetSqlType => value.AsDateTimeOffset.ToString("yyyy-MM-dd HH:mm:ss.fffffff zzz", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.Float => value.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.Real => value.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.Money || value.Type == SqlType.SmallMoney => value.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+            VarbinarySqlType or BinarySqlType => $"0x{Convert.ToHexString(value.AsBytes)}",
+            DecimalSqlType d => value.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
+            _ => throw new NotSupportedException($"No key-violation rendering for {value.Type}."),
+        };
 }

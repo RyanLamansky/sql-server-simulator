@@ -184,6 +184,21 @@ internal class Receipt
 }
 
 /// <summary>
+/// Exercises the simulator's PRIMARY KEY constraint through EF Core.
+/// <see cref="Sku"/> is the caller-supplied PK; SaveChanges round-trips
+/// through a normal INSERT. A duplicate-key insert surfaces as a wrapped
+/// <see cref="DbUpdateException"/> whose
+/// inner exception is the simulator's Msg 2627.
+/// </summary>
+internal class Inventory
+{
+    [Column(TypeName = "nvarchar(50)")]
+    public string Sku { get; set; } = null!;
+
+    public int Quantity { get; set; }
+}
+
+/// <summary>
 /// Counterpart to <see cref="Widget"/> with <see cref="DatabaseGeneratedOption.None"/>
 /// — EF Core treats <see cref="Id"/> as caller-supplied, so SaveChanges
 /// emits a plain INSERT (no <c>OUTPUT INSERTED</c>). Combined with
@@ -230,6 +245,10 @@ internal class TestDbContext(Simulation simulation) : DbContext
         _ = modelBuilder.Entity<Receipt>()
             .Property(r => r.Total)
             .HasComputedColumnSql("[Subtotal] + [Tax]", stored: false);
+
+        // Pin Inventory's caller-supplied string PK so EF Core doesn't try
+        // to generate values for it.
+        _ = modelBuilder.Entity<Inventory>().HasKey(i => i.Sku);
     }
 
     public DbSet<TestRow> Rows => Set<TestRow>();
@@ -251,6 +270,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Sticker> Stickers => Set<Sticker>();
 
     public DbSet<Receipt> Receipts => Set<Receipt>();
+
+    public DbSet<Inventory> Inventory => Set<Inventory>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -384,6 +405,21 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Subtotal decimal(10, 2) not null,
                     Tax decimal(10, 2) not null,
                     Total as Subtotal + Tax
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateInventorySimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Inventory (
+                    Sku nvarchar(50) not null constraint pk_inventory primary key,
+                    Quantity int not null
                 )
                 """)
             .ExecuteNonQuery();
