@@ -27,6 +27,38 @@ internal sealed class Selection
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Selection Parse(ParserContext context, uint depth)
     {
+        // Save / restore the parser's aggregate collector so each Selection
+        // (including nested derived tables) gets its own scope. Aggregates
+        // parsed inside the projection / HAVING register here; the executor
+        // uses the populated list to switch into aggregate mode.
+        var savedCollector = context.AggregateCollector;
+        var aggregates = new List<AggregateExpression>();
+        context.AggregateCollector = aggregates;
+        try
+        {
+            return ParseInner(context, depth, aggregates);
+        }
+        finally
+        {
+            context.AggregateCollector = savedCollector;
+        }
+    }
+
+    /// <summary>
+    /// Bundles the post-FROM clause state — WHERE excluders, GROUP BY keys,
+    /// HAVING predicate, ORDER BY — so the recursive parse helpers can
+    /// share one growing state record without lengthening every signature.
+    /// </summary>
+    private sealed class FromClause
+    {
+        public readonly List<BooleanExpression> Excluders = [];
+        public readonly List<Expression> GroupBy = [];
+        public BooleanExpression? Having;
+        public readonly List<OrderBySpec> OrderBy = [];
+    }
+
+    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates)
+    {
         var distinct = false;
         int? topCount = null;
 
@@ -59,8 +91,7 @@ internal sealed class Selection
         }
 
         List<Expression> expressions = [];
-        List<BooleanExpression> excluders = [];
-        List<OrderBySpec> orderBy = [];
+        var fromClause = new FromClause();
 
         do
         {
@@ -69,8 +100,8 @@ internal sealed class Selection
                 case ReservedKeyword { Keyword: Keyword.From }:
                     break;
 
-                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert }:
-                    // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved
+                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce }:
+                    // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE are reserved
                     // keywords but valid as function-call heads inside a
                     // SELECT projection.
                     expressions.Add(Expression.Parse(context));
@@ -126,13 +157,13 @@ internal sealed class Selection
                                 throw SimulatedSqlException.InvalidObjectName(tableName);
                             }
 
-                            ConsumeOptionalAliasWhereOrderBy(context, excluders, orderBy);
+                            ConsumeOptionalAliasWhereOrderBy(context, fromClause);
 
                             var heapColumnNames = new string[heapTable.Columns.Length];
                             for (var ci = 0; ci < heapColumnNames.Length; ci++)
                                 heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
-                            return new(BuildSqlProjection(heapColumnNames, heapTable.Columns, heapTable.StoredColumns, heapTable.StorageOrdinals, heapTable.Heap, heapTable.Rows, expressions, excluders, orderBy, distinct, topCount));
+                            return new(BuildSqlProjection(heapColumnNames, heapTable.Columns, heapTable.StoredColumns, heapTable.StorageOrdinals, heapTable.Heap, heapTable.Rows, expressions, fromClause, distinct, topCount, aggregates));
 
                         case Operator { Character: '(' }:
                             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
@@ -141,7 +172,7 @@ internal sealed class Selection
                             if (Selection.Parse(context, depth + 1).Results is not SimulatedSqlResultSet derived)
                                 throw new InvalidOperationException("Inner SELECT produced a non-Pages result set; this should be unreachable.");
 
-                            ConsumeOptionalAliasWhereOrderBy(context, excluders, orderBy);
+                            ConsumeOptionalAliasWhereOrderBy(context, fromClause);
 
                             // Inner SELECT result rows are LOB-inline (projections never
                             // emit LOB pointers because they have no destination Heap),
@@ -151,13 +182,13 @@ internal sealed class Selection
                             var derivedColumns = new HeapColumn[derived.Schema.Length];
                             for (var ci = 0; ci < derivedColumns.Length; ci++)
                                 derivedColumns[ci] = new HeapColumn(string.Empty, derived.Schema[ci], maxLength: null, nullable: true);
-                            return new(BuildSqlProjection(derived.ColumnNames, derivedColumns, derivedColumns, storageOrdinals: null, lobStore: null, derived.RowBytes, expressions, excluders, orderBy, distinct, topCount));
+                            return new(BuildSqlProjection(derived.ColumnNames, derivedColumns, derivedColumns, storageOrdinals: null, lobStore: null, derived.RowBytes, expressions, fromClause, distinct, topCount, aggregates));
                     }
 
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Order }:
-                    ConsumeWhereAndOrderBy(context, excluders, orderBy);
+                    ConsumeWhereAndOrderBy(context, fromClause);
                     goto ExitWhileTokenLoop;
             }
 
@@ -165,7 +196,7 @@ internal sealed class Selection
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
 
-        return new(BuildSynthesizedSqlRow(expressions, excluders, orderBy, distinct, topCount));
+        return new(BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, distinct, topCount));
     }
 
     /// <summary>
@@ -174,7 +205,7 @@ internal sealed class Selection
     /// last-component match, so the alias is informational), then any number
     /// of WHERE clauses, then an optional ORDER BY clause.
     /// </summary>
-    private static void ConsumeOptionalAliasWhereOrderBy(ParserContext context, List<BooleanExpression> excluders, List<OrderBySpec> orderBy)
+    private static void ConsumeOptionalAliasWhereOrderBy(ParserContext context, FromClause fromClause)
     {
         var nextToken = context.GetNextOptional();
         if (nextToken is ReservedKeyword { Keyword: Keyword.As })
@@ -183,15 +214,17 @@ internal sealed class Selection
             _ = context.GetNextOptional();
         }
 
-        ConsumeWhereAndOrderBy(context, excluders, orderBy);
+        ConsumeWhereAndOrderBy(context, fromClause);
     }
 
     /// <summary>
-    /// Reads zero or more WHERE clauses followed by an optional ORDER BY,
-    /// starting from <see cref="ParserContext.Token"/> already positioned at
-    /// the first lookahead token (e.g. WHERE, ORDER, ;, or null). On return,
-    /// <see cref="ParserContext.Token"/> is the first token after the last
-    /// consumed clause (typically ;, ), or null).
+    /// Reads zero or more WHERE clauses, an optional GROUP BY, an optional
+    /// HAVING, and an optional ORDER BY — in that order, matching SQL Server's
+    /// grammar. Starts with <see cref="ParserContext.Token"/> already
+    /// positioned at the first lookahead token (e.g. WHERE, GROUP, HAVING,
+    /// ORDER, ;, or null). On return, <see cref="ParserContext.Token"/> is
+    /// the first token after the last consumed clause (typically ;, ), or
+    /// null).
     /// </summary>
     /// <remarks>
     /// Uses <see cref="ParserContext.Token"/> directly between clauses
@@ -200,18 +233,34 @@ internal sealed class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, List<BooleanExpression> excluders, List<OrderBySpec> orderBy)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause)
     {
         while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
-            excluders.Add(BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
+            fromClause.Excluders.Add(BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
+        }
+
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            do
+            {
+                context.MoveNextRequired();
+                fromClause.GroupBy.Add(Expression.Parse(context));
+            } while (context.Token is Operator { Character: ',' });
+        }
+
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
+        {
+            fromClause.Having = BooleanExpression.Parse(context.MoveNextRequiredReturnSelf());
         }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
         {
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            ParseOrderByItems(context, orderBy);
+            ParseOrderByItems(context, fromClause.OrderBy);
         }
     }
 
@@ -320,11 +369,13 @@ internal sealed class Selection
         Heap? lobStore,
         IEnumerable<byte[]> sourceRows,
         List<Expression> expressions,
-        List<BooleanExpression> excluders,
-        List<OrderBySpec> orderBy,
+        FromClause fromClause,
         bool distinct,
-        int? topCount)
+        int? topCount,
+        List<AggregateExpression> aggregates)
     {
+        var excluders = fromClause.Excluders;
+        var orderBy = fromClause.OrderBy;
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
@@ -381,7 +432,222 @@ internal sealed class Selection
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
 
-        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
+        return aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
+            ? BuildAggregateProjection(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, FindSourceColumn, ResolveColumnType, expressions, fromClause, outputSchema, outputColumnNames, aggregates, topCount)
+            : new SimulatedSqlResultSet(outputSchema, outputColumnNames, ProjectSqlRows(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, FindSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount));
+    }
+
+    /// <summary>
+    /// Aggregate-mode executor: streams every input row through each
+    /// projection aggregate's accumulator (per group when GROUP BY is in
+    /// play), then projects one output row per group. WHERE excluders run
+    /// per source row before aggregation; HAVING runs per group after
+    /// finalization; ORDER BY runs across groups at the end. Without
+    /// GROUP BY the output is exactly one row even for empty input (SQL
+    /// Server's implicit-empty-GROUP-BY rule); per-aggregate empty-input
+    /// behavior is each aggregator's responsibility (COUNT returns 0;
+    /// everything else NULL).
+    /// </summary>
+    private static SimulatedSqlResultSet BuildAggregateProjection(
+        HeapColumn[] sourceSchema,
+        HeapColumn[] storedSchema,
+        int[]? storageOrdinals,
+        Heap? lobStore,
+        IEnumerable<byte[]> sourceRows,
+        Func<List<string>, int> findSourceColumn,
+        Func<List<string>, SqlType> resolveColumnType,
+        List<Expression> expressions,
+        FromClause fromClause,
+        SqlType[] outputSchema,
+        string[] outputColumnNames,
+        List<AggregateExpression> aggregates,
+        int? topCount)
+    {
+        if (topCount == 0)
+            return new SimulatedSqlResultSet(outputSchema, outputColumnNames, []);
+
+        var groupByExpressions = fromClause.GroupBy;
+        var groupByCount = groupByExpressions.Count;
+
+        // Per-group state: aggregators (one per AggregateExpression) plus the
+        // group key tuple (used to populate non-aggregate projection slots).
+        // Without GROUP BY, the implicit "single empty group" still flows
+        // through this path with an empty key tuple.
+        var groups = new Dictionary<SqlValueKey, GroupState>();
+
+        var aggregateOperandTypes = new SqlType[aggregates.Count];
+        var aggregateResultTypes = new SqlType[aggregates.Count];
+        for (var i = 0; i < aggregates.Count; i++)
+        {
+            aggregateOperandTypes[i] = aggregates[i].Operand?.GetSqlType(resolveColumnType) ?? SqlType.Int32;
+            aggregateResultTypes[i] = aggregates[i].GetSqlType(resolveColumnType);
+        }
+
+        GroupState NewGroup()
+        {
+            var freshAggregators = new Aggregator[aggregates.Count];
+            for (var i = 0; i < aggregates.Count; i++)
+                freshAggregators[i] = Aggregator.Create(aggregates[i], aggregateOperandTypes[i], aggregateResultTypes[i]);
+            return new(keyValues: new SqlValue[groupByCount], aggregators: freshAggregators);
+        }
+
+        // Pre-create the implicit group when there's no GROUP BY so an empty
+        // input still produces one output row.
+        if (groupByCount == 0)
+            groups[SqlValueKey.Empty] = NewGroup();
+
+        foreach (var rowBytes in sourceRows)
+        {
+            var bytes = rowBytes;
+            SqlValue ResolveColumn(List<string> name)
+            {
+                var columnIndex = findSourceColumn(name);
+                return columnIndex == -1
+                    ? throw SimulatedSqlException.InvalidColumnName(name)
+                    : DecodeOrCompute(sourceSchema, storedSchema, storageOrdinals, columnIndex, bytes, lobStore, ResolveColumn);
+            }
+
+            var include = true;
+            foreach (var excluder in fromClause.Excluders)
+            {
+                if (excluder.Run(ResolveColumn) != true)
+                {
+                    include = false;
+                    break;
+                }
+            }
+            if (!include)
+                continue;
+
+            // Locate or create this row's group.
+            GroupState state;
+            if (groupByCount == 0)
+            {
+                state = groups[SqlValueKey.Empty];
+            }
+            else
+            {
+                var keyValues = new SqlValue[groupByCount];
+                for (var i = 0; i < groupByCount; i++)
+                    keyValues[i] = groupByExpressions[i].Run(ResolveColumn);
+                var key = new SqlValueKey(keyValues);
+                if (!groups.TryGetValue(key, out state!))
+                {
+                    state = NewGroup();
+                    Array.Copy(keyValues, state.KeyValues, groupByCount);
+                    groups[key] = state;
+                }
+            }
+
+            for (var i = 0; i < aggregates.Count; i++)
+            {
+                var aggregate = aggregates[i];
+                // STRING_AGG's separator is evaluated per row (SQL Server
+                // accepts non-constant separators); thread the latest value
+                // into the aggregator before each Add. Other aggregates have
+                // no per-row auxiliary inputs.
+                if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
+                {
+                    var separatorValue = aggregate.Separator!.Run(ResolveColumn);
+                    stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
+                }
+                var operand = aggregate.Operand;
+                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(ResolveColumn));
+            }
+        }
+
+        // Build a per-group resolver that maps GROUP BY key references back
+        // to the bucket's stored key values. Any non-aggregate column outside
+        // this set surfaces as Msg 207 (the simulator's analog to SQL
+        // Server's Msg 8120 — cosmetically different but semantically the
+        // same "unbound column" intent).
+        SqlType[] groupKeyTypes = [.. groupByExpressions.Select(g => g.GetSqlType(resolveColumnType))];
+
+        var output = new List<byte[]>();
+        foreach (var (_, state) in groups)
+        {
+            for (var i = 0; i < aggregates.Count; i++)
+                aggregates[i].BindResult(state.Aggregators[i].Result());
+
+            SqlValue ResolveByGroupKey(List<string> name)
+            {
+                for (var i = 0; i < groupByCount; i++)
+                {
+                    if (groupByExpressions[i] is Reference r
+                        && Collation.Default.Equals(r.Name, name[^1]))
+                    {
+                        return state.KeyValues[i];
+                    }
+                }
+                throw SimulatedSqlException.InvalidColumnName(name);
+            }
+
+            if (fromClause.Having is { } having && having.Run(ResolveByGroupKey) != true)
+                continue;
+
+            var projected = new SqlValue[expressions.Count];
+            for (var i = 0; i < expressions.Count; i++)
+                projected[i] = expressions[i].Run(ResolveByGroupKey);
+
+            output.Add(RowEncoder.EncodeRow(outputSchema, projected));
+        }
+
+        if (topCount is { } limit && output.Count > limit)
+            output = [.. output.Take(limit)];
+
+        return new SimulatedSqlResultSet(outputSchema, outputColumnNames, output);
+    }
+
+    /// <summary>
+    /// Per-group state inside <see cref="BuildAggregateProjection"/>: the
+    /// resolved key tuple (used to populate non-aggregate projection slots
+    /// from the GROUP BY's column references) plus one aggregator per
+    /// <see cref="AggregateExpression"/> in the projection.
+    /// </summary>
+    private sealed class GroupState(SqlValue[] keyValues, Aggregator[] aggregators)
+    {
+        public readonly SqlValue[] KeyValues = keyValues;
+        public readonly Aggregator[] Aggregators = aggregators;
+    }
+
+    /// <summary>
+    /// Hash-key wrapper around a <see cref="SqlValue"/> tuple used as a
+    /// dictionary key for GROUP BY buckets. Two NULL slots compare equal
+    /// (matching SQL Server: NULL is a valid group key with one bucket).
+    /// </summary>
+    private readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey>
+    {
+        public static readonly SqlValueKey Empty = new([]);
+
+        private readonly SqlValue[] values = values;
+
+        public bool Equals(SqlValueKey other)
+        {
+            if (this.values.Length != other.values.Length)
+                return false;
+            for (var i = 0; i < this.values.Length; i++)
+            {
+                var a = this.values[i];
+                var b = other.values[i];
+                if (a.IsNull != b.IsNull)
+                    return false;
+                if (a.IsNull)
+                    continue;
+                if (!a.Equals(b))
+                    return false;
+            }
+            return true;
+        }
+
+        public override bool Equals(object? obj) => obj is SqlValueKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            var h = new HashCode();
+            foreach (var v in this.values)
+                h.Add(v.IsNull ? 0 : v.GetHashCode());
+            return h.ToHashCode();
+        }
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(

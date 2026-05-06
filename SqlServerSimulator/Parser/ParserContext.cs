@@ -63,6 +63,17 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// </summary>
     public bool InDefaultClause;
 
+    /// <summary>
+    /// When non-null, every <see cref="Expressions.AggregateExpression"/>
+    /// constructor registers itself here, letting the surrounding
+    /// <see cref="Selection"/> parser learn which aggregates appear in the
+    /// projection / HAVING clauses without re-walking the expression trees.
+    /// Scoped by Selection.Parse: the outer caller sets the list before
+    /// parsing projection / HAVING, then snapshots the collected aggregates
+    /// and clears it. Nested SELECT scopes each get their own list.
+    /// </summary>
+    public List<Expressions.AggregateExpression>? AggregateCollector;
+
     private readonly FrozenDictionary<string, SqlValue> variables = command
         .Parameters
         .Cast<DbParameter>()

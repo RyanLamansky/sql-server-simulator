@@ -69,7 +69,7 @@ internal abstract class Expression
             // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved keywords
             // but dispatch as function calls when followed by '(' — the
             // surrounding loop hands the call shape off to ResolveBuiltIn.
-            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert } reserved => new Reference(reserved.ToString()),
+            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce } reserved => new Reference(reserved.ToString()),
             Name name => new Reference(name),
             Operator { Character: '(' } => new Parenthesized(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -172,7 +172,12 @@ internal abstract class Expression
             3 => uppercaseName switch
             {
                 "ABS" => new AbsoluteValue(context),
+                "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
                 "LEN" => new Length(context),
+                "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
+                "MIN" => AggregateExpression.Parse(context, AggregateKind.Min),
+                "SUM" => AggregateExpression.Parse(context, AggregateKind.Sum),
+                "VAR" => AggregateExpression.Parse(context, AggregateKind.Var),
                 _ => null
             },
             4 => uppercaseName switch
@@ -180,16 +185,24 @@ internal abstract class Expression
                 "CAST" => new Cast(context),
                 "LEFT" => new Left(context),
                 "TRIM" => new Trim(context),
+                "VARP" => AggregateExpression.Parse(context, AggregateKind.VarP),
                 _ => null
             },
             5 => uppercaseName switch
             {
+                "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
                 "NEWID" => new NewId(context),
                 "RIGHT" => new Right(context),
                 "RTRIM" => new RightTrim(context),
+                "STDEV" => AggregateExpression.Parse(context, AggregateKind.Stdev),
                 "UPPER" => new Upper(context),
+                _ => null
+            },
+            6 => uppercaseName switch
+            {
+                "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
                 _ => null
             },
             7 => uppercaseName switch
@@ -199,20 +212,32 @@ internal abstract class Expression
                 "REVERSE" => new Reverse(context),
                 _ => null
             },
+            8 => uppercaseName switch
+            {
+                "COALESCE" => new Coalesce(context),
+                _ => null
+            },
             9 => uppercaseName switch
             {
                 "CHARINDEX" => new CharIndex(context),
+                "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
                 "SUBSTRING" => new Substring(context),
                 _ => null
             },
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 _ => null
             },
             11 => uppercaseName switch
             {
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
+                _ => null
+            },
+            12 => uppercaseName switch
+            {
+                "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
                 _ => null
             },
             13 => uppercaseName switch
@@ -228,6 +253,11 @@ internal abstract class Expression
             15 => uppercaseName switch
             {
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
+                _ => null
+            },
+            21 => uppercaseName switch
+            {
+                "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct),
                 _ => null
             },
             _ => (Expression?)null
