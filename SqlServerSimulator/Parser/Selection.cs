@@ -292,7 +292,7 @@ internal sealed class Selection
 
         foreach (var excluder in excluders)
         {
-            if (!excluder.Run(column => throw SimulatedSqlException.InvalidColumnName(column)))
+            if (excluder.Run(column => throw SimulatedSqlException.InvalidColumnName(column)) != true)
                 return new SimulatedSqlResultSet(schema, columnNames, []);
         }
 
@@ -421,7 +421,7 @@ internal sealed class Selection
                 var include = true;
                 foreach (var excluder in excluders)
                 {
-                    if (!excluder.Run(ResolveColumn))
+                    if (excluder.Run(ResolveColumn) != true)
                     {
                         include = false;
                         break;
@@ -461,7 +461,7 @@ internal sealed class Selection
             var include = true;
             foreach (var excluder in excluders)
             {
-                if (!excluder.Run(ResolveSource))
+                if (excluder.Run(ResolveSource) != true)
                 {
                     include = false;
                     break;

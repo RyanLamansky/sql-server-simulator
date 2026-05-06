@@ -591,6 +591,58 @@ public class InsertTests
         Assert.AreEqual(dto, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
+    [TestMethod]
+    public void Insert_ExplicitNullIntoNotNull_RaisesMsg515()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int not null)");
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t values (null)"));
+        Assert.AreEqual("Cannot insert the value NULL into column 'a', table 'simulated.dbo.t'; column does not allow nulls. INSERT fails.", ex.Message);
+        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Insert_OmittedColumnFallsThroughToNullIntoNotNull_RaisesMsg515()
+    {
+        // No DEFAULT, no IDENTITY → omitted column auto-fills with NULL,
+        // and NOT NULL enforcement catches it the same as an explicit NULL.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int not null, x int)");
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (x) values (10)"));
+        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Insert_NullableColumn_AcceptsNull()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int null)");
+        _ = simulation.ExecuteNonQuery("insert into t values (null)");
+        Assert.AreEqual(DBNull.Value, simulation.ExecuteScalar("select a from t"));
+    }
+
+    [TestMethod]
+    public void Insert_NullDefault_RaisesMsg515OnNotNullColumn()
+    {
+        // DEFAULT NULL on a NOT NULL column is degenerate but parseable;
+        // the omitted insert fills NULL, then NOT NULL enforcement catches it.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int not null default null, b int)");
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (b) values (1)"));
+        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Insert_PersistedComputedNotNull_ResultNullRaisesMsg515()
+    {
+        // Computed column declared PERSISTED NOT NULL; if the expression
+        // evaluates to NULL (e.g. NULL operand), the NOT NULL check fires.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int, c as a + 1 persisted not null)");
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (a) values (null)"));
+        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
     private static void AddTypedParameter(DbCommand command, string name, DbType dbType, object value)
     {
         var parameter = command.CreateParameter();

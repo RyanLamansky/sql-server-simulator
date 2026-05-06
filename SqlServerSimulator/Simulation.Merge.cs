@@ -221,7 +221,7 @@ partial class Simulation
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', name));
             }
 
-            if (onPredicate.Run(_ => SqlValue.Null(SqlType.Int32)))
+            if (onPredicate.Run(_ => SqlValue.Null(SqlType.Int32)) == true)
             {
                 // Predicate matched — would route to WHEN MATCHED.
                 if (whenMatchedSeen)
@@ -297,6 +297,8 @@ partial class Simulation
             }
 
             EvaluateComputedColumns(destinationTable, rowValues);
+            EnforceNotNull(destinationTable, rowValues);
+            EnforceCheckConstraints(destinationTable, rowValues);
 
             var storedValues = ProjectStoredValues(destinationTable, rowValues);
             EnforceKeyConstraints(destinationTable, storedValues);

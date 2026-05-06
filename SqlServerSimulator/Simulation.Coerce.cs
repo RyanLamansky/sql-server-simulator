@@ -155,6 +155,58 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Per-column NULL check on the final row, run after defaults have filled
+    /// and computed columns have evaluated. A NULL in a NOT-NULL column raises
+    /// Msg 515 naming that column. Mirrors SQL Server's order: any inserted
+    /// value (or computed result) of NULL in a non-nullable column fails the
+    /// statement; identity columns can't be nullable so they're a no-op here.
+    /// Non-persisted computed columns participate even though they're not
+    /// stored — SQL Server considers their evaluated value when checking
+    /// nullability.
+    /// </summary>
+    private static void EnforceNotNull(HeapTable destinationTable, SqlValue[] rowValues)
+    {
+        for (var i = 0; i < destinationTable.Columns.Length; i++)
+        {
+            var column = destinationTable.Columns[i];
+            if (!column.Nullable && rowValues[i].IsNull)
+                throw SimulatedSqlException.CannotInsertNull(column.Name, destinationTable.Name);
+        }
+    }
+
+    /// <summary>
+    /// Evaluates each declared CHECK constraint against the new row. A
+    /// predicate that evaluates to <c>false</c> (definitely-false in SQL
+    /// Server's three-valued logic) raises Msg 547 naming the constraint;
+    /// <c>true</c> and <c>null</c> (UNKNOWN) both pass — the latter matches
+    /// SQL Server's documented "NULL → row passes CHECK" rule. Resolver
+    /// matches the row's column ordinals via case-insensitive name compare,
+    /// the same shape <see cref="EvaluateComputedColumns"/> uses.
+    /// </summary>
+    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues)
+    {
+        if (destinationTable.CheckConstraints.Length == 0)
+            return;
+
+        SqlValue ResolveByName(List<string> reference)
+        {
+            var leaf = reference[^1];
+            for (var k = 0; k < destinationTable.Columns.Length; k++)
+            {
+                if (Collation.Default.Equals(destinationTable.Columns[k].Name, leaf))
+                    return rowValues[k];
+            }
+            throw SimulatedSqlException.InvalidColumnName(reference);
+        }
+
+        foreach (var check in destinationTable.CheckConstraints)
+        {
+            if (check.Predicate.Run(ResolveByName) == false)
+                throw SimulatedSqlException.CheckConstraintViolation(check.Name, destinationTable.Name, check.InlineColumn);
+        }
+    }
+
+    /// <summary>
     /// Linear-scans the table's heap for a row whose key tuple equals the new
     /// row's, raising Msg 2627 with the offending constraint's name on the
     /// first match. Skips when the table has no PK/UNIQUE constraints.

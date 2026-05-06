@@ -199,6 +199,46 @@ internal class Inventory
 }
 
 /// <summary>
+/// Exercises EF Core's full LINQ predicate surface (<c>||</c>, <c>!</c>,
+/// parenthesized compounds, <c>!=</c> over nullable columns) against the
+/// simulator's predicate parser and three-valued evaluator. Mix of nullable
+/// and non-nullable columns to surface SQL Server's NULL-exclusion semantics
+/// in NOT and inequality predicates.
+/// </summary>
+internal class Filter
+{
+    public int Id { get; set; }
+
+    public int A { get; set; }
+
+    public int B { get; set; }
+
+    public int? NullableC { get; set; }
+
+    public bool IsActive { get; set; }
+
+    [Column(TypeName = "nvarchar(20)")]
+    public string? Status { get; set; }
+}
+
+/// <summary>
+/// Exercises the simulator's CHECK constraint enforcement through EF Core.
+/// <see cref="Quantity"/> carries a positivity invariant the schema enforces
+/// at insert time; a violation surfaces as
+/// <see cref="DbUpdateException"/> whose inner exception is the simulator's
+/// Msg 547.
+/// </summary>
+internal class StockItem
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "nvarchar(20)")]
+    public string Sku { get; set; } = null!;
+
+    public int Quantity { get; set; }
+}
+
+/// <summary>
 /// Counterpart to <see cref="Widget"/> with <see cref="DatabaseGeneratedOption.None"/>
 /// — EF Core treats <see cref="Id"/> as caller-supplied, so SaveChanges
 /// emits a plain INSERT (no <c>OUTPUT INSERTED</c>). Combined with
@@ -272,6 +312,10 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Receipt> Receipts => Set<Receipt>();
 
     public DbSet<Inventory> Inventory => Set<Inventory>();
+
+    public DbSet<Filter> Filters => Set<Filter>();
+
+    public DbSet<StockItem> StockItems => Set<StockItem>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -420,6 +464,41 @@ internal class TestDbContext(Simulation simulation) : DbContext
                 create table Inventory (
                     Sku nvarchar(50) not null constraint pk_inventory primary key,
                     Quantity int not null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateFiltersSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Filters (
+                    Id int identity(1, 1) not null primary key,
+                    A int not null,
+                    B int not null,
+                    NullableC int null,
+                    IsActive bit not null,
+                    Status nvarchar(20) null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateStockItemsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table StockItems (
+                    Id int identity(1, 1) not null primary key,
+                    Sku nvarchar(20) not null,
+                    Quantity int not null constraint ck_stockitem_qty check (Quantity > 0)
                 )
                 """)
             .ExecuteNonQuery();

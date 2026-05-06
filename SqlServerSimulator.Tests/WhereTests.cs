@@ -377,14 +377,198 @@ public class WhereTests
     }
 
     [TestMethod]
-    public void Where_OrInPredicate_RaisesNotSupported()
+    public void Where_OrChain_TwoPredicates_EitherMustHold()
     {
-        // OR / NOT at the boolean-combinator level aren't modeled yet; the
-        // parser surfaces the gap so the predicate doesn't silently drop.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
-        var ex = Throws<NotSupportedException>(() => connection.CreateCommand("select a from t where a = 1 or b = 2").ExecuteScalar());
-        Contains("OR", ex.Message);
+        _ = connection.CreateCommand("insert into t values (1, 2), (3, 4), (5, 6)").ExecuteNonQuery();
+
+        using var reader = connection.CreateCommand("select a from t where a = 1 or b = 4").ExecuteReader();
+        var matched = new List<int>();
+        while (reader.Read())
+            matched.Add((int)reader[0]);
+        CollectionAssert.AreEquivalent(new[] { 1, 3 }, matched);
+    }
+
+    [TestMethod]
+    public void Where_AndOrPrecedence_AndBindsTighter()
+    {
+        // `a=1 OR b=2 AND c=2` parses as `a=1 OR (b=2 AND c=2)` — standard
+        // SQL precedence (AND binds tighter than OR). Probe of real SQL
+        // Server returned 3 rows for this dataset; simulator must match.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, 2, 3), (1, 3, 2), (2, 2, 2), (0, 0, 5)").ExecuteNonQuery();
+
+        var matched = CountWhere(connection, "a = 1 or b = 2 and c = 2");
+        AreEqual(3, matched); // (1,2,3), (1,3,2), (2,2,2)
+    }
+
+    [TestMethod]
+    public void Where_ParensOverridePrecedence()
+    {
+        // Same data as the precedence test but with explicit parens forcing
+        // `(a=1 OR b=2) AND c=2` — only rows where c=2 AND (a=1 OR b=2).
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, 2, 3), (1, 3, 2), (2, 2, 2), (0, 0, 5)").ExecuteNonQuery();
+
+        var matched = CountWhere(connection, "(a = 1 or b = 2) and c = 2");
+        AreEqual(2, matched); // (1,3,2), (2,2,2)
+    }
+
+    [TestMethod]
+    public void Where_NotPredicate_ExcludesNullViaTriState()
+    {
+        // SQL Server: NOT (NULL = 1) → NOT NULL → NULL → row excluded by
+        // WHERE. Simulator's tri-state Run propagates UNKNOWN; only a true
+        // Run result lets a row through.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(1, CountWhere(connection, "not (a = 1)")); // only the row with a=2 passes
+    }
+
+    [TestMethod]
+    public void Where_NotEqual_ExcludesEqualAndNull()
+    {
+        // <> mirrors NOT (a = X)'s tri-state semantics: NULL operand → null
+        // → exclude.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(1, CountWhere(connection, "a <> 1"));
+    }
+
+    [TestMethod]
+    public void Where_DoubleNot_CancelsToOriginal()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(1, CountWhere(connection, "not not (a = 1)"));
+    }
+
+    [TestMethod]
+    public void Where_NestedParensPredicate()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, 2), (1, 3), (2, 2)").ExecuteNonQuery();
+
+        AreEqual(1, CountWhere(connection, "((a = 1 and b = 2))"));
+    }
+
+    [TestMethod]
+    public void Where_IsNull_MatchesNullsOnly()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(1, CountWhere(connection, "a is null"));
+    }
+
+    [TestMethod]
+    public void Where_IsNotNull_ExcludesNulls()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "a is not null"));
+    }
+
+    [TestMethod]
+    public void Where_IsNullCombinesWithOr()
+    {
+        // The standard "include NULLs in addition to a value match" shape.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "a = 1 or a is null"));
+    }
+
+    [TestMethod]
+    public void Where_InList_MatchesAnyMember()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1), (2), (3), (4)").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "a in (1, 3)"));
+    }
+
+    [TestMethod]
+    public void Where_NotInList_ExcludesMembers()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1), (2), (3), (4)").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "a not in (1, 3)"));
+    }
+
+    [TestMethod]
+    public void Where_InList_NullLeftSideIsExcluded()
+    {
+        // `NULL IN (1, 2)` is UNKNOWN per three-valued logic; UNKNOWN
+        // excludes from WHERE.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "a in (1, 2)"));
+    }
+
+    [TestMethod]
+    public void Where_NotInList_WithNullElementExcludesEverythingViaUnknown()
+    {
+        // `1 NOT IN (1, NULL)` is false (1 matches 1).
+        // `2 NOT IN (1, NULL)` is UNKNOWN (no match seen but NULL might be 2)
+        // → excluded from WHERE. Only the matched-and-thus-false row is
+        // excluded explicitly; the other rows fall through UNKNOWN-as-exclude.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1), (2), (3)").ExecuteNonQuery();
+
+        AreEqual(0, CountWhere(connection, "a not in (1, null)"));
+    }
+
+    [TestMethod]
+    public void Where_InList_WithStringValues()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, status nvarchar(20))").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, 'active'), (2, 'pending'), (3, 'archived')").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "status in ('active', 'archived')"));
+    }
+
+    [TestMethod]
+    public void Where_InList_PromotesAcrossNumericTypes()
+    {
+        // Member-list values are numeric literals (int by default); column
+        // is bigint. SQL Server promotes to a common numeric type for the
+        // comparison.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a bigint)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1), (2), (3)").ExecuteNonQuery();
+
+        AreEqual(2, CountWhere(connection, "a in (1, 3)"));
+    }
+
+    private static int CountWhere(System.Data.Common.DbConnection connection, string predicate)
+    {
+        using var reader = connection.CreateCommand($"select a from t where {predicate}").ExecuteReader();
+        var n = 0;
+        while (reader.Read())
+            n++;
+        return n;
     }
 
     private static void AddTypedParameter(System.Data.Common.DbCommand command, string name, DbType dbType, object value)

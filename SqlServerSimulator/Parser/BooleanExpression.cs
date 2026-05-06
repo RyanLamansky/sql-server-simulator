@@ -17,37 +17,93 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
-    /// Parses a full boolean predicate from the current position: a single
-    /// comparison (the <see cref="CompareExpression"/> shapes), optionally
-    /// chained with one or more <c>AND</c> clauses producing an
-    /// <see cref="AndExpression"/> tree. Each chain element is itself a
-    /// comparison; nested parens around predicates and <c>OR</c>/<c>NOT</c>
-    /// at the boolean-combinator level aren't supported yet (they fall
-    /// through to the comparison parser, which surfaces them as syntax
-    /// errors). Follows the lookahead contract on <see cref="ParserContext"/>:
-    /// on return, <see cref="ParserContext.Token"/> is the first token not
-    /// consumed by the predicate.
+    /// Parses a full boolean predicate using SQL Server's standard
+    /// precedence: <c>OR</c> binds loosest, then <c>AND</c>, then <c>NOT</c>,
+    /// with parens grouping any sub-predicate. The atom level is a single
+    /// comparison (the <see cref="CompareExpression"/> shapes). Follows the
+    /// lookahead contract on <see cref="ParserContext"/>: on return,
+    /// <see cref="ParserContext.Token"/> is the first token not consumed by
+    /// the predicate.
     /// </summary>
-    public static BooleanExpression Parse(ParserContext context)
+    public static BooleanExpression Parse(ParserContext context) => ParseOr(context);
+
+    /// <summary>
+    /// Lowest-precedence level: zero or more <c>OR</c>-separated
+    /// <see cref="ParseAnd"/> chains.
+    /// </summary>
+    private static BooleanExpression ParseOr(ParserContext context)
     {
-        var result = ParseSingle(Expression.Parse(context), context);
-        while (context.Token is ReservedKeyword { Keyword: Keyword.And })
+        var result = ParseAnd(context);
+        while (context.Token is ReservedKeyword { Keyword: Keyword.Or })
         {
             context.MoveNextRequired();
-            var rhs = ParseSingle(Expression.Parse(context), context);
-            result = new AndExpression(result, rhs);
+            result = new OrExpression(result, ParseAnd(context));
         }
-        return context.Token is ReservedKeyword { Keyword: Keyword.Or }
-            ? throw new NotSupportedException("OR in boolean expressions.")
-            : result;
+        return result;
     }
 
     /// <summary>
-    /// Parses a single comparison/predicate (no AND/OR chaining): equality,
-    /// inequality, ordered comparison, or LIKE/NOT LIKE. Caller must have
-    /// already parsed the left side.
+    /// Mid-precedence level: zero or more <c>AND</c>-separated
+    /// <see cref="ParseNot"/> chains.
     /// </summary>
-    private static BooleanExpression ParseSingle(Expression left, ParserContext context) => context.Token switch
+    private static BooleanExpression ParseAnd(ParserContext context)
+    {
+        var result = ParseNot(context);
+        while (context.Token is ReservedKeyword { Keyword: Keyword.And })
+        {
+            context.MoveNextRequired();
+            result = new AndExpression(result, ParseNot(context));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Highest-precedence boolean combinator: a sequence of <c>NOT</c>
+    /// prefixes wrapping a single atom. Stacking is allowed
+    /// (<c>NOT NOT predicate</c>) — each layer adds a
+    /// <see cref="NotExpression"/>.
+    /// </summary>
+    private static BooleanExpression ParseNot(ParserContext context)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
+        {
+            context.MoveNextRequired();
+            return new NotExpression(ParseNot(context));
+        }
+        return ParseAtom(context);
+    }
+
+    /// <summary>
+    /// Either a parenthesized sub-predicate or a single comparison. A leading
+    /// <c>(</c> at the atom level is unambiguously treated as a boolean
+    /// group: the body is recursively parsed as a full predicate via
+    /// <see cref="ParseOr"/> and the closing <c>)</c> is required. Arithmetic
+    /// parens still work inside an expression operand (e.g.
+    /// <c>where col = (a + 1)</c>) — the right-hand side hits
+    /// <see cref="Expression.Parse"/> which has its own <c>Parenthesized</c>
+    /// dispatch. The pattern that doesn't survive this choice is
+    /// <c>where (arith) cmp rhs</c>; SQL Server accepts that, the simulator
+    /// surfaces it as a syntax error.
+    /// </summary>
+    private static BooleanExpression ParseAtom(ParserContext context)
+    {
+        if (context.Token is Operator { Character: '(' })
+        {
+            context.MoveNextRequired();
+            var inner = ParseOr(context);
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional(); // closing `)` is the predicate's last meaningful token; what follows may be end-of-input
+            return inner;
+        }
+        return ParseComparison(Expression.Parse(context), context);
+    }
+
+    /// <summary>
+    /// Parses a single comparison: equality, inequality, ordered comparison,
+    /// or LIKE/NOT LIKE. Caller must have already parsed the left side.
+    /// </summary>
+    private static BooleanExpression ParseComparison(Expression left, ParserContext context) => context.Token switch
     {
         Operator { Character: '=' } => new EqualityExpression(left, context),
         Operator { Character: '>' } => context.GetNextRequired() switch
@@ -69,9 +125,12 @@ internal abstract class BooleanExpression
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
         },
         ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: false),
+        ReservedKeyword { Keyword: Keyword.Is } => ParseIsNullSuffix(left, context),
+        ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: false),
         ReservedKeyword { Keyword: Keyword.Not } => context.GetNextRequired() switch
         {
             ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: true),
+            ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: true),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         },
         _ => throw SimulatedSqlException.SyntaxErrorNear(context),
@@ -87,11 +146,62 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
-    /// Evaluates the expression. Any NULL operand yields <c>false</c>
-    /// (SQL UNKNOWN-in-WHERE semantics).
+    /// Parses the <c>IS [NOT] NULL</c> suffix after an expression. Entered
+    /// with <see cref="ParserContext.Token"/> on the <c>IS</c> keyword;
+    /// consumes <c>IS</c>, optional <c>NOT</c>, and the required <c>NULL</c>.
+    /// Leaves the token on the next un-consumed token (typically a boolean
+    /// combinator, comma, or end-of-input).
+    /// </summary>
+    private static IsNullExpression ParseIsNullSuffix(Expression left, ParserContext context)
+    {
+        var negated = false;
+        var next = context.GetNextRequired();
+        if (next is ReservedKeyword { Keyword: Keyword.Not })
+        {
+            negated = true;
+            next = context.GetNextRequired();
+        }
+        if (next is not ReservedKeyword { Keyword: Keyword.Null })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return new IsNullExpression(left, negated);
+    }
+
+    /// <summary>
+    /// Parses the <c>[NOT] IN (val1, val2, ...)</c> suffix after an
+    /// expression. Entered with <see cref="ParserContext.Token"/> on the
+    /// <c>IN</c> keyword; consumes <c>IN</c>, the opening <c>(</c>, the
+    /// comma-separated expression list, and the closing <c>)</c>. Leaves the
+    /// token on the next un-consumed token. The subquery form <c>IN (SELECT
+    /// ...)</c> isn't modeled — only literal/expression lists.
+    /// </summary>
+    private static InExpression ParseInList(Expression left, ParserContext context, bool negated)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var candidates = new List<Expression>();
+        do
+        {
+            context.MoveNextRequired();
+            candidates.Add(Expression.Parse(context));
+        } while (context.Token is Operator { Character: ',' });
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return new InExpression(left, [.. candidates], negated);
+    }
+
+    /// <summary>
+    /// Evaluates the predicate to SQL Server's three-valued logic:
+    /// <c>true</c>, <c>false</c>, or <c>null</c> (UNKNOWN). NULL operands in a
+    /// comparison surface as <c>null</c> here; <c>NOT</c>, <c>AND</c>, and
+    /// <c>OR</c> propagate UNKNOWN per the standard truth tables. Callers
+    /// decide what to do with UNKNOWN: WHERE / MERGE-ON treat it as exclude
+    /// (only <c>true</c> rows pass); CHECK constraints treat it as pass
+    /// (only an explicit <c>false</c> rejects the row).
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
-    public abstract bool Run(Func<List<string>, SqlValue> getColumnValue);
+    public abstract bool? Run(Func<List<string>, SqlValue> getColumnValue);
 
     /// <summary>
     /// Diagnostic-only string rendering, surfaced via
@@ -101,18 +211,119 @@ internal abstract class BooleanExpression
     internal abstract string DebugDisplay();
 
     /// <summary>
-    /// Combines two boolean predicates with a logical AND. Short-circuits on
-    /// the left side: if <c>left.Run</c> returns <c>false</c>, the right side
-    /// isn't evaluated. NULL-as-false propagates naturally — both sides must
-    /// run to true for the row to pass, matching SQL Server's WHERE-clause
-    /// "NULL excludes the row" semantics.
+    /// Three-valued <c>AND</c>: <c>false AND x = false</c> regardless of
+    /// <c>x</c>; <c>true AND x = x</c>; <c>NULL AND NULL = NULL</c>. Short-
+    /// circuits when the left side is <c>false</c> — the right side isn't
+    /// evaluated. SQL Server doesn't guarantee evaluation order, but it
+    /// permits short-circuit; the simulator commits to it for predictability.
     /// </summary>
     private sealed class AndExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
-            left.Run(getColumnValue) && right.Run(getColumnValue);
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        {
+            var l = left.Run(getColumnValue);
+            if (l == false)
+                return false;
+            var r = right.Run(getColumnValue);
+            return r == false
+                ? false
+                : l == true && r == true ? true : null;
+        }
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} AND {right.DebugDisplay()}";
+    }
+
+    /// <summary>
+    /// Three-valued <c>OR</c>: <c>true OR x = true</c> regardless of
+    /// <c>x</c>; <c>false OR x = x</c>; <c>NULL OR NULL = NULL</c>. Short-
+    /// circuits when the left side is <c>true</c>.
+    /// </summary>
+    private sealed class OrExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
+    {
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        {
+            var l = left.Run(getColumnValue);
+            if (l == true)
+                return true;
+            var r = right.Run(getColumnValue);
+            return r == true
+                ? true
+                : l == false && r == false ? false : null;
+        }
+
+        internal override string DebugDisplay() => $"{left.DebugDisplay()} OR {right.DebugDisplay()}";
+    }
+
+    /// <summary>
+    /// <c>expr IS [NOT] NULL</c>: definitively resolves UNKNOWN to true /
+    /// false. Distinct from <c>expr = NULL</c> (which would be UNKNOWN per
+    /// three-valued logic): <c>IS NULL</c> tests the actual nullity of the
+    /// value and never returns <c>null</c> itself. The result of
+    /// <c>IS NOT NULL</c> is just the negation; standard NOT behavior
+    /// doesn't apply because there's no UNKNOWN to propagate.
+    /// </summary>
+    private sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
+    {
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+            source.Run(getColumnValue).IsNull ^ negated;
+
+        internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
+    }
+
+    /// <summary>
+    /// <c>expr [NOT] IN (v1, v2, ...)</c>: equivalent to a chain of
+    /// promote-and-equal comparisons OR-combined (or AND-of-not for
+    /// <c>NOT IN</c>). NULL semantics follow the desugared form: a NULL
+    /// left side returns UNKNOWN; a non-NULL left with no match but a NULL
+    /// element in the list returns UNKNOWN (the NULL might have been a
+    /// match); a non-NULL left with no match and no NULL element returns
+    /// the negated flag. Subquery form <c>IN (SELECT ...)</c> isn't modeled.
+    /// </summary>
+    private sealed class InExpression(Expression source, Expression[] candidates, bool negated) : BooleanExpression
+    {
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        {
+            var src = source.Run(getColumnValue);
+            if (src.IsNull)
+                return null;
+            var sawNull = false;
+            foreach (var candidate in candidates)
+            {
+                var c = candidate.Run(getColumnValue);
+                if (c.IsNull)
+                {
+                    sawNull = true;
+                    continue;
+                }
+                if (CompareValuesPromoted(src, c, "equal to", static (l, r) => l.Equals(r)) == true)
+                    return !negated;
+            }
+            return sawNull ? null : negated;
+        }
+
+        internal override string DebugDisplay()
+        {
+            var keyword = negated ? "NOT IN" : "IN";
+            return $"{source.DebugDisplay()} {keyword} ({string.Join(", ", candidates.Select(c => c.DebugDisplay()))})";
+        }
+    }
+
+    /// <summary>
+    /// Three-valued <c>NOT</c>: <c>NOT true = false</c>, <c>NOT false = true</c>,
+    /// <c>NOT NULL = NULL</c>. The NULL pass-through is what makes
+    /// <c>WHERE NOT (col = X)</c> exclude NULL rows in SQL Server (NULL
+    /// becomes UNKNOWN; UNKNOWN excludes from WHERE).
+    /// </summary>
+    private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
+    {
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) => inner.Run(getColumnValue) switch
+        {
+            true => false,
+            false => true,
+            null => null,
+        };
+
+        internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
     }
 
     /// <summary>
@@ -140,34 +351,44 @@ internal abstract class BooleanExpression
 
         /// <summary>
         /// Evaluates both sides, applies SQL Server type promotion to a common
-        /// type, and invokes the comparator. Cross-category type pairs surface
-        /// as <see cref="NotSupportedException"/> via
+        /// type, and invokes the comparator. NULL operands return <c>null</c>
+        /// (the SQL UNKNOWN result of comparing with NULL) — callers decide
+        /// what UNKNOWN means in their context. Cross-category type pairs
+        /// surface as <see cref="NotSupportedException"/> via
         /// <see cref="SqlType.Promote"/>. LOB-typed operands (<c>text</c>,
         /// <c>ntext</c>, <c>image</c>) raise Msg 402 rather than being routed
         /// through promotion — SQL Server rejects them in any comparison /
         /// equality slot, and the operator name is woven into the message via
         /// the caller-supplied <paramref name="operatorName"/>.
         /// </summary>
-        protected static bool ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare)
-        {
-            var l = left.Run(getColumnValue);
-            var r = right.Run(getColumnValue);
-            if (l.Type.IsLob || r.Type.IsLob)
-                throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
-            if (l.IsNull || r.IsNull)
-                return false;
+        protected static bool? ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare) =>
+            CompareValuesPromoted(left.Run(getColumnValue), right.Run(getColumnValue), operatorName, compare);
+    }
 
-            if (l.Type == r.Type)
-                return compare(l, r);
+    /// <summary>
+    /// Value-level promote-and-compare shared by <see cref="CompareExpression"/>
+    /// (post-Run) and <see cref="InExpression"/> (which evaluates each
+    /// list-element separately and short-circuits on the first match).
+    /// Same NULL / LOB / promotion rules as the
+    /// <see cref="CompareExpression.ComparePromoted"/> path.
+    /// </summary>
+    internal static bool? CompareValuesPromoted(SqlValue l, SqlValue r, string operatorName, Func<SqlValue, SqlValue, bool> compare)
+    {
+        if (l.Type.IsLob || r.Type.IsLob)
+            throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
+        if (l.IsNull || r.IsNull)
+            return null;
 
-            var common = SqlType.Promote(l.Type, r.Type);
-            return compare(l.CoerceTo(common), r.CoerceTo(common));
-        }
+        if (l.Type == r.Type)
+            return compare(l, r);
+
+        var common = SqlType.Promote(l.Type, r.Type);
+        return compare(l.CoerceTo(common), r.CoerceTo(common));
     }
 
     private sealed class EqualityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "equal to", static (l, r) => l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
@@ -175,7 +396,7 @@ internal abstract class BooleanExpression
 
     private sealed class InequalityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "not equal to", static (l, r) => !l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <> {right.DebugDisplay()}";
@@ -183,7 +404,7 @@ internal abstract class BooleanExpression
 
     private sealed class GreaterThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "greater than", static (l, r) => l.CompareTo(r) > 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
@@ -191,7 +412,7 @@ internal abstract class BooleanExpression
 
     private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} >= {right.DebugDisplay()}";
@@ -199,7 +420,7 @@ internal abstract class BooleanExpression
 
     private sealed class LessThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "less than", static (l, r) => l.CompareTo(r) < 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
@@ -207,7 +428,7 @@ internal abstract class BooleanExpression
 
     private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <= {right.DebugDisplay()}";
@@ -228,12 +449,12 @@ internal abstract class BooleanExpression
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;
 
-        public override bool Run(Func<List<string>, SqlValue> getColumnValue)
+        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
         {
             var l = left.Run(getColumnValue);
             var r = right.Run(getColumnValue);
             if (l.IsNull || r.IsNull)
-                return false;
+                return null;
 
             if (l.Type.Category != SqlTypeCategory.String || r.Type.Category != SqlTypeCategory.String)
                 throw SimulatedSqlException.OperandTypeClash(l.Type, r.Type);
@@ -243,7 +464,7 @@ internal abstract class BooleanExpression
             {
                 var e = this.escape.Run(getColumnValue);
                 if (e.IsNull)
-                    return false;
+                    return null;
                 if (e.Type.Category != SqlTypeCategory.String)
                     throw SimulatedSqlException.OperandTypeClash(l.Type, e.Type);
                 var s = e.AsString;

@@ -32,18 +32,15 @@ public sealed class KeyConstraintTests
     }
 
     [TestMethod]
-    public void PrimaryKey_Inline_DefaultNullability_AcceptsNonNullInsert()
+    public void PrimaryKey_Inline_DefaultNullability_FlipsToNotNull()
     {
         // SQL Server: declaring `int primary key` without explicit NULL/NOT
-        // NULL silently flips the column to NOT NULL — but the simulator
-        // doesn't enforce NOT NULL on INSERT yet (pre-existing gap), so the
-        // observable property is just that the column accepts a normal value
-        // and that explicit NULL on the column declaration still raises 8111
-        // (covered by the sibling test).
+        // NULL silently flips the column to NOT NULL — verified against the
+        // reference instance.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int primary key)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        Assert.AreEqual(1, simulation.ExecuteScalar("select id from t"));
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t values (null)"));
+        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
     }
 
     [TestMethod]

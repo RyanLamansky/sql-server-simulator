@@ -10,11 +10,12 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable
 {
-    public HeapTable(string name, HeapColumn[] columns, KeyConstraint[]? keyConstraints = null)
+    public HeapTable(string name, HeapColumn[] columns, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null)
     {
         this.Name = name;
         this.Columns = columns;
         this.KeyConstraints = keyConstraints ?? [];
+        this.CheckConstraints = checkConstraints ?? [];
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -102,6 +103,14 @@ internal sealed class HeapTable
     /// rule applies. Empty when the table declares neither.
     /// </summary>
     public readonly KeyConstraint[] KeyConstraints;
+
+    /// <summary>
+    /// CHECK constraints declared on the table or its columns, in declaration
+    /// order. Evaluated per-row at INSERT / MERGE; Msg 547 fires on any
+    /// <c>false</c> predicate result. NULL operands flow through as
+    /// UNKNOWN → row passes (SQL Server's standard CHECK semantics).
+    /// </summary>
+    public readonly CheckConstraint[] CheckConstraints;
 
     /// <summary>The page-backed row store. Insert via <see cref="Heap.Insert"/>; iterate via <see cref="Heap.EnumerateRows"/>.</summary>
     public readonly Heap Heap = new();

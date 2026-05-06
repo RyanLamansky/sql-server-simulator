@@ -30,18 +30,20 @@ partial class Simulation
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
+        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
         var identityCount = 0;
         do
         {
             context.MoveNextRequired();
 
-            // Table-level constraint: `CONSTRAINT name PRIMARY KEY|UNIQUE (cols)`
-            // or unnamed `PRIMARY KEY|UNIQUE (cols)`. Forks before the column
-            // path because PRIMARY/UNIQUE/CONSTRAINT are reserved keywords and
-            // would otherwise collide with the leading-name expectation.
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique })
+            // Table-level constraint: `[CONSTRAINT name] PRIMARY KEY | UNIQUE (cols)`
+            // or `[CONSTRAINT name] CHECK (predicate)`. Forks before the
+            // column path because PRIMARY/UNIQUE/CHECK/CONSTRAINT are reserved
+            // keywords and would otherwise collide with the leading-name
+            // expectation.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check })
             {
-                ParseTableLevelKeyConstraint(context, heapColumns, pendingKeys, pendingComputed);
+                ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed);
                 continue;
             }
 
@@ -128,14 +130,22 @@ partial class Simulation
                     case ReservedKeyword { Keyword: Keyword.Constraint } when inlineKeyKind is null:
                         if (context.GetNextRequired() is not Name namedConstraint)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
-                        inlineKeyName = namedConstraint.Value;
                         context.MoveNextRequired();
+                        if (context.Token is ReservedKeyword { Keyword: Keyword.Check })
+                        {
+                            pendingChecks.Add((namedConstraint.Value, ParseInlineCheckPredicate(context), columnName.Value));
+                            continue;
+                        }
+                        inlineKeyName = namedConstraint.Value;
                         if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
                         continue;
                     case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
                         inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.Check }:
+                        pendingChecks.Add((null, ParseInlineCheckPredicate(context), columnName.Value));
                         continue;
                 }
                 break;
@@ -226,7 +236,8 @@ partial class Simulation
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Value, fixedWidthSum, Heap.MaxRowSize);
 
         var keyConstraints = ResolveKeyConstraints(tableName.Value, heapColumns!, pendingKeys);
-        var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints);
+        var checkConstraints = ResolveCheckConstraints(tableName.Value, pendingChecks);
+        var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints, checkConstraints);
         return this.HeapTables.TryAdd(heapTable.Name, heapTable)
             ? true
             : throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
@@ -300,6 +311,79 @@ partial class Simulation
         expression.Run(name => throw SimulatedSqlException.InvalidColumnName(name)).CoerceTo(SqlType.BigInt).AsInt64;
 
     /// <summary>
+    /// Parses a CHECK constraint's parenthesized predicate body. Entered with
+    /// <see cref="ParserContext.Token"/> on the <c>CHECK</c> keyword; consumes
+    /// the keyword, the opening <c>(</c>, the inner predicate via
+    /// <see cref="BooleanExpression.Parse"/>, and the closing <c>)</c>. Leaves
+    /// the token on the next un-consumed token (typically a comma or the
+    /// column-list's closing paren).
+    /// </summary>
+    private static BooleanExpression ParseInlineCheckPredicate(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var predicate = BooleanExpression.Parse(context);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        return predicate;
+    }
+
+    /// <summary>
+    /// Materializes pending CHECK declarations into <see cref="CheckConstraint"/>
+    /// records, generating SQL-Server-shaped auto-names for any without a
+    /// caller-supplied <c>CONSTRAINT name</c>: <c>CK__&lt;table8&gt;__&lt;col8&gt;__&lt;8hex&gt;</c>
+    /// for inline constraints, <c>CK__&lt;table8&gt;__&lt;8hex&gt;</c> for
+    /// table-level. The 8-hex suffix is a stable FNV-1a hash of the
+    /// constraint shape, same convention as <see cref="AutoConstraintName"/>.
+    /// </summary>
+    private static CheckConstraint[] ResolveCheckConstraints(
+        string tableName,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks)
+    {
+        if (pendingChecks.Count == 0)
+            return [];
+
+        var resolved = new CheckConstraint[pendingChecks.Count];
+        for (var c = 0; c < pendingChecks.Count; c++)
+        {
+            var pending = pendingChecks[c];
+            var name = pending.Name ?? AutoCheckName(tableName, pending.InlineColumn, c);
+            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn);
+        }
+        return resolved;
+    }
+
+    /// <summary>
+    /// Generates an auto-name for an unnamed CHECK constraint. SQL Server
+    /// uses <c>CK__&lt;table8&gt;__&lt;col8&gt;__&lt;8hex&gt;</c> for inline
+    /// and <c>CK__&lt;table8&gt;__&lt;8hex&gt;</c> for table-level; the
+    /// simulator matches the structure with a deterministic 32-bit FNV-1a
+    /// hash of <c>tableName + column + index</c> driving the hex slot. Stable
+    /// across runs but non-cryptographic.
+    /// </summary>
+    private static string AutoCheckName(string tableName, string? inlineColumn, int declarationIndex)
+    {
+        const uint fnvOffset32 = 2166136261;
+        const uint fnvPrime32 = 16777619;
+        var h = fnvOffset32;
+        foreach (var ch in tableName)
+            h = (h ^ ch) * fnvPrime32;
+        h = (h ^ (byte)':') * fnvPrime32;
+        if (inlineColumn is not null)
+        {
+            foreach (var ch in inlineColumn)
+                h = (h ^ ch) * fnvPrime32;
+        }
+        h = (h ^ (byte)declarationIndex) * fnvPrime32;
+        var truncatedTable = tableName.Length > 8 ? tableName[..8] : tableName;
+        return inlineColumn is null
+            ? $"CK__{truncatedTable}__{h:X8}"
+            : $"CK__{truncatedTable}__{(inlineColumn.Length > 8 ? inlineColumn[..8] : inlineColumn)}__{h:X8}";
+    }
+
+    /// <summary>
     /// Parses the inline column-constraint shape <c>(PRIMARY KEY|UNIQUE) [CLUSTERED|NONCLUSTERED]</c>,
     /// entered with <see cref="ParserContext.Token"/> on the <c>PRIMARY</c> or
     /// <c>UNIQUE</c> keyword. Consumes the trailing <c>KEY</c> for PK and the
@@ -328,19 +412,18 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses a table-level <c>[CONSTRAINT name] (PRIMARY KEY|UNIQUE) [CLUSTERED|NONCLUSTERED] (col [, col ...])</c>
-    /// element, entered with <see cref="ParserContext.Token"/> on the leading
-    /// <c>CONSTRAINT</c>, <c>PRIMARY</c>, or <c>UNIQUE</c>. Resolves each named
-    /// column to its index in <paramref name="heapColumns"/> and queues the
-    /// constraint into <paramref name="pendingKeys"/>; final validation
-    /// (multiple-PK, key-on-LOB, PK NULL flip) runs after the column list
-    /// closes. Leaves <see cref="ParserContext.Token"/> on the trailing comma
-    /// or closing paren of the column-element list.
+    /// Parses a table-level constraint element, dispatching on what follows
+    /// the optional <c>CONSTRAINT name</c>: <c>PRIMARY KEY | UNIQUE (cols)</c>
+    /// queues into <paramref name="pendingKeys"/>; <c>CHECK (predicate)</c>
+    /// queues into <paramref name="pendingChecks"/>. Leaves
+    /// <see cref="ParserContext.Token"/> on the trailing comma or closing
+    /// paren of the column-element list.
     /// </summary>
-    private static void ParseTableLevelKeyConstraint(
+    private static void ParseTableLevelConstraint(
         ParserContext context,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed)
     {
         string? constraintName = null;
@@ -350,6 +433,12 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             constraintName = nameToken.Value;
             context.MoveNextRequired();
+        }
+
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Check })
+        {
+            pendingChecks.Add((constraintName, ParseInlineCheckPredicate(context), null));
+            return;
         }
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })

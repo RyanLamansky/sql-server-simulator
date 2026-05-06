@@ -662,6 +662,16 @@ internal sealed class SimulatedSqlException : DbException
         new($"The multi-part identifier \"{name}\" could not be bound.", 4104, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 515: an INSERT or UPDATE supplied (or fell
+    /// through to) <c>NULL</c> for a column whose declaration disallows
+    /// nulls. The fixed text uses the database-qualified table name; the
+    /// simulator's single-database model emits <c>"claude.dbo.&lt;t&gt;"</c>'s
+    /// shape with the simulator's default database name.
+    /// </summary>
+    internal static SimulatedSqlException CannotInsertNull(string columnName, string tableName) =>
+        new($"Cannot insert the value NULL into column '{columnName}', table '{Simulation.DefaultDatabaseName}.dbo.{tableName}'; column does not allow nulls. INSERT fails.", 515, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 8110: more than one column or table-level
     /// PRIMARY KEY clause was declared in a CREATE TABLE.
     /// </summary>
@@ -685,6 +695,19 @@ internal sealed class SimulatedSqlException : DbException
     /// </summary>
     internal static SimulatedSqlException KeyColumnInvalidType(string columnName, string tableName) =>
         new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 547: an INSERT / UPDATE / MERGE row failed a
+    /// CHECK constraint's predicate. SQL Server's wording adds a
+    /// <c>column 'X'</c> suffix only for inline single-column CHECKs;
+    /// table-level CHECK omits it — matching the real-server probe. The DB
+    /// name slot uses <see cref="Simulation.DefaultDatabaseName"/>.
+    /// </summary>
+    internal static SimulatedSqlException CheckConstraintViolation(string constraintName, string tableName, string? inlineColumn)
+    {
+        var columnSuffix = inlineColumn is null ? "" : $", column '{inlineColumn}'";
+        return new($"The INSERT statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.", 547, 16, 0);
+    }
 
     /// <summary>
     /// Mimics SQL Server error 2627: an INSERT or UPDATE produced a row whose

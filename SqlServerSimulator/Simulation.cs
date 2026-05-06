@@ -38,6 +38,15 @@ public sealed partial class Simulation
     internal readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
 
     /// <summary>
+    /// The database name woven into error messages that include a fully
+    /// qualified table reference (e.g. Msg 515's <c>"&lt;db&gt;.dbo.&lt;t&gt;"</c>,
+    /// Msg 547's <c>database "&lt;db&gt;"</c> wording). The simulator has no
+    /// real per-database namespacing; this is a fixed placeholder so the
+    /// emitted text stays well-formed and recognizable.
+    /// </summary>
+    internal const string DefaultDatabaseName = "simulated";
+
+    /// <summary>
     /// Database compatibility level. New simulations default to the most recent
     /// supported level; user code switches via
     /// <c>ALTER DATABASE … SET COMPATIBILITY_LEVEL = N</c>.

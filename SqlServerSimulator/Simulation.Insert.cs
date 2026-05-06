@@ -202,6 +202,8 @@ partial class Simulation
             // the expression bind only to stored columns thanks to Msg 1759
             // at CREATE TABLE.
             EvaluateComputedColumns(destinationTable, rowValues);
+            EnforceNotNull(destinationTable, rowValues);
+            EnforceCheckConstraints(destinationTable, rowValues);
 
             var storedValues = ProjectStoredValues(destinationTable, rowValues);
             EnforceKeyConstraints(destinationTable, storedValues);
