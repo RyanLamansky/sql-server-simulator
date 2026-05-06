@@ -166,25 +166,22 @@ internal static class RowDecoder
 
     private static SqlValue DecodeVarValue(HeapColumn column, ReadOnlySpan<byte> payload, Heap? lobStore)
     {
-        if (!column.IsLob)
-            return column.Type.Decode(payload);
-
         if (payload.Length == 0)
-            throw new InvalidDataException($"LOB-eligible column has zero-byte payload but isn't NULL; the marker prefix is required.");
+            throw new InvalidDataException($"Variable-length column has zero-byte payload but isn't NULL; the marker prefix is required.");
 
         var marker = payload[0];
         return marker switch
         {
-            RowEncoder.LobInlineMarker => column.Type.Decode(payload[1..]),
-            RowEncoder.LobPointerMarker when lobStore is null
-                => throw new InvalidDataException($"LOB pointer in row, but no LOB store was provided to resolve it."),
-            RowEncoder.LobPointerMarker
+            RowEncoder.VarInlineMarker => column.Type.Decode(payload[1..]),
+            RowEncoder.VarPointerMarker when lobStore is null
+                => throw new InvalidDataException($"Var-length pointer in row, but no chain store was provided to resolve it."),
+            RowEncoder.VarPointerMarker
                 => lobStore.ReadLobChain(
                     BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(1, 4)),
                     BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(5, 4)),
                     column.Type,
                     static (span, type) => type.Decode(span)),
-            _ => throw new InvalidDataException($"Unknown LOB marker byte 0x{marker:X2}."),
+            _ => throw new InvalidDataException($"Unknown variable-length marker byte 0x{marker:X2}."),
         };
     }
 

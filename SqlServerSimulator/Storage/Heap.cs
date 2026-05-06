@@ -23,10 +23,11 @@ internal delegate T LobChainReader<TState, T>(ReadOnlySpan<byte> bytes, TState s
 internal sealed class Heap
 {
     /// <summary>
-    /// SQL Server's documented in-row record size limit. Rows whose encoded
-    /// length exceeds this fail at insert time; real SQL Server would push
-    /// variable-length columns to ROW_OVERFLOW pages, which the simulator
-    /// doesn't model yet.
+    /// SQL Server's documented in-row record size limit. The encoder pushes
+    /// variable-length columns off-row through <see cref="AllocateLobChain"/>
+    /// to keep rows under this cap; only when no overflowable column can
+    /// help (e.g. the fixed-length section alone exceeds the limit) does
+    /// insertion fail.
     /// </summary>
     /// <remarks>
     /// The page's physical capacity (<see cref="HeapPage.MaxRowPayload"/>) is
@@ -40,14 +41,16 @@ internal sealed class Heap
 
     /// <summary>
     /// Appends a row's encoded bytes to the heap. The active (last) page is
-    /// tried first; on no-fit, a new page is allocated and linked, and the row
-    /// goes there. Throws if the row exceeds <see cref="MaxRowSize"/>
-    /// (no overflow-page modeling yet).
+    /// tried first; on no-fit, a new page is allocated and linked, and the
+    /// row goes there. Callers are responsible for sizing the row to
+    /// <see cref="MaxRowSize"/> — the row encoder pushes variable-length
+    /// columns off-row to honor that cap; this method only enforces it as
+    /// a defensive guard against bypassed callers.
     /// </summary>
     public void Insert(ReadOnlySpan<byte> row)
     {
         if (row.Length > MaxRowSize)
-            throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; row-overflow pages aren't modeled yet.");
+            throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; the encoder should have pushed variable-length columns off-row.");
 
         if (this.Pages.Count > 0 && this.Pages[^1].TryInsert(row))
             return;

@@ -220,6 +220,16 @@ internal sealed class SimulatedSqlException : DbException
         new($"Cannot create the table '{tableName}' because the row size ({requested} bytes) exceeds the maximum allowable table row size ({max} bytes).", 1701, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 511: an INSERT or UPDATE produced a row that
+    /// exceeds the per-row size limit even after pushing every variable-length
+    /// column to row-overflow / LOB storage. Distinct from Msg 1701 (schema
+    /// is impossible) — Msg 511 fires per-row when the values supplied happen
+    /// to exceed the limit despite the schema being legal.
+    /// </summary>
+    internal static SimulatedSqlException RowSizeExceedsAllowableMaximum(int requested, int max) =>
+        new($"Cannot create a row of size {requested} which is greater than the allowable maximum row size of {max}.", 511, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15048: the integer supplied to
     /// <c>SET COMPATIBILITY_LEVEL</c> is not one of the supported values.
     /// </summary>

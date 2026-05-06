@@ -26,17 +26,23 @@ internal static class RowEncoder
     private const byte TagA_NullBitmap = 0x10;
     private const byte TagA_VarSection = 0x20;
 
-    internal const byte LobInlineMarker = 0x00;
-    internal const byte LobPointerMarker = 0x01;
+    /// <summary>
+    /// First byte of every non-NULL variable-length column's payload.
+    /// <see cref="VarInlineMarker"/> means the rest of the payload is the
+    /// value's bytes; <see cref="VarPointerMarker"/> means the rest is an
+    /// 8-byte chain pointer (<c>Int32 chainHead</c> + <c>Int32 totalLength</c>)
+    /// to off-row storage.
+    /// </summary>
+    internal const byte VarInlineMarker = 0x00;
+    internal const byte VarPointerMarker = 0x01;
 
     /// <summary>
-    /// Bytes added to a LOB-eligible value's variable-section payload when
-    /// it goes inline: 1-byte marker (<see cref="LobInlineMarker"/>). Pointer
-    /// form adds <see cref="LobPointerMarker"/> + 8 bytes
-    /// (<c>Int32 chainHead</c> + <c>Int32 totalLength</c>) instead — see
-    /// <see cref="LobPointerSize"/>.
+    /// Total bytes a pointer-form var-section entry occupies: 1-byte marker
+    /// + <c>Int32 chainHead</c> + <c>Int32 totalLength</c>. Used for both
+    /// always-LOB columns (<c>text</c>/<c>ntext</c>/<c>image</c>),
+    /// MAX siblings, and overflowed bounded var columns.
     /// </summary>
-    internal const int LobPointerSize = 1 + 4 + 4;
+    internal const int VarPointerSize = 1 + 4 + 4;
 
     /// <summary>
     /// Encodes a row of values against a <see cref="SqlType"/>-only schema.
@@ -58,21 +64,22 @@ internal static class RowEncoder
 
     /// <summary>
     /// Encodes a row of values against a column-aware schema. When
-    /// <paramref name="lobStore"/> is non-null, every LOB-eligible non-NULL
-    /// value (<see cref="HeapColumn.IsLob"/>) is allocated to a LOB chain
-    /// in the store and the row carries an 8-byte pointer in its place.
-    /// When <paramref name="lobStore"/> is null, LOB-eligible values stay
-    /// inline (with a 1-byte marker prefix); the row stays self-contained
-    /// but is bounded by the 65535-byte var-offset cap.
+    /// <paramref name="lobStore"/> is non-null, the encoder may store
+    /// values off-row in a chain on the store: LOB-eligible columns
+    /// (<see cref="HeapColumn.IsLob"/>) go off-row unconditionally, and
+    /// bounded variable-length columns are pushed off-row greedily — largest
+    /// first — until the in-row size fits under <see cref="Heap.MaxRowSize"/>.
+    /// When <paramref name="lobStore"/> is null, every variable-length
+    /// value stays inline; the row stays self-contained but is bounded by
+    /// the 65535-byte var-offset cap.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Format layers on the existing var-section structure: each
-    /// LOB-eligible column's variable-section bytes start with a 1-byte
-    /// marker (<see cref="LobInlineMarker"/> = inline content follows;
-    /// <see cref="LobPointerMarker"/> = 8 bytes of pointer follow). NULL
+    /// Every non-NULL variable-length column's payload starts with a 1-byte
+    /// marker (<see cref="VarInlineMarker"/> = inline content follows;
+    /// <see cref="VarPointerMarker"/> = 8 bytes of pointer follow). NULL
     /// values still surface through the row's NULL bitmap and contribute
-    /// 0 bytes to the var section, just like non-LOB var columns.
+    /// 0 bytes to the var section.
     /// </para>
     /// </remarks>
     public static byte[] EncodeRow(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<SqlValue> values, Heap? lobStore = null)
@@ -87,10 +94,13 @@ internal static class RowEncoder
         var varColumnCount = 0;
         var varDataLength = 0;
         var varByteCounts = new int[n];
-        // Pre-resolved LOB pointers for off-row values: indexed by schema
-        // position; entry is (chainHead, totalLength) when the column is
-        // LOB-eligible AND lobStore is provided AND the value is non-NULL.
-        var lobPointers = new (int Head, int Length)?[n];
+        // Pre-resolved off-row pointers for values pushed to a chain on
+        // <paramref name="lobStore"/>: indexed by schema position; entry is
+        // (chainHead, totalLength) when the value is non-NULL AND the encoder
+        // chose to store it off-row (always for LOB-eligible columns when a
+        // store is provided; for bounded var columns when the row otherwise
+        // wouldn't fit).
+        var chainPointers = new (int Head, int Length)?[n];
         var bitsInRun = 0;
 
         for (var i = 0; i < n; i++)
@@ -117,7 +127,7 @@ internal static class RowEncoder
                     var byteCount = ComputeVarByteCount(schema[i], values[i], lobStore, out var pointer);
                     varByteCounts[i] = byteCount;
                     varDataLength += byteCount;
-                    lobPointers[i] = pointer;
+                    chainPointers[i] = pointer;
                 }
             }
         }
@@ -127,7 +137,47 @@ internal static class RowEncoder
         var bitmapStart = fixedEnd + 2;
         var bitmapEnd = bitmapStart + nullBitmapLength;
         var hasVar = varColumnCount > 0;
-        var totalLength = bitmapEnd + (hasVar ? 2 + (2 * varColumnCount) + varDataLength : 0);
+        var headerOverhead = bitmapEnd + (hasVar ? 2 + (2 * varColumnCount) : 0);
+        var totalLength = headerOverhead + varDataLength;
+
+        // Greedy row-overflow push: when the encoded row would exceed
+        // <see cref="Heap.MaxRowSize"/>, repeatedly move the largest still-inline
+        // bounded variable-length value to a chain on <paramref name="lobStore"/>
+        // until the row fits or no more candidates remain. LOB-eligible columns
+        // are already off-row at this point; only bounded varchar/nvarchar/
+        // varbinary inline values are eligible to push.
+        if (lobStore is not null && totalLength > Heap.MaxRowSize)
+        {
+            while (totalLength > Heap.MaxRowSize)
+            {
+                var pickIndex = -1;
+                var pickInlinePayload = -1;
+                for (var i = 0; i < n; i++)
+                {
+                    if (chainPointers[i] is not null || values[i].IsNull)
+                        continue;
+                    if (schema[i].Type == SqlType.Bit || schema[i].Type.IsFixedLength)
+                        continue;
+                    var inlinePayload = varByteCounts[i] - 1;
+                    if (inlinePayload > pickInlinePayload)
+                    {
+                        pickIndex = i;
+                        pickInlinePayload = inlinePayload;
+                    }
+                }
+                if (pickIndex < 0)
+                    break;
+
+                var head = AllocateChainForValue(schema[pickIndex], values[pickIndex], lobStore, pickInlinePayload);
+                chainPointers[pickIndex] = (head, pickInlinePayload);
+                varDataLength -= varByteCounts[pickIndex] - VarPointerSize;
+                varByteCounts[pickIndex] = VarPointerSize;
+                totalLength = headerOverhead + varDataLength;
+            }
+
+            if (totalLength > Heap.MaxRowSize)
+                throw SimulatedSqlException.RowSizeExceedsAllowableMaximum(totalLength, Heap.MaxRowSize);
+        }
 
         var bytes = new byte[totalLength];
 
@@ -180,7 +230,7 @@ internal static class RowEncoder
                 if (!values[i].IsNull)
                 {
                     var width = varByteCounts[i];
-                    WriteVarPayload(schema[i], values[i], lobPointers[i], bytes.AsSpan(dataPos, width));
+                    WriteVarPayload(schema[i], values[i], chainPointers[i], bytes.AsSpan(dataPos, width));
                     dataPos += width;
                 }
 
@@ -194,65 +244,58 @@ internal static class RowEncoder
 
     /// <summary>
     /// Computes the encoded byte count for a single variable-length column's
-    /// non-NULL value. For non-LOB columns this is the type's natural
-    /// byte-count; for LOB-eligible columns it adds a 1-byte marker prefix
-    /// and routes oversize values to <paramref name="lobStore"/> when
-    /// available — returning <see cref="LobPointerSize"/> for the off-row
-    /// path. The pre-allocated chain pointer is returned via
+    /// non-NULL value: 1-byte marker + natural inline bytes by default, or
+    /// <see cref="VarPointerSize"/> bytes when the value is being stored
+    /// off-row. LOB-eligible columns (<see cref="HeapColumn.IsLob"/>) go
+    /// off-row whenever <paramref name="lobStore"/> is provided; bounded
+    /// var columns start inline and may be moved off-row by the row-overflow
+    /// pass in the caller. The pre-allocated chain pointer is returned via
     /// <paramref name="pointer"/> so the second pass can write it without
     /// re-scanning the value.
     /// </summary>
-    /// <remarks>
-    /// The off-row path encodes into a scratch buffer that's stack-allocated
-    /// for small values and rented from <see cref="ArrayPool{T}.Shared"/>
-    /// for large ones — varchar(MAX) values can be megabytes, so unconditional
-    /// stackalloc would overflow.
-    /// </remarks>
     private static int ComputeVarByteCount(HeapColumn column, SqlValue value, Heap? lobStore, out (int Head, int Length)? pointer)
     {
         var natural = column.Type.GetVariableByteCount(value);
-        if (!column.IsLob)
+
+        if (column.IsLob && lobStore is not null)
         {
-            pointer = null;
-            return natural;
+            var head = AllocateChainForValue(column, value, lobStore, natural);
+            pointer = (head, natural);
+            return VarPointerSize;
         }
 
-        if (lobStore is null)
-        {
-            // Inline mode without a LOB store: full bytes plus the inline
-            // marker. Caller is responsible for not exceeding row-format
-            // limits with oversize values.
-            pointer = null;
-            return 1 + natural;
-        }
+        pointer = null;
+        return 1 + natural;
+    }
 
-        // Off-row mode: allocate the chain up front so the byte-count phase
-        // and the byte-write phase agree on the layout. The marker byte plus
-        // chain head + length is a fixed-size payload regardless of value
-        // size.
-        int head;
-        if (natural <= Heap.LobScratchStackThreshold)
+    /// <summary>
+    /// Encodes <paramref name="value"/> into a scratch buffer and allocates
+    /// it as a chain on <paramref name="lobStore"/>, returning the chain's
+    /// head page index. The scratch buffer is stack-allocated for small
+    /// values and rented from <see cref="ArrayPool{T}.Shared"/> for larger
+    /// ones — <c>varchar(MAX)</c> and overflowing bounded values can be
+    /// megabytes, so unconditional stackalloc would overflow.
+    /// </summary>
+    private static int AllocateChainForValue(HeapColumn column, SqlValue value, Heap lobStore, int payloadLength)
+    {
+        if (payloadLength <= Heap.LobScratchStackThreshold)
         {
-            Span<byte> chunk = stackalloc byte[natural];
+            Span<byte> chunk = stackalloc byte[payloadLength];
             _ = column.Type.Encode(value, chunk);
-            head = lobStore.AllocateLobChain(chunk);
+            return lobStore.AllocateLobChain(chunk);
         }
-        else
+
+        var rented = ArrayPool<byte>.Shared.Rent(payloadLength);
+        try
         {
-            var rented = ArrayPool<byte>.Shared.Rent(natural);
-            try
-            {
-                var chunk = rented.AsSpan(0, natural);
-                _ = column.Type.Encode(value, chunk);
-                head = lobStore.AllocateLobChain(chunk);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
+            var chunk = rented.AsSpan(0, payloadLength);
+            _ = column.Type.Encode(value, chunk);
+            return lobStore.AllocateLobChain(chunk);
         }
-        pointer = (head, natural);
-        return LobPointerSize;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     /// <summary>
@@ -263,21 +306,15 @@ internal static class RowEncoder
     /// </summary>
     private static void WriteVarPayload(HeapColumn column, SqlValue value, (int Head, int Length)? pointer, Span<byte> destination)
     {
-        if (!column.IsLob)
-        {
-            _ = column.Type.Encode(value, destination);
-            return;
-        }
-
         if (pointer is { } p)
         {
-            destination[0] = LobPointerMarker;
+            destination[0] = VarPointerMarker;
             BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(1, 4), p.Head);
             BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(5, 4), p.Length);
             return;
         }
 
-        destination[0] = LobInlineMarker;
+        destination[0] = VarInlineMarker;
         _ = column.Type.Encode(value, destination[1..]);
     }
 }

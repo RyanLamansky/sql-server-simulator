@@ -81,13 +81,14 @@ internal sealed class HeapPage
     /// Appends <paramref name="row"/> to the page if it fits. Returns false
     /// when the row plus its slot entry won't fit in the remaining free space;
     /// the page is unmodified in that case. Throws when the row is larger than
-    /// any page can ever hold (<see cref="MaxRowPayload"/>) — overflow pages
-    /// for outsized rows aren't modeled yet.
+    /// any page can ever hold (<see cref="MaxRowPayload"/>) — that's a
+    /// caller-side bug: the row encoder's overflow pass keeps rows under
+    /// <see cref="Heap.MaxRowSize"/>.
     /// </summary>
     public bool TryInsert(ReadOnlySpan<byte> row)
     {
         if (row.Length > MaxRowPayload)
-            throw new NotSupportedException($"Row of {row.Length} bytes exceeds the per-page maximum of {MaxRowPayload}; row-overflow pages aren't modeled yet.");
+            throw new NotSupportedException($"Row of {row.Length} bytes exceeds the per-page maximum of {MaxRowPayload}; the row encoder should have pushed variable-length columns off-row.");
 
         if (row.Length + 2 > this.FreeSpace)
             return false;

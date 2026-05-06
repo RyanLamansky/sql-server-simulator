@@ -20,7 +20,7 @@ The overall plan is incremental and non-specific: pick the lowest-effort path th
 
 ## Architecture shape
 
-One backend: page-format storage. User tables hold a heap of 8KB pages; rows are encoded as bytes via a row encoder/decoder and navigated column-by-column without rehydrating whole rows. Oversize values for the LOB-eligible types (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` / `text` / `ntext` / `image`) flow through a parallel chain of 8KB LOB pages on the same heap; the row stores an inline marker plus a chain-head pointer. The type system has its own `SqlType`/`SqlValue` pair. Expression evaluation has separate paths for runtime evaluation and static type-of resolution (for projection planning).
+One backend: page-format storage. User tables hold a heap of 8KB pages; rows are encoded as bytes via a row encoder/decoder and navigated column-by-column without rehydrating whole rows. Every non-NULL variable-length column carries a 1-byte inline/pointer marker ahead of its bytes. Oversize values for the LOB-eligible types (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` / `text` / `ntext` / `image`) always flow through a parallel chain of 8KB LOB pages on the same heap; bounded var columns (`varchar(N)` / `nvarchar(N)` / `varbinary(N)`) start inline but the encoder pushes the largest one off-row greedily — repeating until the row fits — when the encoded row would exceed 8060 bytes. The type system has its own `SqlType`/`SqlValue` pair. Expression evaluation has separate paths for runtime evaluation and static type-of resolution (for projection planning).
 
 Top-level subsystems (in `SqlServerSimulator/`):
 - `Storage/` — pages, row encoder/decoder, types, values
@@ -72,7 +72,6 @@ Prefer public-API tests when the behavior is reachable from SQL — they exercis
 Heavy-hitters someone might assume work but don't. Source and `git log` are the truth for what's done; this list is for what isn't.
 
 - Transactions / locks / MVCC.
-- Row-overflow pages for ordinary `varchar(N)`/`nvarchar(N)`/`varbinary(N)` columns aren't modeled — rows whose declared bounded var values together exceed 8060 bytes still fail at insert. The MAX siblings (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)`) and the always-LOB types (`text` / `ntext` / `image`) bypass the row-size limit through their own LOB-chain pages.
 - `text` / `ntext` / `image` operation restrictions: comparison (Msg 402) and ORDER BY / DISTINCT (Msg 306) are enforced; function-level restrictions (e.g. `LEN(ntext)` raising Msg 8116) and the legacy `READTEXT`/`WRITETEXT`/`UPDATETEXT` family aren't modeled.
 - `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout.
 - `NEWSEQUENTIALID()` (deferred until `DEFAULT`-clause support exists in `CREATE TABLE`; the function is only valid in that context).

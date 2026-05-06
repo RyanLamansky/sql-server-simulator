@@ -142,26 +142,30 @@ public class VarLengthRowTests
     [TestMethod]
     public void EncodedSingleVarchar_LayoutMatchesSpec()
     {
-        // schema = [Varchar], value = "hi" (UTF-8 = 0x68 0x69, 2 bytes).
+        // schema = [Varchar], value = "hi" (CP1252 = 0x68 0x69, 2 bytes).
+        // Every non-NULL var column carries a 1-byte inline/pointer marker
+        // (RowEncoder.VarInlineMarker = 0x00) ahead of its bytes.
         //   [0]    TagA: 0x30
         //   [1]    TagB: 0x00
         //   [2-3]  fixed-end = 0x0004 (no fixed columns)
         //   [4-5]  column count = 0x0001
         //   [6]    NULL bitmap = 0x00
         //   [7-8]  V count = 0x0001
-        //   [9-10] offset array entry 0 = absolute end = 13
-        //   [11-12] var data: "hi"
+        //   [9-10] offset array entry 0 = absolute end = 14
+        //   [11]   inline marker = 0x00
+        //   [12-13] var data: "hi"
         var bytes = RowEncoder.EncodeRow([SqlType.Varchar], [SqlValue.FromVarchar("hi")]);
-        HasCount(13, bytes);
+        HasCount(14, bytes);
         AreEqual(0x30, bytes[0]);
         AreEqual(0x00, bytes[1]);
         AreEqual(4, BitConverter.ToUInt16(bytes, 2));
         AreEqual(1, BitConverter.ToUInt16(bytes, 4));
         AreEqual(0x00, bytes[6]);
         AreEqual(1, BitConverter.ToUInt16(bytes, 7));
-        AreEqual(13, BitConverter.ToUInt16(bytes, 9));
-        AreEqual((byte)'h', bytes[11]);
-        AreEqual((byte)'i', bytes[12]);
+        AreEqual(14, BitConverter.ToUInt16(bytes, 9));
+        AreEqual(0x00, bytes[11]);
+        AreEqual((byte)'h', bytes[12]);
+        AreEqual((byte)'i', bytes[13]);
     }
 
     [TestMethod]
