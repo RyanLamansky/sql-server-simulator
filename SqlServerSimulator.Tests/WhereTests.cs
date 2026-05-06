@@ -332,6 +332,61 @@ public class WhereTests
         IsFalse(reader.Read());
     }
 
+    [TestMethod]
+    public void Where_AndChain_TwoPredicates_BothMustHold()
+    {
+        // Regression for the silent-wrong-rows bug: pre-fix, `where a=X and
+        // b=Y` parsed only `a=X` and dropped `and b=Y`, returning the first
+        // row matching just the left predicate. With composite-PK row
+        // (1,3,200) present, the right answer is 200, not the (1,2,100) row
+        // that matches only `a=1`.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int not null, b int not null, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, 2, 100), (1, 3, 200), (2, 2, 300)").ExecuteNonQuery();
+
+        AreEqual(200, connection.CreateCommand("select c from t where a = 1 and b = 3").ExecuteScalar());
+        AreEqual(100, connection.CreateCommand("select c from t where a = 1 and b = 2").ExecuteScalar());
+        AreEqual(300, connection.CreateCommand("select c from t where a = 2 and b = 2").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Where_AndChain_ThreePredicates_AllMustHold()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, 2, 100), (1, 2, 200)").ExecuteNonQuery();
+
+        AreEqual(100, connection.CreateCommand("select c from t where a = 1 and b = 2 and c = 100").ExecuteScalar());
+        IsNull(connection.CreateCommand("select c from t where a = 1 and b = 2 and c = 999").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Where_AndChain_NullOperand_ExcludesRow()
+    {
+        // SQL Server WHERE: NULL on either side of AND treats the row as
+        // excluded (the whole predicate evaluates to false/UNKNOWN).
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert into t values (1, null), (1, 2)").ExecuteNonQuery();
+
+        // Only (1, 2) passes both predicates; (1, NULL) fails the b=2 side.
+        using var reader = connection.CreateCommand("select b from t where a = 1 and b = 2").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(2, reader[0]);
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Where_OrInPredicate_RaisesNotSupported()
+    {
+        // OR / NOT at the boolean-combinator level aren't modeled yet; the
+        // parser surfaces the gap so the predicate doesn't silently drop.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        var ex = Throws<NotSupportedException>(() => connection.CreateCommand("select a from t where a = 1 or b = 2").ExecuteScalar());
+        Contains("OR", ex.Message);
+    }
+
     private static void AddTypedParameter(System.Data.Common.DbCommand command, string name, DbType dbType, object value)
     {
         var parameter = command.CreateParameter();

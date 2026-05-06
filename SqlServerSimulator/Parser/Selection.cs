@@ -204,7 +204,7 @@ internal sealed class Selection
     {
         while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
-            excluders.Add(BooleanExpression.Parse(Expression.Parse(context.MoveNextRequiredReturnSelf()), context));
+            excluders.Add(BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
         }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })

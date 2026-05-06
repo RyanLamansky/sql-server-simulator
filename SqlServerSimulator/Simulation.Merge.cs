@@ -79,7 +79,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var onPredicate = BooleanExpression.Parse(Expression.Parse(context), context);
+        var onPredicate = BooleanExpression.Parse(context);
 
         // Compute source schema by static type-of'ing the first tuple's
         // expressions. Source tuples can't reference any columns yet (they're

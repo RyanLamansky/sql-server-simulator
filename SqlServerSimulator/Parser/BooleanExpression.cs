@@ -12,26 +12,42 @@ namespace SqlServerSimulator.Parser;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal abstract class BooleanExpression
 {
-    protected readonly Expression left, right;
-
-    private protected BooleanExpression(Expression left, Expression right)
-    {
-        this.left = left;
-        this.right = right;
-    }
-
-    private protected BooleanExpression(Expression left, ParserContext context)
-        : this(left, Expression.Parse(context.MoveNextRequiredReturnSelf()))
+    private protected BooleanExpression()
     {
     }
 
     /// <summary>
-    /// Parses a comparison operator and its right-hand expression. Follows
-    /// the lookahead contract documented on <see cref="ParserContext"/>: on
-    /// return, <see cref="ParserContext.Token"/> is the first token not
-    /// consumed by the comparison.
+    /// Parses a full boolean predicate from the current position: a single
+    /// comparison (the <see cref="CompareExpression"/> shapes), optionally
+    /// chained with one or more <c>AND</c> clauses producing an
+    /// <see cref="AndExpression"/> tree. Each chain element is itself a
+    /// comparison; nested parens around predicates and <c>OR</c>/<c>NOT</c>
+    /// at the boolean-combinator level aren't supported yet (they fall
+    /// through to the comparison parser, which surfaces them as syntax
+    /// errors). Follows the lookahead contract on <see cref="ParserContext"/>:
+    /// on return, <see cref="ParserContext.Token"/> is the first token not
+    /// consumed by the predicate.
     /// </summary>
-    public static BooleanExpression Parse(Expression left, ParserContext context) => context.Token switch
+    public static BooleanExpression Parse(ParserContext context)
+    {
+        var result = ParseSingle(Expression.Parse(context), context);
+        while (context.Token is ReservedKeyword { Keyword: Keyword.And })
+        {
+            context.MoveNextRequired();
+            var rhs = ParseSingle(Expression.Parse(context), context);
+            result = new AndExpression(result, rhs);
+        }
+        return context.Token is ReservedKeyword { Keyword: Keyword.Or }
+            ? throw new NotSupportedException("OR in boolean expressions.")
+            : result;
+    }
+
+    /// <summary>
+    /// Parses a single comparison/predicate (no AND/OR chaining): equality,
+    /// inequality, ordered comparison, or LIKE/NOT LIKE. Caller must have
+    /// already parsed the left side.
+    /// </summary>
+    private static BooleanExpression ParseSingle(Expression left, ParserContext context) => context.Token switch
     {
         Operator { Character: '=' } => new EqualityExpression(left, context),
         Operator { Character: '>' } => context.GetNextRequired() switch
@@ -85,31 +101,71 @@ internal abstract class BooleanExpression
     internal abstract string DebugDisplay();
 
     /// <summary>
-    /// Evaluates both sides, applies SQL Server type promotion to a common
-    /// type, and invokes the comparator. Cross-category type pairs surface as
-    /// <see cref="NotSupportedException"/> via <see cref="SqlType.Promote"/>.
-    /// LOB-typed operands (<c>text</c>, <c>ntext</c>, <c>image</c>) raise
-    /// Msg 402 rather than being routed through promotion — SQL Server rejects
-    /// them in any comparison/equality slot, and the operator name is woven
-    /// into the message via the caller-supplied <paramref name="operatorName"/>.
+    /// Combines two boolean predicates with a logical AND. Short-circuits on
+    /// the left side: if <c>left.Run</c> returns <c>false</c>, the right side
+    /// isn't evaluated. NULL-as-false propagates naturally — both sides must
+    /// run to true for the row to pass, matching SQL Server's WHERE-clause
+    /// "NULL excludes the row" semantics.
     /// </summary>
-    private static bool ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare)
+    private sealed class AndExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
     {
-        var l = left.Run(getColumnValue);
-        var r = right.Run(getColumnValue);
-        if (l.Type.IsLob || r.Type.IsLob)
-            throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
-        if (l.IsNull || r.IsNull)
-            return false;
+        public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
+            left.Run(getColumnValue) && right.Run(getColumnValue);
 
-        if (l.Type == r.Type)
-            return compare(l, r);
-
-        var common = SqlType.Promote(l.Type, r.Type);
-        return compare(l.CoerceTo(common), r.CoerceTo(common));
+        internal override string DebugDisplay() => $"{left.DebugDisplay()} AND {right.DebugDisplay()}";
     }
 
-    private sealed class EqualityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
+    /// <summary>
+    /// Common base for the binary-comparison subclasses (=, &lt;&gt;, &lt;,
+    /// &gt;, &lt;=, &gt;=, LIKE). Holds the parsed left/right
+    /// <see cref="Expression"/>s and the shared promote-and-compare helper;
+    /// non-comparison <see cref="BooleanExpression"/>s (currently
+    /// <see cref="AndExpression"/> and <see cref="LikeExpression"/>) bring
+    /// their own field shapes.
+    /// </summary>
+    private abstract class CompareExpression : BooleanExpression
+    {
+        protected readonly Expression left, right;
+
+        private protected CompareExpression(Expression left, Expression right)
+        {
+            this.left = left;
+            this.right = right;
+        }
+
+        private protected CompareExpression(Expression left, ParserContext context)
+            : this(left, Expression.Parse(context.MoveNextRequiredReturnSelf()))
+        {
+        }
+
+        /// <summary>
+        /// Evaluates both sides, applies SQL Server type promotion to a common
+        /// type, and invokes the comparator. Cross-category type pairs surface
+        /// as <see cref="NotSupportedException"/> via
+        /// <see cref="SqlType.Promote"/>. LOB-typed operands (<c>text</c>,
+        /// <c>ntext</c>, <c>image</c>) raise Msg 402 rather than being routed
+        /// through promotion — SQL Server rejects them in any comparison /
+        /// equality slot, and the operator name is woven into the message via
+        /// the caller-supplied <paramref name="operatorName"/>.
+        /// </summary>
+        protected static bool ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare)
+        {
+            var l = left.Run(getColumnValue);
+            var r = right.Run(getColumnValue);
+            if (l.Type.IsLob || r.Type.IsLob)
+                throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
+            if (l.IsNull || r.IsNull)
+                return false;
+
+            if (l.Type == r.Type)
+                return compare(l, r);
+
+            var common = SqlType.Promote(l.Type, r.Type);
+            return compare(l.CoerceTo(common), r.CoerceTo(common));
+        }
+    }
+
+    private sealed class EqualityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "equal to", static (l, r) => l.Equals(r));
@@ -117,7 +173,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
     }
 
-    private sealed class InequalityExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
+    private sealed class InequalityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "not equal to", static (l, r) => !l.Equals(r));
@@ -125,7 +181,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <> {right.DebugDisplay()}";
     }
 
-    private sealed class GreaterThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
+    private sealed class GreaterThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "greater than", static (l, r) => l.CompareTo(r) > 0);
@@ -133,7 +189,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
     }
 
-    private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
+    private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
@@ -141,7 +197,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} >= {right.DebugDisplay()}";
     }
 
-    private sealed class LessThanExpression(Expression left, Expression right) : BooleanExpression(left, right)
+    private sealed class LessThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "less than", static (l, r) => l.CompareTo(r) < 0);
@@ -149,7 +205,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
     }
 
-    private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : BooleanExpression(left, context)
+    private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
         public override bool Run(Func<List<string>, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
@@ -167,7 +223,7 @@ internal abstract class BooleanExpression
     /// ranges (<c>[c-a]</c>) and unterminated <c>[</c> all produce never-match
     /// translations to mirror SQL Server's silent failure.
     /// </summary>
-    private sealed class LikeExpression(Expression left, Expression right, Expression? escape, bool negated) : BooleanExpression(left, right)
+    private sealed class LikeExpression(Expression left, Expression right, Expression? escape, bool negated) : CompareExpression(left, right)
     {
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;

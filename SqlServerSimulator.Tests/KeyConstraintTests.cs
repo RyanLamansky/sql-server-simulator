@@ -99,13 +99,10 @@ public sealed class KeyConstraintTests
     [TestMethod]
     public void PrimaryKey_TableLevel_Composite_Works()
     {
-        // Each (a, b) pair distinct → all three insert successfully. Read-back
-        // uses single-predicate WHERE (composite-key equality projection
-        // already exercised by the duplicate-violation test).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int not null, b int not null, c int, constraint pk_t primary key (a, b))");
         _ = simulation.ExecuteNonQuery("insert into t values (1, 2, 100), (1, 3, 200), (2, 2, 300)");
-        Assert.AreEqual(200, simulation.ExecuteScalar("select c from t where b = 3"));
+        Assert.AreEqual(200, simulation.ExecuteScalar("select c from t where a = 1 and b = 3"));
     }
 
     [TestMethod]
