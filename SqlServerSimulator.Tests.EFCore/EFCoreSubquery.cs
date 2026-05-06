@@ -85,4 +85,40 @@ public class EFCoreSubquery
             .ToArray();
         CollectionAssert.AreEqual(new[] { 2 }, ids);
     }
+
+    [TestMethod]
+    public void Projection_CountCorrelated_EmitsScalarSubquery()
+    {
+        // EF Core translates `Count` of a related set in projection to a
+        // scalar subquery: `SELECT (SELECT COUNT(*) FROM CustomerOrders o
+        // WHERE o.CustomerId = c.Id) FROM Customers c`. Customers 1, 2, 3
+        // have order counts 2, 1, 0 respectively.
+        using var context = SeededContext();
+        var rows = context.Customers
+            .OrderBy(c => c.Id)
+            .Select(c => new
+            {
+                c.Id,
+                OrderCount = context.CustomerOrders.Count(o => o.CustomerId == c.Id)
+            })
+            .ToArray();
+        Assert.HasCount(3, rows);
+        Assert.AreEqual(2, rows[0].OrderCount);
+        Assert.AreEqual(1, rows[1].OrderCount);
+        Assert.AreEqual(0, rows[2].OrderCount);
+    }
+
+    [TestMethod]
+    public void Where_ScalarComparisonAgainstSubquery_FiltersByMaxAmount()
+    {
+        // EF Core translates `o.Amount == context.CustomerOrders.Max(...)`
+        // to `WHERE o.Amount = (SELECT MAX(o.Amount) FROM CustomerOrders)`.
+        // Single highest-amount order: 30 (CustomerId=2).
+        using var context = SeededContext();
+        var customerIds = context.CustomerOrders
+            .Where(o => o.Amount == context.CustomerOrders.Max(x => x.Amount))
+            .Select(o => o.CustomerId)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { 2 }, customerIds);
+    }
 }

@@ -71,7 +71,7 @@ internal abstract class Expression
             // surrounding loop hands the call shape off to ResolveBuiltIn.
             ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce } reserved => new Reference(reserved.ToString()),
             Name name => new Reference(name),
-            Operator { Character: '(' } => new Parenthesized(context),
+            Operator { Character: '(' } => ParseGroupedExpression(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
         };
 
@@ -163,6 +163,34 @@ internal abstract class Expression
     /// production use fails to compile.
     /// </summary>
     internal abstract string DebugDisplay();
+
+    /// <summary>
+    /// Parses a grouped expression starting at the opening <c>(</c>. Two
+    /// shapes share the leading paren: a parenthesized expression
+    /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar
+    /// subquery (<c>(SELECT col FROM t)</c>, parses as
+    /// <see cref="ScalarSubqueryExpression"/>). Dispatch is by peeking the
+    /// token immediately after <c>(</c>: a <c>SELECT</c> keyword routes to
+    /// the subquery path; anything else falls through to the standard
+    /// parenthesized form. Both leave the cursor on the closing <c>)</c>,
+    /// matching the lookahead contract <see cref="Parse"/>'s
+    /// binary loop expects.
+    /// </summary>
+    private static Expression ParseGroupedExpression(ParserContext context)
+    {
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
+        {
+            var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            return inner.Schema.Length != 1
+                ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()
+                : context.Token is not Operator { Character: ')' }
+                    ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                    : (Expression)new ScalarSubqueryExpression(inner);
+        }
+
+        return new Parenthesized(Expression.Parse(context));
+    }
 
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {

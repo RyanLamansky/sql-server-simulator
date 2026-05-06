@@ -289,6 +289,136 @@ public sealed class SubqueryTests
         CollectionAssert.AreEquivalent(new int?[] { 2, 4 }, matched);
     }
 
+    // === Scalar subqueries ===
+
+    [TestMethod]
+    public void Scalar_InProjection_ReturnsValue()
+    {
+        AreEqual(1, new Simulation().ExecuteScalar("select (select 1)"));
+    }
+
+    [TestMethod]
+    public void Scalar_InArithmetic_FlowsThroughOperator()
+    {
+        AreEqual(6, new Simulation().ExecuteScalar("select (select 1) + 5"));
+    }
+
+    [TestMethod]
+    public void Scalar_EmptyResult_IsNull()
+    {
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select 1 where 1=0)"));
+    }
+
+    [TestMethod]
+    public void Scalar_EmptyInArithmetic_PropagatesNull()
+    {
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select 1 where 1=0) + 5"));
+    }
+
+    [TestMethod]
+    public void Scalar_InWhereComparison_FiltersByValue()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (x int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (5), (10), (15)");
+
+        using var connection = simulation.CreateOpenConnection();
+        var matched = ReadIntColumn(connection.CreateCommand("select x from t where x = (select max(x) from t)"));
+        CollectionAssert.AreEqual(new int?[] { 15 }, matched);
+    }
+
+    [TestMethod]
+    public void Scalar_NullValueInRow_PropagatesNull()
+    {
+        // Single-row inner with a NULL column value flows through normally.
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select cast(null as int)) + 5"));
+    }
+
+    [TestMethod]
+    public void Scalar_MultiRow_RaisesMsg512()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (x int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1), (2)");
+
+        var ex = Throws<DbException>(() => _ = simulation.ExecuteScalar("select (select x from t)"));
+        AreEqual("512", ex.Data["HelpLink.EvtID"]);
+        AreEqual("Subquery returned more than 1 value. This is not permitted when the subquery follows =, !=, <, <= , >, >= or when the subquery is used as an expression.", ex.Message);
+    }
+
+    [TestMethod]
+    public void Scalar_MultiColumn_RaisesMsg116()
+    {
+        var ex = Throws<DbException>(() =>
+            _ = new Simulation().ExecuteScalar("select (select 1, 2)"));
+        AreEqual("116", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Scalar_Correlated_ResolvesPerRow()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table a (id int)");
+        _ = simulation.ExecuteNonQuery("create table b (id int, val int)");
+        _ = simulation.ExecuteNonQuery("insert into a values (1), (2), (3)");
+        _ = simulation.ExecuteNonQuery("insert into b values (1, 100), (2, 200)");
+
+        // For each a.id, look up b.val. id=3 has no match → NULL.
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand("select a.id, (select b.val from b where b.id = a.id) as v from a").ExecuteReader();
+        var ids = new List<int>();
+        var vals = new List<int?>();
+        while (reader.Read())
+        {
+            ids.Add(reader.GetInt32(0));
+            vals.Add(reader.IsDBNull(1) ? null : reader.GetInt32(1));
+        }
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, ids);
+        CollectionAssert.AreEqual(new int?[] { 100, 200, null }, vals);
+    }
+
+    [TestMethod]
+    public void Scalar_CorrelatedMultiRow_RaisesMsg512()
+    {
+        // Per-outer-row Msg 512: a.id=1 matches two b rows, hits the limit.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table a (id int)");
+        _ = simulation.ExecuteNonQuery("create table b (id int, val int)");
+        _ = simulation.ExecuteNonQuery("insert into a values (1)");
+        _ = simulation.ExecuteNonQuery("insert into b values (1, 100), (1, 200)");
+
+        using var connection = simulation.CreateOpenConnection();
+        var ex = Throws<DbException>(() =>
+        {
+            using var reader = connection.CreateCommand("select (select b.val from b where b.id = a.id) from a").ExecuteReader();
+            while (reader.Read()) { /* exhaust */ }
+        });
+        AreEqual("512", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Scalar_AggregateInner_ReturnsAggregate()
+    {
+        // Common EF Core pattern: scalar subquery with COUNT.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table a (id int)");
+        _ = simulation.ExecuteNonQuery("create table b (id int)");
+        _ = simulation.ExecuteNonQuery("insert into a values (1), (2)");
+        _ = simulation.ExecuteNonQuery("insert into b values (1), (2), (3)");
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand("select a.id, (select count(*) from b) as c from a").ExecuteReader();
+        var ids = new List<int>();
+        var counts = new List<int>();
+        while (reader.Read())
+        {
+            ids.Add(reader.GetInt32(0));
+            counts.Add(reader.GetInt32(1));
+        }
+        CollectionAssert.AreEqual(new[] { 1, 2 }, ids);
+        CollectionAssert.AreEqual(new[] { 3, 3 }, counts);
+    }
+
     // === EXISTS with table-alias resolution ===
 
     [TestMethod]

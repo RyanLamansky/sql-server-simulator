@@ -268,6 +268,15 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException SubqueryNotIntroducedWithExists() =>
         new("Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.", 116, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 512 — fired when a scalar subquery (or one
+    /// behind a comparison operator) returns more than one row. Verbatim
+    /// text from the probed real SQL Server, including the literal extra
+    /// space in the <c>&lt;= , &gt;</c> sequence.
+    /// </summary>
+    internal static SimulatedSqlException SubqueryReturnedMoreThanOneValue() =>
+        new("Subquery returned more than 1 value. This is not permitted when the subquery follows =, !=, <, <= , >, >= or when the subquery is used as an expression.", 512, 16, 1);
+
     internal static SimulatedSqlException MissingEndCommentMark() => new("Missing end comment mark '*/'.", 113, 15, 1);
 
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
