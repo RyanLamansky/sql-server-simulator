@@ -10,23 +10,41 @@ namespace SqlServerSimulator.Parser;
 /// <remarks>
 /// <para>
 /// Parsing and execution are split: <see cref="Parse"/> captures the
-/// projection / WHERE / GROUP BY / HAVING / ORDER BY into a frozen plan and
-/// returns it; <see cref="Execute"/> materializes one
-/// <see cref="SimulatedSqlResultSet"/> per call. The split lets correlated
-/// subqueries (EXISTS / IN(SELECT)) re-execute the inner SELECT per outer
-/// row by passing a different <c>outerResolver</c> each time. For the
-/// non-correlated and top-level cases, <see cref="Execute"/> is called once
-/// with no outer resolver — the deferred shape is invisible to those callers.
+/// projection / FROM (with JOINs) / WHERE / GROUP BY / HAVING / ORDER BY
+/// into a frozen plan and returns it; <see cref="Execute"/> materializes
+/// one <see cref="SimulatedSqlResultSet"/> per call. The split lets
+/// correlated subqueries (EXISTS / IN(SELECT) / scalar) re-execute the
+/// inner SELECT per outer row by passing a different <c>outerResolver</c>
+/// each time. For the non-correlated and top-level cases,
+/// <see cref="Execute"/> is called once with no outer resolver — the
+/// deferred shape is invisible to those callers.
 /// </para>
 /// <para>
-/// Correlated lookup chains via the <c>outerResolver</c> argument: a column
-/// reference that doesn't resolve in the local FROM source falls through to
-/// the outer scope, which itself falls through to its outer, and so on. Type
-/// resolution at parse time follows the same chain through
-/// <see cref="ParserContext.OuterTypeResolver"/>.
+/// Multi-source FROM clauses (one or more JOINs) are represented as a
+/// <see cref="FromSource"/>[] plus a parallel <see cref="JoinSpec"/>[]
+/// (one shorter — the leftmost source has no join). The row stream
+/// consumed by the projector is a sequence of <c>byte[]?[]</c> tuples
+/// (one byte[] per source, null for an unmatched LEFT-JOIN slot).
+/// Column resolution walks all sources via a qualifier-aware lookup;
+/// unqualified collisions raise Msg 209.
+/// </para>
+/// <para>
+/// Correlated lookup chains via the <c>outerResolver</c> argument: a
+/// column reference that doesn't resolve in any local FROM source falls
+/// through to the outer scope, which itself falls through to its outer,
+/// and so on. Type resolution at parse time follows the same chain
+/// through <see cref="ParserContext.OuterTypeResolver"/>.
+/// </para>
+/// <para>
+/// This file holds the public surface and the parser-side logic
+/// (Parse / ParseInner / FROM-source + JOIN parsing / WHERE / GROUP BY /
+/// HAVING / ORDER BY / tableless-SELECT shortcut). The execution-side
+/// helpers (row pipeline, projection paths, column resolution at
+/// runtime) live in <c>Selection.Execution.cs</c> as the other half of
+/// the same partial class.
 /// </para>
 /// </remarks>
-internal sealed class Selection
+internal sealed partial class Selection
 {
     public readonly SqlType[] Schema;
     public readonly string[] ColumnNames;
@@ -197,60 +215,10 @@ internal sealed class Selection
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
-                    switch (context.GetNextRequired())
-                    {
-                        case Name tableName:
-                            if (!context.Simulation.HeapTables.TryGetValue(tableName.Value, out var heapTable)
-                                && !Simulation.SystemHeapTables.TryGetValue(tableName.Value, out heapTable))
-                            {
-                                throw SimulatedSqlException.InvalidObjectName(tableName);
-                            }
-
-                            var heapColumnNames = new string[heapTable.Columns.Length];
-                            for (var ci = 0; ci < heapColumnNames.Length; ci++)
-                                heapColumnNames[ci] = heapTable.Columns[ci].Name;
-
-                            var heapAlias = ConsumeOptionalAlias(context);
-                            var heapQualifier = heapAlias ?? tableName.Value;
-
-                            ConsumeWhereOrderByWithOuterScope(context, fromClause, heapQualifier, heapColumnNames, heapTable.Columns, outerTypeResolver);
-
-                            return BuildSqlProjection(heapQualifier, heapColumnNames, heapTable.Columns, heapTable.StoredColumns, heapTable.StorageOrdinals, heapTable.Heap, heapTable.Rows, expressions, fromClause, distinct, topCount, aggregates, outerTypeResolver);
-
-                        case Operator { Character: '(' }:
-                            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
-                                throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                            // Derived tables don't see the outer scope of the
-                            // enclosing SELECT — pass null for the inner Parse
-                            // so projection-time references can't reach out.
-                            // (SQL Server's actual rule allows this only with
-                            // APPLY / lateral; we don't support those yet.)
-                            var derivedSelection = Selection.Parse(context, depth + 1, outerTypeResolver: null);
-                            if (derivedSelection.Execute() is not SimulatedSqlResultSet derived)
-                                throw new InvalidOperationException("Inner SELECT produced a non-Pages result set; this should be unreachable.");
-
-                            // Inner SELECT result rows are LOB-inline (projections never
-                            // emit LOB pointers because they have no destination Heap),
-                            // so build a HeapColumn[] schema from the SqlType[] so the
-                            // decoder still strips marker bytes for text/ntext/image
-                            // columns; lobStore is null because no chain to follow.
-                            var derivedColumns = new HeapColumn[derived.Schema.Length];
-                            for (var ci = 0; ci < derivedColumns.Length; ci++)
-                                derivedColumns[ci] = new HeapColumn(string.Empty, derived.Schema[ci], maxLength: null, nullable: true);
-
-                            // Derived tables have no native name; the alias is
-                            // the qualifier when present, otherwise null disables
-                            // the qualified-reference check (the existing simulator
-                            // accepts derived tables without alias, unlike real SQL).
-                            var derivedQualifier = ConsumeOptionalAlias(context);
-
-                            ConsumeWhereOrderByWithOuterScope(context, fromClause, derivedQualifier, derived.ColumnNames, derivedColumns, outerTypeResolver);
-
-                            return BuildSqlProjection(derivedQualifier, derived.ColumnNames, derivedColumns, derivedColumns, storageOrdinals: null, lobStore: null, derived.RowBytes, expressions, fromClause, distinct, topCount, aggregates, outerTypeResolver);
-                    }
-
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                    var sources = new List<FromSource>();
+                    var joins = new List<JoinSpec>();
+                    ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver);
+                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, outerTypeResolver);
 
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Order }:
                     ConsumeWhereAndOrderBy(context, fromClause);
@@ -265,45 +233,206 @@ internal sealed class Selection
     }
 
     /// <summary>
-    /// After a FROM source's columns and qualifier are known, sets
+    /// Parses the FROM clause: the leftmost source plus zero or more JOIN
+    /// clauses, followed by the optional WHERE / GROUP BY / HAVING /
+    /// ORDER BY tail. Builds the <see cref="FromSource"/>[] /
+    /// <see cref="JoinSpec"/>[] pair the projector consumes, and registers
+    /// the multi-source type resolver in
+    /// <see cref="ParserContext.OuterTypeResolver"/> so any subqueries
+    /// inside WHERE / HAVING / ON predicates see the chained scope stack.
+    /// </summary>
+    /// <remarks>
+    /// On entry, <see cref="ParserContext.Token"/> is the FROM keyword.
+    /// On return, the cursor is positioned past the WHERE / GROUP BY /
+    /// HAVING / ORDER BY tail, ready for the outer dispatch loop to
+    /// observe the next un-consumed token.
+    /// </remarks>
+    private static void ParseFromSourceAndJoins(
+        ParserContext context,
+        uint depth,
+        List<FromSource> sources,
+        List<JoinSpec> joins,
+        FromClause fromClause,
+        Func<List<string>, SqlType>? outerTypeResolver)
+    {
+        sources.Add(ParseSingleFromSource(context, depth));
+
+        // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
+        // the lookahead-after-source token (e.g. WHERE, ORDER, JOIN, INNER,
+        // LEFT, CROSS, etc.). Loop while we see a JOIN-introducing keyword.
+        while (TryParseJoinKeyword(context, out var kind))
+        {
+            sources.Add(ParseSingleFromSource(context, depth));
+            BooleanExpression? on = null;
+            if (kind == JoinKind.Cross)
+            {
+                if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
+            }
+            else
+            {
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                on = BooleanExpression.Parse(context);
+            }
+            joins.Add(new JoinSpec(kind, on));
+        }
+
+        // Now register the multi-source type resolver and parse WHERE / etc.
+        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver);
+    }
+
+    /// <summary>
+    /// Parses one FROM source: a table name (with optional alias) or a
+    /// derived-table <c>(SELECT ...)</c> (with optional alias). On entry
+    /// the cursor is on the FROM or JOIN keyword (caller advances past it
+    /// internally via <see cref="ParserContext.GetNextRequired"/>); on
+    /// return, the cursor is at the first un-consumed token after the
+    /// source — typically WHERE / ORDER / a JOIN keyword / ON / etc.
+    /// </summary>
+    private static FromSource ParseSingleFromSource(ParserContext context, uint depth)
+    {
+        var token = context.GetNextRequired();
+        switch (token)
+        {
+            case Name tableName:
+                if (!context.Simulation.HeapTables.TryGetValue(tableName.Value, out var heapTable)
+                    && !Simulation.SystemHeapTables.TryGetValue(tableName.Value, out heapTable))
+                {
+                    throw SimulatedSqlException.InvalidObjectName(tableName);
+                }
+
+                var heapColumnNames = new string[heapTable.Columns.Length];
+                for (var ci = 0; ci < heapColumnNames.Length; ci++)
+                    heapColumnNames[ci] = heapTable.Columns[ci].Name;
+
+                var heapAlias = ConsumeOptionalAlias(context);
+                var heapQualifier = heapAlias ?? tableName.Value;
+
+                return new FromSource(
+                    qualifier: heapQualifier,
+                    columnNames: heapColumnNames,
+                    columns: heapTable.Columns,
+                    storedSchema: heapTable.StoredColumns,
+                    storageOrdinals: heapTable.StorageOrdinals,
+                    lobStore: heapTable.Heap,
+                    rows: heapTable.Rows);
+
+            case Operator { Character: '(' }:
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+
+                // Derived tables don't see the outer scope of the
+                // enclosing SELECT — pass null for the inner Parse so
+                // projection-time references can't reach out.
+                // (SQL Server's actual rule allows this only with
+                // APPLY / lateral; we don't support those yet.)
+                var derivedSelection = Selection.Parse(context, depth + 1, outerTypeResolver: null);
+                if (derivedSelection.Execute() is not SimulatedSqlResultSet derived)
+                    throw new InvalidOperationException("Inner SELECT produced a non-Pages result set; this should be unreachable.");
+
+                // Inner SELECT result rows are LOB-inline (projections never
+                // emit LOB pointers because they have no destination Heap),
+                // so build a HeapColumn[] schema from the SqlType[] so the
+                // decoder still strips marker bytes for text/ntext/image
+                // columns; lobStore is null because no chain to follow.
+                var derivedColumns = new HeapColumn[derived.Schema.Length];
+                for (var ci = 0; ci < derivedColumns.Length; ci++)
+                    derivedColumns[ci] = new HeapColumn(string.Empty, derived.Schema[ci], maxLength: null, nullable: true);
+
+                // Derived tables have no native name; the alias is the
+                // qualifier when present, otherwise null disables the
+                // qualified-reference check (the existing simulator
+                // accepts derived tables without alias, unlike real SQL).
+                var derivedQualifier = ConsumeOptionalAlias(context);
+
+                return new FromSource(
+                    qualifier: derivedQualifier,
+                    columnNames: derived.ColumnNames,
+                    columns: derivedColumns,
+                    storedSchema: derivedColumns,
+                    storageOrdinals: null,
+                    lobStore: null,
+                    rows: derived.RowBytes);
+
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+    }
+
+    /// <summary>
+    /// If <see cref="ParserContext.Token"/> is one of the JOIN-introducing
+    /// keywords (<c>INNER</c> / <c>LEFT</c> / <c>CROSS</c> / bare
+    /// <c>JOIN</c>), consumes it (plus an optional <c>OUTER</c> after LEFT
+    /// and the required <c>JOIN</c> after the inner/left/cross keyword)
+    /// and returns the join kind. Returns false otherwise (no
+    /// advancement). <c>RIGHT</c> and <c>FULL</c> raise
+    /// <see cref="NotSupportedException"/> — RIGHT can be rewritten as
+    /// LEFT with the source order swapped, and FULL OUTER isn't modeled.
+    /// </summary>
+    private static bool TryParseJoinKeyword(ParserContext context, out JoinKind kind)
+    {
+        kind = JoinKind.Inner;
+        if (context.Token is not ReservedKeyword keyword)
+            return false;
+
+        switch (keyword.Keyword)
+        {
+            case Keyword.Inner:
+                context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                kind = JoinKind.Inner;
+                return true;
+
+            case Keyword.Join:
+                kind = JoinKind.Inner;
+                return true;
+
+            case Keyword.Left:
+                context.MoveNextRequired();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
+                    context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                kind = JoinKind.Left;
+                return true;
+
+            case Keyword.Right:
+                throw new NotSupportedException("RIGHT JOIN isn't modeled yet; rewrite as LEFT JOIN with the source order swapped.");
+
+            case Keyword.Full:
+                throw new NotSupportedException("FULL OUTER JOIN isn't modeled yet.");
+
+            case Keyword.Cross:
+                context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                kind = JoinKind.Cross;
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// After all FROM sources are parsed, sets
     /// <see cref="ParserContext.OuterTypeResolver"/> to a chained resolver
-    /// (this scope's columns, falling through to the prior outer) for the
+    /// (this scope's sources, falling through to the prior outer) for the
     /// duration of the WHERE / GROUP BY / HAVING / ORDER BY parse.
     /// Subqueries that appear inside those clauses pick up the chained
     /// resolver and pass it as their own outer resolver to
-    /// <see cref="Parse"/>, so a column reference inside a
-    /// correlated subquery sees the full enclosing-scope stack.
+    /// <see cref="Parse"/>.
     /// </summary>
     private static void ConsumeWhereOrderByWithOuterScope(
         ParserContext context,
         FromClause fromClause,
-        string? qualifier,
-        string[] sourceColumnNames,
-        HeapColumn[] sourceSchema,
+        FromSource[] sources,
         Func<List<string>, SqlType>? outerTypeResolver)
     {
-        SqlType MyResolver(List<string> name)
-        {
-            // Qualified reference: only this scope owns the name iff the
-            // qualifier matches; otherwise fall through to the outer chain
-            // unconditionally — the resolver up the stack will handle it.
-            if (name.Count >= 2 && (qualifier is null || !Collation.Default.Equals(name[^2], qualifier)))
-            {
-                return outerTypeResolver is not null
-                    ? outerTypeResolver(name)
-                    : throw SimulatedSqlException.InvalidColumnName(name);
-            }
-
-            var lastPart = name[^1];
-            for (var j = 0; j < sourceColumnNames.Length; j++)
-            {
-                if (Collation.Default.Equals(sourceColumnNames[j], lastPart))
-                    return sourceSchema[j].Type;
-            }
-            return outerTypeResolver is not null
-                ? outerTypeResolver(name)
-                : throw SimulatedSqlException.InvalidColumnName(name);
-        }
+        SqlType MyResolver(List<string> name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
         var saved = context.OuterTypeResolver;
         context.OuterTypeResolver = MyResolver;
@@ -321,9 +450,10 @@ internal sealed class Selection
     /// Consumes an optional <c>AS alias</c> after a FROM source. Returns the
     /// alias text if present, null otherwise. On entry, the FROM source
     /// (table name or derived-table closing <c>)</c>) is the current token;
-    /// this advances past it, optionally past <c>AS alias</c>, and leaves
-    /// the cursor at the next un-consumed lookahead position (typically
-    /// WHERE / GROUP / HAVING / ORDER / ; / null).
+    /// this advances past it, optionally past <c>AS alias</c> or a bare
+    /// <c>alias</c> (the implicit alias form), and leaves the cursor at
+    /// the next un-consumed lookahead position (typically WHERE / GROUP /
+    /// HAVING / ORDER / JOIN keywords / ; / null).
     /// </summary>
     private static string? ConsumeOptionalAlias(ParserContext context)
     {
@@ -333,6 +463,13 @@ internal sealed class Selection
             var alias = context.GetNextRequired<Name>().Value;
             _ = context.GetNextOptional();
             return alias;
+        }
+        // Bare-Name alias form (without the AS keyword): "FROM t a JOIN ..."
+        // SQL Server accepts this as an alias.
+        if (nextToken is Name aliasName)
+        {
+            _ = context.GetNextOptional();
+            return aliasName.Value;
         }
         return null;
     }
@@ -442,12 +579,6 @@ internal sealed class Selection
     /// are no-ops — the result is at most one row, so dedup and sort have no
     /// effect.
     /// </summary>
-    /// <remarks>
-    /// <paramref name="outerTypeResolver"/> is unused here because the parse-
-    /// time projection Run can't see outer rows (and a tableless projection
-    /// referencing an outer column raises Msg 207 at parse time). Kept on the
-    /// signature so the dispatch in <see cref="ParseInner"/> doesn't fork.
-    /// </remarks>
     private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, bool distinct, int? topCount, Func<List<string>, SqlType>? outerTypeResolver)
     {
         _ = distinct;
@@ -484,580 +615,6 @@ internal sealed class Selection
             return [RowEncoder.EncodeRow(schema, values)];
         });
     }
-
-    /// <summary>
-    /// Builds the plan for a SELECT-FROM-source query (a heap table or a
-    /// derived table). Static work — output schema, validation of ordinal
-    /// ORDER BY items, LOB-in-DISTINCT/ORDER-BY checks — happens here.
-    /// The deferred closure runs per <see cref="Execute"/> call, accepting
-    /// the outer-row resolver and dispatching to the aggregate or simple
-    /// projection path; each input row is decoded column-by-column on demand
-    /// via <see cref="RowDecoder"/> and projected through
-    /// <see cref="Expression.Run"/>.
-    /// </summary>
-    private static Selection BuildSqlProjection(
-        string? qualifier,
-        string[] sourceColumnNames,
-        HeapColumn[] sourceSchema,
-        HeapColumn[] storedSchema,
-        int[]? storageOrdinals,
-        Heap? lobStore,
-        IEnumerable<byte[]> sourceRows,
-        List<Expression> expressions,
-        FromClause fromClause,
-        bool distinct,
-        int? topCount,
-        List<AggregateExpression> aggregates,
-        Func<List<string>, SqlType>? outerTypeResolver)
-    {
-        var orderBy = fromClause.OrderBy;
-        var outputSchema = new SqlType[expressions.Count];
-        var outputColumnNames = new string[expressions.Count];
-
-        // Qualified-reference scoping: a multi-part name like `t1.id` only
-        // resolves locally when its qualifier matches this scope's table /
-        // alias. A mismatch returns -1 so the runtime / type resolvers fall
-        // through to the outer chain — the rule that lets correlated
-        // subqueries reach enclosing scopes even when column names collide.
-        int FindSourceColumn(List<string> name)
-        {
-            if (name.Count >= 2 && (qualifier is null || !Collation.Default.Equals(name[^2], qualifier)))
-                return -1;
-
-            for (var j = 0; j < sourceColumnNames.Length; j++)
-            {
-                if (Collation.Default.Equals(sourceColumnNames[j], name[^1]))
-                    return j;
-            }
-            return -1;
-        }
-
-        SqlType ResolveColumnType(List<string> name)
-        {
-            var idx = FindSourceColumn(name);
-            return idx != -1
-                ? sourceSchema[idx].Type
-                : outerTypeResolver is not null
-                    ? outerTypeResolver(name)
-                    : throw SimulatedSqlException.InvalidColumnName(name);
-        }
-
-        for (var i = 0; i < expressions.Count; i++)
-        {
-            outputSchema[i] = expressions[i].GetSqlType(ResolveColumnType);
-            outputColumnNames[i] = expressions[i].Name;
-        }
-
-        // Validate ordinal ORDER BY items now that the projection count is
-        // known. SQL Server fires Msg 108 at parse time, before any rows are
-        // touched, so do the same.
-        for (var i = 0; i < orderBy.Count; i++)
-        {
-            if (orderBy[i].IsOrdinal && (orderBy[i].Ordinal < 1 || orderBy[i].Ordinal > expressions.Count))
-                throw SimulatedSqlException.OrderByPositionOutOfRange(orderBy[i].Ordinal);
-        }
-
-        // Msg 306: text/ntext/image can't appear in a sort or distinct slot.
-        // ORDER BY: ordinal items index into the output schema; expression
-        // items resolve through the same column type machinery the projection
-        // already used. DISTINCT is row-level dedup, so any LOB output column
-        // is fatal.
-        if (distinct)
-        {
-            for (var i = 0; i < outputSchema.Length; i++)
-            {
-                if (outputSchema[i].IsLob)
-                    throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
-            }
-        }
-        for (var i = 0; i < orderBy.Count; i++)
-        {
-            var keyType = orderBy[i].IsOrdinal
-                ? outputSchema[orderBy[i].Ordinal - 1]
-                : orderBy[i].Expr!.GetSqlType(ResolveColumnType);
-            if (keyType.IsLob)
-                throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
-        }
-
-        return new Selection(outputSchema, outputColumnNames, outerResolver =>
-            aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
-                ? BuildAggregateProjectionRows(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, FindSourceColumn, ResolveColumnType, expressions, fromClause, outputSchema, outputColumnNames, aggregates, topCount, outerResolver)
-                : ProjectSqlRows(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, FindSourceColumn, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, outerResolver));
-    }
-
-    /// <summary>
-    /// Aggregate-mode executor: streams every input row through each
-    /// projection aggregate's accumulator (per group when GROUP BY is in
-    /// play), then projects one output row per group. WHERE excluders run
-    /// per source row before aggregation; HAVING runs per group after
-    /// finalization; ORDER BY runs across groups at the end. Without
-    /// GROUP BY the output is exactly one row even for empty input (SQL
-    /// Server's implicit-empty-GROUP-BY rule); per-aggregate empty-input
-    /// behavior is each aggregator's responsibility (COUNT returns 0;
-    /// everything else NULL). <paramref name="outerResolver"/> chains
-    /// unresolved column references to the enclosing scope.
-    /// </summary>
-    private static List<byte[]> BuildAggregateProjectionRows(
-        HeapColumn[] sourceSchema,
-        HeapColumn[] storedSchema,
-        int[]? storageOrdinals,
-        Heap? lobStore,
-        IEnumerable<byte[]> sourceRows,
-        Func<List<string>, int> findSourceColumn,
-        Func<List<string>, SqlType> resolveColumnType,
-        List<Expression> expressions,
-        FromClause fromClause,
-        SqlType[] outputSchema,
-        string[] outputColumnNames,
-        List<AggregateExpression> aggregates,
-        int? topCount,
-        Func<List<string>, SqlValue>? outerResolver)
-    {
-        _ = outputColumnNames;
-
-        if (topCount == 0)
-            return [];
-
-        var groupByExpressions = fromClause.GroupBy;
-        var groupByCount = groupByExpressions.Count;
-
-        // Per-group state: aggregators (one per AggregateExpression) plus the
-        // group key tuple (used to populate non-aggregate projection slots).
-        // Without GROUP BY, the implicit "single empty group" still flows
-        // through this path with an empty key tuple.
-        var groups = new Dictionary<SqlValueKey, GroupState>();
-
-        var aggregateOperandTypes = new SqlType[aggregates.Count];
-        var aggregateResultTypes = new SqlType[aggregates.Count];
-        for (var i = 0; i < aggregates.Count; i++)
-        {
-            aggregateOperandTypes[i] = aggregates[i].Operand?.GetSqlType(resolveColumnType) ?? SqlType.Int32;
-            aggregateResultTypes[i] = aggregates[i].GetSqlType(resolveColumnType);
-        }
-
-        GroupState NewGroup()
-        {
-            var freshAggregators = new Aggregator[aggregates.Count];
-            for (var i = 0; i < aggregates.Count; i++)
-                freshAggregators[i] = Aggregator.Create(aggregates[i], aggregateOperandTypes[i], aggregateResultTypes[i]);
-            return new(keyValues: new SqlValue[groupByCount], aggregators: freshAggregators);
-        }
-
-        // Pre-create the implicit group when there's no GROUP BY so an empty
-        // input still produces one output row.
-        if (groupByCount == 0)
-            groups[SqlValueKey.Empty] = NewGroup();
-
-        foreach (var rowBytes in sourceRows)
-        {
-            var bytes = rowBytes;
-            SqlValue ResolveColumn(List<string> name)
-            {
-                var columnIndex = findSourceColumn(name);
-                return columnIndex != -1
-                    ? DecodeOrCompute(sourceSchema, storedSchema, storageOrdinals, columnIndex, bytes, lobStore, ResolveColumn)
-                    : outerResolver is not null
-                        ? outerResolver(name)
-                        : throw SimulatedSqlException.InvalidColumnName(name);
-            }
-
-            var include = true;
-            foreach (var excluder in fromClause.Excluders)
-            {
-                if (excluder.Run(ResolveColumn) != true)
-                {
-                    include = false;
-                    break;
-                }
-            }
-            if (!include)
-                continue;
-
-            // Locate or create this row's group.
-            GroupState state;
-            if (groupByCount == 0)
-            {
-                state = groups[SqlValueKey.Empty];
-            }
-            else
-            {
-                var keyValues = new SqlValue[groupByCount];
-                for (var i = 0; i < groupByCount; i++)
-                    keyValues[i] = groupByExpressions[i].Run(ResolveColumn);
-                var key = new SqlValueKey(keyValues);
-                if (!groups.TryGetValue(key, out state!))
-                {
-                    state = NewGroup();
-                    Array.Copy(keyValues, state.KeyValues, groupByCount);
-                    groups[key] = state;
-                }
-            }
-
-            for (var i = 0; i < aggregates.Count; i++)
-            {
-                var aggregate = aggregates[i];
-                // STRING_AGG's separator is evaluated per row (SQL Server
-                // accepts non-constant separators); thread the latest value
-                // into the aggregator before each Add. Other aggregates have
-                // no per-row auxiliary inputs.
-                if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
-                {
-                    var separatorValue = aggregate.Separator!.Run(ResolveColumn);
-                    stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
-                }
-                var operand = aggregate.Operand;
-                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(ResolveColumn));
-            }
-        }
-
-        var output = new List<byte[]>();
-        foreach (var (_, state) in groups)
-        {
-            for (var i = 0; i < aggregates.Count; i++)
-                aggregates[i].BindResult(state.Aggregators[i].Result());
-
-            SqlValue ResolveByGroupKey(List<string> name)
-            {
-                for (var i = 0; i < groupByCount; i++)
-                {
-                    if (groupByExpressions[i] is Reference r
-                        && Collation.Default.Equals(r.Name, name[^1]))
-                    {
-                        return state.KeyValues[i];
-                    }
-                }
-                return outerResolver is not null
-                    ? outerResolver(name)
-                    : throw SimulatedSqlException.InvalidColumnName(name);
-            }
-
-            if (fromClause.Having is { } having && having.Run(ResolveByGroupKey) != true)
-                continue;
-
-            var projected = new SqlValue[expressions.Count];
-            for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveByGroupKey);
-
-            output.Add(RowEncoder.EncodeRow(outputSchema, projected));
-        }
-
-        if (topCount is { } limit && output.Count > limit)
-            output = [.. output.Take(limit)];
-
-        return output;
-    }
-
-    /// <summary>
-    /// Per-group state inside <see cref="BuildAggregateProjectionRows"/>: the
-    /// resolved key tuple (used to populate non-aggregate projection slots
-    /// from the GROUP BY's column references) plus one aggregator per
-    /// <see cref="AggregateExpression"/> in the projection.
-    /// </summary>
-    private sealed class GroupState(SqlValue[] keyValues, Aggregator[] aggregators)
-    {
-        public readonly SqlValue[] KeyValues = keyValues;
-        public readonly Aggregator[] Aggregators = aggregators;
-    }
-
-    /// <summary>
-    /// Hash-key wrapper around a <see cref="SqlValue"/> tuple used as a
-    /// dictionary key for GROUP BY buckets. Two NULL slots compare equal
-    /// (matching SQL Server: NULL is a valid group key with one bucket).
-    /// </summary>
-    private readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey>
-    {
-        public static readonly SqlValueKey Empty = new([]);
-
-        private readonly SqlValue[] values = values;
-
-        public bool Equals(SqlValueKey other)
-        {
-            if (this.values.Length != other.values.Length)
-                return false;
-            for (var i = 0; i < this.values.Length; i++)
-            {
-                var a = this.values[i];
-                var b = other.values[i];
-                if (a.IsNull != b.IsNull)
-                    return false;
-                if (a.IsNull)
-                    continue;
-                if (!a.Equals(b))
-                    return false;
-            }
-            return true;
-        }
-
-        public override bool Equals(object? obj) => obj is SqlValueKey other && Equals(other);
-
-        public override int GetHashCode()
-        {
-            var h = new HashCode();
-            foreach (var v in this.values)
-                h.Add(v.IsNull ? 0 : v.GetHashCode());
-            return h.ToHashCode();
-        }
-    }
-
-    private static IEnumerable<byte[]> ProjectSqlRows(
-        HeapColumn[] sourceSchema,
-        HeapColumn[] storedSchema,
-        int[]? storageOrdinals,
-        Heap? lobStore,
-        IEnumerable<byte[]> sourceRows,
-        Func<List<string>, int> findSourceColumn,
-        List<Expression> expressions,
-        List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
-        string[] outputColumnNames,
-        List<OrderBySpec> orderBy,
-        bool distinct,
-        int? topCount,
-        Func<List<string>, SqlValue>? outerResolver)
-    {
-        // Streaming path: no DISTINCT, no ORDER BY. TOP applies row-by-row.
-        if (!distinct && orderBy.Count == 0)
-        {
-            return ProjectStreaming(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, findSourceColumn, expressions, excluders, outputSchema, topCount, outerResolver);
-        }
-
-        // Buffered path: DISTINCT and/or ORDER BY require the full row set
-        // before TOP can apply.
-        return ProjectBuffered(sourceSchema, storedSchema, storageOrdinals, lobStore, sourceRows, findSourceColumn, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, outerResolver);
-    }
-
-    private static IEnumerable<byte[]> ProjectStreaming(
-        HeapColumn[] sourceSchema,
-        HeapColumn[] storedSchema,
-        int[]? storageOrdinals,
-        Heap? lobStore,
-        IEnumerable<byte[]> sourceRows,
-        Func<List<string>, int> findSourceColumn,
-        List<Expression> expressions,
-        List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
-        int? topCount,
-        Func<List<string>, SqlValue>? outerResolver)
-    {
-        var remaining = topCount;
-        foreach (var rowBytes in sourceRows)
-        {
-            if (remaining == 0)
-                yield break;
-
-            var bytes = rowBytes;
-
-            SqlValue ResolveColumn(List<string> name)
-            {
-                var columnIndex = findSourceColumn(name);
-                return columnIndex != -1
-                    ? DecodeOrCompute(sourceSchema, storedSchema, storageOrdinals, columnIndex, bytes, lobStore, ResolveColumn)
-                    : outerResolver is not null
-                        ? outerResolver(name)
-                        : throw SimulatedSqlException.InvalidColumnName(name);
-            }
-
-            var include = true;
-            foreach (var excluder in excluders)
-            {
-                if (excluder.Run(ResolveColumn) != true)
-                {
-                    include = false;
-                    break;
-                }
-            }
-            if (!include)
-                continue;
-
-            var projected = new SqlValue[expressions.Count];
-            for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveColumn);
-
-            yield return RowEncoder.EncodeRow(outputSchema, projected);
-
-            if (remaining is not null)
-                remaining--;
-        }
-    }
-
-    private static IEnumerable<byte[]> ProjectBuffered(
-        HeapColumn[] sourceSchema,
-        HeapColumn[] storedSchema,
-        int[]? storageOrdinals,
-        Heap? lobStore,
-        IEnumerable<byte[]> sourceRows,
-        Func<List<string>, int> findSourceColumn,
-        List<Expression> expressions,
-        List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
-        string[] outputColumnNames,
-        List<OrderBySpec> orderBy,
-        bool distinct,
-        int? topCount,
-        Func<List<string>, SqlValue>? outerResolver)
-    {
-        var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
-
-        foreach (var rowBytes in sourceRows)
-        {
-            var bytes = rowBytes;
-
-            SqlValue ResolveSource(List<string> name)
-            {
-                var columnIndex = findSourceColumn(name);
-                return columnIndex != -1
-                    ? DecodeOrCompute(sourceSchema, storedSchema, storageOrdinals, columnIndex, bytes, lobStore, ResolveSource)
-                    : outerResolver is not null
-                        ? outerResolver(name)
-                        : throw SimulatedSqlException.InvalidColumnName(name);
-            }
-
-            var include = true;
-            foreach (var excluder in excluders)
-            {
-                if (excluder.Run(ResolveSource) != true)
-                {
-                    include = false;
-                    break;
-                }
-            }
-            if (!include)
-                continue;
-
-            var projected = new SqlValue[expressions.Count];
-            for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveSource);
-
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, ResolveSource);
-            buffer.Add((projected, keys));
-        }
-
-        IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> filtered = buffer;
-        if (distinct)
-        {
-            var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-            filtered = buffer.Where(item => seen.Add(item.Projected));
-        }
-
-        var materialized = filtered.ToList();
-
-        if (orderBy.Count > 0)
-            materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
-
-        var taken = topCount is { } limit ? materialized.Take(limit) : materialized;
-        foreach (var (projected, _) in taken)
-            yield return RowEncoder.EncodeRow(outputSchema, projected);
-    }
-
-    /// <summary>
-    /// Resolves a single column reference at <paramref name="columnIndex"/>
-    /// in <paramref name="sourceSchema"/> for the row at <paramref name="bytes"/>.
-    /// Stored columns (regular plus persisted-computed) decode directly via
-    /// <see cref="RowDecoder.DecodeColumn(ReadOnlySpan{HeapColumn}, ReadOnlySpan{byte}, int, Heap?)"/>
-    /// at their storage ordinal. Non-persisted computed columns evaluate
-    /// their expression through <paramref name="resolveByName"/> — the
-    /// recursive references inside the expression bind back through the same
-    /// caller's resolver, but are guaranteed by Msg 1759 to land only on
-    /// stored columns.
-    /// </summary>
-    private static SqlValue DecodeOrCompute(
-        HeapColumn[] sourceSchema,
-        HeapColumn[] storedSchema,
-        int[]? storageOrdinals,
-        int columnIndex,
-        byte[] bytes,
-        Heap? lobStore,
-        Func<List<string>, SqlValue> resolveByName) =>
-        storageOrdinals is null
-            ? RowDecoder.DecodeColumn(storedSchema, bytes, columnIndex, lobStore)
-            : sourceSchema[columnIndex].Computed is { } computedExpr && !sourceSchema[columnIndex].IsPersisted
-                ? computedExpr.Run(resolveByName)
-                : RowDecoder.DecodeColumn(storedSchema, bytes, storageOrdinals[columnIndex], lobStore);
-
-    /// <summary>
-    /// Evaluates each ORDER BY item against the current row. Ordinal items
-    /// index directly into the projected row. Expression items resolve column
-    /// references through an output-first resolver; without DISTINCT, names
-    /// not in the output fall back to source columns (matching SQL Server's
-    /// rule that ORDER BY can reference non-selected source columns). With
-    /// DISTINCT, source fallback would be ambiguous post-dedup so a missing
-    /// output match raises Msg 145.
-    /// </summary>
-    private static SqlValue[] ComputeOrderKeys(
-        List<OrderBySpec> orderBy,
-        SqlValue[] projected,
-        string[] outputColumnNames,
-        bool distinct,
-        Func<List<string>, SqlValue> resolveSource)
-    {
-        var keys = new SqlValue[orderBy.Count];
-        for (var i = 0; i < orderBy.Count; i++)
-        {
-            var spec = orderBy[i];
-            if (spec.IsOrdinal)
-            {
-                keys[i] = projected[spec.Ordinal - 1];
-                continue;
-            }
-
-            keys[i] = spec.Expr!.Run(name =>
-            {
-                var lastPart = name[^1];
-                for (var j = 0; j < outputColumnNames.Length; j++)
-                {
-                    if (Collation.Default.Equals(outputColumnNames[j], lastPart))
-                        return projected[j];
-                }
-                return distinct
-                    ? throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()
-                    : resolveSource(name);
-            });
-        }
-        return keys;
-    }
-
-    /// <summary>
-    /// Lexicographic compare of two key tuples per the per-key descending
-    /// flags. NULL is treated as the smallest value (NULL first under ASC,
-    /// NULL last under DESC), matching SQL Server. Cross-type keys are
-    /// promoted via <see cref="SqlType.Promote"/> before comparison.
-    /// </summary>
-    private static int CompareOrderKeys(SqlValue[] a, SqlValue[] b, List<OrderBySpec> orderBy)
-    {
-        for (var i = 0; i < a.Length; i++)
-        {
-            var lk = a[i];
-            var rk = b[i];
-            int c;
-            if (lk.IsNull && rk.IsNull)
-            {
-                c = 0;
-            }
-            else if (lk.IsNull)
-            {
-                c = -1;
-            }
-            else if (rk.IsNull)
-            {
-                c = 1;
-            }
-            else if (lk.Type == rk.Type)
-            {
-                c = lk.CompareTo(rk);
-            }
-            else
-            {
-                var common = SqlType.Promote(lk.Type, rk.Type);
-                c = lk.CoerceTo(common).CompareTo(rk.CoerceTo(common));
-            }
-
-            if (orderBy[i].Descending)
-                c = -c;
-            if (c != 0)
-                return c;
-        }
-        return 0;
-    }
 }
 
 /// <summary>
@@ -1082,33 +639,4 @@ internal readonly struct OrderBySpec
 
     public static OrderBySpec FromExpression(Expression expr, bool descending) => new(expr, 0, descending);
     public static OrderBySpec FromOrdinal(int ordinal, bool descending) => new(null, ordinal, descending);
-}
-
-/// <summary>
-/// Equality comparer for projected rows (<see cref="SqlValue"/> tuples). Used
-/// by DISTINCT to dedupe based on the same equality semantics as the
-/// <c>=</c> operator: collation-aware string comparison, ANSI trailing-space
-/// padding, two NULLs of the same type compare equal, and
-/// <c>datetimeoffset</c> compares by UTC instant.
-/// </summary>
-internal sealed class RowEqualityComparer : IEqualityComparer<SqlValue[]>
-{
-    public static readonly RowEqualityComparer Instance = new();
-
-    public bool Equals(SqlValue[]? x, SqlValue[]? y)
-    {
-        if (ReferenceEquals(x, y)) return true;
-        if (x is null || y is null || x.Length != y.Length) return false;
-        for (var i = 0; i < x.Length; i++)
-            if (!x[i].Equals(y[i])) return false;
-        return true;
-    }
-
-    public int GetHashCode(SqlValue[] obj)
-    {
-        var hash = new HashCode();
-        foreach (var v in obj)
-            hash.Add(v);
-        return hash.ToHashCode();
-    }
 }

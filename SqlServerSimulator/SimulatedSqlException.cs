@@ -258,6 +258,15 @@ internal sealed class SimulatedSqlException : DbException
 
     internal static SimulatedSqlException InvalidColumnName(IEnumerable<string> name) => InvalidColumnName(string.Join('.', name));
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 209 — fired when an unqualified column
+    /// reference matches columns in more than one source after a JOIN.
+    /// The fix is to add a qualifier (table or alias prefix) disambiguating
+    /// which source the reference targets.
+    /// </summary>
+    internal static SimulatedSqlException AmbiguousColumnName(string name) =>
+        new($"Ambiguous column name '{name}'.", 209, 16, 1);
+
     internal static SimulatedSqlException InvalidObjectName(StringToken name) => new($"Invalid object name {name}.", 208, 16, 1);
 
     /// <summary>
