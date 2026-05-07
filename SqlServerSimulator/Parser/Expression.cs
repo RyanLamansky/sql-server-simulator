@@ -237,6 +237,7 @@ internal abstract class Expression
             7 => uppercaseName switch
             {
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
+                "DATEADD" => new DateAdd(context),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
                 _ => null
@@ -244,6 +245,7 @@ internal abstract class Expression
             8 => uppercaseName switch
             {
                 "COALESCE" => new Coalesce(context),
+                "DATEPART" => new DatePart(context),
                 _ => null
             },
             9 => uppercaseName switch

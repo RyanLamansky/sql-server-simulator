@@ -242,4 +242,46 @@ public class EFCoreDateTime
 
         Assert.AreEqual(min, context.Events.Select(e => e.Started).First());
     }
+
+    [TestMethod]
+    public void Where_DateTimeYearExtraction_TranslatesToDatepart()
+    {
+        // EF Core translates .Year (and .Month / .Day / .Hour / etc.) to
+        // DATEPART(year, col). Common in real apps for "events this year"
+        // filters.
+        var simulation = TestDbContext.CreateEventsSimulation();
+        using (var seed = new TestDbContext(simulation))
+        {
+            seed.Events.AddRange(
+                new Event { Id = 1, CreatedAt = new DateTime(2023, 6, 1), OccurredAt = DateTimeOffset.MinValue },
+                new Event { Id = 2, CreatedAt = new DateTime(2024, 6, 1), OccurredAt = DateTimeOffset.MinValue },
+                new Event { Id = 3, CreatedAt = new DateTime(2024, 12, 1), OccurredAt = DateTimeOffset.MinValue });
+            _ = seed.SaveChanges();
+        }
+
+        using var context = new TestDbContext(simulation);
+        var ids = context.Events.Where(e => e.CreatedAt.Year == 2024).OrderBy(e => e.Id).Select(e => e.Id).ToArray();
+        CollectionAssert.AreEqual(new[] { 2, 3 }, ids);
+    }
+
+    [TestMethod]
+    public void Projection_DateTimeAddDays_TranslatesToDateadd()
+    {
+        // EF Core translates .AddDays(N) to DATEADD(day, CAST(N AS int), col).
+        var simulation = TestDbContext.CreateEventsSimulation();
+        using (var seed = new TestDbContext(simulation))
+        {
+            _ = seed.Events.Add(new Event
+            {
+                Id = 1,
+                CreatedAt = new DateTime(2024, 6, 1),
+                OccurredAt = DateTimeOffset.MinValue,
+            });
+            _ = seed.SaveChanges();
+        }
+
+        using var context = new TestDbContext(simulation);
+        var rolled = context.Events.Select(e => e.CreatedAt.AddDays(7)).Single();
+        Assert.AreEqual(new DateTime(2024, 6, 8), rolled);
+    }
 }

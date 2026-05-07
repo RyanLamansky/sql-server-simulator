@@ -87,6 +87,31 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 
     /// <summary>
+    /// Mimics SQL Server error 155: the first argument to <c>DATEPART</c> /
+    /// <c>DATEADD</c> / <c>DATEDIFF</c> / etc. wasn't a recognized datepart
+    /// keyword (year / month / day / hour / minute / second / etc.).
+    /// </summary>
+    internal static SimulatedSqlException NotARecognizedDatepartOption(string keyword) =>
+        new($"'{keyword}' is not a recognized datepart option.", 155, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 9810: a datepart keyword is incompatible with
+    /// the date-family argument's data type (e.g. <c>DATEPART(hour, dateCol)</c>
+    /// against a <c>date</c> column has no time component to extract).
+    /// </summary>
+    internal static SimulatedSqlException DatepartNotSupportedForType(string datepart, string function, string typeName) =>
+        new($"The datepart {datepart} is not supported by date function {function} for data type {typeName}.", 9810, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 517: <c>DATEADD</c>'s output value falls
+    /// outside the date/time type's representable range. The type-name slot
+    /// is the *input* column's type (e.g. <c>'date'</c>), not the abstract
+    /// SQL-server type family — verified by probe.
+    /// </summary>
+    internal static SimulatedSqlException DateAddOverflow(string typeName) =>
+        new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 506: the <c>ESCAPE</c> clause of a <c>LIKE</c>
     /// predicate received a value that wasn't exactly one character (empty,
     /// multi-char). The displayed value is whatever the expression evaluated

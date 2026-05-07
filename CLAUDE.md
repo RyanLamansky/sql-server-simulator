@@ -175,6 +175,13 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 ### Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (integer-truncating; `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. Standalone and inside `GROUP BY` / `HAVING`.
 
+### Date scalar functions: `DATEPART` / `DATEADD`
+Both take a bare datepart keyword as the first argument (parse-time `Name` token, not an expression). Canonical keywords + common aliases: `year`/`yy`/`yyyy`, `quarter`/`qq`/`q`, `month`/`mm`/`m`, `dayofyear`/`dy`/`y`, `day`/`dd`/`d`, `week`/`wk`/`ww`, `iso_week`/`isowk`/`isoww`, `weekday`/`dw`, `hour`/`hh`, `minute`/`mi`/`n`, `second`/`ss`/`s`, `millisecond`/`ms`, `microsecond`/`mcs`, `nanosecond`/`ns`, `tzoffset`/`tz`. `DATEPART` always returns `int`; `DATEADD` preserves the input's SQL type (`date` stays `date`, `time(N)` stays `time(N)`, etc.).
+
+Per-type keyword compatibility mirrors SQL Server (verified against Kardax7 2026-05-07): `date` accepts only date parts; `time(N)` accepts only time parts; `datetime` / `smalldatetime` / `datetime2(N)` accept date and time parts; `datetimeoffset(N)` adds `tzoffset`. Wrong combinations raise **Msg 9810** `"The datepart {part} is not supported by date function {function} for data type {type}."`. Unknown keyword → **Msg 155** `"'{X}' is not a recognized datepart option."`. `DATEADD` overflow (e.g. `dateadd(year, 100000, dateCol)`) → **Msg 517** `"Adding a value to a '{type}' column caused an overflow."`. NULL-value input → typed-NULL output (DATEPART returns NULL int). DATEPART(weekday) uses default `DATEFIRST 7` (Sunday=1, Saturday=7); changing `DATEFIRST` isn't modeled. The week / iso_week algorithm pins the default us_english behavior — week 1 is the week containing January 1, rolling on Sundays.
+
+`DatePartKind` (`Parser/Expressions/DatePartKind.cs`) is the shared enum + helpers; both `DatePart.cs` and `DateAdd.cs` route through it for keyword resolution, type-compatibility validation, extraction, and addition. `DATEDIFF` is a downstream beneficiary if/when added — same dispatch surface.
+
 ### Constraints
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree backing.
