@@ -390,4 +390,55 @@ public sealed class UpdateTests
         names = ReadStrings(simulation.CreateCommand("select name from t"));
         CollectionAssert.AreEqual(new[] { "newer" }, names);
     }
+
+    // === Multi-table-syntax UPDATE (EF7+ ExecuteUpdate emission) ===
+
+    [TestMethod]
+    public void Update_MultiTableSyntax_AcceptsAliasFormWithFromClause()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int, name varchar(30))");
+        _ = simulation.ExecuteNonQuery("insert into t values (1, 'a'), (2, 'b'), (3, 'c')");
+
+        var rows = simulation.ExecuteNonQuery(
+            "update [a] set [a].[name] = upper([a].[name]) from t as [a] where [a].[id] = 2");
+        AreEqual(1, rows);
+
+        var names = ReadStrings(simulation.CreateCommand("select name from t order by id"));
+        CollectionAssert.AreEqual(new[] { "a", "B", "c" }, names);
+    }
+
+    [TestMethod]
+    public void Update_MultiTableSyntax_NoWhereClause_UpdatesAllRows()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int, name varchar(30))");
+        _ = simulation.ExecuteNonQuery("insert into t values (1, 'a'), (2, 'b')");
+
+        var rows = simulation.ExecuteNonQuery("update [a] set [a].[name] = 'X' from t as [a]");
+        AreEqual(2, rows);
+
+        var names = ReadStrings(simulation.CreateCommand("select name from t order by id"));
+        CollectionAssert.AreEqual(new[] { "X", "X" }, names);
+    }
+
+    [TestMethod]
+    public void Update_MultiTableSyntax_AliasUnknownAndNoFromClause_RaisesInvalidObject()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+
+        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("update [unknown] set [unknown].[id] = 1"));
+        Contains("Invalid object name", ex.Message);
+    }
+
+    [TestMethod]
+    public void Update_MultiTableSyntax_JoinedFromClause_RaisesNotSupported() =>
+        ThrowsExactly<NotSupportedException>(() =>
+        {
+            var simulation = new Simulation();
+            _ = simulation.ExecuteNonQuery("create table t (id int)");
+            _ = simulation.ExecuteNonQuery("create table u (id int)");
+            _ = simulation.ExecuteNonQuery("update [a] set [a].[id] = 1 from t as [a] inner join u as [b] on [a].[id] = [b].[id]");
+        });
 }

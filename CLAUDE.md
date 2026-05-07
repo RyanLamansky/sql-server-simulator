@@ -18,7 +18,7 @@ Priority is opportunistic: each bundle picks the lowest-effort path that unlocks
 
 Standing pattern for non-trivial SQL feature work:
 
-1. **Probe.** Behavior questions get answered against a real SQL Server 2025 instance, not from memory or docs. Connection details for the user's reference instance live in user memory under "Real SQL Server reference instance."
+1. **Probe.** Behavior questions get answered against a real SQL Server 2025 instance, not from memory or docs. Connection details for the user's reference instance live in user memory under "Real SQL Server reference instance." Probe scaffolds — both raw SqlClient probes and EF Core emission probes — live in `/tmp/<probe-name>/` console projects and get deleted after the bundle. The git workspace stays free of probe scratch; only graduated regression tests land in `*.Tests` / `*.Tests.EFCore`.
 2. **Surface decisions.** Before writing code, surface 2–3 concrete design choices and recommend one each. The user is decisive at choice points.
 3. **Implement + test.** Tests in `*.Tests` exercise the public API path; `*.Tests.EFCore` validates the oracle. Use `*.Tests.Internal` only for things genuinely unreachable from public SQL.
 4. **Update CLAUDE.md.** Move bullets between "What's modeled" / "Not modeled" / "Quirks" as scope changes.
@@ -188,7 +188,8 @@ Per-type keyword compatibility mirrors SQL Server (verified against Kardax7 2026
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree backing.
 
 ### UPDATE / DELETE
-- `UPDATE table SET col = expr [, col = expr]* [WHERE pred]` and `DELETE [FROM] table [WHERE pred]`. Single-table only.
+- `UPDATE table SET col = expr [, col = expr]* [WHERE pred]` and `DELETE [FROM] table [WHERE pred]`.
+- Multi-table-syntax form (`UPDATE alias SET alias.col = expr FROM table AS alias [WHERE pred]`, `DELETE FROM alias FROM table AS alias [WHERE pred]`) is the EF7+ `ExecuteUpdate` / `ExecuteDelete` shape. Single-source-only — additional sources or joins on the FROM clause raise `NotSupportedException`. Two-pass parsing: collect raw `(columnName, expr)` pairs without resolving ordinals, then bind to the FROM-clause table once known. SET LHS supports both bare `col = expr` and alias-qualified `[a].[col] = expr`; the alias prefix is accepted verbatim and not cross-checked against the FROM-clause's alias since the simulator's row resolvers use `name.Leaf` (the alias is moot for single-source). OUTPUT is only supported on the single-table form (EF doesn't combine OUTPUT with multi-table-syntax) — see `Simulation.Update.cs` / `Simulation.Delete.cs` for the deferred-table-binding pattern.
 - **Multi-column SET evaluates RHS against the pre-update row snapshot** — verified: `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` produces `(a=100, b=11)` (b read pre-update a). Scalar subquery RHS sees the pre-update table state.
 - Identity-column update → **Msg 8102** `"Cannot update identity column 'X'."`. Computed-column update → Msg 271 (existing factory). Rowversion update → **Msg 272** `"Cannot update a timestamp column."`.
 - Per-row constraint re-validation: NOT NULL → **Msg 515** with `"UPDATE fails."` verb; CHECK → **Msg 547** with `"UPDATE statement"` verb. PK / UNIQUE → Msg 2627 (same wording as INSERT — verbatim SQL Server quirk: "Cannot insert duplicate key" wording even on UPDATE).
@@ -250,7 +251,7 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 - Cross-category `Promote` for integer ↔ string. Only CAST works that pair.
 - `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
 - `OUTPUT INTO @table_var`, `OUTPUT DELETED.*` / `INSERTED.*` star expansion. Per-column `OUTPUT INSERTED.<col>` / `OUTPUT DELETED.<col>` *is* supported (UPDATE / DELETE both); only the star-expansion form is missing. `OUTPUT INTO` (sending the projection to a table variable rather than the result set) isn't.
-- Multi-table UPDATE / DELETE (`UPDATE alias SET ... FROM table AS alias`, `DELETE alias FROM ...`). EF7+ `ExecuteUpdate` / `ExecuteDelete` emit these and won't work without the bundle.
+- Joined-source UPDATE / DELETE FROM clauses (`UPDATE a SET ... FROM t AS a JOIN u AS b ON ...`). The single-source alias form (`UPDATE a SET ... FROM t AS a [WHERE ...]`, `DELETE FROM a FROM t AS a [WHERE ...]`) IS supported — that's what EF7+ `ExecuteUpdate` / `ExecuteDelete` emit, verified against real SQL Server 2025. Adding sources beyond the single aliased target raises `NotSupportedException` so the gap is visible.
 - MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`. EF Core 9 emits N semicolon-separated `UPDATE … OUTPUT INSERTED.[RowVersion] WHERE [Id] = @p AND [RowVersion] = @p` statements for batched updates (verified 2026-05-07, real SQL Server 2025) — *not* MERGE WHEN MATCHED — so EF SaveChanges fidelity already works without WHEN MATCHED. WHEN MATCHED is still legitimate SQL Server surface (hand-written MERGE, future trigger model) but isn't the EF unlock the older roadmap framed it as. Triggers, when added, will reuse the same INSERTED/DELETED projection model already wired here.
 - Msg 8141 (inline CHECK referencing a peer column — SQL Server rejects at CREATE TABLE; simulator allows).
 - Msg 8133 (CASE where every branch is bare `NULL`; simulator returns NULL of `int`).

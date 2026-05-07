@@ -86,4 +86,17 @@ public class EFCoreDecimal
         var ordered = context.Products.OrderBy(p => p.Price).Select(p => p.Price).ToArray();
         CollectionAssert.AreEqual(new[] { 9.99m, 19.99m, 29.99m }, ordered);
     }
+
+    [TestMethod]
+    public void Cast_DecimalToDouble_ProjectsAsFloat()
+    {
+        // (double)decimalCol — EF Core emits CAST(... AS float). Common when
+        // Math functions or aggregations need a wider numeric type.
+        using var context = new TestDbContext(TestDbContext.CreateProductsSimulation());
+        _ = context.Products.Add(new Product { Id = 1, Price = 19.99m });
+        _ = context.SaveChanges();
+
+        var asDouble = context.Products.Select(p => (double)p.Price).Single();
+        Assert.AreEqual(19.99, asDouble, 0.001);
+    }
 }

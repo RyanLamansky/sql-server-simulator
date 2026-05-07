@@ -298,4 +298,18 @@ public class EFCoreStrings
         CollectionAssert.AreEquivalent(new[] { "Alice", "Bob", "Carol" }, names);
         CollectionAssert.AreEquivalent(new[] { "A", "B", null }, codes);
     }
+
+    [TestMethod]
+    public void StringFunction_IndexOf()
+    {
+        // EF Core translates .IndexOf to CHARINDEX-1 (CHARINDEX is 1-based,
+        // .NET's IndexOf is 0-based; -1 conversion happens server-side).
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
+        _ = context.People.Add(new Person { Id = 1, Name = "hello world" });
+        _ = context.SaveChanges();
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var index = fresh.People.Select(p => p.Name.IndexOf("world", StringComparison.Ordinal)).Single();
+        Assert.AreEqual(6, index);
+    }
 }

@@ -171,4 +171,52 @@ public sealed class DeleteTests
         var values = ReadInts(simulation.CreateCommand("select v from t"));
         CollectionAssert.AreEqual(new[] { 20 }, values);
     }
+
+    // === Multi-table-syntax DELETE (EF7+ ExecuteDelete emission) ===
+
+    [TestMethod]
+    public void Delete_MultiTableSyntax_AcceptsAliasFormWithFromClause()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3)");
+
+        var rows = simulation.ExecuteNonQuery(
+            "delete from [a] from t as [a] where [a].[id] = 2");
+        AreEqual(1, rows);
+
+        var ids = ReadInts(simulation.CreateCommand("select id from t order by id"));
+        CollectionAssert.AreEqual(new[] { 1, 3 }, ids);
+    }
+
+    [TestMethod]
+    public void Delete_MultiTableSyntax_NoWhereClause_DeletesAllRows()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3)");
+
+        var rows = simulation.ExecuteNonQuery("delete from [a] from t as [a]");
+        AreEqual(3, rows);
+    }
+
+    [TestMethod]
+    public void Delete_MultiTableSyntax_AliasUnknownAndNoFromClause_RaisesInvalidObject()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+
+        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("delete from [unknown]"));
+        Contains("Invalid object name", ex.Message);
+    }
+
+    [TestMethod]
+    public void Delete_MultiTableSyntax_JoinedFromClause_RaisesNotSupported() =>
+        ThrowsExactly<NotSupportedException>(() =>
+        {
+            var simulation = new Simulation();
+            _ = simulation.ExecuteNonQuery("create table t (id int)");
+            _ = simulation.ExecuteNonQuery("create table u (id int)");
+            _ = simulation.ExecuteNonQuery("delete [a] from t as [a] inner join u as [b] on [a].[id] = [b].[id]");
+        });
 }

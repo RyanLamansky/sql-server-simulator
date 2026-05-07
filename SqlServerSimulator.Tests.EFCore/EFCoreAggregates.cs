@@ -112,4 +112,41 @@ public class EFCoreAggregates
         using var context = SeededContext();
         Assert.AreEqual(0, context.Filters.Where(f => f.A > 999).Sum(f => f.A));
     }
+
+    [TestMethod]
+    public void GroupBy_MultipleAggregatesPerGroup()
+    {
+        // GroupBy producing multiple aggregates per key in one projection.
+        // Verifies the simulator emits all three aggregates from a single
+        // grouped scan rather than re-issuing per-aggregate.
+        var simulation = TestDbContext.CreateCustomersSimulation();
+        using (var seed = new TestDbContext(simulation))
+        {
+            seed.CustomerOrders.AddRange(
+                new CustomerOrder { CustomerId = 1, Amount = 10 },
+                new CustomerOrder { CustomerId = 1, Amount = 20 },
+                new CustomerOrder { CustomerId = 2, Amount = 30 },
+                new CustomerOrder { CustomerId = 2, Amount = 40 });
+            _ = seed.SaveChanges();
+        }
+
+        using var context = new TestDbContext(simulation);
+        var summary = context.CustomerOrders
+            .GroupBy(o => o.CustomerId)
+            .Select(g => new
+            {
+                CustomerId = g.Key,
+                Total = g.Sum(o => o.Amount),
+                Count = g.Count(),
+                Max = g.Max(o => o.Amount),
+            })
+            .OrderBy(x => x.CustomerId)
+            .ToList();
+
+        Assert.HasCount(2, summary);
+        Assert.AreEqual(30m, summary[0].Total);
+        Assert.AreEqual(2, summary[0].Count);
+        Assert.AreEqual(20m, summary[0].Max);
+        Assert.AreEqual(70m, summary[1].Total);
+    }
 }

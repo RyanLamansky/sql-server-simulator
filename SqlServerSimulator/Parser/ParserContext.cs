@@ -201,6 +201,24 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     }
 
     /// <summary>
+    /// Advances <see cref="Token"/> to the next token, throwing an exception
+    /// if the end was reached or if the new token isn't of type
+    /// <typeparamref name="T"/>. Use when the caller needs the type assertion
+    /// but not the token value — pairs with <see cref="GetNextRequired{T}"/>
+    /// the same way <see cref="MoveNextRequired"/> pairs with
+    /// <see cref="GetNextRequired"/>.
+    /// </summary>
+    /// <typeparam name="T">The expected type of the new token.</typeparam>
+    /// <exception cref="SimulatedSqlException">Incorrect syntax near '{token}'.</exception>
+    public void MoveNextRequired<T>()
+        where T : Token
+    {
+        var previous = this.Token;
+        if (!MoveNext() || this.Token is not T)
+            throw SimulatedSqlException.SyntaxErrorNear(previous);
+    }
+
+    /// <summary>
     /// Updates <see cref="Token"/> with the next usable token in <see cref="commandText"/>.
     /// </summary>
     /// <remarks>

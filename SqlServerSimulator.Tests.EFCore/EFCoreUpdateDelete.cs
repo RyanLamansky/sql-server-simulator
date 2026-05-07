@@ -4,12 +4,12 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// End-to-end tests for the UPDATE / DELETE shapes EF Core's SqlServer
-/// provider emits during <c>SaveChanges</c> on modified or removed
-/// entities. Without this bundle the simulator couldn't faithfully stand
-/// in for any real EF Core app — the canonical "load, modify, save"
-/// flow ended at SaveChanges. Concurrency tokens (rowversion + UPDATE
-/// OUTPUT) and the EF7+ bulk operations (ExecuteUpdate / ExecuteDelete)
-/// are both deferred to follow-up bundles; see CLAUDE.md.
+/// provider emits — both the change-tracker-driven <c>SaveChanges</c>
+/// path (single-row UPDATE / DELETE per modified entity, batched as
+/// semicolon-separated statements) and the EF7+ bulk
+/// <c>ExecuteUpdate</c> / <c>ExecuteDelete</c> path (multi-table-syntax
+/// <c>UPDATE [a] SET ... FROM [t] AS [a]</c> / <c>DELETE [a] FROM [t] AS [a]</c>).
+/// Optimistic concurrency via <c>[Timestamp]</c> rides through both paths.
 /// </summary>
 [TestClass]
 public class EFCoreUpdateDelete
@@ -161,6 +161,51 @@ public class EFCoreUpdateDelete
         using var fresh = new TimestampedDbContext(simulation);
         var names = fresh.Items.OrderBy(i => i.Id).Select(i => i.Name).ToArray();
         CollectionAssert.AreEqual(new[] { "a!", "b!", "c!" }, names);
+    }
+
+    [TestMethod]
+    public void ExecuteUpdate_BulkUpdate_EmitsMultiTableSyntax()
+    {
+        // EF7+ ExecuteUpdate emits a multi-table-syntax UPDATE
+        //   UPDATE [a] SET [a].[col] = ... FROM [t] AS [a] WHERE ...
+        // (probed against real SQL Server 2025, 2026-05-07). The simulator's
+        // parser accepts the alias-form leading identifier and the trailing
+        // `FROM <table> AS <alias>` clause; runtime column-resolvers use
+        // name.Leaf so alias-qualified column refs resolve to the target.
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
+        context.People.AddRange(
+            new Person { Id = 1, Name = "alice", Code = "A" },
+            new Person { Id = 2, Name = "bob", Code = "B" },
+            new Person { Id = 3, Name = "carol", Code = "C" });
+        _ = context.SaveChanges();
+
+        var rows = context.People.Where(p => p.Code == "A" || p.Code == "B")
+            .ExecuteUpdate(setters => setters.SetProperty(p => p.Name, p => p.Name.ToUpper()));
+
+        Assert.AreEqual(2, rows);
+        using var fresh = new TestDbContext(context.Simulation);
+        var names = fresh.People.OrderBy(p => p.Id).Select(p => p.Name).ToArray();
+        CollectionAssert.AreEqual(new[] { "ALICE", "BOB", "carol" }, names);
+    }
+
+    [TestMethod]
+    public void ExecuteDelete_BulkDelete_EmitsMultiTableSyntax()
+    {
+        // EF7+ ExecuteDelete emits
+        //   DELETE FROM [a] FROM [t] AS [a] WHERE ...
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
+        context.People.AddRange(
+            new Person { Id = 1, Name = "alice", Code = "A" },
+            new Person { Id = 2, Name = "bob", Code = "B" },
+            new Person { Id = 3, Name = "carol", Code = "C" });
+        _ = context.SaveChanges();
+
+        var rows = context.People.Where(p => p.Code == "B").ExecuteDelete();
+
+        Assert.AreEqual(1, rows);
+        using var fresh = new TestDbContext(context.Simulation);
+        var names = fresh.People.OrderBy(p => p.Id).Select(p => p.Name).ToArray();
+        CollectionAssert.AreEqual(new[] { "alice", "carol" }, names);
     }
 
     [TestMethod]

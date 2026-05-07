@@ -43,31 +43,91 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseUpdate(ParserContext context)
     {
-        if (context.GetNextRequired() is not StringToken tableToken)
+        if (context.GetNextRequired() is not StringToken leadingIdentToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (!context.Simulation.HeapTables.TryGetValue(tableToken.Value, out var table))
-            throw SimulatedSqlException.InvalidObjectName(tableToken);
+
+        // The leading identifier is either the target table (single-table form
+        // `UPDATE t SET ...`) or an alias for the FROM clause that follows
+        // (multi-table form `UPDATE alias SET alias.col = ... FROM table AS alias ...` —
+        // what EF Core's ExecuteUpdate emits). Try table-resolution now; defer
+        // the InvalidObjectName error until after we've seen whether a FROM
+        // clause provides the binding.
+        _ = context.Simulation.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var assignments = new List<(int ColumnOrdinal, Expression Expr)>();
+        // Phase 1 of two-pass parsing: collect raw (columnName, expr) pairs
+        // without resolving column ordinals — we may not know the binding
+        // table yet (alias form). LHS supports both bare `col = expr` and
+        // alias-qualified `[a].[col] = expr` forms; the alias is accepted
+        // verbatim without cross-checking against the FROM-clause's alias
+        // (the simulator is single-source so the validation is moot).
+        var rawAssignments = new List<(string ColumnName, Expression Expr)>();
         while (true)
         {
-            if (context.GetNextRequired() is not StringToken columnNameToken)
+            if (context.GetNextRequired() is not StringToken first)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
+            string columnName;
+            switch (context.GetNextRequired())
+            {
+                case Operator { Character: '.' }:
+                    if (context.GetNextRequired() is not StringToken col)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    columnName = col.Value;
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case Operator { Character: '=' }:
+                    columnName = first.Value;
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+
+            context.MoveNextRequired();
+            var expr = Expression.Parse(context);
+            rawAssignments.Add((columnName, expr));
+
+            if (context.Token is Operator { Character: ',' })
+                continue;
+            break;
+        }
+
+        // OUTPUT requires a known table. EF Core never emits OUTPUT alongside
+        // ExecuteUpdate's multi-table FROM, so the simulator only supports it
+        // when leading-identifier resolution gave us the target up-front.
+        MutationOutputProjection? output = null;
+        if (leadingTable is not null)
+            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: true, allowDeleted: true);
+
+        // Optional FROM clause for the multi-table form. Single-source-only:
+        // multiple sources or a JOIN raise NotSupportedException so the gap
+        // is visible. When both leading-identifier and FROM-clause forms
+        // are present (e.g. `UPDATE t SET ... FROM t AS alias`), the FROM
+        // table wins — matching SQL Server's binding precedence.
+        var table = context.Token is ReservedKeyword { Keyword: Keyword.From }
+            ? ParseSingleSourceFromClause(context)
+            : leadingTable;
+
+        table = table ?? throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+
+        // Phase 2: resolve column ordinals against the (now known) target table.
+        var assignments = new List<(int ColumnOrdinal, Expression Expr)>();
+        foreach (var (colName, expr) in rawAssignments)
+        {
             var columnOrdinal = -1;
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, columnNameToken.Value))
+                if (Collation.Default.Equals(table.Columns[i].Name, colName))
                 {
                     columnOrdinal = i;
                     break;
                 }
             }
             if (columnOrdinal < 0)
-                throw SimulatedSqlException.InvalidColumnName(columnNameToken.Value);
+                throw SimulatedSqlException.InvalidColumnName(colName);
 
             var column = table.Columns[columnOrdinal];
             if (column.Identity is not null)
@@ -77,18 +137,8 @@ partial class Simulation
             if (column.Type == SqlType.RowVersion)
                 throw SimulatedSqlException.CannotUpdateTimestampColumn();
 
-            if (context.GetNextRequired() is not Operator { Character: '=' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-            var expr = Expression.Parse(context);
             assignments.Add((columnOrdinal, expr));
-
-            if (context.Token is Operator { Character: ',' })
-                continue;
-            break;
         }
-
-        var output = TryParseOutputClauseForMutation(context, table, allowInserted: true, allowDeleted: true);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -181,6 +231,42 @@ partial class Simulation
             return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
         }
         return new SimulatedNonQuery(affected.Count);
+    }
+
+    /// <summary>
+    /// Parses the <c>FROM &lt;table&gt; [AS] &lt;alias&gt;</c> tail of a
+    /// multi-table UPDATE / DELETE statement (the EF7+ ExecuteUpdate /
+    /// ExecuteDelete shape). Enters with <see cref="ParserContext.Token"/>
+    /// on the <c>FROM</c> keyword; returns the resolved target table and
+    /// leaves the cursor on the first token after the alias (typically
+    /// <c>WHERE</c> or end-of-statement). Multiple sources or a JOIN raise
+    /// <see cref="NotSupportedException"/> — the simulator's UPDATE / DELETE
+    /// pipeline is single-source only. The alias itself is parsed but
+    /// discarded; runtime column-resolvers use <c>name.Leaf</c>, so any
+    /// alias prefix in SET / WHERE / OUTPUT references resolves to the
+    /// target column without per-alias validation.
+    /// </summary>
+    private static HeapTable ParseSingleSourceFromClause(ParserContext context)
+    {
+        if (context.GetNextRequired() is not StringToken fromTableToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (!context.Simulation.HeapTables.TryGetValue(fromTableToken.Value, out var fromTable))
+            throw SimulatedSqlException.InvalidObjectName(fromTableToken);
+
+        var afterTable = context.GetNextOptional();
+        if (afterTable is ReservedKeyword { Keyword: Keyword.As })
+        {
+            context.MoveNextRequired<StringToken>();
+            context.MoveNextOptional();
+        }
+        else if (afterTable is StringToken)
+        {
+            context.MoveNextOptional();
+        }
+
+        return context.Token is Operator { Character: ',' } or ReservedKeyword { Keyword: Keyword.Inner or Keyword.Left or Keyword.Right or Keyword.Full or Keyword.Cross or Keyword.Join }
+            ? throw new NotSupportedException("Multi-source FROM clauses (joins, comma-separated sources) aren't supported in UPDATE / DELETE.")
+            : fromTable;
     }
 
     /// <summary>
