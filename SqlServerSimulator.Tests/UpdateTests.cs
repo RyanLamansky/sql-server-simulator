@@ -311,16 +311,54 @@ public sealed class UpdateTests
     }
 
     [TestMethod]
-    public void Update_OutputInsertedColumn_RaisesNotSupported()
+    public void Update_OutputInsertedColumn_YieldsNewValue()
     {
-        // INSERTED / DELETED references in OUTPUT on UPDATE aren't yet
-        // supported (deferred to the optimistic-concurrency bundle).
+        // INSERTED.<col> on UPDATE returns the post-update value (probe-confirmed).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int, v int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1, 10)");
 
-        _ = Throws<NotSupportedException>(() =>
-            _ = simulation.ExecuteScalar("update t set v = 99 output inserted.v where id = 1"));
+        var newV = simulation.ExecuteScalar("update t set v = 99 output inserted.v where id = 1");
+        AreEqual(99, newV);
+    }
+
+    [TestMethod]
+    public void Update_OutputDeletedColumn_YieldsOldValue()
+    {
+        // DELETED.<col> on UPDATE returns the pre-update value.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int, v int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1, 10)");
+
+        var oldV = simulation.ExecuteScalar("update t set v = 99 output deleted.v where id = 1");
+        AreEqual(10, oldV);
+    }
+
+    [TestMethod]
+    public void Update_OutputBothInsertedAndDeleted_YieldsBoth()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int, v int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1, 10)");
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand("update t set v = v * 5 output deleted.v as old_v, inserted.v as new_v where id = 1").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(10, reader.GetInt32(0));
+        AreEqual(50, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void Update_OutputBareColumnRef_RaisesMsg207()
+    {
+        // OUTPUT v (no INSERTED/DELETED qualifier) → Msg 207 "Invalid column name".
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int, v int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1, 10)");
+
+        var ex = Throws<DbException>(() =>
+            _ = simulation.ExecuteScalar("update t set v = 99 output v where id = 1"));
+        AreEqual("207", ex.Data["HelpLink.EvtID"]);
     }
 
     [TestMethod]

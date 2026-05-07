@@ -7,31 +7,34 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Slim OUTPUT-clause parser for UPDATE / DELETE: accepts only literal
-    /// and parameter expressions (no <c>INSERTED.&lt;col&gt;</c> /
-    /// <c>DELETED.&lt;col&gt;</c> references). EF Core's SaveChanges path
-    /// emits <c>OUTPUT 1</c> as a rows-affected detector on every modify
-    /// and remove, regardless of concurrency tracking — that's the case
-    /// this slim parser unblocks. Full INSERTED / DELETED resolver work
-    /// pairs with the rowversion / MERGE WHEN MATCHED bundle that
-    /// completes the optimistic-concurrency story; CLAUDE.md flags it.
+    /// OUTPUT-clause parser for UPDATE / DELETE. Supports literal /
+    /// parameter expressions and <c>INSERTED.&lt;col&gt;</c> /
+    /// <c>DELETED.&lt;col&gt;</c> column references; star expansion
+    /// (<c>INSERTED.*</c> / <c>DELETED.*</c>), bare column refs, and
+    /// table-alias qualifiers aren't modeled (CLAUDE.md flags those).
+    /// <paramref name="allowInserted"/> and <paramref name="allowDeleted"/>
+    /// gate which qualifier the call site permits — UPDATE allows both;
+    /// DELETE allows only DELETED (INSERTED.col on DELETE is rejected at
+    /// parse time with Msg 4104, matching the probed real-server
+    /// behavior). The returned <see cref="MutationOutputProjection"/> is
+    /// re-runnable once per affected row.
     /// </summary>
     /// <remarks>
     /// On entry the cursor sits at the first lookahead token after the
     /// preceding clause (SET assignments for UPDATE; the table-name slot
-    /// for DELETE). When the token is the contextual <c>OUTPUT</c> keyword
-    /// the projection is parsed; otherwise <see langword="null"/> is
-    /// returned and the cursor is unchanged. Each expression is evaluated
-    /// at parse time with a resolver that throws
-    /// <see cref="NotSupportedException"/> on any
-    /// <c>INSERTED</c> / <c>DELETED</c> column reference (ordinary column
-    /// names — without those qualifiers — fall through to the
-    /// <see cref="SimulatedSqlException.MultiPartIdentifierCouldNotBeBound"/>
-    /// path). The returned tuple holds the resolved schema, output column
-    /// names, and the encoded byte row to emit once per affected mutation
-    /// row.
+    /// for DELETE). The schema resolves at parse time with a type-only
+    /// resolver that mirrors the run-time resolver — bare column refs
+    /// (<c>name.Count == 1</c>) raise Msg 207
+    /// (<c>"Invalid column name 'X'."</c>); qualifiers other than
+    /// INSERTED / DELETED raise Msg 4104. INSERTED columns on DELETE and
+    /// any star-form raise the same Msg 4104 (Msg 207 stays for the
+    /// bare-name case to match SQL Server's probe-confirmed shape).
     /// </remarks>
-    private static (SqlType[] Schema, string[] ColumnNames, byte[] RowBytes)? TryParseLiteralOutputClauseForMutation(ParserContext context)
+    private static MutationOutputProjection? TryParseOutputClauseForMutation(
+        ParserContext context,
+        HeapTable table,
+        bool allowInserted,
+        bool allowDeleted)
     {
         if (!context.MatchContextual(ContextualKeyword.Output))
             return null;
@@ -57,20 +60,87 @@ partial class Simulation
             names.Add(expr.Name);
         } while (context.Token is Operator { Character: ',' });
 
-        var values = new SqlValue[expressions.Count];
-        var schema = new SqlType[expressions.Count];
-        for (var i = 0; i < expressions.Count; i++)
+        SqlType ResolveOutputType(List<string> reference)
         {
-            values[i] = expressions[i].Run(name =>
+            if (reference.Count == 1)
+                throw SimulatedSqlException.InvalidColumnName(reference);
+
+            var qualifier = reference[0];
+            var leaf = reference[^1];
+            var insertedRef = Collation.Default.Equals(qualifier, "INSERTED");
+            var deletedRef = Collation.Default.Equals(qualifier, "DELETED");
+
+            if (insertedRef && !allowInserted)
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+            if (deletedRef && !allowDeleted)
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+            if (!insertedRef && !deletedRef)
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+
+            for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (name.Count >= 2 && (Collation.Default.Equals(name[0], "INSERTED") || Collation.Default.Equals(name[0], "DELETED")))
-                    throw new NotSupportedException($"OUTPUT clause references to {name[0].ToUpperInvariant()} columns aren't supported on UPDATE / DELETE in this version of the simulator; use literal or parameter expressions only.");
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', name));
-            });
-            schema[i] = values[i].Type;
+                if (Collation.Default.Equals(table.Columns[i].Name, leaf))
+                    return table.Columns[i].Type;
+            }
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
         }
 
-        return (schema, [.. names], RowEncoder.EncodeRow(schema, values));
+        var schema = new SqlType[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
+            schema[i] = expressions[i].GetSqlType(ResolveOutputType);
+
+        return new MutationOutputProjection(table, [.. expressions], [.. names], schema);
+    }
+
+    /// <summary>
+    /// Holds the parsed UPDATE / DELETE OUTPUT projection together with
+    /// its statically resolved schema. Re-runnable once per affected row
+    /// via <see cref="ProjectRow"/>; the row's <c>INSERTED</c> /
+    /// <c>DELETED</c> values are passed in per call (the inner resolver
+    /// dispatches on the qualifier).
+    /// </summary>
+    private sealed class MutationOutputProjection(
+        HeapTable table,
+        Expression[] expressions,
+        string[] columnNames,
+        SqlType[] schema)
+    {
+        public readonly SqlType[] Schema = schema;
+
+        public readonly string[] ColumnNames = columnNames;
+
+        /// <summary>
+        /// Encodes one OUTPUT row by running each parsed expression against
+        /// a per-row resolver that dispatches on <c>INSERTED.&lt;col&gt;</c>
+        /// (post-update / post-insert values) and <c>DELETED.&lt;col&gt;</c>
+        /// (pre-update / pre-delete values). Pass <see langword="null"/>
+        /// for whichever side doesn't apply (DELETE has no INSERTED row);
+        /// referencing the absent side is a parse-time error, so this
+        /// runtime path doesn't need to defend against it.
+        /// </summary>
+        public byte[] ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues)
+        {
+            SqlValue Resolve(List<string> reference)
+            {
+                var qualifier = reference[0];
+                var leaf = reference[^1];
+                var source = (Collation.Default.Equals(qualifier, "INSERTED") ? insertedValues
+                    : Collation.Default.Equals(qualifier, "DELETED") ? deletedValues
+                    : null)
+                    ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+                for (var i = 0; i < table.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(table.Columns[i].Name, leaf))
+                        return source[i];
+                }
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+            }
+
+            var projected = new SqlValue[expressions.Length];
+            for (var i = 0; i < expressions.Length; i++)
+                projected[i] = expressions[i].Run(Resolve);
+            return RowEncoder.EncodeRow(this.Schema, projected);
+        }
     }
 
     /// <summary>

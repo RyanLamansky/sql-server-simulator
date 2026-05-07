@@ -133,7 +133,10 @@ internal abstract class SqlType
     /// dense byte-typed enums, so the JIT can lower them to jump tables.
     /// </remarks>
     public static SqlType Promote(SqlType a, SqlType b) =>
-        a == b ? a : a.Category switch
+        a == b ? a
+        : a is RowVersionSqlType ? PromoteFromRowVersion(b)
+        : b is RowVersionSqlType ? PromoteFromRowVersion(a)
+        : a.Category switch
         {
             SqlTypeCategory.Approximate => PromoteFromApproximate(a, b),
             SqlTypeCategory.Decimal => PromoteFromDecimal(a, b),
@@ -144,6 +147,19 @@ internal abstract class SqlType
             SqlTypeCategory.UniqueIdentifier => PromoteFromUniqueIdentifier(a, b),
             _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
         };
+
+    /// <summary>
+    /// rowversion participates in comparison with the binary family — chiefly
+    /// to support EF Core's optimistic-concurrency <c>WHERE [RowVersion] = @p</c>
+    /// pattern, where <c>@p</c> binds as <c>varbinary</c>. Cross-binary
+    /// promotion picks the binary side as the common type; the rowversion
+    /// side coerces via its <see cref="RowVersionSqlType"/> outbound CAST.
+    /// Other categories raise the operand-type-clash error.
+    /// </summary>
+    private static SqlType PromoteFromRowVersion(SqlType other) =>
+        other == Varbinary ? Varbinary
+        : other is BinarySqlType ? other
+        : throw SimulatedSqlException.OperandTypeClash(RowVersion, other);
 
     /// <summary>
     /// Approximate (float/real) wins over every other numeric or string
@@ -540,6 +556,13 @@ internal abstract class SqlType
     public static readonly SqlType UniqueIdentifier = new UniqueIdentifierSqlType();
 
     /// <remarks>
+    /// SQL Server's <c>rowversion</c> (also spelled <c>timestamp</c>): 8-byte
+    /// big-endian auto-generated counter. See <see cref="RowVersionSqlType"/>
+    /// for the auto-generation contract.
+    /// </remarks>
+    public static readonly SqlType RowVersion = new RowVersionSqlType();
+
+    /// <remarks>
     /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
     /// length is a distinct singleton reachable through this accessor.
     /// </remarks>
@@ -793,11 +816,13 @@ internal abstract class SqlType
             },
             9 => upper switch
             {
+                "TIMESTAMP" => RowVersion,
                 "VARBINARY" => Varbinary,
                 _ => null
             },
             10 => upper switch
             {
+                "ROWVERSION" => RowVersion,
                 "SMALLMONEY" => SmallMoney,
                 _ => null
             },

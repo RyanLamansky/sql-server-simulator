@@ -74,6 +74,8 @@ partial class Simulation
                 throw SimulatedSqlException.CannotUpdateIdentityColumn(column.Name);
             if (column.Computed is not null)
                 throw SimulatedSqlException.ColumnCannotBeModified(column.Name);
+            if (column.Type == SqlType.RowVersion)
+                throw SimulatedSqlException.CannotUpdateTimestampColumn();
 
             if (context.GetNextRequired() is not Operator { Character: '=' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -86,7 +88,7 @@ partial class Simulation
             break;
         }
 
-        var output = TryParseLiteralOutputClauseForMutation(context);
+        var output = TryParseOutputClauseForMutation(context, table, allowInserted: true, allowDeleted: true);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -95,8 +97,10 @@ partial class Simulation
             where = BooleanExpression.Parse(context);
         }
 
-        // Phase 1: pick affected rows and compute their new values.
-        var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] StoredValues)>();
+        // Phase 1: pick affected rows and compute their new values. When OUTPUT
+        // is present we also retain the pre-update full-column snapshot so the
+        // projection can resolve DELETED.<col> / INSERTED.<col> in phase 3.
+        var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 
@@ -137,37 +141,45 @@ partial class Simulation
                 newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal].Type);
             }
 
+            // Auto-bump rowversion on every affected row, regardless of SET list.
+            for (var ci = 0; ci < table.Columns.Length; ci++)
+            {
+                if (table.Columns[ci].Type == SqlType.RowVersion)
+                    newValues[ci] = SqlValue.FromRowVersion(context.Simulation.AllocateRowVersion());
+            }
+
             // Recompute computed columns: their inputs may have changed.
             EvaluateComputedColumns(table, newValues);
             EnforceNotNull(table, newValues, "UPDATE");
             EnforceCheckConstraints(table, newValues, "UPDATE");
 
-            affected.Add((pageIndex, slotIndex, ProjectStoredValues(table, newValues)));
+            // Snapshot the pre-update full-column row only when OUTPUT may
+            // need it. fullValues carries the row's pre-update view at this
+            // point — Array.Copy created a fresh newValues array, so
+            // fullValues is still an exclusive reference.
+            var oldSnapshot = output is null ? null : fullValues;
+            affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
 
         if (affected.Count == 0)
-        {
-            return output is var (emptySchema, emptyNames, _)
-                ? new SimulatedSqlResultSet(emptySchema, emptyNames, [])
-                : new SimulatedNonQuery(0);
-        }
+            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, []);
 
         // Phase 2: PK / UNIQUE validation against the post-update virtual state.
         EnforceKeyConstraintsForUpdate(table, affected);
 
         // Phase 3: tombstone old, insert new. Validation has already passed,
         // so no rollback is required.
-        foreach (var (pageIndex, slotIndex, _) in affected)
+        foreach (var (pageIndex, slotIndex, _, _) in affected)
             table.Heap.DeleteAt(pageIndex, slotIndex);
-        foreach (var (_, _, newStored) in affected)
-            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, newStored, table.Heap));
+        foreach (var (_, _, fullNew, _) in affected)
+            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap));
 
-        if (output is var (outputSchema, outputNames, outputRow))
+        if (output is not null)
         {
             var rows = new List<byte[]>(affected.Count);
-            for (var i = 0; i < affected.Count; i++)
-                rows.Add(outputRow);
-            return new SimulatedSqlResultSet(outputSchema, outputNames, rows);
+            foreach (var (_, _, fullNew, fullOld) in affected)
+                rows.Add(output.ProjectRow(insertedValues: fullNew, deletedValues: fullOld));
+            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
         }
         return new SimulatedNonQuery(affected.Count);
     }
@@ -183,21 +195,25 @@ partial class Simulation
     /// per-row check fails when the shifted value matches another affected
     /// row's pre-shift value pattern (CLAUDE.md flags this as a quirk).
     /// </summary>
-    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] StoredValues)> affected)
+    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
     {
         if (table.KeyConstraints.Length == 0)
             return;
 
         var affectedAddrs = new HashSet<(int, int)>();
-        foreach (var (p, s, _) in affected)
-            _ = affectedAddrs.Add((p, s));
+        var storedSnapshots = new SqlValue[affected.Count][];
+        for (var i = 0; i < affected.Count; i++)
+        {
+            _ = affectedAddrs.Add((affected[i].PageIndex, affected[i].SlotIndex));
+            storedSnapshots[i] = ProjectStoredValues(table, affected[i].FullNew);
+        }
 
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 
         for (var i = 0; i < affected.Count; i++)
         {
-            var myStored = affected[i].StoredValues;
+            var myStored = storedSnapshots[i];
 
             foreach (var constraint in table.KeyConstraints)
             {
@@ -205,7 +221,7 @@ partial class Simulation
                 {
                     if (i == j)
                         continue;
-                    if (KeyTuplesEqualStored(myStored, affected[j].StoredValues, constraint))
+                    if (KeyTuplesEqualStored(myStored, storedSnapshots[j], constraint))
                         throw KeyViolationForUpdate(table, constraint, myStored);
                 }
 

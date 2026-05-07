@@ -27,7 +27,8 @@ partial class Simulation
             throw SimulatedSqlException.InvalidObjectName(tableToken);
 
         _ = context.GetNextOptional();
-        var output = TryParseLiteralOutputClauseForMutation(context);
+        // INSERTED isn't a valid qualifier in DELETE OUTPUT (probe-confirmed Msg 4104).
+        var output = TryParseOutputClauseForMutation(context, table, allowInserted: false, allowDeleted: true);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -39,50 +40,57 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 
-        var addressesToDelete = new List<(int PageIndex, int SlotIndex)>();
+        var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
-            if (where is null)
+            // Decode full row values when we need them — for WHERE evaluation,
+            // for OUTPUT projection, or both. Skip the work entirely when
+            // neither is in play (no-WHERE / no-OUTPUT).
+            SqlValue[]? fullValues = null;
+            if (where is not null || output is not null)
             {
-                addressesToDelete.Add((pageIndex, slotIndex));
-                continue;
-            }
-
-            var fullValues = new SqlValue[table.Columns.Length];
-            for (var i = 0; i < table.Columns.Length; i++)
-            {
-                var ord = table.StorageOrdinals[i];
-                fullValues[i] = ord < 0
-                    ? SqlValue.Null(table.Columns[i].Type)
-                    : RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
-            }
-            EvaluateComputedColumns(table, fullValues);
-
-            SqlValue Resolve(List<string> name)
-            {
-                var leaf = name[^1];
-                for (var k = 0; k < table.Columns.Length; k++)
+                fullValues = new SqlValue[table.Columns.Length];
+                for (var i = 0; i < table.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(table.Columns[k].Name, leaf))
-                        return fullValues[k];
+                    var ord = table.StorageOrdinals[i];
+                    fullValues[i] = ord < 0
+                        ? SqlValue.Null(table.Columns[i].Type)
+                        : RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
                 }
-                throw SimulatedSqlException.InvalidColumnName(name);
+                EvaluateComputedColumns(table, fullValues);
             }
 
-            if (where.Run(Resolve) == true)
-                addressesToDelete.Add((pageIndex, slotIndex));
+            if (where is not null)
+            {
+                var localValues = fullValues!;
+                SqlValue Resolve(List<string> name)
+                {
+                    var leaf = name[^1];
+                    for (var k = 0; k < table.Columns.Length; k++)
+                    {
+                        if (Collation.Default.Equals(table.Columns[k].Name, leaf))
+                            return localValues[k];
+                    }
+                    throw SimulatedSqlException.InvalidColumnName(name);
+                }
+
+                if (where.Run(Resolve) != true)
+                    continue;
+            }
+
+            deleted.Add((pageIndex, slotIndex, output is null ? null : fullValues));
         }
 
-        foreach (var (pageIndex, slotIndex) in addressesToDelete)
+        foreach (var (pageIndex, slotIndex, _) in deleted)
             table.Heap.DeleteAt(pageIndex, slotIndex);
 
-        if (output is var (outputSchema, outputNames, outputRow))
+        if (output is not null)
         {
-            var rows = new List<byte[]>(addressesToDelete.Count);
-            for (var i = 0; i < addressesToDelete.Count; i++)
-                rows.Add(outputRow);
-            return new SimulatedSqlResultSet(outputSchema, outputNames, rows);
+            var rows = new List<byte[]>(deleted.Count);
+            foreach (var (_, _, fullOld) in deleted)
+                rows.Add(output.ProjectRow(insertedValues: null, deletedValues: fullOld));
+            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
         }
-        return new SimulatedNonQuery(addressesToDelete.Count);
+        return new SimulatedNonQuery(deleted.Count);
     }
 }

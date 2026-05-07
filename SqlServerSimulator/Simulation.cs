@@ -82,6 +82,20 @@ public sealed partial class Simulation
     /// </summary>
     internal string? IdentityInsertTable;
 
+    private long rowVersionCounter;
+
+    /// <summary>
+    /// Allocates the next <c>rowversion</c> counter value (also surfaced as
+    /// <c>@@DBTS</c> in real SQL Server). Database-scoped, monotonic,
+    /// shared across every <c>rowversion</c> column in every table — INSERT
+    /// and UPDATE on a rowversion-bearing table both advance it. The
+    /// counter is the in-memory representation; the 8-byte big-endian wire
+    /// form materializes on demand via <see cref="SqlValue.AsBytes"/> /
+    /// <see cref="RowVersionSqlType.Encode"/>, never per-row in the hot
+    /// path.
+    /// </summary>
+    internal long AllocateRowVersion() => Interlocked.Increment(ref this.rowVersionCounter);
+
     /// <summary>
     /// Explicit override of the per-database <c>VERBOSE_TRUNCATION_WARNINGS</c>
     /// scoped configuration; <c>null</c> means follow the compatibility-level

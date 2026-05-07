@@ -796,6 +796,33 @@ internal sealed class SimulatedSqlException : DbException
         new($"Cannot update identity column '{columnName}'.", 8102, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 273: an INSERT supplied an explicit value for
+    /// a <c>rowversion</c> / <c>timestamp</c> column. The column is
+    /// auto-generated; explicit values are never accepted (no
+    /// <c>IDENTITY_INSERT</c> analog). Wording verbatim from the probed
+    /// server, including the recommendation in the second sentence.
+    /// </summary>
+    internal static SimulatedSqlException CannotInsertExplicitTimestamp() =>
+        new("Cannot insert an explicit value into a timestamp column. Use INSERT with a column list to exclude the timestamp column, or insert a DEFAULT into the timestamp column.", 273, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 272: an UPDATE statement's SET clause targeted
+    /// a <c>rowversion</c> / <c>timestamp</c> column. The column is
+    /// auto-bumped on every UPDATE; manual sets are never accepted.
+    /// </summary>
+    internal static SimulatedSqlException CannotUpdateTimestampColumn() =>
+        new("Cannot update a timestamp column.", 272, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2738: a CREATE TABLE declared a second
+    /// <c>rowversion</c> / <c>timestamp</c> column. SQL Server allows at most
+    /// one per table. Wording verbatim — note the "timestamp" word in the
+    /// message regardless of which spelling the user wrote.
+    /// </summary>
+    internal static SimulatedSqlException MultipleTimestampColumns(string tableName, string secondColumnName) =>
+        new($"A table can only have one timestamp column. Because table '{tableName}' already has one, the column '{secondColumnName}' cannot be added.", 2738, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 2627: an INSERT or UPDATE produced a row whose
     /// PRIMARY KEY or UNIQUE-constraint key tuple already existed in the
     /// table. SQL Server uses Msg 2627 for both PK and UNIQUE *constraint*

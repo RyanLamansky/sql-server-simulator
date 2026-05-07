@@ -174,6 +174,19 @@ partial class Simulation
                     throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
             }
 
+            if (resolvedType == SqlType.RowVersion)
+            {
+                // SQL Server allows at most one rowversion / timestamp column per
+                // table; the second declaration raises Msg 2738. Implicit NOT NULL
+                // (no nullable form is reachable through the type itself).
+                for (var i = 0; i < heapColumns.Count; i++)
+                {
+                    if (heapColumns[i] is { } existing && existing.Type == SqlType.RowVersion)
+                        throw SimulatedSqlException.MultipleTimestampColumns(tableName.Value, columnName.Value);
+                }
+                actualNullable = false;
+            }
+
             heapColumns.Add(new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression));
         } while (context.Token is Operator { Character: ',' });
 

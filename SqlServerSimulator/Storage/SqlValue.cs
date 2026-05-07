@@ -143,6 +143,31 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             : new(type, 0, NormalizeFixedLengthBytes(value, b.length), isNull: false);
     }
 
+    /// <summary>
+    /// Wraps the raw <see cref="long"/> counter of a <c>rowversion</c>
+    /// value. Stored in the primitive slot — no <c>byte[]</c> allocation —
+    /// so encode / decode / equality / compare run alloc-free in the hot
+    /// path. Auto-generated values flow in through
+    /// <see cref="Simulation.AllocateRowVersion"/>; the bytes form
+    /// (big-endian, 8 bytes) materializes on demand via
+    /// <see cref="AsBytes"/> for CAST to varbinary, the wire-typed
+    /// accessor, and debug rendering.
+    /// </summary>
+    public static SqlValue FromRowVersion(long counter) =>
+        new(SqlType.RowVersion, counter, reference: null, isNull: false);
+
+    /// <summary>
+    /// Returns the raw <see cref="long"/> counter behind a non-NULL
+    /// <c>rowversion</c> value. Used by <see cref="RowVersionSqlType.Encode"/>
+    /// to write the bytes big-endian without going through
+    /// <see cref="AsBytes"/>'s on-demand allocation.
+    /// </summary>
+    internal long RowVersionCounter => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type is not RowVersionSqlType
+            ? throw new InvalidOperationException($"Value is {this.Type}, not rowversion.")
+            : this.primitive;
+
     private static string NormalizeFixedLengthString(string value, int length) =>
         value.Length == length ? value
         : value.Length < length ? value.PadRight(length, ' ')
@@ -420,12 +445,21 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not a string type.")
             : (string)this.reference!;
 
-    /// <summary>Returns the value as <see cref="byte"/><c>[]</c>. Throws if NULL or not a binary/varbinary/image value.</summary>
+    /// <summary>Returns the value as <see cref="byte"/><c>[]</c>. Throws if NULL or not a binary/varbinary/image/rowversion value. For rowversion, allocates a fresh 8-byte big-endian buffer on each call (the in-memory rep is the raw <see cref="long"/> counter); the row-encoding hot path goes through <see cref="RowVersionSqlType.Encode"/> instead, which writes the bytes directly into the row buffer.</summary>
     public byte[] AsBytes => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
-        : this.Type is not (VarbinarySqlType or BinarySqlType or ImageSqlType)
-            ? throw new InvalidOperationException($"Value is {this.Type}, not varbinary, binary, or image.")
-            : (byte[])this.reference!;
+        : this.Type is RowVersionSqlType
+            ? RowVersionToBytes(this.primitive)
+            : this.Type is not (VarbinarySqlType or BinarySqlType or ImageSqlType)
+                ? throw new InvalidOperationException($"Value is {this.Type}, not varbinary, binary, image, or rowversion.")
+                : (byte[])this.reference!;
+
+    private static byte[] RowVersionToBytes(long counter)
+    {
+        var bytes = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(bytes, counter);
+        return bytes;
+    }
 
     /// <summary>Returns the value as <see cref="DateOnly"/>. Throws if NULL or wrong type.</summary>
     public DateOnly AsDate => this.As(SqlType.Date, p => DateOnly.FromDayNumber((int)p));
@@ -504,7 +538,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         var t when t == SqlType.TinyInt => this.AsByte,
         var t when t == SqlType.Bit => this.AsBoolean,
         { Category: SqlTypeCategory.String } => this.AsString,
-        VarbinarySqlType or BinarySqlType or ImageSqlType => this.AsBytes,
+        VarbinarySqlType or BinarySqlType or ImageSqlType or RowVersionSqlType => this.AsBytes,
         // SqlClient surfaces a date column as DateTime at midnight (Kind=Unspecified)
         // when read via the untyped accessors. EF's DateOnly mapping reads
         // through GetDateTime and converts on its own.
@@ -584,6 +618,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type == SqlType.TinyInt ? this.AsByte.CompareTo(other.AsByte)
         : this.Type == SqlType.Bit ? this.AsBoolean.CompareTo(other.AsBoolean)
         : IsStringTypeRef(this.Type) ? Collation.Default.Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
+        : this.Type is RowVersionSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType ? this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes)
         : this.Type == SqlType.Date ? this.primitive.CompareTo(other.primitive)
         : this.Type == SqlType.DateTime ? this.primitive.CompareTo(other.primitive)
@@ -669,7 +704,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.TinyInt => this.AsByte.ToString(CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Bit => this.AsBoolean ? "1" : "0",
         { Category: SqlTypeCategory.String } => $"'{this.AsString}'",
-        VarbinarySqlType or BinarySqlType or ImageSqlType => $"0x{Convert.ToHexString(this.AsBytes)}",
+        VarbinarySqlType or BinarySqlType or ImageSqlType or RowVersionSqlType => $"0x{Convert.ToHexString(this.AsBytes)}",
         _ when this.Type == SqlType.Date => $"'{this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         _ when this.Type == SqlType.DateTime => $"'{this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}'",
         _ when this.Type == SqlType.SmallDateTime => $"'{this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}'",

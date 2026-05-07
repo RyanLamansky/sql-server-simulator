@@ -133,14 +133,28 @@ public sealed class DeleteTests
     }
 
     [TestMethod]
-    public void Delete_OutputDeletedColumn_RaisesNotSupported()
+    public void Delete_OutputDeletedColumn_YieldsRemovedValue()
     {
+        // DELETED.<col> on DELETE returns the pre-delete value (probe-confirmed).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1)");
 
-        _ = Throws<NotSupportedException>(() =>
-            _ = simulation.ExecuteScalar("delete from t output deleted.id where id = 1"));
+        var deletedId = simulation.ExecuteScalar("delete from t output deleted.id where id = 1");
+        AreEqual(1, deletedId);
+    }
+
+    [TestMethod]
+    public void Delete_OutputInsertedColumn_RaisesMsg4104()
+    {
+        // INSERTED isn't a valid qualifier in DELETE OUTPUT (probe-confirmed Msg 4104).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.ExecuteNonQuery("insert into t values (1)");
+
+        var ex = Throws<DbException>(() =>
+            _ = simulation.ExecuteScalar("delete from t output inserted.id where id = 1"));
+        AreEqual("4104", ex.Data["HelpLink.EvtID"]);
     }
 
     [TestMethod]

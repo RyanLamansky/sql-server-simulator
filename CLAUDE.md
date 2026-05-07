@@ -163,10 +163,20 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 ### UPDATE / DELETE
 - `UPDATE table SET col = expr [, col = expr]* [WHERE pred]` and `DELETE [FROM] table [WHERE pred]`. Single-table only.
 - **Multi-column SET evaluates RHS against the pre-update row snapshot** — verified: `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` produces `(a=100, b=11)` (b read pre-update a). Scalar subquery RHS sees the pre-update table state.
-- Identity-column update → **Msg 8102** `"Cannot update identity column 'X'."`. Computed-column update → Msg 271 (existing factory).
+- Identity-column update → **Msg 8102** `"Cannot update identity column 'X'."`. Computed-column update → Msg 271 (existing factory). Rowversion update → **Msg 272** `"Cannot update a timestamp column."`.
 - Per-row constraint re-validation: NOT NULL → **Msg 515** with `"UPDATE fails."` verb; CHECK → **Msg 547** with `"UPDATE statement"` verb. PK / UNIQUE → Msg 2627 (same wording as INSERT — verbatim SQL Server quirk: "Cannot insert duplicate key" wording even on UPDATE).
 - Two-phase execution: phase 1 picks affected rows + computes new values + per-row validation; phase 2 validates PK / UNIQUE against the post-update virtual state (other affected rows' new keys + non-affected heap rows' existing keys); phase 3 mutates (tombstone old, insert new).
-- Literal-only `OUTPUT` clause on UPDATE / DELETE: `OUTPUT 1` and similar literal / parameter projections supported (one yielded row per affected row). EF Core 8's SaveChanges flow emits `OUTPUT 1` as a rows-affected detector on every modify and remove — that's the case this enables. Storage uses page-slot tombstones (high bit on slot directory entry; row payload bytes not reclaimed) and orphaned LOB chains stay in `Heap.LobPages` (see Quirks below).
+- `OUTPUT` clause on UPDATE / DELETE supports `INSERTED.<col>` (post-update / new value), `DELETED.<col>` (pre-update / old value), and literal / parameter expressions. UPDATE allows both qualifiers; DELETE rejects `INSERTED.<col>` at parse time → **Msg 4104** (verbatim probed). Bare column refs → Msg 207. Star expansion (`INSERTED.*` / `DELETED.*`) and table-alias qualifiers aren't modeled (parse error). Storage uses page-slot tombstones (high bit on slot directory entry; row payload bytes not reclaimed) and orphaned LOB chains stay in `Heap.LobPages` (see Quirks below).
+
+### `rowversion` (legacy synonym `timestamp`)
+8-byte big-endian auto-generated counter, implicitly NOT NULL, at most one per table. Database-scoped monotonic counter (`Simulation.AllocateRowVersion`) — every INSERT into a rowversion-bearing table and every UPDATE that affects a row in one allocates the next value. Storage type name surfaces as `timestamp` in `information_schema` and SqlClient's `DataTypeName` regardless of which keyword the column was declared with.
+
+- Explicit value in INSERT column list → **Msg 273** `"Cannot insert an explicit value into a timestamp column. ..."`.
+- Explicit value in UPDATE SET → **Msg 272** `"Cannot update a timestamp column."`.
+- Second rowversion column on a table → **Msg 2738** `"A table can only have one timestamp column. ..."`.
+- Outbound CAST: `varbinary(N)` and `binary(N)` copy the 8 bytes; `bigint` reads them big-endian (matches the `@@DBTS`-style integer view real SQL Server exposes). No reverse-direction CAST — rowversion values can only be auto-generated.
+- `Promote(RowVersion, Varbinary)` → `Varbinary` so the EF Core optimistic-concurrency `WHERE [rv] = @originalRv` pattern (where the parameter binds as `varbinary`) works directly.
+- `EF Core [Timestamp]` round-trip works end-to-end: SaveChanges of a modified entity emits `UPDATE ... OUTPUT INSERTED.[RowVersion] WHERE [Id] = @p AND [RowVersion] = @originalRv` and the simulator returns the new rowversion through OUTPUT for EF's change tracker.
 
 ### MERGE / OUTPUT (EF Core SaveChanges shape only)
 - `INSERT ... OUTPUT INSERTED.<col>` (single-row).
@@ -196,10 +206,9 @@ Comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 fr
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string. Other styles raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date parsing not modeled.
 - Cross-category `Promote` for integer ↔ string. Only CAST works that pair.
 - `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
-- `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, `INSERTED.*` star expansion. Full `OUTPUT INSERTED.<col>` / `OUTPUT DELETED.<col>` support on UPDATE / DELETE (literal-only OUTPUT *is* supported — see "What's modeled / UPDATE / DELETE"). The INSERTED / DELETED resolver work pairs with the rowversion + MERGE WHEN MATCHED bundle that closes the optimistic-concurrency story; trigger support also depends on it.
+- `OUTPUT INTO @table_var`, `OUTPUT DELETED.*` / `INSERTED.*` star expansion. Per-column `OUTPUT INSERTED.<col>` / `OUTPUT DELETED.<col>` *is* supported (UPDATE / DELETE both); only the star-expansion form is missing. `OUTPUT INTO` (sending the projection to a table variable rather than the result set) isn't.
 - Multi-table UPDATE / DELETE (`UPDATE alias SET ... FROM table AS alias`, `DELETE alias FROM ...`). EF7+ `ExecuteUpdate` / `ExecuteDelete` emit these and won't work without the bundle.
-- `rowversion` type (paired with full UPDATE / DELETE OUTPUT for `[Timestamp]` concurrency tracking).
-- MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`.
+- MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`. EF Core uses `WHEN MATCHED` branches for batched updates and the optimistic-concurrency story isn't complete until that lands. Triggers (which depend on the same INSERTED / DELETED projection model already wired here) are a downstream beneficiary.
 - Msg 8141 (inline CHECK referencing a peer column — SQL Server rejects at CREATE TABLE; simulator allows).
 - Msg 8133 (CASE where every branch is bare `NULL`; simulator returns NULL of `int`).
 - `PRIMARY KEY` / `UNIQUE` on a computed column (would need to evaluate the expression against every existing row at insert; `NotSupportedException`).

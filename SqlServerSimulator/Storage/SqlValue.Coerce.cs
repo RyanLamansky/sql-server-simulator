@@ -74,6 +74,20 @@ internal readonly partial struct SqlValue
         if (this.Type is VarbinarySqlType or BinarySqlType && target == SqlType.Image)
             return FromImage(this.AsBytes);
 
+        // rowversion outbound CAST: bigint reads the 8 bytes big-endian (matches
+        // SQL Server: the database-scoped @@DBTS counter is exposed as a signed
+        // bigint); varbinary / binary copy the raw 8 bytes. No reverse direction
+        // — rowversion can only be auto-generated, never CAST in.
+        if (this.Type is RowVersionSqlType)
+        {
+            if (target == SqlType.BigInt)
+                return FromInt64(System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(this.AsBytes));
+            if (target == SqlType.Varbinary)
+                return FromVarbinary(this.AsBytes);
+            if (target is BinarySqlType targetRvBinary)
+                return FromBinary(targetRvBinary, this.AsBytes);
+        }
+
         // uniqueidentifier crossings: only string ↔ uid and varbinary ↔ uid
         // are allowed. Every other source/target pair surfaces as Msg 529.
         if (target == SqlType.UniqueIdentifier)

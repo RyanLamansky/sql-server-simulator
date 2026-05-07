@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -88,4 +90,51 @@ public class EFCoreUpdateDelete
         var rows = fresh.People.OrderBy(p => p.Id).Select(p => p.Name).ToArray();
         CollectionAssert.AreEqual(new[] { "AAA", "carol", "dave" }, rows);
     }
+
+    [TestMethod]
+    public async Task SaveChanges_TimestampEntity_ReadsBackAutoBumpedRowVersion()
+    {
+        // EF Core's [Timestamp]-tracked entity emits
+        //   UPDATE [T] SET [Name] = @p0 OUTPUT INSERTED.[RowVersion] WHERE [Id] = @p1 AND [RowVersion] = @p2;
+        // on SaveChanges. The simulator must auto-bump rv on UPDATE, accept
+        // the varbinary parameter in the WHERE comparison, and surface the
+        // new value via OUTPUT. After SaveChanges, EF Core compares the
+        // tracked entity's RowVersion to detect concurrency failures.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(
+            "create table Items (Id int primary key, Name nvarchar(50), RowVersion rowversion)");
+
+        using var context = new TimestampedDbContext(simulation);
+        var item = new TimestampedItem { Id = 1, Name = "first" };
+        _ = context.Items.Add(item);
+        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        var initialRv = item.RowVersion!.ToArray();
+
+        item.Name = "second";
+        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        var bumpedRv = item.RowVersion!.ToArray();
+
+        Assert.IsFalse(initialRv.SequenceEqual(bumpedRv), "rowversion must change after SaveChanges of a modified entity");
+    }
+}
+
+internal class TimestampedItem
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+
+    [System.ComponentModel.DataAnnotations.Timestamp]
+    public byte[]? RowVersion { get; set; }
+}
+
+internal class TimestampedDbContext(Simulation simulation) : DbContext
+{
+    public Simulation Simulation { get; set; } = simulation;
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        _ = optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
+    }
+
+    public DbSet<TimestampedItem> Items => Set<TimestampedItem>();
 }

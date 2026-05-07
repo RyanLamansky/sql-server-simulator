@@ -57,6 +57,8 @@ partial class Simulation
                     ?? throw SimulatedSqlException.InvalidColumnName(columnName);
                 if (tableColumn.Computed is not null)
                     throw SimulatedSqlException.ColumnCannotBeModified(tableColumn.Name);
+                if (tableColumn.Type == SqlType.RowVersion)
+                    throw SimulatedSqlException.CannotInsertExplicitTimestamp();
                 usedColumns.Add(tableColumn);
 
                 var separator = context.GetNextRequired();
@@ -74,10 +76,11 @@ partial class Simulation
         {
             // No column list: target every regular column (skip identity when
             // IDENTITY_INSERT is OFF and skip every computed column — neither
-            // is a writable destination from the VALUES side).
+            // is a writable destination from the VALUES side; rowversion is
+            // also auto-generated and never accepts explicit values).
             destinationColumns = (identityColumn is not null && !identityInsertOn)
-                ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null)]
-                : [.. destinationTable.Columns.Where(c => c.Computed is null)];
+                ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null && c.Type != SqlType.RowVersion)]
+                : [.. destinationTable.Columns.Where(c => c.Computed is null && c.Type != SqlType.RowVersion)];
         }
 
         if (identityColumn is not null)
@@ -194,6 +197,13 @@ partial class Simulation
 
                 rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
                 lastIdentityValue = generated;
+            }
+
+            // Auto-generate rowversion for every row in a table that has one.
+            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            {
+                if (destinationTable.Columns[i].Type == SqlType.RowVersion)
+                    rowValues[i] = SqlValue.FromRowVersion(context.Simulation.AllocateRowVersion());
             }
 
             // Evaluate computed columns now — both persisted (whose result
