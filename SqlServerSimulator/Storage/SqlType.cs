@@ -386,15 +386,15 @@ internal abstract class SqlType
     /// <summary>True for SQL string-family types (varchar, nvarchar, sysname).</summary>
     public static bool IsStringCategory(SqlType type) => type.Category == SqlTypeCategory.String;
 
-    public static readonly SqlType Int32 = new Int32SqlType();
+    public static readonly Int32SqlType Int32 = new();
 
-    public static readonly SqlType BigInt = new BigIntSqlType();
+    public static readonly BigIntSqlType BigInt = new();
 
-    public static readonly SqlType SmallInt = new SmallIntSqlType();
+    public static readonly SmallIntSqlType SmallInt = new();
 
-    public static readonly SqlType TinyInt = new TinyIntSqlType();
+    public static readonly TinyIntSqlType TinyInt = new();
 
-    public static readonly SqlType Bit = new BitSqlType();
+    public static readonly BitSqlType Bit = new();
 
     /// <remarks>
     /// Stored as Windows-1252 bytes — matching SQL Server's default collation
@@ -405,13 +405,13 @@ internal abstract class SqlType
     /// UTF-8-enabled collations (introduced in SQL Server 2019) are an opt-in
     /// feature and aren't modeled today.
     /// </remarks>
-    public static readonly SqlType Varchar = new VarcharSqlType();
+    public static readonly VarcharSqlType Varchar = new();
 
     /// <remarks>
     /// Stored as UTF-16 LE bytes (2 bytes per BMP code unit, surrogate pairs for
     /// supplementary characters), matching SQL Server's on-disk nvarchar layout.
     /// </remarks>
-    public static readonly SqlType NVarchar = new NVarcharSqlType();
+    public static readonly NVarcharSqlType NVarchar = new();
 
     /// <remarks>
     /// SQL Server's <c>sysname</c> — historically <c>varchar(30)</c> in 6.5,
@@ -420,7 +420,7 @@ internal abstract class SqlType
     /// <see cref="SqlType"/> instance because it appears with its own identity
     /// across system catalogs and in user-visible <c>sp_help</c> output.
     /// </remarks>
-    public static readonly SqlType SystemName = new SystemNameSqlType();
+    public static readonly SystemNameSqlType SystemName = new();
 
     /// <remarks>
     /// Stored as raw bytes — no encoding, no codepage conversion. The simulator
@@ -428,7 +428,7 @@ internal abstract class SqlType
     /// after passing it to <see cref="SqlValue.FromVarbinary"/> or after
     /// receiving it from <see cref="SqlValue.AsBytes"/>.
     /// </remarks>
-    public static readonly SqlType Varbinary = new VarbinarySqlType();
+    public static readonly VarbinarySqlType Varbinary = new();
 
     /// <remarks>
     /// SQL Server's deprecated <c>text</c> type: <c>varchar</c>-shaped CP1252
@@ -437,19 +437,19 @@ internal abstract class SqlType
     /// expression layer can apply the operation restrictions Msg 402
     /// (no comparison) and Msg 306 (no sort/group/distinct).
     /// </remarks>
-    public static readonly SqlType Text = new TextSqlType();
+    public static readonly TextSqlType Text = new();
 
     /// <remarks>
     /// SQL Server's deprecated <c>ntext</c> type: <c>nvarchar</c>-shaped UTF-16
     /// storage, always off-row. Same restrictions as <see cref="Text"/>.
     /// </remarks>
-    public static readonly SqlType NText = new NTextSqlType();
+    public static readonly NTextSqlType NText = new();
 
     /// <remarks>
     /// SQL Server's deprecated <c>image</c> type: <c>varbinary</c>-shaped raw
     /// bytes, always off-row. Same restrictions as <see cref="Text"/>.
     /// </remarks>
-    public static readonly SqlType Image = new ImageSqlType();
+    public static readonly ImageSqlType Image = new();
 
     /// <remarks>
     /// SQL Server's <c>date</c>: 3-byte fixed-length storage representing days
@@ -459,7 +459,7 @@ internal abstract class SqlType
     /// <c>date</c> isn't publicly specified, and 24-bit LE is the natural fit
     /// for SQL Server's overall little-endian on-disk format.
     /// </remarks>
-    public static readonly SqlType Date = new DateSqlType();
+    public static readonly DateSqlType Date = new();
 
     /// <remarks>
     /// SQL Server's <c>datetime2(N)</c>: variable-precision date+time, where
@@ -528,7 +528,7 @@ internal abstract class SqlType
     /// 1/300-second tick at construction; rounding past the type's max value
     /// raises Msg 242.
     /// </remarks>
-    public static readonly SqlType DateTime = new DateTimeSqlType();
+    public static readonly DateTimeSqlType DateTime = new();
 
     /// <remarks>
     /// SQL Server's <c>smalldatetime</c>: 4-byte fixed-length, 1-minute
@@ -542,7 +542,7 @@ internal abstract class SqlType
     /// SQL Server's internal pipeline) and then rounded half-up to the
     /// nearest minute; rounding past the type's max raises Msg 242.
     /// </remarks>
-    public static readonly SqlType SmallDateTime = new SmallDateTimeSqlType();
+    public static readonly SmallDateTimeSqlType SmallDateTime = new();
 
     /// <remarks>
     /// SQL Server's <c>uniqueidentifier</c>: 16-byte fixed-length GUID. On-disk
@@ -553,14 +553,14 @@ internal abstract class SqlType
     /// <see cref="System.Data.SqlTypes.SqlGuid.CompareTo(System.Data.SqlTypes.SqlGuid)"/>,
     /// which is incompatible with .NET's natural <see cref="Guid.CompareTo(Guid)"/>.
     /// </remarks>
-    public static readonly SqlType UniqueIdentifier = new UniqueIdentifierSqlType();
+    public static readonly UniqueIdentifierSqlType UniqueIdentifier = new();
 
     /// <remarks>
     /// SQL Server's <c>rowversion</c> (also spelled <c>timestamp</c>): 8-byte
     /// big-endian auto-generated counter. See <see cref="RowVersionSqlType"/>
     /// for the auto-generation contract.
     /// </remarks>
-    public static readonly SqlType RowVersion = new RowVersionSqlType();
+    public static readonly RowVersionSqlType RowVersion = new();
 
     /// <remarks>
     /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
@@ -596,13 +596,13 @@ internal abstract class SqlType
     /// with <c>N ≤ 24</c> resolves to <see cref="Real"/> instead — that
     /// dispatch lives in <see cref="GetByName"/>.
     /// </remarks>
-    public static readonly SqlType Float = new FloatSqlType();
+    public static readonly FloatSqlType Float = new();
 
     /// <remarks>
     /// SQL Server's <c>real</c>: 4-byte IEEE 754 single. Equivalent to
     /// <c>float(24)</c>.
     /// </remarks>
-    public static readonly SqlType Real = new RealSqlType();
+    public static readonly RealSqlType Real = new();
 
     /// <remarks>
     /// SQL Server's <c>money</c>: 8-byte scaled signed integer with a fixed
@@ -610,14 +610,14 @@ internal abstract class SqlType
     /// <c>[-922337203685477.5808, 922337203685477.5807]</c> (matching
     /// <see cref="long"/>).
     /// </remarks>
-    public static readonly SqlType Money = new MoneySqlType();
+    public static readonly MoneySqlType Money = new();
 
     /// <remarks>
     /// SQL Server's <c>smallmoney</c>: 4-byte scaled signed integer with a
     /// fixed scale of 4 decimal places. Range
     /// <c>[-214748.3648, 214748.3647]</c>.
     /// </remarks>
-    public static readonly SqlType SmallMoney = new SmallMoneySqlType();
+    public static readonly SmallMoneySqlType SmallMoney = new();
 
     /// <summary>True for SQL date/time-family types (date, datetime, smalldatetime, datetime2, time, datetimeoffset).</summary>
     public static bool IsDateTimeCategory(SqlType type) => type.Category == SqlTypeCategory.DateTime;
@@ -774,72 +774,17 @@ internal abstract class SqlType
         if (resolvedName == 6 && upper.SequenceEqual("BINARY"))
             return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "binary", GetBinary);
 
-        var resolved = resolvedName switch
-        {
-            3 => upper switch
-            {
-                "BIT" => Bit,
-                "INT" => Int32,
-                _ => null
-            },
-            4 => upper switch
-            {
-                "DATE" => Date,
-                "REAL" => Real,
-                "TEXT" => Text,
-                _ => null
-            },
-            5 => upper switch
-            {
-                "MONEY" => Money,
-                "NTEXT" => NText,
-                "IMAGE" => Image,
-                _ => null
-            },
-            6 => upper switch
-            {
-                "BIGINT" => BigInt,
-                _ => null
-            },
-            7 => upper switch
-            {
-                "TINYINT" => TinyInt,
-                "VARCHAR" => Varchar,
-                _ => null
-            },
-            8 => upper switch
-            {
-                "SMALLINT" => SmallInt,
-                "NVARCHAR" => NVarchar,
-                "DATETIME" => DateTime,
-                _ => null
-            },
-            9 => upper switch
-            {
-                "TIMESTAMP" => RowVersion,
-                "VARBINARY" => Varbinary,
-                _ => null
-            },
-            10 => upper switch
-            {
-                "ROWVERSION" => RowVersion,
-                "SMALLMONEY" => SmallMoney,
-                _ => null
-            },
-            13 => upper switch
-            {
-                "SMALLDATETIME" => SmallDateTime,
-                _ => null
-            },
-            16 => upper switch
-            {
-                "UNIQUEIDENTIFIER" => UniqueIdentifier,
-                _ => null
-            },
-            _ => null,
-        } ?? throw (columnName is not null
-            ? SimulatedSqlException.CannotFindDataType(name.Span, index)
-            : SimulatedSqlException.CannotFindDataTypeInCast(name.Span));
+        // Length-then-name dispatch over the simple keyword-named singletons.
+        // (CHAR / NCHAR / BINARY / VARCHAR(MAX) / etc. with parameter handling
+        // are dispatched ahead of this block — see the early returns above.)
+        // ResolveSimpleKeyword's explicit return type bridges the disparate
+        // concrete SqlType subclasses each arm produces; embedding the same
+        // dispatch as a switch expression here would force per-arm casts to
+        // satisfy best-common-type inference.
+        var resolved = ResolveSimpleKeyword(resolvedName, upper)
+            ?? throw (columnName is not null
+                ? SimulatedSqlException.CannotFindDataType(name.Span, index)
+                : SimulatedSqlException.CannotFindDataTypeInCast(name.Span));
 
         // SQL Server's pre-type-specific zero check: Msg 1001 fires before
         // any per-type validation (e.g. varchar(0), datetime(0)). datetime2 /
@@ -922,6 +867,82 @@ internal abstract class SqlType
         }
         return (factory(declared), declared);
     }
+
+    /// <summary>
+    /// Length-then-name dispatch for the simple keyword-named singletons
+    /// (no parameter parsing; the parameterized types like <c>varchar(N)</c>
+    /// and <c>decimal(p, s)</c> are handled in <see cref="GetByName"/>'s
+    /// earlier branches). Returns null when the name doesn't match a known
+    /// type. The explicit <c>SqlType?</c> return type widens each arm's
+    /// concrete subclass to the common <see cref="SqlType"/> via the usual
+    /// reference conversion — embedding the same dispatch inline as a
+    /// switch expression would require per-arm casts to satisfy
+    /// best-common-type inference.
+    /// </summary>
+    private static SqlType? ResolveSimpleKeyword(int length, ReadOnlySpan<char> upper) => length switch
+    {
+        3 => upper switch
+        {
+            "BIT" => Bit,
+            "INT" => Int32,
+            _ => null,
+        },
+        4 => upper switch
+        {
+            "DATE" => Date,
+            "REAL" => Real,
+            "TEXT" => Text,
+            _ => null,
+        },
+        5 => upper switch
+        {
+            "MONEY" => Money,
+            "NTEXT" => NText,
+            "IMAGE" => Image,
+            _ => null,
+        },
+        6 => upper switch
+        {
+            "BIGINT" => BigInt,
+            _ => null,
+        },
+        7 => upper switch
+        {
+            "TINYINT" => TinyInt,
+            "VARCHAR" => Varchar,
+            _ => null,
+        },
+        8 => upper switch
+        {
+            "SMALLINT" => SmallInt,
+            "NVARCHAR" => NVarchar,
+            "DATETIME" => DateTime,
+            _ => null,
+        },
+        9 => upper switch
+        {
+            "TIMESTAMP" => RowVersion,
+            "VARBINARY" => Varbinary,
+            _ => null,
+        },
+        10 => upper switch
+        {
+            "ROWVERSION" => RowVersion,
+            "SMALLMONEY" => SmallMoney,
+            _ => null,
+        },
+        13 => upper switch
+        {
+            "SMALLDATETIME" => SmallDateTime,
+            _ => null,
+        },
+        16 => upper switch
+        {
+            "UNIQUEIDENTIFIER" => UniqueIdentifier,
+            _ => null,
+        },
+        _ => null,
+    };
 
     /// <summary>
     /// Tick count of one fractional-second unit at the given precision (e.g.

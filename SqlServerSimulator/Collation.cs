@@ -11,7 +11,7 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
     public abstract string Name { get; }
 
-    internal static readonly Collation Default = new SQL_Latin1_General_CP1_CI_AS();
+    internal static readonly SQL_Latin1_General_CP1_CI_AS Default = new();
 
     public abstract int Compare(string? x, string? y);
 
@@ -19,7 +19,7 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
     public abstract int GetHashCode(string obj);
 
-    private sealed class SQL_Latin1_General_CP1_CI_AS : Collation
+    internal sealed class SQL_Latin1_General_CP1_CI_AS : Collation
     {
         public override string Name => "SQL_Latin1_General_CP1_CI_AS";
 

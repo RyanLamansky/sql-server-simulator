@@ -57,7 +57,7 @@ public class MixedTypeRowTests
     [TestMethod]
     public void EachType_NullRoundTrips()
     {
-        foreach (var type in new[] { SqlType.Int32, SqlType.BigInt, SqlType.SmallInt, SqlType.TinyInt, SqlType.Bit })
+        foreach (var type in new SqlType[] { SqlType.Int32, SqlType.BigInt, SqlType.SmallInt, SqlType.TinyInt, SqlType.Bit })
         {
             var decoded = RowDecoder.DecodeRow([type], RowEncoder.EncodeRow([type], [SqlValue.Null(type)]));
             IsTrue(decoded[0].IsNull);

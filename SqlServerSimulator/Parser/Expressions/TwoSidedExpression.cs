@@ -279,7 +279,7 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
     private protected static SqlValue ApproximateArithmetic(SqlValue left, SqlValue right, char op)
     {
         var resultIsReal = left.Type == SqlType.Real && right.Type == SqlType.Real;
-        var resultType = resultIsReal ? SqlType.Real : SqlType.Float;
+        SqlType resultType = resultIsReal ? SqlType.Real : SqlType.Float;
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 
