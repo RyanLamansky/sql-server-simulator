@@ -29,7 +29,7 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
-    public async Task SaveChanges_ModifyExisting_EmitsUpdate()
+    public void SaveChanges_ModifyExisting_EmitsUpdate()
     {
         // The most basic real-app workflow: load an entity, change a
         // property, save. EF Core emits UPDATE [People] SET [Name] = @p0
@@ -38,7 +38,7 @@ public class EFCoreUpdateDelete
         using var context = SeededContext();
         var alice = context.People.Single(p => p.Name == "alice");
         alice.Name = "ALICE";
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
 
         // Read back through a fresh context (different connection) to
         // confirm the update persisted at the simulation level, not
@@ -48,14 +48,34 @@ public class EFCoreUpdateDelete
         Assert.AreEqual("ALICE", reloaded.Name);
     }
 
+    /// <summary>
+    /// Mirrors <see cref="SaveChanges_ModifyExisting_EmitsUpdate"/> through
+    /// the async path. The simulator is fully synchronous, so this exists
+    /// only to ensure EF Core's default async-over-sync wrapper still works
+    /// for the UPDATE shape — same role <see cref="EFCoreBasics.InsertRowAsync"/>
+    /// plays for INSERT.
+    /// </summary>
     [TestMethod]
-    public async Task SaveChanges_ModifyMultipleProperties_OneUpdate()
+    public async Task SaveChangesAsync_ModifyExisting_AsyncPathSmoke()
+    {
+        using var context = SeededContext();
+        var alice = context.People.Single(p => p.Name == "alice");
+        alice.Name = "ALICE";
+        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var reloaded = fresh.People.Single(p => p.Id == alice.Id);
+        Assert.AreEqual("ALICE", reloaded.Name);
+    }
+
+    [TestMethod]
+    public void SaveChanges_ModifyMultipleProperties_OneUpdate()
     {
         using var context = SeededContext();
         var bob = context.People.Single(p => p.Name == "bob");
         bob.Name = "BOB";
         bob.Code = "BB";
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
 
         using var fresh = new TestDbContext(context.Simulation);
         var reloaded = fresh.People.Single(p => p.Id == bob.Id);
@@ -64,12 +84,12 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
-    public async Task SaveChanges_RemoveEntity_EmitsDelete()
+    public void SaveChanges_RemoveEntity_EmitsDelete()
     {
         using var context = SeededContext();
         var carol = context.People.Single(p => p.Name == "carol");
         _ = context.People.Remove(carol);
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
 
         using var fresh = new TestDbContext(context.Simulation);
         var names = fresh.People.OrderBy(p => p.Id).Select(p => p.Name).ToArray();
@@ -77,14 +97,14 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
-    public async Task SaveChanges_ModifyAndRemove_BothApplied()
+    public void SaveChanges_ModifyAndRemove_BothApplied()
     {
         using var context = SeededContext();
         var alice = context.People.Single(p => p.Name == "alice");
         alice.Name = "AAA";
         var bob = context.People.Single(p => p.Name == "bob");
         _ = context.People.Remove(bob);
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
 
         using var fresh = new TestDbContext(context.Simulation);
         var rows = fresh.People.OrderBy(p => p.Id).Select(p => p.Name).ToArray();
@@ -92,7 +112,7 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
-    public async Task SaveChanges_ModifyMultipleEntities_BatchedAsSemicolonSeparatedUpdates()
+    public void SaveChanges_ModifyMultipleEntities_BatchedAsSemicolonSeparatedUpdates()
     {
         // EF Core 9 emits N semicolon-separated UPDATE statements (one per
         // modified entity) on SaveChanges of a multi-entity update — not a
@@ -103,7 +123,7 @@ public class EFCoreUpdateDelete
         var people = context.People.OrderBy(p => p.Id).ToList();
         foreach (var p in people)
             p.Code += "x";
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
 
         using var fresh = new TestDbContext(context.Simulation);
         var rows = fresh.People.OrderBy(p => p.Id).Select(p => p.Code).ToArray();
@@ -111,7 +131,7 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
-    public async Task SaveChanges_ModifyMultipleTimestampedEntities_BatchedUpdatesWithRowVersion()
+    public void SaveChanges_ModifyMultipleTimestampedEntities_BatchedUpdatesWithRowVersion()
     {
         // EF Core 9 with [Timestamp] emits N semicolon-separated
         //   UPDATE [T] SET [c] = @p OUTPUT INSERTED.[RowVersion]
@@ -130,13 +150,13 @@ public class EFCoreUpdateDelete
             new TimestampedItem { Id = 1, Name = "a" },
             new TimestampedItem { Id = 2, Name = "b" },
             new TimestampedItem { Id = 3, Name = "c" });
-        _ = await seed.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = seed.SaveChanges();
 
         using var ctx = new TimestampedDbContext(simulation);
         var items = ctx.Items.OrderBy(i => i.Id).ToList();
         foreach (var i in items)
             i.Name += "!";
-        _ = await ctx.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = ctx.SaveChanges();
 
         using var fresh = new TimestampedDbContext(simulation);
         var names = fresh.Items.OrderBy(i => i.Id).Select(i => i.Name).ToArray();
@@ -144,7 +164,7 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
-    public async Task SaveChanges_TimestampEntity_ReadsBackAutoBumpedRowVersion()
+    public void SaveChanges_TimestampEntity_ReadsBackAutoBumpedRowVersion()
     {
         // EF Core's [Timestamp]-tracked entity emits
         //   UPDATE [T] SET [Name] = @p0 OUTPUT INSERTED.[RowVersion] WHERE [Id] = @p1 AND [RowVersion] = @p2;
@@ -159,11 +179,11 @@ public class EFCoreUpdateDelete
         using var context = new TimestampedDbContext(simulation);
         var item = new TimestampedItem { Id = 1, Name = "first" };
         _ = context.Items.Add(item);
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
         var initialRv = item.RowVersion!.ToArray();
 
         item.Name = "second";
-        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+        _ = context.SaveChanges();
         var bumpedRv = item.RowVersion!.ToArray();
 
         Assert.IsFalse(initialRv.SequenceEqual(bumpedRv), "rowversion must change after SaveChanges of a modified entity");
