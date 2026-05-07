@@ -267,6 +267,21 @@ internal sealed class SimulatedSqlException : DbException
     internal static SimulatedSqlException AmbiguousColumnName(string name) =>
         new($"Ambiguous column name '{name}'.", 209, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 205 — fired when the branches of a UNION /
+    /// INTERSECT / EXCEPT chain have different column counts.
+    /// </summary>
+    internal static SimulatedSqlException SetOpUnequalColumnCount() =>
+        new("All queries combined using a UNION, INTERSECT or EXCEPT operator must have an equal number of expressions in their target lists.", 205, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 156 specifically for the per-branch
+    /// ORDER BY rejection in set-op chains. The keyword in the message
+    /// is the set operator that follows the offending ORDER BY.
+    /// </summary>
+    internal static SimulatedSqlException PerBranchOrderByRejected(string setOpKeyword) =>
+        new($"Incorrect syntax near the keyword '{setOpKeyword}'.", 156, 15, 1);
+
     internal static SimulatedSqlException InvalidObjectName(StringToken name) => new($"Invalid object name {name}.", 208, 16, 1);
 
     /// <summary>

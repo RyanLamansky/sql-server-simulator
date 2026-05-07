@@ -49,12 +49,24 @@ internal sealed partial class Selection
     public readonly SqlType[] Schema;
     public readonly string[] ColumnNames;
 
+    /// <summary>
+    /// True when this plan internally bakes an ORDER BY clause into its
+    /// row pipeline. Set-op chaining inspects this on the first branch:
+    /// per SQL Server, a per-branch ORDER BY is illegal when a set
+    /// operator follows (Msg 156), and the simulator rejects via
+    /// <see cref="CombineSetOps"/>. Top-level ORDER BY (after a set-op
+    /// chain) is applied by <see cref="ApplyTopLevelOrderBy"/> and also
+    /// sets this flag on the wrapper.
+    /// </summary>
+    public readonly bool HasOrderBy;
+
     private readonly Func<Func<List<string>, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, Func<Func<List<string>, SqlValue>?, IEnumerable<byte[]>> rowSource)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, Func<Func<List<string>, SqlValue>?, IEnumerable<byte[]>> rowSource)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
+        this.HasOrderBy = hasOrderBy;
         this.rowSource = rowSource;
     }
 
@@ -81,18 +93,115 @@ internal sealed partial class Selection
     /// <returns>The prepared plan; call <see cref="Execute"/> to materialize results.</returns>
     /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
-    public static Selection Parse(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver = null)
+    public static Selection Parse(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver = null) =>
+        ParseQueryExpression(context, depth, outerTypeResolver);
+
+    /// <summary>
+    /// Parses a full query expression: a chain of set-op-combined SELECT
+    /// branches optionally followed by a top-level ORDER BY. Set-op
+    /// precedence: <c>INTERSECT</c> binds tighter than <c>UNION</c> /
+    /// <c>EXCEPT</c> (which are at the same level, left-to-right).
+    /// </summary>
+    private static Selection ParseQueryExpression(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver)
     {
-        // Save / restore the parser's aggregate collector so each Selection
-        // (including nested derived tables) gets its own scope. Aggregates
-        // parsed inside the projection / HAVING register here; the executor
-        // uses the populated list to switch into aggregate mode.
+        var combined = ParseUnionExceptChain(context, depth, outerTypeResolver);
+
+        // Top-level ORDER BY: applies to the combined result (post-set-op).
+        // ORDER BY references within set-op chains use the first branch's
+        // column names.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var orderBy = new List<OrderBySpec>();
+            ParseOrderByItems(context, orderBy);
+            combined = ApplyTopLevelOrderBy(combined, orderBy);
+        }
+
+        return combined;
+    }
+
+    /// <summary>
+    /// Lower-precedence set-op level: parses a chain of UNION /
+    /// UNION ALL / EXCEPT operators left-to-right, with each operand
+    /// parsed via <see cref="ParseIntersectChain"/> (which handles the
+    /// higher-precedence INTERSECT operator). The first branch gets
+    /// <c>allowOrderBy=true</c> so single-SELECT queries with ORDER BY
+    /// retain the existing inside-the-projection behavior (which can
+    /// reference non-projected source columns); subsequent branches use
+    /// <c>allowOrderBy=false</c> and any post-chain ORDER BY is applied
+    /// at the top level.
+    /// </summary>
+    private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver)
+    {
+        var left = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: true);
+        while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
+        {
+            SetOpKind kind;
+            if (op.Keyword == Keyword.Union)
+            {
+                context.MoveNextRequired();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.All })
+                {
+                    kind = SetOpKind.UnionAll;
+                    context.MoveNextRequired();
+                }
+                else
+                {
+                    kind = SetOpKind.Union;
+                }
+            }
+            else
+            {
+                kind = SetOpKind.Except;
+                context.MoveNextRequired();
+            }
+
+            var right = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: false);
+            left = CombineSetOps(left, right, kind);
+        }
+        return left;
+    }
+
+    /// <summary>
+    /// Higher-precedence set-op level: parses a chain of INTERSECT
+    /// operators left-to-right.
+    /// </summary>
+    private static Selection ParseIntersectChain(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver, bool isFirstBranch)
+    {
+        var left = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch);
+        while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
+        {
+            context.MoveNextRequired();
+            var right = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: false);
+            left = CombineSetOps(left, right, SetOpKind.Intersect);
+        }
+        return left;
+    }
+
+    /// <summary>
+    /// Parses a single SELECT statement (the leaf of a set-op chain).
+    /// Each branch gets its own aggregate-collector scope so aggregates
+    /// inside one branch don't leak into another.
+    /// <paramref name="allowOrderBy"/> is true only for the very first
+    /// branch parsed (or the entire query if no set-op follows) so that
+    /// non-set-op queries like <c>SELECT name FROM t ORDER BY id</c>
+    /// keep the existing branch-internal sort that can reference
+    /// non-projected source columns; subsequent branches must defer
+    /// ORDER BY to the top level.
+    /// </summary>
+    private static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver, bool allowOrderBy)
+    {
+        // Save / restore the parser's aggregate collector so each branch
+        // gets its own scope. Aggregates parsed inside the projection /
+        // HAVING register here; the executor uses the populated list to
+        // switch into aggregate mode.
         var savedCollector = context.AggregateCollector;
         var aggregates = new List<AggregateExpression>();
         context.AggregateCollector = aggregates;
         try
         {
-            return ParseInner(context, depth, aggregates, outerTypeResolver);
+            return ParseInner(context, depth, aggregates, outerTypeResolver, allowOrderBy);
         }
         finally
         {
@@ -113,7 +222,7 @@ internal sealed partial class Selection
         public readonly List<OrderBySpec> OrderBy = [];
     }
 
-    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, Func<List<string>, SqlType>? outerTypeResolver)
+    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, Func<List<string>, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         var distinct = false;
         int? topCount = null;
@@ -163,6 +272,12 @@ internal sealed partial class Selection
                     // (see CaseExpression.ParseCase).
                     expressions.Add(Expression.Parse(context));
                     break;
+
+                // Set-op keywords at the outer-switch position (i.e. after
+                // an `AS alias` continued the loop) terminate this branch
+                // so the set-op driver can chain.
+                case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except }:
+                    goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: not Keyword.Null } keyword:
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
@@ -217,11 +332,25 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.From }:
                     var sources = new List<FromSource>();
                     var joins = new List<JoinSpec>();
-                    ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver);
+                    ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
                     return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, outerTypeResolver);
 
-                case ReservedKeyword { Keyword: Keyword.Where or Keyword.Order }:
-                    ConsumeWhereAndOrderBy(context, fromClause);
+                case ReservedKeyword { Keyword: Keyword.Where }:
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
+                    goto ExitWhileTokenLoop;
+
+                case ReservedKeyword { Keyword: Keyword.Order }:
+                    if (allowOrderBy)
+                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
+                    // When this branch is part of a set-op chain, leave
+                    // the cursor on ORDER for the top-level driver to
+                    // consume (or for the outer caller to error on, per
+                    // SQL Server's per-branch-ORDER-BY rejection).
+                    goto ExitWhileTokenLoop;
+
+                // Set-op keywords terminate a branch parse so the outer
+                // driver (ParseQueryExpression) can chain branches.
+                case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except }:
                     goto ExitWhileTokenLoop;
             }
 
@@ -229,7 +358,7 @@ internal sealed partial class Selection
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
 
-        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, distinct, topCount, outerTypeResolver);
+        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, topCount);
     }
 
     /// <summary>
@@ -253,7 +382,8 @@ internal sealed partial class Selection
         List<FromSource> sources,
         List<JoinSpec> joins,
         FromClause fromClause,
-        Func<List<string>, SqlType>? outerTypeResolver)
+        Func<List<string>, SqlType>? outerTypeResolver,
+        bool allowOrderBy)
     {
         sources.Add(ParseSingleFromSource(context, depth));
 
@@ -280,7 +410,7 @@ internal sealed partial class Selection
         }
 
         // Now register the multi-source type resolver and parse WHERE / etc.
-        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver);
+        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
     }
 
     /// <summary>
@@ -430,7 +560,8 @@ internal sealed partial class Selection
         ParserContext context,
         FromClause fromClause,
         FromSource[] sources,
-        Func<List<string>, SqlType>? outerTypeResolver)
+        Func<List<string>, SqlType>? outerTypeResolver,
+        bool allowOrderBy)
     {
         SqlType MyResolver(List<string> name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
@@ -438,7 +569,7 @@ internal sealed partial class Selection
         context.OuterTypeResolver = MyResolver;
         try
         {
-            ConsumeWhereAndOrderBy(context, fromClause);
+            ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
         }
         finally
         {
@@ -490,7 +621,7 @@ internal sealed partial class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy)
     {
         while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
@@ -513,7 +644,11 @@ internal sealed partial class Selection
             fromClause.Having = BooleanExpression.Parse(context.MoveNextRequiredReturnSelf());
         }
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        // Skip ORDER BY when this branch is part of a set-op chain — the
+        // top-level driver consumes it after combining branches and applies
+        // the sort to the combined result. Per SQL Server, per-branch
+        // ORDER BY is rejected (Msg 156).
+        if (allowOrderBy && context.Token is ReservedKeyword { Keyword: Keyword.Order })
         {
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -574,17 +709,13 @@ internal sealed partial class Selection
     /// can reference outer-scope columns when this Selection is the body of a
     /// correlated subquery, so they re-evaluate at <see cref="Execute"/> time
     /// against the supplied outer resolver. <paramref name="topCount"/>, if
-    /// zero, suppresses the row. <paramref name="distinct"/> and
-    /// <paramref name="orderBy"/> are accepted for syntactic completeness but
-    /// are no-ops — the result is at most one row, so dedup and sort have no
-    /// effect.
+    /// zero, suppresses the row. DISTINCT is a no-op for a single-row
+    /// result and isn't represented; <paramref name="orderBy"/> is also a
+    /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
+    /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, bool distinct, int? topCount, Func<List<string>, SqlType>? outerTypeResolver)
+    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount)
     {
-        _ = distinct;
-        _ = orderBy;
-        _ = outerTypeResolver;
-
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
         var columnNames = new string[expressions.Count];
@@ -596,7 +727,7 @@ internal sealed partial class Selection
             columnNames[i] = expressions[i].Name;
         }
 
-        return new Selection(schema, columnNames, outerResolver =>
+        return new Selection(schema, columnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
         {
             if (topCount == 0)
                 return [];

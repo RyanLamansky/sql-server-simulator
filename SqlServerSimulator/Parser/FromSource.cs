@@ -44,6 +44,22 @@ internal sealed class FromSource(
 }
 
 /// <summary>
+/// The four set-operation variants the simulator parses. <c>Union</c>
+/// dedupes; <c>UnionAll</c> preserves duplicates; <c>Intersect</c> keeps
+/// rows present in both branches (dedupes); <c>Except</c> keeps left-side
+/// rows not in the right (dedupes). NULLs are equal during dedup /
+/// matching — opposite of the <c>=</c> operator's three-valued behavior,
+/// matching SQL Server's documented set-op semantics.
+/// </summary>
+internal enum SetOpKind
+{
+    Union,
+    UnionAll,
+    Intersect,
+    Except,
+}
+
+/// <summary>
 /// The variants of JOIN the simulator parses. <c>Inner</c> includes the
 /// bare <c>JOIN</c> keyword (which SQL Server treats as INNER) and the
 /// explicit <c>INNER JOIN</c>. <c>Left</c> covers <c>LEFT [OUTER] JOIN</c>.

@@ -144,10 +144,193 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
 
-        return new Selection(outputSchema, outputColumnNames, outerResolver =>
+        return new Selection(outputSchema, outputColumnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
             aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
                 ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, outerResolver)
                 : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, outerResolver));
+    }
+
+    /// <summary>
+    /// Combines two SELECT plans via a set operator (UNION / UNION ALL /
+    /// INTERSECT / EXCEPT). Validates that the branches have the same
+    /// column count (Msg 205), promotes per-column types via
+    /// <see cref="SqlType.Promote"/>, and rejects per-branch ORDER BY
+    /// (which the parser tolerates greedily for the first branch via
+    /// <see cref="HasOrderBy"/>; if it stuck around when a set operator
+    /// follows, that's a syntax error).
+    /// </summary>
+    private static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind)
+    {
+        if (left.HasOrderBy)
+        {
+            var setOpKeyword = kind switch
+            {
+                SetOpKind.Union or SetOpKind.UnionAll => "union",
+                SetOpKind.Intersect => "intersect",
+                SetOpKind.Except => "except",
+                _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
+            };
+            throw SimulatedSqlException.PerBranchOrderByRejected(setOpKeyword);
+        }
+
+        if (left.Schema.Length != right.Schema.Length)
+            throw SimulatedSqlException.SetOpUnequalColumnCount();
+
+        var combinedSchema = new SqlType[left.Schema.Length];
+        for (var i = 0; i < combinedSchema.Length; i++)
+            combinedSchema[i] = SqlType.Promote(left.Schema[i], right.Schema[i]);
+
+        // Result column names come from the first (leftmost) branch.
+        var combinedNames = left.ColumnNames;
+
+        return new Selection(combinedSchema, combinedNames, hasOrderBy: false, outerResolver => kind switch
+        {
+            SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, outerResolver),
+            SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, outerResolver),
+            SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, outerResolver),
+            SetOpKind.Except => ExceptRows(left, right, combinedSchema, outerResolver),
+            _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
+        });
+    }
+
+    /// <summary>
+    /// Materializes a branch's rows and coerces each value to the
+    /// combined schema's per-column type. Pass-through fast path when
+    /// the branch's schema already matches; otherwise decode, coerce,
+    /// re-encode each row.
+    /// </summary>
+    private static IEnumerable<byte[]> CoerceBranchRows(Selection branch, SqlType[] targetSchema, Func<List<string>, SqlValue>? outerResolver)
+    {
+        var resultSet = branch.Execute(outerResolver);
+        var sourceSchema = resultSet.Schema;
+
+        var sameTypes = true;
+        for (var i = 0; i < sourceSchema.Length; i++)
+        {
+            if (sourceSchema[i] != targetSchema[i]) { sameTypes = false; break; }
+        }
+
+        if (sameTypes)
+        {
+            foreach (var rowBytes in resultSet.RowBytes)
+                yield return rowBytes;
+            yield break;
+        }
+
+        foreach (var rowBytes in resultSet.RowBytes)
+        {
+            var values = new SqlValue[targetSchema.Length];
+            for (var i = 0; i < sourceSchema.Length; i++)
+            {
+                var v = RowDecoder.DecodeColumn(sourceSchema, rowBytes, i);
+                values[i] = v.IsNull ? SqlValue.Null(targetSchema[i]) : v.CoerceTo(targetSchema[i]);
+            }
+            yield return RowEncoder.EncodeRow(targetSchema, values);
+        }
+    }
+
+    private static IEnumerable<byte[]> ConcatBranchRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    {
+        foreach (var r in CoerceBranchRows(left, schema, outer)) yield return r;
+        foreach (var r in CoerceBranchRows(right, schema, outer)) yield return r;
+    }
+
+    /// <summary>
+    /// Decodes a row's bytes into a <see cref="SqlValue"/> array using
+    /// the combined schema. Used by the dedup-aware set ops (UNION /
+    /// INTERSECT / EXCEPT) for HashSet keying via
+    /// <see cref="RowEqualityComparer"/>.
+    /// </summary>
+    private static SqlValue[] DecodeRowToValues(byte[] bytes, SqlType[] schema)
+    {
+        var values = new SqlValue[schema.Length];
+        for (var i = 0; i < schema.Length; i++)
+            values[i] = RowDecoder.DecodeColumn(schema, bytes, i);
+        return values;
+    }
+
+    private static IEnumerable<byte[]> DedupeUnionRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    {
+        var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        foreach (var rowBytes in CoerceBranchRows(left, schema, outer).Concat(CoerceBranchRows(right, schema, outer)))
+        {
+            if (seen.Add(DecodeRowToValues(rowBytes, schema)))
+                yield return rowBytes;
+        }
+    }
+
+    private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    {
+        var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        foreach (var rb in CoerceBranchRows(right, schema, outer))
+            _ = rightSet.Add(DecodeRowToValues(rb, schema));
+
+        var emitted = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        foreach (var rowBytes in CoerceBranchRows(left, schema, outer))
+        {
+            var values = DecodeRowToValues(rowBytes, schema);
+            if (rightSet.Contains(values) && emitted.Add(values))
+                yield return rowBytes;
+        }
+    }
+
+    private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    {
+        var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        foreach (var rb in CoerceBranchRows(right, schema, outer))
+            _ = rightSet.Add(DecodeRowToValues(rb, schema));
+
+        var emitted = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        foreach (var rowBytes in CoerceBranchRows(left, schema, outer))
+        {
+            var values = DecodeRowToValues(rowBytes, schema);
+            if (!rightSet.Contains(values) && emitted.Add(values))
+                yield return rowBytes;
+        }
+    }
+
+    /// <summary>
+    /// Wraps a Selection (typically the combined result of a set-op
+    /// chain) with a top-level ORDER BY pass. References resolve against
+    /// the inner plan's projected column names and ordinals only — there
+    /// are no source columns to fall back to. (Single-SELECT queries
+    /// with ORDER BY take a different path: ORDER BY stays inside the
+    /// branch's projection so it can reference non-projected source
+    /// columns, matching SQL Server's documented behavior.)
+    /// </summary>
+    private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy)
+    {
+        var schema = inner.Schema;
+        var columnNames = inner.ColumnNames;
+
+        return new Selection(schema, columnNames, hasOrderBy: true, outerResolver =>
+        {
+            var allRows = inner.Execute(outerResolver).RowBytes.ToList();
+            if (orderBy.Count == 0 || allRows.Count <= 1)
+                return allRows;
+
+            var keyed = new List<(byte[] Row, SqlValue[] Keys)>(allRows.Count);
+            foreach (var rowBytes in allRows)
+            {
+                var values = DecodeRowToValues(rowBytes, schema);
+                SqlValue ResolveByOutputName(List<string> name)
+                {
+                    var lastPart = name[^1];
+                    for (var j = 0; j < columnNames.Length; j++)
+                    {
+                        if (Collation.Default.Equals(columnNames[j], lastPart))
+                            return values[j];
+                    }
+                    throw SimulatedSqlException.InvalidColumnName(name);
+                }
+
+                var keys = ComputeOrderKeys(orderBy, values, columnNames, distinct: false, ResolveByOutputName);
+                keyed.Add((rowBytes, keys));
+            }
+
+            keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+            return keyed.Select(r => r.Row);
+        });
     }
 
     /// <summary>
