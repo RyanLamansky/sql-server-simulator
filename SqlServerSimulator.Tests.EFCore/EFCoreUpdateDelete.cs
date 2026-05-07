@@ -92,6 +92,58 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
+    public async Task SaveChanges_ModifyMultipleEntities_BatchedAsSemicolonSeparatedUpdates()
+    {
+        // EF Core 9 emits N semicolon-separated UPDATE statements (one per
+        // modified entity) on SaveChanges of a multi-entity update — not a
+        // single MERGE. Probed against real SQL Server 2025; the simulator's
+        // multi-statement command path handles it without needing
+        // MERGE WHEN MATCHED support.
+        using var context = SeededContext();
+        var people = context.People.OrderBy(p => p.Id).ToList();
+        foreach (var p in people)
+            p.Code += "x";
+        _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var rows = fresh.People.OrderBy(p => p.Id).Select(p => p.Code).ToArray();
+        CollectionAssert.AreEqual(new[] { "Ax", "Bx", "Cx", "Dx" }, rows);
+    }
+
+    [TestMethod]
+    public async Task SaveChanges_ModifyMultipleTimestampedEntities_BatchedUpdatesWithRowVersion()
+    {
+        // EF Core 9 with [Timestamp] emits N semicolon-separated
+        //   UPDATE [T] SET [c] = @p OUTPUT INSERTED.[RowVersion]
+        //     WHERE [Id] = @p AND [RowVersion] = @p
+        // statements on a multi-entity SaveChanges. The seed phase exercises
+        // MERGE WHEN NOT MATCHED INSERT for a rowversion table — the bug
+        // fixed alongside this test was that MERGE didn't auto-bump
+        // rowversion at insert time (INSERT did but MERGE was a parallel
+        // path that missed it).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(
+            "create table Items (Id int primary key, Name nvarchar(50), RowVersion rowversion)");
+
+        using var seed = new TimestampedDbContext(simulation);
+        seed.Items.AddRange(
+            new TimestampedItem { Id = 1, Name = "a" },
+            new TimestampedItem { Id = 2, Name = "b" },
+            new TimestampedItem { Id = 3, Name = "c" });
+        _ = await seed.SaveChangesAsync(this.TestContext.CancellationToken);
+
+        using var ctx = new TimestampedDbContext(simulation);
+        var items = ctx.Items.OrderBy(i => i.Id).ToList();
+        foreach (var i in items)
+            i.Name += "!";
+        _ = await ctx.SaveChangesAsync(this.TestContext.CancellationToken);
+
+        using var fresh = new TimestampedDbContext(simulation);
+        var names = fresh.Items.OrderBy(i => i.Id).Select(i => i.Name).ToArray();
+        CollectionAssert.AreEqual(new[] { "a!", "b!", "c!" }, names);
+    }
+
+    [TestMethod]
     public async Task SaveChanges_TimestampEntity_ReadsBackAutoBumpedRowVersion()
     {
         // EF Core's [Timestamp]-tracked entity emits

@@ -211,6 +211,48 @@ public class OutputClauseTests
     }
 
     [TestMethod]
+    public void Merge_AutoPopulatesRowVersionOnNotMatchedInsert()
+    {
+        // EF Core's batched insert into a [Timestamp] entity emits a MERGE
+        // WHEN NOT MATCHED INSERT against a rowversion-bearing table; the
+        // simulator must auto-bump rowversion the same way INSERT does
+        // (the standalone INSERT path had this; MERGE was a parallel path
+        // that missed it).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key, name nvarchar(50), rv rowversion)");
+
+        var affected = simulation.ExecuteNonQuery("""
+            merge t using (values (1, 'a'), (2, 'b')) as s (id, name) on 1 = 0
+            when not matched then insert (id, name) values (s.id, s.name);
+            """);
+        Assert.AreEqual(2, affected);
+
+        // Both inserted rows must have non-NULL rowversion bytes; values
+        // distinct because rowversion is monotonic per-allocation.
+        using var reader = simulation.ExecuteReader("select id, rv from t order by id");
+        Assert.IsTrue(reader.Read());
+        var row1 = (byte[])reader.GetValue(1);
+        Assert.IsTrue(reader.Read());
+        var row2 = (byte[])reader.GetValue(1);
+        Assert.AreNotEqual(BitConverter.ToString(row1), BitConverter.ToString(row2));
+    }
+
+    [TestMethod]
+    public void Merge_ExplicitRowVersionInColumnList_RaisesMsg273()
+    {
+        // Mirrors INSERT's Msg 273 rejection. The MERGE INSERT branch must
+        // refuse explicit values for a rowversion column the same way.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key, rv rowversion)");
+
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("""
+            merge t using (values (1, 0x0000000000000001)) as s (id, rv) on 1 = 0
+            when not matched then insert (id, rv) values (s.id, s.rv);
+            """));
+        Assert.AreEqual(273, ex.Data["HelpLink.EvtID"] is string s ? int.Parse(s) : 0);
+    }
+
+    [TestMethod]
     public void Merge_WhenMatchedFires_RaisesNotSupported()
     {
         // The simulator parses WHEN MATCHED syntactically but throws if the ON

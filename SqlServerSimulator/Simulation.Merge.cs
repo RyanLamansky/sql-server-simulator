@@ -174,6 +174,8 @@ partial class Simulation
                 ?? throw SimulatedSqlException.InvalidColumnName(colName);
             if (insertColumns2[i].Computed is not null)
                 throw SimulatedSqlException.ColumnCannotBeModified(insertColumns2[i].Name);
+            if (insertColumns2[i].Type == SqlType.RowVersion)
+                throw SimulatedSqlException.CannotInsertExplicitTimestamp();
         }
 
         var output = TryParseOutputClause(context, destinationTable, (sourceAlias, [.. sourceColumnNames], sourceSchema));
@@ -293,6 +295,14 @@ partial class Simulation
 
                 rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
                 lastIdentityValue = generated;
+            }
+
+            // Auto-generate rowversion for every row in a table that has one;
+            // mirrors INSERT (the explicit-value rejection is gated above).
+            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            {
+                if (destinationTable.Columns[i].Type == SqlType.RowVersion)
+                    rowValues[i] = SqlValue.FromRowVersion(context.Simulation.AllocateRowVersion());
             }
 
             EvaluateComputedColumns(destinationTable, rowValues);
