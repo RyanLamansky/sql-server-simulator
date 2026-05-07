@@ -108,14 +108,18 @@ internal sealed partial class Selection
 
         // Top-level ORDER BY: applies to the combined result (post-set-op).
         // ORDER BY references within set-op chains use the first branch's
-        // column names.
+        // column names. Top-level OFFSET/FETCH (post-chain) attaches here
+        // too; FETCH-without-OFFSET on a single SELECT is also caught here
+        // when the cursor sits on FETCH after no ORDER BY was consumed.
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
         {
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             var orderBy = new List<OrderBySpec>();
             ParseOrderByItems(context, orderBy);
-            combined = ApplyTopLevelOrderBy(combined, orderBy);
+            var topLevelTail = new FromClause();
+            ConsumeOffsetFetch(context, topLevelTail);
+            combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetCount, topLevelTail.FetchCount);
         }
 
         return combined;
@@ -220,6 +224,21 @@ internal sealed partial class Selection
         public readonly List<Expression> GroupBy = [];
         public BooleanExpression? Having;
         public readonly List<OrderBySpec> OrderBy = [];
+
+        /// <summary>
+        /// Resolved <c>OFFSET</c> count. Null when no OFFSET clause was
+        /// present. The value is parse-time-resolved (constants, parameters,
+        /// arithmetic) and pre-validated for non-negativity (Msg 10742).
+        /// </summary>
+        public int? OffsetCount;
+
+        /// <summary>
+        /// Resolved <c>FETCH NEXT</c> / <c>FETCH FIRST</c> count. Null when
+        /// no FETCH clause was present (OFFSET-only is valid; FETCH-only is
+        /// rejected at parse time via Msg 153). Pre-validated for &gt; 0
+        /// (Msg 10744).
+        /// </summary>
+        public int? FetchCount;
     }
 
     private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, Func<List<string>, SqlType>? outerTypeResolver, bool allowOrderBy)
@@ -333,6 +352,8 @@ internal sealed partial class Selection
                     var sources = new List<FromSource>();
                     var joins = new List<JoinSpec>();
                     ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
+                    if (topCount is not null && fromClause.OffsetCount is not null)
+                        throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, outerTypeResolver);
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
@@ -358,7 +379,9 @@ internal sealed partial class Selection
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
 
-        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, topCount);
+        if (topCount is not null && fromClause.OffsetCount is not null)
+            throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
+        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount);
     }
 
     /// <summary>
@@ -653,7 +676,70 @@ internal sealed partial class Selection
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             ParseOrderByItems(context, fromClause.OrderBy);
+            ConsumeOffsetFetch(context, fromClause);
         }
+    }
+
+    /// <summary>
+    /// Consumes the optional <c>OFFSET n ROWS [FETCH NEXT|FIRST k ROW|ROWS ONLY]</c>
+    /// tail. Must be called immediately after <see cref="ParseOrderByItems"/>
+    /// — SQL Server requires OFFSET/FETCH to follow ORDER BY (no ORDER BY → the
+    /// OFFSET keyword is just an unexpected identifier and falls through to a
+    /// generic Msg 102 syntax error). FETCH alone (without preceding OFFSET) is
+    /// rejected with Msg 153 here. <c>ROW</c> and <c>ROWS</c> are interchangeable;
+    /// <c>NEXT</c> and <c>FIRST</c> are interchangeable. Both counts resolve at
+    /// parse time and are validated for non-negativity (Msg 10742) and &gt; 0
+    /// (Msg 10744).
+    /// </summary>
+    private static void ConsumeOffsetFetch(ParserContext context, FromClause fromClause)
+    {
+        // FETCH at this position with no preceding OFFSET → Msg 153.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Fetch })
+            throw SimulatedSqlException.FetchInvalidUsageWithoutOffset();
+
+        if (!context.MatchContextual(ContextualKeyword.Offset))
+            return;
+
+        context.MoveNextRequired();
+        var offsetValue = Expression
+            .Parse(context)
+            .Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+        var offsetCount = !offsetValue.IsNull && offsetValue.Type == SqlType.Int32
+            ? offsetValue.AsInt32
+            : throw SimulatedSqlException.TopFetchRequiresInteger();
+        if (offsetCount < 0)
+            throw SimulatedSqlException.OffsetMustNotBeNegative();
+        fromClause.OffsetCount = offsetCount;
+
+        if (!context.MatchContextual(ContextualKeyword.Row) && !context.MatchContextual(ContextualKeyword.Rows))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Fetch })
+            return;
+
+        context.MoveNextRequired();
+        if (!context.MatchContextual(ContextualKeyword.Next) && !context.MatchContextual(ContextualKeyword.First))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        var fetchValue = Expression
+            .Parse(context)
+            .Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+        var fetchCount = !fetchValue.IsNull && fetchValue.Type == SqlType.Int32
+            ? fetchValue.AsInt32
+            : throw SimulatedSqlException.TopFetchRequiresInteger();
+        if (fetchCount < 1)
+            throw SimulatedSqlException.FetchMustBeGreaterThanZero();
+        fromClause.FetchCount = fetchCount;
+
+        if (!context.MatchContextual(ContextualKeyword.Row) && !context.MatchContextual(ContextualKeyword.Rows))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        if (!context.MatchContextual(ContextualKeyword.Only))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
     }
 
     /// <summary>
@@ -714,7 +800,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount)
+    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount)
     {
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
@@ -730,6 +816,10 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
         {
             if (topCount == 0)
+                return [];
+            if (offsetCount is { } offset && offset > 0)
+                return [];
+            if (fetchCount is { } fetch && fetch < 1)
                 return [];
 
             SqlValue Resolve(List<string> name) =>

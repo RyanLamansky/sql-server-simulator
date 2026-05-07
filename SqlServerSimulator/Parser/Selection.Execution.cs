@@ -144,10 +144,13 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
 
+        var offsetCount = fromClause.OffsetCount;
+        var fetchCount = fromClause.FetchCount;
+
         return new Selection(outputSchema, outputColumnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
             aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
-                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, outerResolver)
-                : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, outerResolver));
+                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, outerResolver)
+                : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver));
     }
 
     /// <summary>
@@ -298,7 +301,7 @@ internal sealed partial class Selection
     /// branch's projection so it can reference non-projected source
     /// columns, matching SQL Server's documented behavior.)
     /// </summary>
-    private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy)
+    private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy, int? offsetCount, int? fetchCount)
     {
         var schema = inner.Schema;
         var columnNames = inner.ColumnNames;
@@ -306,30 +309,38 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames, hasOrderBy: true, outerResolver =>
         {
             var allRows = inner.Execute(outerResolver).RowBytes.ToList();
-            if (orderBy.Count == 0 || allRows.Count <= 1)
-                return allRows;
 
-            var keyed = new List<(byte[] Row, SqlValue[] Keys)>(allRows.Count);
-            foreach (var rowBytes in allRows)
+            IEnumerable<byte[]> ordered;
+            if (orderBy.Count == 0 || allRows.Count <= 1)
             {
-                var values = DecodeRowToValues(rowBytes, schema);
-                SqlValue ResolveByOutputName(List<string> name)
+                ordered = allRows;
+            }
+            else
+            {
+                var keyed = new List<(byte[] Row, SqlValue[] Keys)>(allRows.Count);
+                foreach (var rowBytes in allRows)
                 {
-                    var lastPart = name[^1];
-                    for (var j = 0; j < columnNames.Length; j++)
+                    var values = DecodeRowToValues(rowBytes, schema);
+                    SqlValue ResolveByOutputName(List<string> name)
                     {
-                        if (Collation.Default.Equals(columnNames[j], lastPart))
-                            return values[j];
+                        var lastPart = name[^1];
+                        for (var j = 0; j < columnNames.Length; j++)
+                        {
+                            if (Collation.Default.Equals(columnNames[j], lastPart))
+                                return values[j];
+                        }
+                        throw SimulatedSqlException.InvalidColumnName(name);
                     }
-                    throw SimulatedSqlException.InvalidColumnName(name);
+
+                    var keys = ComputeOrderKeys(orderBy, values, columnNames, distinct: false, ResolveByOutputName);
+                    keyed.Add((rowBytes, keys));
                 }
 
-                var keys = ComputeOrderKeys(orderBy, values, columnNames, distinct: false, ResolveByOutputName);
-                keyed.Add((rowBytes, keys));
+                keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+                ordered = keyed.Select(r => r.Row);
             }
 
-            keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
-            return keyed.Select(r => r.Row);
+            return ApplyOffsetTake(ordered, offsetCount, fetchCount);
         });
     }
 
@@ -354,6 +365,8 @@ internal sealed partial class Selection
         SqlType[] outputSchema,
         List<AggregateExpression> aggregates,
         int? topCount,
+        int? offsetCount,
+        int? fetchCount,
         Func<List<string>, SqlValue>? outerResolver)
     {
         if (topCount == 0)
@@ -462,8 +475,13 @@ internal sealed partial class Selection
             output.Add(RowEncoder.EncodeRow(outputSchema, projected));
         }
 
-        if (topCount is { } limit && output.Count > limit)
-            output = [.. output.Take(limit)];
+        if (topCount is { } topLimit && output.Count > topLimit)
+            output = [.. output.Take(topLimit)];
+
+        if (offsetCount is { } offset && offset > 0)
+            output = [.. output.Skip(offset)];
+        if (fetchCount is { } fetchLimit && output.Count > fetchLimit)
+            output = [.. output.Take(fetchLimit)];
 
         return output;
     }
@@ -530,10 +548,27 @@ internal sealed partial class Selection
         List<OrderBySpec> orderBy,
         bool distinct,
         int? topCount,
+        int? offsetCount,
+        int? fetchCount,
         Func<List<string>, SqlValue>? outerResolver) =>
         !distinct && orderBy.Count == 0
-            ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, outerResolver)
-            : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, outerResolver);
+            ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, outerResolver)
+            : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver);
+
+    /// <summary>
+    /// Applies OFFSET (skip) and the row cap (take) to a row sequence in
+    /// that order. The cap is whichever of TOP / FETCH is in play —
+    /// they're mutually exclusive at parse time (Msg 10741), so callers
+    /// pass <c>topCount ?? fetchCount</c> here.
+    /// </summary>
+    private static IEnumerable<byte[]> ApplyOffsetTake(IEnumerable<byte[]> rows, int? offsetCount, int? topOrFetch)
+    {
+        if (offsetCount is { } offset && offset > 0)
+            rows = rows.Skip(offset);
+        if (topOrFetch is { } limit)
+            rows = rows.Take(limit);
+        return rows;
+    }
 
     private static IEnumerable<byte[]> ProjectStreaming(
         FromSource[] sources,
@@ -542,37 +577,37 @@ internal sealed partial class Selection
         List<BooleanExpression> excluders,
         SqlType[] outputSchema,
         int? topCount,
+        int? offsetCount,
+        int? fetchCount,
         Func<List<string>, SqlValue>? outerResolver)
     {
-        var remaining = topCount;
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
+        return ApplyOffsetTake(InnerStream(), offsetCount, topCount ?? fetchCount);
+
+        IEnumerable<byte[]> InnerStream()
         {
-            if (remaining == 0)
-                yield break;
-
-            var localTuple = tuple;
-            SqlValue ResolveColumn(List<string> name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
-
-            var include = true;
-            foreach (var excluder in excluders)
+            foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
             {
-                if (excluder.Run(ResolveColumn) != true)
+                var localTuple = tuple;
+                SqlValue ResolveColumn(List<string> name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
+
+                var include = true;
+                foreach (var excluder in excluders)
                 {
-                    include = false;
-                    break;
+                    if (excluder.Run(ResolveColumn) != true)
+                    {
+                        include = false;
+                        break;
+                    }
                 }
+                if (!include)
+                    continue;
+
+                var projected = new SqlValue[expressions.Count];
+                for (var i = 0; i < expressions.Count; i++)
+                    projected[i] = expressions[i].Run(ResolveColumn);
+
+                yield return RowEncoder.EncodeRow(outputSchema, projected);
             }
-            if (!include)
-                continue;
-
-            var projected = new SqlValue[expressions.Count];
-            for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveColumn);
-
-            yield return RowEncoder.EncodeRow(outputSchema, projected);
-
-            if (remaining is not null)
-                remaining--;
         }
     }
 
@@ -586,6 +621,8 @@ internal sealed partial class Selection
         List<OrderBySpec> orderBy,
         bool distinct,
         int? topCount,
+        int? offsetCount,
+        int? fetchCount,
         Func<List<string>, SqlValue>? outerResolver)
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
@@ -627,8 +664,13 @@ internal sealed partial class Selection
         if (orderBy.Count > 0)
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
 
-        var taken = topCount is { } limit ? materialized.Take(limit) : materialized;
-        foreach (var (projected, _) in taken)
+        IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> windowed = materialized;
+        if (offsetCount is { } offset && offset > 0)
+            windowed = windowed.Skip(offset);
+        if ((topCount ?? fetchCount) is { } limit)
+            windowed = windowed.Take(limit);
+
+        foreach (var (projected, _) in windowed)
             yield return RowEncoder.EncodeRow(outputSchema, projected);
     }
 

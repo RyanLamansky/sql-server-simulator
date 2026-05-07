@@ -146,6 +146,13 @@ Searched (`CASE WHEN cond THEN ... [ELSE ...] END`) and simple (`CASE input WHEN
 
 All forms work correlated and non-correlated, arbitrary nesting depth. Inner plan re-executes per outer row (no caching — fidelity over performance).
 
+### Pagination (`OFFSET ... FETCH`)
+`OFFSET n ROWS [FETCH NEXT|FIRST k ROW|ROWS ONLY]` attached to ORDER BY. `ROW`/`ROWS` and `NEXT`/`FIRST` are interchangeable. OFFSET requires ORDER BY (no ORDER BY → Msg 102 generic syntax error). FETCH alone (no preceding OFFSET) → **Msg 153** `"Invalid usage of the option next in the FETCH statement."` Counts resolve at parse time (constants, parameters, arithmetic like `1+1`); validated at parse: negative offset → **Msg 10742** `"The offset specified in a OFFSET clause may not be negative."` (verbatim "a OFFSET"); fetch &le; 0 → **Msg 10744** `"... must be greater then zero."` (verbatim typo "then").
+
+TOP and OFFSET are mutually exclusive on the same SELECT — both present → **Msg 10741** `"A TOP can not be used in the same query or sub-query as a OFFSET."` Detected at parse time before any rows are read.
+
+Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDER BY in `ApplyTopLevelOrderBy` and operates on the combined result. Per-branch OFFSET/FETCH in a non-final set-op branch inherits the existing Msg 156 rejection (since OFFSET requires ORDER BY which is already rejected per-branch). Inside a derived table: works (the inner SELECT is its own scope).
+
 ### Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (integer-truncating; `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. Standalone and inside `GROUP BY` / `HAVING`.
 

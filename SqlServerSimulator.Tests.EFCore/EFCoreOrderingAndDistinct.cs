@@ -99,6 +99,28 @@ public class EFCoreOrderingAndDistinct
     }
 
     [TestMethod]
+    public void OrderBy_Skip_Take_PaginatesViaOffsetFetch()
+    {
+        // EF Core translates Skip(n).Take(m) over an ordered query into
+        // ORDER BY ... OFFSET n ROWS FETCH NEXT m ROWS ONLY. This test
+        // pins the simulator's pagination plumbing against the real EF
+        // emit shape rather than the hand-written SQL.
+        using var context = SeedPeople();
+        var page2 = context.People.OrderBy(p => p.Id).Select(p => p.Id).Skip(1).Take(2).ToArray();
+        CollectionAssert.AreEqual(new[] { 2, 3 }, page2);
+    }
+
+    [TestMethod]
+    public void OrderBy_Skip_AllRowsAfterOffset()
+    {
+        // Skip without Take → OFFSET n ROWS (no FETCH). EF Core supports
+        // this and the simulator must too.
+        using var context = SeedPeople();
+        var afterFirst = context.People.OrderBy(p => p.Id).Select(p => p.Id).Skip(2).ToArray();
+        CollectionAssert.AreEqual(new[] { 3, 4 }, afterFirst);
+    }
+
+    [TestMethod]
     public void Distinct_OnSingleColumn_RemovesDuplicates()
     {
         using var context = SeedPeople();

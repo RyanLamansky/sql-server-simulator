@@ -321,6 +321,40 @@ internal sealed class SimulatedSqlException : DbException
     /// <returns>The exception.</returns>
     internal static SimulatedSqlException TopFetchRequiresInteger() => new("The number of rows provided for a TOP or FETCH clauses row count parameter must be an integer.", 1060, 15, 1);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 153 — fired when a FETCH clause appears
+    /// without a preceding OFFSET (FETCH alone is invalid; OFFSET must
+    /// always come first). Wording verbatim from the probed server.
+    /// </summary>
+    internal static SimulatedSqlException FetchInvalidUsageWithoutOffset() =>
+        new("Invalid usage of the option next in the FETCH statement.", 153, 15, 2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10741 — fired when both <c>TOP</c> and
+    /// <c>OFFSET</c> appear on the same SELECT (or subquery). Wording
+    /// verbatim, including the "can not" two-word form and the
+    /// non-grammatical "a OFFSET" article.
+    /// </summary>
+    internal static SimulatedSqlException TopAndOffsetMutuallyExclusive() =>
+        new("A TOP can not be used in the same query or sub-query as a OFFSET.", 10741, 15, 2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10742 — fired when an <c>OFFSET</c> clause
+    /// resolves to a negative value at execution time. Wording verbatim,
+    /// including the non-grammatical "a OFFSET" article.
+    /// </summary>
+    internal static SimulatedSqlException OffsetMustNotBeNegative() =>
+        new("The offset specified in a OFFSET clause may not be negative.", 10742, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10744 — fired when a <c>FETCH</c> clause
+    /// resolves to zero or a negative value at execution time. Wording
+    /// verbatim, including the literal "greater then zero" typo from the
+    /// real server's error catalog.
+    /// </summary>
+    internal static SimulatedSqlException FetchMustBeGreaterThanZero() =>
+        new("The number of rows provided for a FETCH clause must be greater then zero.", 10744, 15, 1);
+
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 
     /// <summary>
