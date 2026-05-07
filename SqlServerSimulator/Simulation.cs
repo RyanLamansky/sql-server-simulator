@@ -191,6 +191,14 @@ public sealed partial class Simulation
                     yield return ParseMerge(context);
                     continue;
 
+                case ReservedKeyword { Keyword: Keyword.Update }:
+                    yield return ParseUpdate(context);
+                    continue;
+
+                case ReservedKeyword { Keyword: Keyword.Delete }:
+                    yield return ParseDelete(context);
+                    continue;
+
                 case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
                 case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
                 case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):

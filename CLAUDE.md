@@ -160,6 +160,14 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree backing.
 
+### UPDATE / DELETE
+- `UPDATE table SET col = expr [, col = expr]* [WHERE pred]` and `DELETE [FROM] table [WHERE pred]`. Single-table only.
+- **Multi-column SET evaluates RHS against the pre-update row snapshot** — verified: `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` produces `(a=100, b=11)` (b read pre-update a). Scalar subquery RHS sees the pre-update table state.
+- Identity-column update → **Msg 8102** `"Cannot update identity column 'X'."`. Computed-column update → Msg 271 (existing factory).
+- Per-row constraint re-validation: NOT NULL → **Msg 515** with `"UPDATE fails."` verb; CHECK → **Msg 547** with `"UPDATE statement"` verb. PK / UNIQUE → Msg 2627 (same wording as INSERT — verbatim SQL Server quirk: "Cannot insert duplicate key" wording even on UPDATE).
+- Two-phase execution: phase 1 picks affected rows + computes new values + per-row validation; phase 2 validates PK / UNIQUE against the post-update virtual state (other affected rows' new keys + non-affected heap rows' existing keys); phase 3 mutates (tombstone old, insert new).
+- Literal-only `OUTPUT` clause on UPDATE / DELETE: `OUTPUT 1` and similar literal / parameter projections supported (one yielded row per affected row). EF Core 8's SaveChanges flow emits `OUTPUT 1` as a rows-affected detector on every modify and remove — that's the case this enables. Storage uses page-slot tombstones (high bit on slot directory entry; row payload bytes not reclaimed) and orphaned LOB chains stay in `Heap.LobPages` (see Quirks below).
+
 ### MERGE / OUTPUT (EF Core SaveChanges shape only)
 - `INSERT ... OUTPUT INSERTED.<col>` (single-row).
 - `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch).
@@ -188,7 +196,9 @@ Comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 fr
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string. Other styles raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date parsing not modeled.
 - Cross-category `Promote` for integer ↔ string. Only CAST works that pair.
 - `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
-- `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, OUTPUT on UPDATE/DELETE, `INSERTED.*` star expansion.
+- `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, `INSERTED.*` star expansion. Full `OUTPUT INSERTED.<col>` / `OUTPUT DELETED.<col>` support on UPDATE / DELETE (literal-only OUTPUT *is* supported — see "What's modeled / UPDATE / DELETE"). The INSERTED / DELETED resolver work pairs with the rowversion + MERGE WHEN MATCHED bundle that closes the optimistic-concurrency story; trigger support also depends on it.
+- Multi-table UPDATE / DELETE (`UPDATE alias SET ... FROM table AS alias`, `DELETE alias FROM ...`). EF7+ `ExecuteUpdate` / `ExecuteDelete` emit these and won't work without the bundle.
+- `rowversion` type (paired with full UPDATE / DELETE OUTPUT for `[Timestamp]` concurrency tracking).
 - MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`.
 - Msg 8141 (inline CHECK referencing a peer column — SQL Server rejects at CREATE TABLE; simulator allows).
 - Msg 8133 (CASE where every branch is bare `NULL`; simulator returns NULL of `int`).
@@ -207,3 +217,6 @@ Comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 fr
 - `float` text formatting: .NET `G15` / `G7` rather than SQL Server's `1e+015`-style scientific.
 - CAST to a smaller `varchar` / `nvarchar` than the value renders: SQL Server silently truncates; simulator returns the full string.
 - Auto-generated PK / UNIQUE / CHECK constraint names: structurally `PK__<table>__<hex>` / `UQ__...` / `CK__<table>__[col__]<hex>` matching SQL Server's shape; the 16-hex suffix is a deterministic FNV-1a hash, not SQL Server's object-id-derived hex (stable across runs but won't byte-match a real-server reproduction).
+- **DELETE / UPDATE leak page space**: deleted (or UPDATE-relocated) row payload bytes stay in their original page until process exit; only the slot is tombstoned. Slot directory entries are also never reused. SQL Server has ghost-cleanup background work that the simulator doesn't model.
+- **DELETE / UPDATE leak LOB chains**: when a row is removed or its LOB-pointed value replaced, the orphaned LOB chain stays in `Heap.LobPages`. Other rows reference LOB pages by stable index, so list compaction would corrupt them; full LOB lifecycle (free-list / tombstones) is a follow-up bundle.
+- **Mass-shift UPDATE on a unique key**: `UPDATE t SET k = k + 1` where `k` is PK / UNIQUE produces a per-row collision check that may spuriously raise Msg 2627 — the simulator's two-phase validator compares each affected row's new key against other affected rows' new keys, so a "shift" pattern where post-shift values overlap pre-shift values triggers a false positive. SQL Server uses a temp store that staging-applies all updates before validation. Real EF Core SaveChanges patterns don't hit this.

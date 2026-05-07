@@ -742,9 +742,12 @@ internal sealed class SimulatedSqlException : DbException
     /// nulls. The fixed text uses the database-qualified table name; the
     /// simulator's single-database model emits <c>"claude.dbo.&lt;t&gt;"</c>'s
     /// shape with the simulator's default database name.
+    /// <paramref name="verb"/> picks between <c>"INSERT"</c> (the default)
+    /// and <c>"UPDATE"</c> for the trailing <c>"… fails."</c> clause —
+    /// real SQL Server emits the per-statement verb verbatim there.
     /// </summary>
-    internal static SimulatedSqlException CannotInsertNull(string columnName, string tableName) =>
-        new($"Cannot insert the value NULL into column '{columnName}', table '{Simulation.DefaultDatabaseName}.dbo.{tableName}'; column does not allow nulls. INSERT fails.", 515, 16, 2);
+    internal static SimulatedSqlException CannotInsertNull(string columnName, string tableName, string verb = "INSERT") =>
+        new($"Cannot insert the value NULL into column '{columnName}', table '{Simulation.DefaultDatabaseName}.dbo.{tableName}'; column does not allow nulls. {verb} fails.", 515, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 8110: more than one column or table-level
@@ -778,11 +781,19 @@ internal sealed class SimulatedSqlException : DbException
     /// table-level CHECK omits it — matching the real-server probe. The DB
     /// name slot uses <see cref="Simulation.DefaultDatabaseName"/>.
     /// </summary>
-    internal static SimulatedSqlException CheckConstraintViolation(string constraintName, string tableName, string? inlineColumn)
+    internal static SimulatedSqlException CheckConstraintViolation(string constraintName, string tableName, string? inlineColumn, string verb = "INSERT")
     {
         var columnSuffix = inlineColumn is null ? "" : $", column '{inlineColumn}'";
-        return new($"The INSERT statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.", 547, 16, 0);
+        return new($"The {verb} statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.", 547, 16, 0);
     }
+
+    /// <summary>
+    /// Mimics SQL Server error 8102: an UPDATE statement targeted an identity
+    /// column. <c>SET IDENTITY_INSERT</c> only opens INSERT to identity
+    /// values; UPDATE on an identity column is rejected unconditionally.
+    /// </summary>
+    internal static SimulatedSqlException CannotUpdateIdentityColumn(string columnName) =>
+        new($"Cannot update identity column '{columnName}'.", 8102, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2627: an INSERT or UPDATE produced a row whose

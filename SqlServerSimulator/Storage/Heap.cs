@@ -70,7 +70,8 @@ internal sealed class Heap
 
     /// <summary>
     /// Yields every row in every page in allocation order. Each yielded array
-    /// is a fresh copy of the page bytes for that row.
+    /// is a fresh copy of the page bytes for that row. Tombstoned slots
+    /// (DELETE / UPDATE-relocated) are skipped at the page level.
     /// </summary>
     public IEnumerable<byte[]> EnumerateRows()
     {
@@ -80,6 +81,33 @@ internal sealed class Heap
                 yield return row;
         }
     }
+
+    /// <summary>
+    /// Like <see cref="EnumerateRows"/> but yields a stable address for each
+    /// row alongside its bytes — UPDATE and DELETE need this to call
+    /// <see cref="DeleteAt"/> on the rows they're operating on. The address
+    /// is a (pageIndex, slotIndex) tuple; the index pair survives further
+    /// inserts (insertions may add new pages but never reshuffle existing
+    /// slots).
+    /// </summary>
+    public IEnumerable<(int PageIndex, int SlotIndex, byte[] Bytes)> EnumerateRowsWithAddress()
+    {
+        for (var p = 0; p < this.Pages.Count; p++)
+        {
+            foreach (var (slotIndex, bytes) in this.Pages[p].EnumerateRowsWithSlots())
+                yield return (p, slotIndex, bytes);
+        }
+    }
+
+    /// <summary>
+    /// Marks the row at <paramref name="pageIndex"/> / <paramref name="slotIndex"/>
+    /// as deleted. The slot is tombstoned at the page level; row payload
+    /// bytes are not reclaimed and any LOB chain the row referenced is
+    /// orphaned (left in <see cref="LobPages"/>) — see CLAUDE.md for the
+    /// LOB-leak quirk on UPDATE / DELETE.
+    /// </summary>
+    public void DeleteAt(int pageIndex, int slotIndex) =>
+        this.Pages[pageIndex].DeleteSlot(slotIndex);
 
     /// <summary>Total row count across all pages.</summary>
     public int RowCount

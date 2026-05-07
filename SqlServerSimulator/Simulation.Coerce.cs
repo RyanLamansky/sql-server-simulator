@@ -164,13 +164,13 @@ partial class Simulation
     /// stored — SQL Server considers their evaluated value when checking
     /// nullability.
     /// </summary>
-    private static void EnforceNotNull(HeapTable destinationTable, SqlValue[] rowValues)
+    private static void EnforceNotNull(HeapTable destinationTable, SqlValue[] rowValues, string verb = "INSERT")
     {
         for (var i = 0; i < destinationTable.Columns.Length; i++)
         {
             var column = destinationTable.Columns[i];
             if (!column.Nullable && rowValues[i].IsNull)
-                throw SimulatedSqlException.CannotInsertNull(column.Name, destinationTable.Name);
+                throw SimulatedSqlException.CannotInsertNull(column.Name, destinationTable.Name, verb);
         }
     }
 
@@ -183,7 +183,7 @@ partial class Simulation
     /// matches the row's column ordinals via case-insensitive name compare,
     /// the same shape <see cref="EvaluateComputedColumns"/> uses.
     /// </summary>
-    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues)
+    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, string verb = "INSERT")
     {
         if (destinationTable.CheckConstraints.Length == 0)
             return;
@@ -202,7 +202,7 @@ partial class Simulation
         foreach (var check in destinationTable.CheckConstraints)
         {
             if (check.Predicate.Run(ResolveByName) == false)
-                throw SimulatedSqlException.CheckConstraintViolation(check.Name, destinationTable.Name, check.InlineColumn);
+                throw SimulatedSqlException.CheckConstraintViolation(check.Name, destinationTable.Name, check.InlineColumn, verb);
         }
     }
 

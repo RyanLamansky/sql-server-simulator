@@ -45,6 +45,17 @@ internal sealed class HeapPage
 
     private const byte HeapDataPageType = 0x01;
 
+    /// <summary>
+    /// High bit of a slot's 16-bit value flags the slot as deleted (tombstone).
+    /// The remaining 15 bits hold the row's byte offset within the page; offsets
+    /// fit in 13 bits (max 8190) so the high bit is always available. UPDATE
+    /// and DELETE set this bit; <see cref="EnumerateRowsWithSlots"/> skips
+    /// tombstoned slots. Row payload bytes are not reclaimed — slot directory
+    /// space and row data area both grow monotonically (intentional simplifying
+    /// trade-off; see CLAUDE.md).
+    /// </summary>
+    private const ushort SlotTombstoneBit = 0x8000;
+
     /// <summary>The page's raw bytes (for tests and future page I/O).</summary>
     public readonly byte[] Bytes = new byte[PageSize];
 
@@ -106,22 +117,58 @@ internal sealed class HeapPage
     }
 
     /// <summary>
-    /// Yields each row's bytes in slot-directory order. Rows are copied out of
-    /// the page; mutating the returned arrays does not affect the page.
+    /// Yields each live row's bytes in slot-directory order. Tombstoned slots
+    /// (rows removed by DELETE or relocated by UPDATE) are skipped. Rows are
+    /// copied out of the page; mutating the returned arrays does not affect
+    /// the page.
     /// </summary>
     public IEnumerable<byte[]> EnumerateRows()
+    {
+        foreach (var (_, bytes) in this.EnumerateRowsWithSlots())
+            yield return bytes;
+    }
+
+    /// <summary>
+    /// Like <see cref="EnumerateRows"/> but yields the slot index alongside
+    /// each row's bytes. Used by UPDATE and DELETE to address rows for
+    /// in-place removal via <see cref="DeleteSlot"/>. Tombstoned slots are
+    /// skipped — the caller never sees them.
+    /// </summary>
+    public IEnumerable<(int SlotIndex, byte[] Bytes)> EnumerateRowsWithSlots()
     {
         var count = this.SlotCount;
         for (var i = 0; i < count; i++)
         {
-            var rowStart = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (i + 1)), 2));
+            if (this.IsSlotDeleted(i))
+                continue;
+
+            var rowStart = this.ReadSlotOffset(i);
             var rowEnd = i + 1 < count
-                ? BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (i + 2)), 2))
+                ? this.ReadSlotOffset(i + 1)
                 : this.FreeSpacePointer;
 
-            yield return this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray();
+            yield return (i, this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray());
         }
     }
+
+    /// <summary>
+    /// Marks the slot at <paramref name="slotIndex"/> as deleted (tombstone).
+    /// The slot directory entry stays in place — slot count is unchanged —
+    /// but the high bit is set so subsequent enumerations skip it. Row
+    /// payload bytes within the page are not reclaimed.
+    /// </summary>
+    public void DeleteSlot(int slotIndex)
+    {
+        var slotByteOffset = PageSize - (2 * (slotIndex + 1));
+        var slotValue = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2));
+        BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue | SlotTombstoneBit));
+    }
+
+    private bool IsSlotDeleted(int slotIndex) =>
+        (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotTombstoneBit) != 0;
+
+    private ushort ReadSlotOffset(int slotIndex) =>
+        (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & ~SlotTombstoneBit);
 
     internal string DebugDisplay() => $"HeapPage(type=0x{this.PageType:X2}, slots={this.SlotCount}, freePtr={this.FreeSpacePointer}, prev={this.PrevPageIndex}, next={this.NextPageIndex})";
 }
