@@ -37,25 +37,97 @@ internal static class DatePartKinds
     public static DatePartKind ResolveOrThrow(string keyword) =>
         Resolve(keyword) ?? throw SimulatedSqlException.NotARecognizedDatepartOption(keyword);
 
-    private static DatePartKind? Resolve(string keyword) => keyword.ToUpperInvariant() switch
+    /// <summary>
+    /// Span-based keyword dispatch — matches the pattern used in
+    /// <c>Parser/Expression.cs:ResolveBuiltIn</c> and
+    /// <c>Storage/SqlType.cs:GetByName</c> so the parser stays
+    /// allocation-free in its keyword-resolution hot paths.
+    /// </summary>
+    private static DatePartKind? Resolve(string keyword)
     {
-        "YEAR" or "YY" or "YYYY" => DatePartKind.Year,
-        "QUARTER" or "QQ" or "Q" => DatePartKind.Quarter,
-        "MONTH" or "MM" or "M" => DatePartKind.Month,
-        "DAYOFYEAR" or "DY" or "Y" => DatePartKind.DayOfYear,
-        "DAY" or "DD" or "D" => DatePartKind.Day,
-        "WEEK" or "WK" or "WW" => DatePartKind.Week,
-        "ISO_WEEK" or "ISOWK" or "ISOWW" => DatePartKind.IsoWeek,
-        "WEEKDAY" or "DW" => DatePartKind.Weekday,
-        "HOUR" or "HH" => DatePartKind.Hour,
-        "MINUTE" or "MI" or "N" => DatePartKind.Minute,
-        "SECOND" or "SS" or "S" => DatePartKind.Second,
-        "MILLISECOND" or "MS" => DatePartKind.Millisecond,
-        "MICROSECOND" or "MCS" => DatePartKind.Microsecond,
-        "NANOSECOND" or "NS" => DatePartKind.Nanosecond,
-        "TZOFFSET" or "TZ" => DatePartKind.TzOffset,
-        _ => null,
-    };
+        Span<char> upper = stackalloc char[keyword.Length];
+        return keyword.AsSpan().ToUpperInvariant(upper) switch
+        {
+            1 => upper switch
+            {
+                "Q" => DatePartKind.Quarter,
+                "M" => DatePartKind.Month,
+                "Y" => DatePartKind.DayOfYear,
+                "D" => DatePartKind.Day,
+                "N" => DatePartKind.Minute,
+                "S" => DatePartKind.Second,
+                _ => null,
+            },
+            2 => upper switch
+            {
+                "YY" => DatePartKind.Year,
+                "QQ" => DatePartKind.Quarter,
+                "MM" => DatePartKind.Month,
+                "DY" => DatePartKind.DayOfYear,
+                "DD" => DatePartKind.Day,
+                "WK" or "WW" => DatePartKind.Week,
+                "DW" => DatePartKind.Weekday,
+                "HH" => DatePartKind.Hour,
+                "MI" => DatePartKind.Minute,
+                "SS" => DatePartKind.Second,
+                "MS" => DatePartKind.Millisecond,
+                "NS" => DatePartKind.Nanosecond,
+                "TZ" => DatePartKind.TzOffset,
+                _ => null,
+            },
+            3 => upper switch
+            {
+                "DAY" => DatePartKind.Day,
+                "MCS" => DatePartKind.Microsecond,
+                _ => null,
+            },
+            4 => upper switch
+            {
+                "YEAR" => DatePartKind.Year,
+                "YYYY" => DatePartKind.Year,
+                "WEEK" => DatePartKind.Week,
+                "HOUR" => DatePartKind.Hour,
+                _ => null,
+            },
+            5 => upper switch
+            {
+                "MONTH" => DatePartKind.Month,
+                "ISOWK" or "ISOWW" => DatePartKind.IsoWeek,
+                _ => null,
+            },
+            6 => upper switch
+            {
+                "MINUTE" => DatePartKind.Minute,
+                "SECOND" => DatePartKind.Second,
+                _ => null,
+            },
+            7 => upper switch
+            {
+                "QUARTER" => DatePartKind.Quarter,
+                "WEEKDAY" => DatePartKind.Weekday,
+                _ => null,
+            },
+            8 => upper switch
+            {
+                "ISO_WEEK" => DatePartKind.IsoWeek,
+                "TZOFFSET" => DatePartKind.TzOffset,
+                _ => null,
+            },
+            9 => upper switch
+            {
+                "DAYOFYEAR" => DatePartKind.DayOfYear,
+                _ => null,
+            },
+            11 => upper switch
+            {
+                "MILLISECOND" => DatePartKind.Millisecond,
+                "MICROSECOND" => DatePartKind.Microsecond,
+                "NANOSECOND" => DatePartKind.Nanosecond,
+                _ => null,
+            },
+            _ => null,
+        };
+    }
 
     private static bool IsTimePart(DatePartKind k) => k is DatePartKind.Hour
         or DatePartKind.Minute or DatePartKind.Second or DatePartKind.Millisecond
