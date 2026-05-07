@@ -24,7 +24,7 @@ internal sealed class SimulatedSqlResultSet(SqlType[] schema, string[] columnNam
 
         public override bool MoveNext() => source.MoveNext();
 
-        public override object? GetValueObject(int ordinal) => RowDecoder.DecodeColumn(schema, source.Current, ordinal).ToObject();
+        public override SqlValue this[int ordinal] => RowDecoder.DecodeColumn(schema, source.Current, ordinal);
 
         protected override void DisposeCore() => source.Dispose();
     }

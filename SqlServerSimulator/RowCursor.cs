@@ -1,9 +1,13 @@
+using SqlServerSimulator.Storage;
+
 namespace SqlServerSimulator;
 
 /// <summary>
 /// Iterates a result set's rows for <see cref="SimulatedDbDataReader"/>.
-/// Each row exposes its column values as .NET objects (or <c>null</c> for SQL
-/// NULL); the public reader translates <c>null</c> to <see cref="DBNull.Value"/>.
+/// Each accessor returns the column's <see cref="SqlValue"/> directly so the
+/// reader's typed <c>Get*</c> methods can route through <c>SqlValue.As*</c>
+/// without a boxing detour. Object-typed accessors (<c>GetValue</c> /
+/// <c>this[int]</c>) call <c>ToObject()</c> at the public API boundary.
 /// </summary>
 internal abstract class RowCursor : IDisposable
 {
@@ -14,11 +18,11 @@ internal abstract class RowCursor : IDisposable
     public abstract bool MoveNext();
 
     /// <summary>
-    /// Returns the .NET object representation of the column at <paramref name="ordinal"/>,
-    /// or <c>null</c> for SQL NULL. The caller is responsible for converting <c>null</c>
-    /// to <see cref="DBNull.Value"/> at the public API boundary.
+    /// Returns the column at <paramref name="ordinal"/> as a
+    /// <see cref="SqlValue"/>; <see cref="SqlValue.IsNull"/> distinguishes
+    /// SQL NULL from a present value of any type.
     /// </summary>
-    public abstract object? GetValueObject(int ordinal);
+    public abstract SqlValue this[int ordinal] { get; }
 
     public void Dispose()
     {

@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Data.Common;
+using System.Data.SqlTypes;
 using System.Diagnostics.CodeAnalysis;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -16,7 +18,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         this.cursor = this.results.MoveNext() ? this.results.Current.CreateCursor() : EmptyCursor.Instance;
     }
 
-    public override object this[int ordinal] => cursor.GetValueObject(ordinal) ?? DBNull.Value;
+    public override object this[int ordinal] => GetValue(ordinal);
 
     public override object this[string name] => throw new NotImplementedException();
 
@@ -30,7 +32,11 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override int RecordsAffected => recordsAffected;
 
-    public override bool GetBoolean(int ordinal) => (bool)this[ordinal];
+    public override bool GetBoolean(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsBoolean;
+    }
 
     public override byte GetByte(int ordinal)
     {
@@ -57,11 +63,47 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override DateTime GetDateTime(int ordinal) => (DateTime)this[ordinal];
+    /// <summary>
+    /// Mirrors SqlClient's polymorphic <c>GetDateTime</c>: a <c>date</c> column
+    /// surfaces as <see cref="DateTime"/> at midnight (<see cref="DateTimeKind.Unspecified"/>),
+    /// while <c>datetime</c> / <c>smalldatetime</c> / <c>datetime2</c> return
+    /// their stored value directly. Other column types raise
+    /// <see cref="InvalidCastException"/>.
+    /// </summary>
+    public override DateTime GetDateTime(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException()
+            : v.Type switch
+            {
+                var t when t == SqlType.Date => v.AsDate.ToDateTime(TimeOnly.MinValue),
+                var t when t == SqlType.DateTime => v.AsDateTime,
+                var t when t == SqlType.SmallDateTime => v.AsSmallDateTime,
+                DateTime2SqlType => v.AsDateTime2,
+                _ => throw new InvalidCastException($"Cannot cast column of type {v.Type} to DateTime."),
+            };
+    }
 
-    public override decimal GetDecimal(int ordinal) => (decimal)this[ordinal];
+    /// <summary>
+    /// Mirrors SqlClient's polymorphic <c>GetDecimal</c>: <c>decimal</c> /
+    /// <c>numeric</c> columns return their stored value, and <c>money</c> /
+    /// <c>smallmoney</c> columns surface as scale-4 <see cref="decimal"/>.
+    /// Other column types raise <see cref="InvalidCastException"/>.
+    /// </summary>
+    public override decimal GetDecimal(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException()
+            : v.Type is DecimalSqlType ? v.AsDecimal
+            : v.Type == SqlType.Money || v.Type == SqlType.SmallMoney ? v.AsMoney
+            : throw new InvalidCastException($"Cannot cast column of type {v.Type} to decimal.");
+    }
 
-    public override double GetDouble(int ordinal) => (double)this[ordinal];
+    public override double GetDouble(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsDouble;
+    }
 
     public override IEnumerator GetEnumerator()
     {
@@ -74,13 +116,29 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override float GetFloat(int ordinal) => (float)this[ordinal];
+    public override float GetFloat(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsSingle;
+    }
 
-    public override Guid GetGuid(int ordinal) => (Guid)this[ordinal];
+    public override Guid GetGuid(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsGuid;
+    }
 
-    public override short GetInt16(int ordinal) => (short)this[ordinal];
+    public override short GetInt16(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsInt16;
+    }
 
-    public override int GetInt32(int ordinal) => (int)this[ordinal];
+    public override int GetInt32(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsInt32;
+    }
 
     public override long GetInt64(int ordinal)
     {
@@ -103,32 +161,48 @@ sealed class SimulatedDbDataReader : DbDataReader
         throw new NotImplementedException();
     }
 
-    public override string GetString(int ordinal) => (string)this[ordinal];
+    public override string GetString(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsString;
+    }
 
-    public override object GetValue(int ordinal) => cursor.GetValueObject(ordinal) ?? DBNull.Value;
+    public override object GetValue(int ordinal)
+    {
+        var v = cursor[ordinal];
+        return v.IsNull ? DBNull.Value : v.ToObject()!;
+    }
 
     /// <summary>
-    /// Adds the unboxing conversions real <c>SqlClient</c> performs for the
-    /// CLR-only types EF Core asks about explicitly: <c>date</c> values are
-    /// stored as <see cref="DateTime"/> but EF requests <see cref="DateOnly"/>;
-    /// <c>time</c> values are stored as <see cref="TimeSpan"/> but EF
-    /// requests <see cref="TimeOnly"/>. Anything else falls through to the
-    /// base implementation, which is a plain unboxing cast.
+    /// Adds the conversions real <c>SqlClient</c> performs for the CLR-only
+    /// types EF Core asks about explicitly: <c>date</c> values are stored as
+    /// <see cref="DateOnly"/> but EF requests <see cref="DateTime"/> via
+    /// <see cref="GetDateTime"/>; <c>time</c> values are surfaced as
+    /// <see cref="TimeSpan"/> via the untyped path but EF requests
+    /// <see cref="TimeOnly"/> here. Anything else routes through
+    /// <see cref="GetValue"/> + the unboxing cast that the base class would
+    /// otherwise perform; the per-row decode happens once because the SqlValue
+    /// is captured up front.
     /// </summary>
-    public override T GetFieldValue<T>(int ordinal) =>
-        cursor.GetValueObject(ordinal) switch
+    public override T GetFieldValue<T>(int ordinal)
+    {
+        var v = cursor[ordinal];
+        if (!v.IsNull)
         {
-            DateTime dt when typeof(T) == typeof(DateOnly) => (T)(object)DateOnly.FromDateTime(dt),
-            TimeSpan ts when typeof(T) == typeof(TimeOnly) => (T)(object)TimeOnly.FromTimeSpan(ts),
-            _ => base.GetFieldValue<T>(ordinal),
-        };
+            if (typeof(T) == typeof(DateOnly) && v.Type == SqlType.Date)
+                return (T)(object)v.AsDate;
+            if (typeof(T) == typeof(TimeOnly) && v.Type is TimeSqlType)
+                return (T)(object)TimeOnly.FromTimeSpan(v.AsTime);
+        }
+        return (T)(v.IsNull ? DBNull.Value : v.ToObject()!);
+    }
 
     public override int GetValues(object[] values)
     {
         throw new NotImplementedException();
     }
 
-    public override bool IsDBNull(int ordinal) => cursor.GetValueObject(ordinal) is null;
+    public override bool IsDBNull(int ordinal) => cursor[ordinal].IsNull;
 
     public override bool NextResult()
     {
@@ -170,6 +244,6 @@ sealed class SimulatedDbDataReader : DbDataReader
 
         public override bool MoveNext() => false;
 
-        public override object? GetValueObject(int ordinal) => throw new InvalidOperationException("No current row.");
+        public override SqlValue this[int ordinal] => throw new InvalidOperationException("No current row.");
     }
 }
