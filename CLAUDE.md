@@ -1,37 +1,30 @@
 # Claude Working Notes
 
-Canonical orientation for working in this repo. Claude Code reads this file automatically; `README.md` is user-facing and not auto-loaded.
+Auto-loaded orientation. `README.md` is for humans.
 
-## What this is
+## Identity
 
-SqlServerSimulator is a .NET library that emulates a SQL Server instance in-process. Code written against `Microsoft.Data.SqlClient` or `Microsoft.EntityFrameworkCore.SqlServer` can use a `Simulation` instance instead of a real database — useful for fast deterministic tests, for reproducing pathological SQL Server behaviors that are hard to set up on a real server, and for any scenario where embedding a database avoids the operational weight of a real one.
+`SqlServerSimulator`: in-process .NET 10 SQL Server simulation. Consumers point `Microsoft.Data.SqlClient` or `Microsoft.EntityFrameworkCore.SqlServer` at a `Simulation` instead of a real database. Public surface is `Simulation` + `CreateDbConnection()`; `QualityTests.PublicApiWhitelist` fails the build if anything else leaks public — resist expanding.
 
-## Long-term direction
+`SqlServerSimulator.EFCore` is a sibling package whose only public method is `UseSqlServerSimulator(DbContextOptionsBuilder, DbConnection)`. It registers an `IRelationalTypeMappingSourcePlugin` for the (CLR, store) pairs whose default mappings downcast to `SqlParameter`.
 
-High-fidelity SQL Server simulation, eventually including transactions, locks, MVCC, real allocation tracking (IAM/PFS), and overflow pages — the things that make SQL Server *SQL Server*, not just a SQL parser with a hash table behind it. The fidelity bar is set by the EF Core regression oracle in the `*.Tests.EFCore` project: if EF Core trusts the simulator end-to-end, the simulator is earning its keep. That project must stay green.
+## Operating goal
 
-When SQL Server's actual behavior is quirky or lossy (CP1252's silent `?` replacement for out-of-codepage characters, ANSI trailing-space padding for `=`, `LEN` excluding trailing spaces), mirror it rather than "fixing" it — authenticity over desirability is what makes the simulator a faithful stand-in.
+High-fidelity emulation. Authenticity over desirability — when SQL Server's behavior is quirky or lossy (CP1252 `?` replacement, ANSI trailing-space `=` padding, `LEN` excluding trailing spaces), mirror it. Final fidelity bar: EF Core trusts the simulator end-to-end. `*.Tests.EFCore` is the regression oracle; must stay green.
 
-The overall plan is incremental and non-specific: pick the lowest-effort path that unlocks the most useful application compatibility next. Transactions / locks / MVCC are the next obvious eventual target; order is opportunistic, driven by what's blocking the user's actual application stand-ins. Over time, this accretion gets the simulator to "most apps just work"; near term, work flows to the smallest unlock for the biggest cohort of pain points.
+Priority is opportunistic: each bundle picks the lowest-effort path that unlocks the most application compatibility next. Transactions / locks / MVCC are the eventual obvious target; near-term order is driven by what's actually blocking real EF Core / SqlClient code.
 
-## Public API surface
+## Feature-bundle workflow
 
-`Simulation` and `CreateDbConnection()`. That's it. `QualityTests.PublicApiWhitelist` fails the build if anything else becomes public. Resist expanding the surface.
+Standing pattern for non-trivial SQL feature work:
 
-## Architecture shape
+1. **Probe.** Behavior questions get answered against a real SQL Server 2025 instance, not from memory or docs. Connection details for the user's reference instance live in user memory under "Real SQL Server reference instance."
+2. **Surface decisions.** Before writing code, surface 2–3 concrete design choices and recommend one each. The user is decisive at choice points.
+3. **Implement + test.** Tests in `*.Tests` exercise the public API path; `*.Tests.EFCore` validates the oracle. Use `*.Tests.Internal` only for things genuinely unreachable from public SQL.
+4. **Update CLAUDE.md.** Move bullets between "What's modeled" / "Not modeled" / "Quirks" as scope changes.
+5. **Single-sentence commit.** Squashes capture the end state, not working steps. Don't run `git commit` — the user holds signing credentials.
 
-One backend: page-format storage. User tables hold a heap of 8KB pages; rows are encoded as bytes via a row encoder/decoder and navigated column-by-column without rehydrating whole rows. Every non-NULL variable-length column carries a 1-byte inline/pointer marker ahead of its bytes. Oversize values for the LOB-eligible types (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` / `text` / `ntext` / `image`) always flow through a parallel chain of 8KB LOB pages on the same heap; bounded var columns (`varchar(N)` / `nvarchar(N)` / `varbinary(N)`) start inline but the encoder pushes the largest one off-row greedily — repeating until the row fits — when the encoded row would exceed 8060 bytes. The type system has its own `SqlType`/`SqlValue` pair. Expression evaluation has separate paths for runtime evaluation and static type-of resolution (for projection planning).
-
-Top-level subsystems (in `SqlServerSimulator/`):
-- `Storage/` — pages, row encoder/decoder, types, values
-- `Parser/` — tokenizer, expression tree, query planner
-- root — `Simulated*` implementations of `DbCommand`/`DbConnection`/`DbDataReader`/etc., plus `Simulation` itself
-
-`SqlServerSimulator.EFCore/` is a sibling package whose only public surface is `UseSqlServerSimulator(DbContextOptionsBuilder, DbConnection)`. It registers an `IRelationalTypeMappingSourcePlugin` that substitutes provider-agnostic mappings for the (CLR type, store type) pairs whose default `SqlServer`-provider mappings downcast `DbParameter` to `SqlParameter`: `DateOnly` / `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly` / `TimeSpan → time(N)`, and `decimal → money` / `smallmoney`.
-
-Test projects: main feature tests, internal-access tests for storage/parser internals, EF Core integration (the oracle), and analyzer tests.
-
-## Build, test, format
+## Build / test / format
 
 ```
 dotnet build
@@ -39,54 +32,171 @@ dotnet test
 dotnet format --verify-no-changes
 ```
 
-`dotnet build` runs most analyzers via `EnforceCodeStyleInBuild=true`, but a few formatting rules (notably IDE0055) only fire under `dotnet format` or in Visual Studio. CI runs both — keep both green locally before pushing.
+Each `.csproj` sets `<EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>`, so `dotnet build` runs IDE-prefixed analyzers as build errors. `dotnet format whitespace` is the only thing build doesn't cover — IDE0055 and the textual rules (`csharp_space_*`, `csharp_indent_*`, `csharp_new_line_*`, trailing whitespace, final-newline-at-EOF) live in Roslyn's formatter, not its analyzer host. The `style` and `analyzers` sub-pipelines overlap the build, so CI runs only `dotnet format whitespace` separately. Run the full `dotnet format` locally — that's still useful for picking up any drift.
 
-## Project-specific rules
+CI matrix runs Debug + Release builds (conditional compilation can differ). Test parallelism is method-level on every project (`[assembly: Parallelize(Scope = ExecutionScope.MethodLevel)]`); follow that on new test projects.
 
-### SSS001 (custom analyzer)
-A repo-local analyzer flags any property in a non-public type that's an auto-property or a trivial wrapper over a same-type field. Rationale: non-public types gain no API-stability benefit from property metadata; the wrapper just adds JIT/IDE overhead. Expose the field directly (`public readonly T Foo = expr;`). Overrides, abstracts, statics, and explicit interface implementations are exempt. The analyzer lives in its own project with its own test project.
+If `obj/` permission errors appear (e.g. `Up2Date` access denied), the user has been building outside the dev container; `rm -rf obj/ bin/` clears them.
 
-### MSTEST0049 (error severity)
-Configured in `.editorconfig` to fail the build. Async tests must thread `TestContext.CancellationToken` into framework calls. Pattern: `public TestContext TestContext { get; set; } = null!;` on the test class plus a helper that uses `this.TestContext.CancellationToken`.
+## Architecture — load-bearing patterns
 
-### AssemblyHooks
-Each test project has an `AssemblyHooks.cs` with a `static [TestClass]` hosting `[AssemblyInitialize]`. Use this for assembly-scoped warm-up or sanity checks rather than embedding the hook in a regular test class. The analyzer-tests warm-up specifically prevents Roslyn cache contention under parallel test execution (~3x slowdown without it).
+Top-level layout (`SqlServerSimulator/`):
+- `Storage/` — pages, types, row encoder/decoder, heap, constraints
+- `Parser/` — tokenizer, expressions, query planning + execution
+- root — `Simulated*` ADO.NET implementations, `Simulation`
 
-### Test parallelism
-Every test project uses `[assembly: Parallelize(Scope = ExecutionScope.MethodLevel)]`. New test projects should follow.
+### Storage
 
-### Exception types
-`SimulatedSqlException` mirrors a real SQL Server error — its number, class, state, and message format. Use it when the simulator's behavior matches SQL Server's: invalid SQL, type mismatches, constraint violations, oversize column declarations, truncation. `NotSupportedException` is for valid SQL Server features the simulator hasn't built yet; name the unmodeled feature in the message. The distinction matters to users debugging tests against the simulator: "this is invalid SQL" should look different from "this works against real SQL Server but not yet here."
+8KB heap pages. Rows encoded as bytes, navigated column-by-column without rehydrating. Every non-NULL variable-length column carries a 1-byte inline/pointer marker. LOB-eligible types (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` / `text` / `ntext` / `image`) flow through a parallel chain of 8KB LOB pages on the same heap. Bounded `varchar(N)` / `nvarchar(N)` / `varbinary(N)` start inline; the encoder pushes the largest off-row greedily until the row fits within 8060 bytes. Allocation tracking is a flat page list (no IAM/PFS).
 
-### Commit messages
-Single sentence with period. Concrete artifacts named where useful. Squashes capture the intended end state, not the working steps.
+`SqlType` and `SqlValue` are the storage-layer type pair. Two coercion paths exist intentionally:
+- `SqlValue.Coerce` — runtime value coercion
+- `SqlType.Promote` — static type unification, used by CASE / set ops / COALESCE
 
-## Test organization
+### Selection: deferred plan, partial-class split
 
-The main test project is split topically — one file per feature (SELECT, WHERE, TOP, INSERT, etc.). When adding tests, prefer extending an existing topical file over creating a new one with overlapping scope. Storage internals are tested separately because they require `internal` access.
+`Selection.cs` and `Selection.Execution.cs` are a partial-class pair (parser side / executor side). Don't grep just one.
 
-Prefer public-API tests when the behavior is reachable from SQL — they exercise the full parse/evaluate path and don't pin internal shapes that may refactor. Reserve `Tests.Internal` for things genuinely unreachable from public SQL: raw storage byte layouts, encoder/decoder invariants, and similar contracts that have no observable public surface.
+```
+Selection.Parse(parserContext, depth, outerTypeResolver?) → Selection
+Selection.Execute(outerResolver?) → SimulatedSqlResultSet
+```
 
-## Live limitations
+`Parse` returns a deferred plan; `Execute` runs it. Correlated subqueries re-run the same plan once per outer row by passing different `outerResolver` values:
+- `outerTypeResolver: Func<List<string>, SqlType>?` — outer column types at parse time (projection planning)
+- `outerResolver: Func<List<string>, SqlValue>?` — outer column values at execute time
 
-Heavy-hitters someone might assume work but don't. Source and `git log` are the truth for what's done; this list is for what isn't.
+`List<string>` is the multipart name (`["t1", "id"]` or `["id"]`). Outer scope chains via `ParserContext.OuterTypeResolver` (parse) and the runtime `outerResolver` argument (execute); both walk arbitrary nesting depth.
+
+### Multi-source rows: FromSource[]
+
+`Parser/FromSource.cs` is the per-source bundle (qualifier, columns, storage handle, row enumeration). Multi-source FROM (joins, set-op branches that join internally) uses `FromSource[]`; rows during enumeration are `byte[]?[]` — one slot per source, null = unmatched LEFT JOIN right side.
+
+Column resolution is qualifier-aware: `alias.col` / `tableName.col` restricts to the matching source; an unqualified name that resolves in more than one source raises **Msg 209**. `FindSourceColumn` / `ResolveAcrossTuple` are the lookup helpers.
+
+### SimulatedSqlException factories
+
+Constructor is private. Each error case is an `internal static` factory named per behavior, carrying the SQL Server `(message, number, class, state)` tuple:
+
+```csharp
+internal static SimulatedSqlException ArithmeticOverflow(string targetType) =>
+    new($"Arithmetic overflow error converting expression to data type {targetType}.", 8115, 16, 8);
+```
+
+When adding error coverage: add a factory; never construct directly. The number lands in `Data["HelpLink.EvtID"]` for tests to assert.
+
+### Aggregators
+
+`Parser/Aggregator.cs` is the abstract base (`Add(SqlValue)` / `Result()`). Implementations live in `Parser/Aggregators/`. To add a new aggregate: subclass `Aggregator`, register in `AggregateExpression`'s dispatch.
+
+### Expression evaluation
+
+`Expression.Run(columnResolver)` is the runtime path; `Expression.GetSqlType(...)` is the static-type-of path used for projection schema. Both must agree on result type — drift breaks union/CASE/coalesce schema. Expressions live in `Parser/Expressions/`.
+
+`BooleanExpression.Run` returns `bool?` (three-valued). WHERE / MERGE-ON exclude UNKNOWN; CHECK passes UNKNOWN.
+
+## Conventions that fail builds
+
+- **SSS001** (custom analyzer): non-public types may not have auto-properties or trivial wrappers over same-type fields. Expose the field directly: `public readonly T Foo = expr;`. Overrides, abstracts, statics, explicit-interface members are exempt. Lives in `SqlServerSimulator.Analyzers/`.
+- **MSTEST0049**: async tests must thread `TestContext.CancellationToken`. Pattern: `public TestContext TestContext { get; set; } = null!;` plus a helper that uses `this.TestContext.CancellationToken`.
+- **MSTEST0037**: prefer `Assert.IsEmpty(values)` over `Assert.AreEqual(0, values.Count)`; use typed asserts over generic `Assert.AreEqual` on known types.
+- **AssemblyHooks**: each test project has `AssemblyHooks.cs` with `static [TestClass]` hosting `[AssemblyInitialize]`. The analyzer-tests warm-up specifically prevents Roslyn cache contention under parallel execution (~3x slowdown without it).
+
+## Style notes
+
+User-corrected drift to avoid:
+
+- **No temporal words in code comments** — "currently", "now", "yet", "new" age badly. Describe what is, not when.
+- **No comments inside expression chains** — VS IDE0055 fails on comments in ternary chains or between `=>` and body, even when `dotnet format` accepts them. Restructure or hoist to XML doc.
+- **Fields over auto-properties on non-public types** (the SSS001 rationale, generalized).
+- **Squashes capture end state**, not working steps.
+- **Parallel architectures over bridges** — when replacing a subsystem, build the new one parallel to the old, no shims.
+
+## SimulatedSqlException vs NotSupportedException
+
+- `SimulatedSqlException` for behavior matching SQL Server: invalid SQL, type mismatches, constraint violations, oversize columns, truncation. Mirrors number/class/state/message format.
+- `NotSupportedException` for valid SQL Server features the simulator hasn't built. Name the unmodeled feature in the message.
+
+The distinction matters to users debugging tests against the simulator: "this is invalid" vs "this works upstream but not here yet."
+
+---
+
+## What's modeled (with subtleties)
+
+### Boolean combinators (WHERE / MERGE-ON / CHECK)
+`AND` / `OR` / `NOT`, parens, `IS [NOT] NULL`, `[NOT] IN (literal, ...)`. Standard precedence (AND > OR; NOT highest). Tri-valued via `BooleanExpression.Run → bool?`. `IS NULL` definitively resolves UNKNOWN to true/false. Quirk: `where (arith_expr) cmp rhs` (parens around arithmetic as the LHS of a comparison) doesn't parse here; SQL Server accepts it.
+
+### Set operations (UNION / UNION ALL / INTERSECT / EXCEPT)
+UNION dedupes; UNION ALL preserves duplicates; INTERSECT and EXCEPT both dedupe their inputs. **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state). Result column names from first branch; types promoted via `SqlType.Promote`, branch values coerced to combined schema.
+
+Precedence: INTERSECT > UNION/EXCEPT (which are co-equal, left-to-right). Mismatched column count → Msg 205.
+
+ORDER BY: a non-set-op SELECT keeps branch-internal ORDER BY (which can reference non-projected source columns); when a set-op follows the first branch, per-branch ORDER BY → Msg 156. Top-level ORDER BY (after the chain) wraps via `ApplyTopLevelOrderBy` and references first-branch column names only — no source-column fallback. `Selection.HasOrderBy` is the parse-time signal that gates Msg 156 in `CombineSetOps`.
+
+### JOINs
+`INNER JOIN ... ON`, bare `JOIN` (= INNER), `LEFT [OUTER] JOIN ... ON`, `CROSS JOIN`. Multi-table chains compose left-to-right. Self-joins via alias work. ON-predicate UNKNOWN excludes. Aliases parse with or without `AS`.
+
+### CASE
+Searched (`CASE WHEN cond THEN ... [ELSE ...] END`) and simple (`CASE input WHEN val ...`). Branches evaluate in order; first true predicate wins. UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through. Result type computed via `SqlType.Promote` across all THEN/ELSE, cached on first `GetSqlType`; `Run` coerces matched values to the common type. No-match-no-ELSE → typed NULL.
+
+### Subqueries
+- `EXISTS (SELECT ...)` / `NOT EXISTS` — boolean atom in WHERE/HAVING/CHECK. Multi-column inner allowed.
+- `expr [NOT] IN (SELECT ...)` — boolean atom; exactly one inner column (Msg 116). NULL semantics mirror literal-list IN (NULL row → UNKNOWN unless a non-NULL match wins first).
+- Scalar subquery `(SELECT col FROM ...)` — anywhere an expression is allowed. Exactly one inner column (Msg 116). Single-row cardinality enforced at runtime (Msg 512, fired per outer row for correlated). Empty result → typed NULL.
+
+All forms work correlated and non-correlated, arbitrary nesting depth. Inner plan re-executes per outer row (no caching — fidelity over performance).
+
+### Aggregates
+`COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (integer-truncating; `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. Standalone and inside `GROUP BY` / `HAVING`.
+
+### Constraints
+- `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
+- `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree backing.
+
+### MERGE / OUTPUT (EF Core SaveChanges shape only)
+- `INSERT ... OUTPUT INSERTED.<col>` (single-row).
+- `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch).
+- `WHEN MATCHED` parses but throws `NotSupportedException` if its predicate ever evaluates true.
+
+### EF Core adapter coverage
+`UseSqlServerSimulator(...)` covers the seven SqlParameter-downcast pairs: `DateOnly → date`, `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly → time(N)`, `TimeSpan → time(N)`, `decimal → money`, `decimal → smallmoney`. Without the adapter, those mappings throw at SaveChanges. The MAX-string family (default `string → nvarchar(max)`, `[Column(TypeName="varchar(max)|varbinary(max)")]`) flows through plain `UseSqlServer`.
+
+### `text` / `ntext` / `image` restrictions
+Comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) are enforced.
+
+---
+
+## Not modeled
 
 - Transactions / locks / MVCC.
-- `text` / `ntext` / `image` operation restrictions: comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) are enforced; function-level restrictions (e.g. `LEN(ntext)` raising Msg 8116) and the legacy `READTEXT`/`WRITETEXT`/`UPDATETEXT` family aren't modeled.
-- Aggregate functions: `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (with the documented integer-truncating behavior and `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, the statistical family (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, and `APPROX_COUNT_DISTINCT` all parse and execute, both standalone and inside `GROUP BY` / `HAVING`. Window-function form (`OVER (...)`) and `STRING_AGG`'s `WITHIN GROUP (ORDER BY ...)` ordering aren't parsed yet. `CHECKSUM_AGG` returns an order-independent XOR fold whose semantic guarantee matches SQL Server (same multiset → same checksum) but whose exact bit pattern won't byte-match a real-server reproduction. `APPROX_COUNT_DISTINCT` is implemented as exact `COUNT(DISTINCT)` since memory optimization isn't a goal here.
-- `decimal` / `numeric` values are backed by .NET `decimal`, so values requiring more than 28 significant digits aren't modeled (the type declarations up through `decimal(38, *)` are accepted so storage byte-width still matches SQL Server). `float` text formatting uses .NET's `G15`/`G7` conventions rather than SQL Server's exact `1e+015`-style scientific layout.
-- `CONVERT` / `TRY_CONVERT` style-code coverage. Only styles `0`, `120`, and `121` are wired up for date-like sources targeting a character string (the EF Core code-generation defaults). Other style numbers raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date-parsing styles aren't modeled.
-- Boolean combinators in WHERE / MERGE-ON / CHECK predicates: `AND` / `OR` / `NOT`, parenthesized groupings, `IS [NOT] NULL`, and `[NOT] IN (literal, literal, ...)` all parse with standard SQL precedence (AND > OR; NOT highest). The pattern `where (arith_expr) cmp rhs` (parens-around-arithmetic as the left side of a comparison) is the one shape the simulator's parser doesn't accept; SQL Server does. `BooleanExpression.Run` returns `bool?` (three-valued: true / false / UNKNOWN); WHERE / MERGE-ON treat UNKNOWN as exclude, CHECK treats UNKNOWN as pass — matching SQL Server. `IS NULL` definitively resolves UNKNOWN to true/false (it's the canonical way to test nullability without falling through tri-state).
-- Set operations: `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT` all parse and execute. UNION dedupes; UNION ALL preserves duplicates; INTERSECT and EXCEPT both dedupe their inputs. NULLs are equal during set-op dedup / matching (opposite of `=`'s tri-state behavior — matching SQL Server's documented behavior). Result column names come from the first branch; result types are promoted across branches via `SqlType.Promote` and each branch's values are coerced to the combined schema. **Precedence**: INTERSECT binds tighter than UNION/EXCEPT (which are at the same level, left-to-right). Mismatched column count → Msg 205. **ORDER BY rules**: a non-set-op SELECT keeps the existing branch-internal ORDER BY (which can reference non-projected source columns); when a set-op follows the first branch, per-branch ORDER BY is rejected via Msg 156 (matching SQL Server's wording). Top-level ORDER BY (after the chain) wraps the combined result via `ApplyTopLevelOrderBy` and references first-branch column names only — no source-column fallback. `Selection.HasOrderBy` is the parse-time signal that gates per-branch-ORDER-BY-then-set-op rejection in `CombineSetOps`.
-- JOINs: `INNER JOIN ... ON`, bare `JOIN ... ON` (treated as INNER), `LEFT [OUTER] JOIN ... ON`, and `CROSS JOIN` (no ON) all parse and execute. Multi-table chains compose left-to-right; self-joins via alias work; ON-predicate three-valued logic excludes UNKNOWN matches (matching SQL Server). Column resolution is qualifier-aware across all sources — a multi-part name like `t1.id` matches only the source whose qualifier (alias-or-table-name) equals `t1`; an unqualified name that resolves in more than one source raises **Msg 209** (`"Ambiguous column name 'X'."`). Aliases parse with or without the `AS` keyword. Row enumeration is a recursive cross-product over `FromSource[]` with each tuple represented as `byte[]?[]` (one byte[] per source, null for the unmatched right side of a LEFT JOIN). **Not modeled**: `RIGHT JOIN` (rewrite as LEFT with sources swapped) and `FULL OUTER JOIN` raise `NotSupportedException` at parse time; comma-separated FROM (legacy ANSI-89 join syntax) is not parsed; `CROSS APPLY` / `OUTER APPLY` (lateral) aren't supported.
-- `CASE` expressions: both searched (`CASE WHEN cond THEN ... [ELSE ...] END`) and simple (`CASE input WHEN val THEN ... [ELSE ...] END`) forms parse anywhere an expression is allowed. Branches evaluate in source order; first true predicate wins. UNKNOWN is treated as exclude (matching WHERE), so the simple form's NULL-vs-NULL `WHEN` falls through (`CASE NULL WHEN NULL` → no match). Result type is computed via `SqlType.Promote` across all THEN / ELSE branches and cached on the first `GetSqlType` call; `Run` then coerces matched values to that common type so projection schema stays consistent. No-match-no-ELSE → typed NULL. **Not enforced**: Msg 8133 (real SQL Server raises this when every branch is a bare `NULL` literal — the simulator returns NULL of `int`).
-- Subqueries: `EXISTS (SELECT ...)` / `[NOT] EXISTS` and `expr [NOT] IN (SELECT ...)` parse as boolean atoms in WHERE / HAVING / CHECK; scalar subqueries `(SELECT col FROM ...)` parse anywhere an expression is allowed (projection, WHERE comparison, arithmetic operand). All forms work both correlated and non-correlated, with arbitrary outer-scope nesting depth. EXISTS counts rows only (multi-column inner allowed); `IN (SELECT ...)` and scalar subqueries require exactly one inner column (Msg 116). Scalar subqueries also enforce single-row cardinality at runtime (Msg 512, fired per outer row for correlated cases); empty result → NULL of the inner's projected type. NULL semantics in `IN (SELECT ...)` mirror the literal-list IN (NULL row → UNKNOWN unless a non-NULL match wins first). Column resolution honors qualifiers (`alias.col` / `tableName.col`) so a correlated reference to an outer column with the same name as an inner column works correctly. The inner plan re-executes per outer row (no result caching yet — fidelity over performance for now). `Selection.Parse` returns a deferred plan; `Selection.Execute(outerResolver)` materializes results, so the same plan re-runs against different outer rows. **Not modeled**: `ANY` / `SOME` / `ALL` quantifiers, `UNION` / `UNION ALL` inside a subquery body, row-constructor `IN ((1,2), (3,4))`. Derived tables in FROM (already supported) don't see outer scope (no APPLY / lateral).
-- `LIKE` `COLLATE` override. The default collation (case-insensitive, Latin1_General-shaped) is what every `LIKE` runs under; explicit `COLLATE` clauses on the predicate aren't parsed yet.
-- Cross-category `Promote` for integer ↔ string. Only CAST works for that pair.
-- EF Core compatibility: the `SqlServerSimulator.EFCore` adapter (`UseSqlServerSimulator(...)`) covers the seven `SqlParameter`-downcast pairs — `DateOnly → date`, `DateTime → date`, `DateTime → smalldatetime`, `TimeOnly → time(N)`, `TimeSpan → time(N)`, `decimal → money`, `decimal → smallmoney`. Without the adapter (plain `UseSqlServer`), those mappings still throw at SaveChanges as before. The MAX-string family (default-mapped `string` → `nvarchar(max)`, `[Column(TypeName = "varchar(max)")]`, `[Column(TypeName = "varbinary(max)")]`) flows through plain `UseSqlServer` without needing the adapter. Other type pairs the SqlServer provider supports but aren't modeled here (e.g. `hierarchyid`, `geography`, `geometry`, `rowversion`) are not bridged.
-- `OUTPUT` and `MERGE` are scoped to the EF Core SaveChanges shape: `INSERT ... OUTPUT INSERTED.<col>` (single-row) and `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch). `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, OUTPUT on UPDATE/DELETE, `INSERTED.*` star expansion, MERGE source subqueries, MERGE target with column refs in `ON`, the `WHEN MATCHED` UPDATE/DELETE branches, and `$action` aren't supported. The `WHEN MATCHED` branch parses syntactically but throws `NotSupportedException` if the per-row predicate ever evaluates true.
-- Session-scoped state. `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, and `DBCC TRACEON(N)` flags all live on `Simulation` rather than per-connection. The simulator collapses session vs global scope until a real connection-scoped state model exists; revisit when transactions/locks/MVCC bring the per-session shape with them.
-- CAST to a smaller `varchar`/`nvarchar` than the value renders: SQL Server silently truncates; the simulator returns the full string.
-- `PRIMARY KEY` / `UNIQUE` on a computed column. SQL Server allows it (silently persisting the values for the underlying index); the simulator throws `NotSupportedException` because the enforcement loop would need to evaluate the computed expression against every existing row at insert time. Auto-generated constraint names use a deterministic FNV-1a hash for the 16-hex suffix, not SQL Server's object-id-derived hex — same shape, stable across runs but won't byte-match a real-server reproduction. PK/UNIQUE enforcement is a linear scan over the heap (O(N) per insert); no B-tree backing yet.
-- `CHECK` constraints: parsed and enforced for inline single-column and table-level forms; Msg 547 fires per row on a definitely-false predicate. Msg 8141 (an inline CHECK that references a peer column) isn't enforced — SQL Server rejects at CREATE TABLE; the simulator accepts and lets the CHECK reference any column. Auto-generated names use the same FNV-1a hash convention as PK/UNIQUE; structurally identical to SQL Server's `CK__<table>__[col__]<hex>` shape but won't byte-match a real-server reproduction.
-- Heap allocation tracking (IAM/PFS): the page list is flat.
+- `RIGHT JOIN` (rewrite as LEFT with sources swapped); `FULL OUTER JOIN`. Both raise `NotSupportedException` at parse.
+- Comma-separated FROM (legacy ANSI-89 join syntax).
+- `CROSS APPLY` / `OUTER APPLY` (lateral). Derived tables in FROM don't see outer scope.
+- `ANY` / `SOME` / `ALL` quantifiers.
+- `UNION` / `UNION ALL` inside a subquery body.
+- Row-constructor `IN ((1,2), (3,4))`.
+- Window-function aggregate form (`OVER (...)`).
+- `STRING_AGG`'s `WITHIN GROUP (ORDER BY ...)`.
+- `LIKE` with `COLLATE` override (default collation only — case-insensitive Latin1_General-shaped).
+- `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string. Other styles raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date parsing not modeled.
+- Cross-category `Promote` for integer ↔ string. Only CAST works that pair.
+- `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
+- `OUTPUT INTO @table_var`, `OUTPUT DELETED.*`, OUTPUT on UPDATE/DELETE, `INSERTED.*` star expansion.
+- MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`.
+- Msg 8141 (inline CHECK referencing a peer column — SQL Server rejects at CREATE TABLE; simulator allows).
+- Msg 8133 (CASE where every branch is bare `NULL`; simulator returns NULL of `int`).
+- `PRIMARY KEY` / `UNIQUE` on a computed column (would need to evaluate the expression against every existing row at insert; `NotSupportedException`).
+- Heap allocation tracking: flat page list, no IAM/PFS.
+- Per-connection session state. `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, `DBCC TRACEON(N)` flags all live on `Simulation`. Revisit when transactions/locks/MVCC bring per-session shape.
+- `hierarchyid`, `geography`, `geometry`, `rowversion`.
+
+---
+
+## Quirks (modeled, not byte-identical to SQL Server)
+
+- `CHECKSUM_AGG`: order-independent XOR fold; semantic guarantee matches (same multiset → same checksum), exact bit pattern won't.
+- `APPROX_COUNT_DISTINCT`: implemented as exact `COUNT(DISTINCT)` (memory optimization isn't a goal here).
+- `decimal` / `numeric`: backed by .NET `decimal`. Values requiring more than 28 significant digits aren't modeled (declarations up through `decimal(38, *)` accepted so storage byte-width matches).
+- `float` text formatting: .NET `G15` / `G7` rather than SQL Server's `1e+015`-style scientific.
+- CAST to a smaller `varchar` / `nvarchar` than the value renders: SQL Server silently truncates; simulator returns the full string.
+- Auto-generated PK / UNIQUE / CHECK constraint names: structurally `PK__<table>__<hex>` / `UQ__...` / `CK__<table>__[col__]<hex>` matching SQL Server's shape; the 16-hex suffix is a deterministic FNV-1a hash, not SQL Server's object-id-derived hex (stable across runs but won't byte-match a real-server reproduction).
