@@ -15,7 +15,7 @@ internal sealed class Lower(ParserContext context) : Expression
 
     [SuppressMessage("Globalization", "CA1308:Normalize strings to uppercase",
         Justification = "SQL LOWER lowercases user-facing data; the rule's normalization concern doesn't apply here.")]
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
         if (value.IsNull)
@@ -26,7 +26,7 @@ internal sealed class Lower(ParserContext context) : Expression
         return SqlValue.FromString(value.Type, lowered);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"LOWER({source.DebugDisplay()})";
 }

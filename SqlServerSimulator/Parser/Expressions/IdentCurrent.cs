@@ -30,7 +30,7 @@ internal sealed class IdentCurrent : Expression
             .AsString;
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         if (!this.simulation.HeapTables.TryGetValue(this.tableName, out var table))
             return SqlValue.Null(ResultType);
@@ -40,7 +40,7 @@ internal sealed class IdentCurrent : Expression
             : SqlValue.FromDecimal(ResultType, table.Columns[identityOrdinal].Identity!.Current);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => ResultType;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => $"IDENT_CURRENT('{this.tableName}')";
 }

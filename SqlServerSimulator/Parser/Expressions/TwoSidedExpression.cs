@@ -15,12 +15,12 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
         return rightTwo;
     }
 
-    public sealed override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public sealed override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
         => Run(left.Run(getColumnValue), right.Run(getColumnValue));
 
     protected abstract SqlValue Run(SqlValue left, SqlValue right);
 
-    public sealed override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) =>
+    public sealed override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
         SqlType.Promote(left.GetSqlType(resolveColumnType), right.GetSqlType(resolveColumnType));
 
     /// <summary>

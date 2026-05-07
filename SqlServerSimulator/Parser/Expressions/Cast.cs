@@ -39,10 +39,10 @@ internal sealed class Cast : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue) =>
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
         ApplyCoercion(source.Run(getColumnValue), this.targetType, this.targetMaxLength);
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => targetType;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => targetType;
 
     internal override string DebugDisplay() => $"CAST({source.DebugDisplay()} AS {targetType})";
 

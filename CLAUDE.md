@@ -74,6 +74,16 @@ Selection.Execute(outerResolver?) → SimulatedSqlResultSet
 
 Column resolution is qualifier-aware: `alias.col` / `tableName.col` restricts to the matching source; an unqualified name that resolves in more than one source raises **Msg 209**. `FindSourceColumn` / `ResolveAcrossTuple` are the lookup helpers.
 
+### Multi-part identifiers: `MultiPartName`
+
+`Parser/MultiPartName.cs` is the readonly struct carried by every `Reference` expression and passed to runtime / parse-time column resolvers (`Func<MultiPartName, SqlValue>` / `Func<MultiPartName, SqlType>`). Up to 4 inline string slots (matching SQL Server's grammar limit), with `Count` reporting how many are populated. The API is intentionally minimal — three accessors plus the build helper:
+- `Leaf` — the rightmost segment (the column / object name itself).
+- `ImmediateQualifier` — the segment to the left of `Leaf`, or `null` when unqualified. Pair with `Collation.Default.Equals(name.ImmediateQualifier, "INSERTED")`: the equality folds null-or-unqualified into `false` without a separate guard.
+- `Count` — populated-segment count (single SaveChanges-style early reject site uses it).
+- `ToString()` — dotted form (`db.schema.table.col`) for error-message interpolation; no `string.Join` at the call site.
+
+`Reference` accumulates parts via `WithAddedPart` (struct reassignment) during parsing. `WithAddedPart` raises **Msg 4104** (`"The multi-part identifier 'X' could not be bound."`) with the full attempted dotted name when a 5th segment would be added — matching the user-visible wire effect of real SQL Server, which parses arbitrary-many parts and rejects them at resolution time.
+
 ### SimulatedSqlException factories
 
 Constructor is private. Each error case is an `internal static` factory named per behavior, carrying the SQL Server `(message, number, class, state)` tuple:
@@ -97,7 +107,7 @@ When adding error coverage: add a factory; never construct directly. The number 
 
 ## Conventions that fail builds
 
-- **SSS001** (custom analyzer): non-public types may not have auto-properties or trivial wrappers over same-type fields. Expose the field directly: `public readonly T Foo = expr;`. Overrides, abstracts, statics, explicit-interface members are exempt. Lives in `SqlServerSimulator.Analyzers/`.
+- **SSS001** (custom analyzer): non-public types may not have auto-properties or trivial wrappers over same-type fields. Expose the field directly: `public readonly T Foo = expr;`. Overrides, abstracts, statics, and interface implementations (both explicit and implicit — a property whose name and signature satisfy a member of an implemented interface) are exempt; the interface contract dictates the property shape. Lives in `SqlServerSimulator.Analyzers/`.
 - **SSS002** (custom analyzer): a `readonly` field in a non-public-API type whose declared type is a strict supertype of its immediately-assigned initializer should be declared as the concrete type. Same-assembly callers gain no API-stability benefit from the abstraction; the concrete declaration exposes more members directly and avoids virtual dispatch. Public types are exempt; value-typed initializers (boxing) are exempt; const fields and fields without initializers don't apply. After applying the rule, switch / conditional expressions that previously inferred the (now-shed) base type may need an explicit base-type annotation — extract to a helper method with an explicit return type (`SqlType.ResolveSimpleKeyword`), declare the destination variable explicitly (`SqlType resultType = ... ? ...`), or cast a `null` arm.
 - **MSTEST0049**: async tests must thread `TestContext.CancellationToken`. Pattern: `public TestContext TestContext { get; set; } = null!;` plus a helper that uses `this.TestContext.CancellationToken`.
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` over `Assert.AreEqual(0, values.Count)`; use typed asserts over generic `Assert.AreEqual` on known types.

@@ -25,7 +25,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
 {
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var resultSet = inner.Execute(getColumnValue);
         using var enumerator = resultSet.RowBytes.GetEnumerator();
@@ -37,7 +37,7 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
             : RowDecoder.DecodeColumn(resultSet.Schema, firstRow, 0);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => inner.Schema[0];
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => inner.Schema[0];
 
     internal override string DebugDisplay() => "(SELECT ...)";
 }

@@ -207,18 +207,17 @@ partial class Simulation
             // matches references to the source alias and falls back to error
             // for anything else. Targeting the destination table is rejected
             // (see method-level remarks).
-            SqlValue ResolveSource(List<string> name)
+            SqlValue ResolveSource(MultiPartName name)
             {
-                if (name.Count >= 2 && Collation.Default.Equals(name[0], sourceAlias))
+                if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
                 {
-                    var lastPart = name[^1];
                     for (var i = 0; i < sourceColumnNames.Count; i++)
                     {
-                        if (Collation.Default.Equals(sourceColumnNames[i], lastPart))
+                        if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
                             return sourceRowValues[i];
                     }
                 }
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', name));
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             }
 
             if (onPredicate.Run(_ => SqlValue.Null(SqlType.Int32)) == true)

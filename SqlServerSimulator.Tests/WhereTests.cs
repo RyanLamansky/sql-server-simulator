@@ -579,4 +579,19 @@ public class WhereTests
         parameter.Value = value;
         _ = command.Parameters.Add(parameter);
     }
+
+    [TestMethod]
+    public void Where_FivePartColumnReference_RaisesMsg4104()
+    {
+        // SQL Server's grammar caps qualified column references at 4 parts
+        // (linked.db.schema.object). Real SQL Server parses arbitrary-many
+        // parts and fails at resolution with Msg 4104; the simulator's
+        // MultiPartName cap raises the same Msg 4104 at parse time, with
+        // the full attempted dotted name in the message — matching the
+        // user-visible wire effect.
+        var ex = Throws<System.Data.Common.DbException>(() =>
+            _ = new Simulation().ExecuteScalar("select 1 where a.b.c.d.e = 1"));
+        AreEqual("4104", ex.Data["HelpLink.EvtID"]);
+        AreEqual("The multi-part identifier \"a.b.c.d.e\" could not be bound.", ex.Message);
+    }
 }

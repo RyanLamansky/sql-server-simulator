@@ -9,9 +9,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class Parenthesized(Expression wrapped) : Expression
 {
-    public override Storage.SqlValue Run(Func<List<string>, Storage.SqlValue> getColumnValue) => wrapped.Run(getColumnValue);
+    public override Storage.SqlValue Run(Func<MultiPartName, Storage.SqlValue> getColumnValue) => wrapped.Run(getColumnValue);
 
-    public override Storage.SqlType GetSqlType(Func<List<string>, Storage.SqlType> resolveColumnType) => wrapped.GetSqlType(resolveColumnType);
+    public override Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType) => wrapped.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"( {wrapped.DebugDisplay()} )";
 }

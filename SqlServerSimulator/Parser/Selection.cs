@@ -60,9 +60,9 @@ internal sealed partial class Selection
     /// </summary>
     public readonly bool HasOrderBy;
 
-    private readonly Func<Func<List<string>, SqlValue>?, IEnumerable<byte[]>> rowSource;
+    private readonly Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, Func<Func<List<string>, SqlValue>?, IEnumerable<byte[]>> rowSource)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
@@ -77,7 +77,7 @@ internal sealed partial class Selection
     /// is itself lazy or eager depending on whether DISTINCT / ORDER BY /
     /// aggregation force buffering.
     /// </summary>
-    public SimulatedSqlResultSet Execute(Func<List<string>, SqlValue>? outerResolver = null) =>
+    public SimulatedSqlResultSet Execute(Func<MultiPartName, SqlValue>? outerResolver = null) =>
         new(this.Schema, this.ColumnNames, this.rowSource(outerResolver));
 
     /// <summary>
@@ -93,7 +93,7 @@ internal sealed partial class Selection
     /// <returns>The prepared plan; call <see cref="Execute"/> to materialize results.</returns>
     /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
-    public static Selection Parse(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver = null) =>
+    public static Selection Parse(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver = null) =>
         ParseQueryExpression(context, depth, outerTypeResolver);
 
     /// <summary>
@@ -102,7 +102,7 @@ internal sealed partial class Selection
     /// precedence: <c>INTERSECT</c> binds tighter than <c>UNION</c> /
     /// <c>EXCEPT</c> (which are at the same level, left-to-right).
     /// </summary>
-    private static Selection ParseQueryExpression(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver)
+    private static Selection ParseQueryExpression(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var combined = ParseUnionExceptChain(context, depth, outerTypeResolver);
 
@@ -136,7 +136,7 @@ internal sealed partial class Selection
     /// <c>allowOrderBy=false</c> and any post-chain ORDER BY is applied
     /// at the top level.
     /// </summary>
-    private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver)
+    private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var left = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: true);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
@@ -171,7 +171,7 @@ internal sealed partial class Selection
     /// Higher-precedence set-op level: parses a chain of INTERSECT
     /// operators left-to-right.
     /// </summary>
-    private static Selection ParseIntersectChain(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver, bool isFirstBranch)
+    private static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch)
     {
         var left = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
@@ -194,7 +194,7 @@ internal sealed partial class Selection
     /// non-projected source columns; subsequent branches must defer
     /// ORDER BY to the top level.
     /// </summary>
-    private static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<List<string>, SqlType>? outerTypeResolver, bool allowOrderBy)
+    private static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         // Save / restore the parser's aggregate collector so each branch
         // gets its own scope. Aggregates parsed inside the projection /
@@ -241,7 +241,7 @@ internal sealed partial class Selection
         public int? FetchCount;
     }
 
-    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, Func<List<string>, SqlType>? outerTypeResolver, bool allowOrderBy)
+    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         var distinct = false;
         int? topCount = null;
@@ -405,7 +405,7 @@ internal sealed partial class Selection
         List<FromSource> sources,
         List<JoinSpec> joins,
         FromClause fromClause,
-        Func<List<string>, SqlType>? outerTypeResolver,
+        Func<MultiPartName, SqlType>? outerTypeResolver,
         bool allowOrderBy)
     {
         sources.Add(ParseSingleFromSource(context, depth));
@@ -583,10 +583,10 @@ internal sealed partial class Selection
         ParserContext context,
         FromClause fromClause,
         FromSource[] sources,
-        Func<List<string>, SqlType>? outerTypeResolver,
+        Func<MultiPartName, SqlType>? outerTypeResolver,
         bool allowOrderBy)
     {
-        SqlType MyResolver(List<string> name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
+        SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
         var saved = context.OuterTypeResolver;
         context.OuterTypeResolver = MyResolver;
@@ -822,7 +822,7 @@ internal sealed partial class Selection
             if (fetchCount is { } fetch && fetch < 1)
                 return [];
 
-            SqlValue Resolve(List<string> name) =>
+            SqlValue Resolve(MultiPartName name) =>
                 outerResolver is not null
                     ? outerResolver(name)
                     : throw SimulatedSqlException.InvalidColumnName(name);

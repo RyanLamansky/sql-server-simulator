@@ -20,7 +20,7 @@ internal sealed class Left : Expression
         this.count = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var s = source.Run(getColumnValue);
         var n = count.Run(getColumnValue);
@@ -37,7 +37,7 @@ internal sealed class Left : Expression
         return SqlValue.FromString(s.Type, len >= input.Length ? input : input[..len]);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"LEFT({source.DebugDisplay()}, {count.DebugDisplay()})";
 }

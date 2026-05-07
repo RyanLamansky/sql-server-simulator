@@ -113,6 +113,31 @@ public sealed class WrapperPropertyAnalyzerTests
             """);
 
     [TestMethod]
+    public Task ImplicitInterfaceImplementation_DoesNotReport() =>
+        RunAsync("""
+            using System.Collections;
+            using System.Collections.Generic;
+            internal sealed class C : IReadOnlyCollection<int>
+            {
+                public int Count { get; } = 0;
+                public IEnumerator<int> GetEnumerator() => System.Linq.Enumerable.Empty<int>().GetEnumerator();
+                IEnumerator IEnumerable.GetEnumerator() => this.GetEnumerator();
+            }
+            """);
+
+    [TestMethod]
+    public Task PropertyMatchingInterfaceMemberOnUnimplementedInterface_Reports() =>
+        RunAsync("""
+            internal sealed class C
+            {
+                // Same name as System.Collections.ICollection.Count, but C
+                // doesn't implement that interface, so the property is plain
+                // metadata over a backing field — should still be flagged.
+                public int {|SSS001:Count|} { get; } = 0;
+            }
+            """);
+
+    [TestMethod]
     public Task OverrideProperty_DoesNotReport() =>
         RunAsync("""
             internal abstract class B

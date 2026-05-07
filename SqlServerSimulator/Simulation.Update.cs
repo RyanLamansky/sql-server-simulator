@@ -117,12 +117,11 @@ partial class Simulation
             // Fill non-persisted computed slots from the pre-update stored values.
             EvaluateComputedColumns(table, fullValues);
 
-            SqlValue ResolveOriginal(List<string> name)
+            SqlValue ResolveOriginal(MultiPartName name)
             {
-                var leaf = name[^1];
                 for (var k = 0; k < table.Columns.Length; k++)
                 {
-                    if (Collation.Default.Equals(table.Columns[k].Name, leaf))
+                    if (Collation.Default.Equals(table.Columns[k].Name, name.Leaf))
                         return fullValues[k];
                 }
                 throw SimulatedSqlException.InvalidColumnName(name);

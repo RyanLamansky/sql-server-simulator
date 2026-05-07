@@ -60,29 +60,27 @@ partial class Simulation
             names.Add(expr.Name);
         } while (context.Token is Operator { Character: ',' });
 
-        SqlType ResolveOutputType(List<string> reference)
+        SqlType ResolveOutputType(MultiPartName reference)
         {
             if (reference.Count == 1)
                 throw SimulatedSqlException.InvalidColumnName(reference);
 
-            var qualifier = reference[0];
-            var leaf = reference[^1];
-            var insertedRef = Collation.Default.Equals(qualifier, "INSERTED");
-            var deletedRef = Collation.Default.Equals(qualifier, "DELETED");
+            var insertedRef = Collation.Default.Equals(reference.ImmediateQualifier, "INSERTED");
+            var deletedRef = Collation.Default.Equals(reference.ImmediateQualifier, "DELETED");
 
             if (insertedRef && !allowInserted)
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
             if (deletedRef && !allowDeleted)
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
             if (!insertedRef && !deletedRef)
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
 
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, leaf))
+                if (Collation.Default.Equals(table.Columns[i].Name, reference.Leaf))
                     return table.Columns[i].Type;
             }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
         }
 
         var schema = new SqlType[expressions.Count];
@@ -120,20 +118,18 @@ partial class Simulation
         /// </summary>
         public byte[] ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues)
         {
-            SqlValue Resolve(List<string> reference)
+            SqlValue Resolve(MultiPartName reference)
             {
-                var qualifier = reference[0];
-                var leaf = reference[^1];
-                var source = (Collation.Default.Equals(qualifier, "INSERTED") ? insertedValues
-                    : Collation.Default.Equals(qualifier, "DELETED") ? deletedValues
+                var source = (Collation.Default.Equals(reference.ImmediateQualifier, "INSERTED") ? insertedValues
+                    : Collation.Default.Equals(reference.ImmediateQualifier, "DELETED") ? deletedValues
                     : null)
-                    ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+                    ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
                 for (var i = 0; i < table.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(table.Columns[i].Name, leaf))
+                    if (Collation.Default.Equals(table.Columns[i].Name, reference.Leaf))
                         return source[i];
                 }
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', reference));
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
             }
 
             var projected = new SqlValue[expressions.Length];
@@ -161,27 +157,25 @@ partial class Simulation
         var expressions = new List<Expression>();
         var columnNames = new List<string>();
 
-        SqlType ResolveOutputType(List<string> name)
+        SqlType ResolveOutputType(MultiPartName name)
         {
-            if (name.Count >= 2 && Collation.Default.Equals(name[0], "INSERTED"))
+            if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED"))
             {
-                var lastPart = name[^1];
                 for (var i = 0; i < destinationTable.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, lastPart))
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
                         return destinationTable.Columns[i].Type;
                 }
             }
-            else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes) && Collation.Default.Equals(name[0], sourceAlias))
+            else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes) && Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
             {
-                var lastPart = name[^1];
                 for (var i = 0; i < sourceCols.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceCols[i], lastPart))
+                    if (Collation.Default.Equals(sourceCols[i], name.Leaf))
                         return sourceTypes[i];
                 }
             }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', name));
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
 
         do
@@ -235,27 +229,25 @@ partial class Simulation
         /// </summary>
         public byte[] ProjectRow(SqlValue[] insertedRow, SqlValue[]? sourceRowValues)
         {
-            SqlValue Resolve(List<string> name)
+            SqlValue Resolve(MultiPartName name)
             {
-                if (name.Count >= 2 && Collation.Default.Equals(name[0], "INSERTED"))
+                if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED"))
                 {
-                    var lastPart = name[^1];
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
-                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, lastPart))
+                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
                             return insertedRow[i];
                     }
                 }
-                else if (source is var (sourceAlias, sourceCols, _) && sourceRowValues is not null && Collation.Default.Equals(name[0], sourceAlias))
+                else if (source is var (sourceAlias, sourceCols, _) && sourceRowValues is not null && Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
                 {
-                    var lastPart = name[^1];
                     for (var i = 0; i < sourceCols.Length; i++)
                     {
-                        if (Collation.Default.Equals(sourceCols[i], lastPart))
+                        if (Collation.Default.Equals(sourceCols[i], name.Leaf))
                             return sourceRowValues[i];
                     }
                 }
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(string.Join('.', name));
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             }
 
             var projected = new SqlValue[expressions.Count];

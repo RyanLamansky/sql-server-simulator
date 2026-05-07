@@ -237,7 +237,7 @@ internal abstract class BooleanExpression
     /// (only an explicit <c>false</c> rejects the row).
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
-    public abstract bool? Run(Func<List<string>, SqlValue> getColumnValue);
+    public abstract bool? Run(Func<MultiPartName, SqlValue> getColumnValue);
 
     /// <summary>
     /// Diagnostic-only string rendering, surfaced via
@@ -255,7 +255,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class AndExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue)
         {
             var l = left.Run(getColumnValue);
             if (l == false)
@@ -276,7 +276,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class OrExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue)
         {
             var l = left.Run(getColumnValue);
             if (l == true)
@@ -300,7 +300,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             source.Run(getColumnValue).IsNull ^ negated;
 
         internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
@@ -317,7 +317,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue)
         {
             var src = source.Run(getColumnValue);
             if (src.IsNull)
@@ -354,7 +354,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class ExistsExpression(Selection inner) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             inner.Execute(getColumnValue).RowBytes.Any();
 
         internal override string DebugDisplay() => "EXISTS (...)";
@@ -373,7 +373,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class InSubqueryExpression(Expression source, Selection inner, bool negated) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue)
         {
             var src = source.Run(getColumnValue);
             if (src.IsNull)
@@ -406,7 +406,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) => inner.Run(getColumnValue) switch
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) => inner.Run(getColumnValue) switch
         {
             true => false,
             false => true,
@@ -451,7 +451,7 @@ internal abstract class BooleanExpression
         /// equality slot, and the operator name is woven into the message via
         /// the caller-supplied <paramref name="operatorName"/>.
         /// </summary>
-        protected static bool? ComparePromoted(Expression left, Expression right, Func<List<string>, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare) =>
+        protected static bool? ComparePromoted(Expression left, Expression right, Func<MultiPartName, SqlValue> getColumnValue, string operatorName, Func<SqlValue, SqlValue, bool> compare) =>
             CompareValuesPromoted(left.Run(getColumnValue), right.Run(getColumnValue), operatorName, compare);
     }
 
@@ -478,7 +478,7 @@ internal abstract class BooleanExpression
 
     private sealed class EqualityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "equal to", static (l, r) => l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
@@ -486,7 +486,7 @@ internal abstract class BooleanExpression
 
     private sealed class InequalityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "not equal to", static (l, r) => !l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <> {right.DebugDisplay()}";
@@ -494,7 +494,7 @@ internal abstract class BooleanExpression
 
     private sealed class GreaterThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "greater than", static (l, r) => l.CompareTo(r) > 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
@@ -502,7 +502,7 @@ internal abstract class BooleanExpression
 
     private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} >= {right.DebugDisplay()}";
@@ -510,7 +510,7 @@ internal abstract class BooleanExpression
 
     private sealed class LessThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "less than", static (l, r) => l.CompareTo(r) < 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
@@ -518,7 +518,7 @@ internal abstract class BooleanExpression
 
     private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
     {
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue) =>
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue) =>
             ComparePromoted(left, right, getColumnValue, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <= {right.DebugDisplay()}";
@@ -539,7 +539,7 @@ internal abstract class BooleanExpression
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;
 
-        public override bool? Run(Func<List<string>, SqlValue> getColumnValue)
+        public override bool? Run(Func<MultiPartName, SqlValue> getColumnValue)
         {
             var l = left.Run(getColumnValue);
             var r = right.Run(getColumnValue);

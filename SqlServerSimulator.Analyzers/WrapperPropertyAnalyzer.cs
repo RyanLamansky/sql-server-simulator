@@ -60,11 +60,15 @@ public sealed class WrapperPropertyAnalyzer : DiagnosticAnalyzer
         if (property.IsStatic || property.GetMethod is null)
             return;
 
-        // Overrides, abstract/extern declarations, and explicit interface
-        // implementations have their API shape dictated by something else —
-        // the property isn't optional.
+        // Overrides, abstract/extern declarations, explicit interface
+        // implementations, and implicit interface implementations all have
+        // their API shape dictated by something else — the property isn't
+        // optional. (Implicit implementation: a regular public property
+        // whose name and signature match an interface member of an
+        // implemented interface.)
         if (property.IsOverride || property.IsAbstract || property.IsExtern
-            || property.ExplicitInterfaceImplementations.Length > 0)
+            || property.ExplicitInterfaceImplementations.Length > 0
+            || ImplementsInterfaceMember(property))
         {
             return;
         }
@@ -119,6 +123,33 @@ public sealed class WrapperPropertyAnalyzer : DiagnosticAnalyzer
     private static bool IsEffectivelyPublic(INamedTypeSymbol type) =>
         type.DeclaredAccessibility == Accessibility.Public
         && (type.ContainingType is null || IsEffectivelyPublic(type.ContainingType));
+
+    /// <summary>
+    /// True when <paramref name="property"/> is the implementation of an
+    /// interface member declared on one of the containing type's
+    /// implemented interfaces. Catches the implicit-implementation case
+    /// (regular public property satisfying an interface contract) that
+    /// <see cref="IPropertySymbol.ExplicitInterfaceImplementations"/> doesn't
+    /// surface.
+    /// </summary>
+    private static bool ImplementsInterfaceMember(IPropertySymbol property)
+    {
+        var containingType = property.ContainingType;
+        foreach (var iface in containingType.AllInterfaces)
+        {
+            foreach (var ifaceMember in iface.GetMembers())
+            {
+                if (ifaceMember is not IPropertySymbol)
+                    continue;
+                if (containingType.FindImplementationForInterfaceMember(ifaceMember) is { } impl
+                    && SymbolEqualityComparer.Default.Equals(impl, property))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// Returns the expression that the property's getter resolves to, when that

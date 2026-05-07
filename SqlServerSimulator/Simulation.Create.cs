@@ -199,12 +199,11 @@ partial class Simulation
         // name; valid references resolve to the source column's SqlType so
         // <see cref="Expression.GetSqlType"/> can infer the computed column's
         // own type.
-        SqlType ResolveComputedReference(List<string> reference)
+        SqlType ResolveComputedReference(MultiPartName reference)
         {
-            var leaf = reference[^1];
             for (var i = 0; i < heapColumns.Count; i++)
             {
-                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, leaf))
+                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, reference.Leaf))
                 {
                     return existing.Computed is not null
                         ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, tableName.Value)
@@ -214,7 +213,7 @@ partial class Simulation
                 {
                     foreach (var pending in pendingComputed)
                     {
-                        if (pending.Index == i && Collation.Default.Equals(pending.Name, leaf))
+                        if (pending.Index == i && Collation.Default.Equals(pending.Name, reference.Leaf))
                             throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, tableName.Value);
                     }
                 }

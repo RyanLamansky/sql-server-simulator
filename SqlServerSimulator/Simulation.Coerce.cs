@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -116,12 +117,11 @@ partial class Simulation
             if (column.Computed is null)
                 continue;
 
-            SqlValue ResolveByName(List<string> reference)
+            SqlValue ResolveByName(MultiPartName reference)
             {
-                var leaf = reference[^1];
                 for (var k = 0; k < destinationTable.Columns.Length; k++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[k].Name, leaf))
+                    if (Collation.Default.Equals(destinationTable.Columns[k].Name, reference.Leaf))
                         return rowValues[k];
                 }
                 throw SimulatedSqlException.InvalidColumnName(reference);
@@ -188,12 +188,11 @@ partial class Simulation
         if (destinationTable.CheckConstraints.Length == 0)
             return;
 
-        SqlValue ResolveByName(List<string> reference)
+        SqlValue ResolveByName(MultiPartName reference)
         {
-            var leaf = reference[^1];
             for (var k = 0; k < destinationTable.Columns.Length; k++)
             {
-                if (Collation.Default.Equals(destinationTable.Columns[k].Name, leaf))
+                if (Collation.Default.Equals(destinationTable.Columns[k].Name, reference.Leaf))
                     return rowValues[k];
             }
             throw SimulatedSqlException.InvalidColumnName(reference);

@@ -5,11 +5,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal sealed class Reference : Expression
 {
-    private readonly List<string> name;
+    private MultiPartName name;
 
     public Reference(Name name)
     {
-        this.name = [name.Value];
+        this.name = new MultiPartName(name.Value);
     }
 
     /// <summary>
@@ -19,16 +19,16 @@ internal sealed class Reference : Expression
     /// </summary>
     public Reference(string name)
     {
-        this.name = [name];
+        this.name = new MultiPartName(name);
     }
 
-    public override string Name => this.name[^1];
+    public override string Name => this.name.Leaf;
 
-    public void AddMultiPartComponent(Name name) => this.name.Add(name.Value);
+    public void AddMultiPartComponent(Name next) => this.name = this.name.WithAddedPart(next.Value);
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue) => getColumnValue(this.name);
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => getColumnValue(this.name);
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => resolveColumnType(this.name);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.name);
 
-    internal override string DebugDisplay() => string.Join('.', name);
+    internal override string DebugDisplay() => this.name.ToString();
 }

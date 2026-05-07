@@ -83,7 +83,7 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// passes it down. Each level captures the prior value so the chain
     /// recurses naturally; null means the top-level scope.
     /// </summary>
-    public Func<List<string>, SqlType>? OuterTypeResolver;
+    public Func<MultiPartName, SqlType>? OuterTypeResolver;
 
     private readonly FrozenDictionary<string, SqlValue> variables = command
         .Parameters

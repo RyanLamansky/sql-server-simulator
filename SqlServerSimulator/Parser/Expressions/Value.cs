@@ -32,9 +32,9 @@ internal sealed class Value : Expression
         throw new NotSupportedException($"Simulator doesn't recognize {doubleAtPrefixedString}.");
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue) => this.Constant;
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => this.Constant;
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => this.Constant.Type;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Constant.Type;
 
     internal override string DebugDisplay() => this.Constant.DebugDisplay();
 }

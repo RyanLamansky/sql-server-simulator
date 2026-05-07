@@ -91,10 +91,10 @@ internal sealed class AggregateExpression : Expression
         this.resultBound = true;
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue) =>
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
         this.resultBound ? this.cachedResult : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => this.Kind switch
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         AggregateKind.Count => SqlType.Int32,
         AggregateKind.CountBig or AggregateKind.ApproxCountDistinct => SqlType.BigInt,

@@ -26,7 +26,7 @@ internal sealed class Replace : Expression
         this.newValue = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var i = input.Run(getColumnValue);
         var o = oldValue.Run(getColumnValue);
@@ -39,7 +39,7 @@ internal sealed class Replace : Expression
         return SqlValue.FromString(i.Type, replaced);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => input.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => input.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
 }

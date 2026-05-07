@@ -9,7 +9,7 @@ internal sealed class DataLength(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
         return value.IsNull
@@ -19,7 +19,7 @@ internal sealed class DataLength(ParserContext context) : Expression
                 : SqlValue.FromInt32(value.Type.GetVariableByteCount(value));
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"DATALENGTH({source.DebugDisplay()})";
 }

@@ -54,7 +54,7 @@ internal sealed class ConvertExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         int? styleCode = null;
         if (this.style is { } styleExpr)
@@ -98,7 +98,7 @@ internal sealed class ConvertExpression : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => this.targetType;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.targetType;
 
     internal override string DebugDisplay() =>
         this.style is null

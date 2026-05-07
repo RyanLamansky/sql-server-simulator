@@ -12,7 +12,7 @@ internal sealed class Reverse(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
         if (value.IsNull)
@@ -44,7 +44,7 @@ internal sealed class Reverse(ParserContext context) : Expression
         return SqlValue.FromString(value.Type, new string(reversed));
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"REVERSE({source.DebugDisplay()})";
 }

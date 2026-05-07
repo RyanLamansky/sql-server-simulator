@@ -26,12 +26,12 @@ internal sealed class LastIdentityExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue) =>
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
         this.simulation.LastIdentity is decimal v
             ? SqlValue.FromDecimal(ResultType, v)
             : SqlValue.Null(ResultType);
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => ResultType;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => "SCOPE_IDENTITY()";
 }

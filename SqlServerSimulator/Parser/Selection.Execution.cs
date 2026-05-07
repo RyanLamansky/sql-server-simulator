@@ -22,19 +22,17 @@ internal sealed partial class Selection
     /// <c>(-1, -1)</c> when no source resolves the name — the caller then
     /// falls through to the outer scope.
     /// </summary>
-    private static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, List<string> name)
+    private static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, MultiPartName name)
     {
-        if (name.Count >= 2)
+        if (name.ImmediateQualifier is { } qualifier)
         {
-            var qualifier = name[^2];
             for (var s = 0; s < sources.Length; s++)
             {
                 if (sources[s].Qualifier is null || !Collation.Default.Equals(sources[s].Qualifier, qualifier))
                     continue;
-                var lastPart = name[^1];
                 for (var c = 0; c < sources[s].ColumnNames.Length; c++)
                 {
-                    if (Collation.Default.Equals(sources[s].ColumnNames[c], lastPart))
+                    if (Collation.Default.Equals(sources[s].ColumnNames[c], name.Leaf))
                         return (s, c);
                 }
                 // Qualifier matched but the column doesn't exist in that
@@ -45,7 +43,6 @@ internal sealed partial class Selection
             return (-1, -1);
         }
 
-        var unqualified = name[^1];
         var foundSource = -1;
         var foundColumn = -1;
         var matches = 0;
@@ -53,7 +50,7 @@ internal sealed partial class Selection
         {
             for (var c = 0; c < sources[s].ColumnNames.Length; c++)
             {
-                if (Collation.Default.Equals(sources[s].ColumnNames[c], unqualified))
+                if (Collation.Default.Equals(sources[s].ColumnNames[c], name.Leaf))
                 {
                     if (matches == 0)
                     {
@@ -65,7 +62,7 @@ internal sealed partial class Selection
             }
         }
         return matches > 1
-            ? throw SimulatedSqlException.AmbiguousColumnName(unqualified)
+            ? throw SimulatedSqlException.AmbiguousColumnName(name.Leaf)
             : matches == 1 ? (foundSource, foundColumn) : (-1, -1);
     }
 
@@ -75,7 +72,7 @@ internal sealed partial class Selection
     /// sources; falls through to <paramref name="outerTypeResolver"/> if
     /// nothing matches; raises Msg 209 on unqualified ambiguity.
     /// </summary>
-    private static SqlType ResolveColumnTypeAcrossSources(FromSource[] sources, List<string> name, Func<List<string>, SqlType>? outerTypeResolver)
+    private static SqlType ResolveColumnTypeAcrossSources(FromSource[] sources, MultiPartName name, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var (s, c) = FindSourceColumn(sources, name);
         return s != -1
@@ -103,13 +100,13 @@ internal sealed partial class Selection
         bool distinct,
         int? topCount,
         List<AggregateExpression> aggregates,
-        Func<List<string>, SqlType>? outerTypeResolver)
+        Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var orderBy = fromClause.OrderBy;
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
-        SqlType ResolveColumnType(List<string> name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
+        SqlType ResolveColumnType(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
         for (var i = 0; i < expressions.Count; i++)
         {
@@ -202,7 +199,7 @@ internal sealed partial class Selection
     /// the branch's schema already matches; otherwise decode, coerce,
     /// re-encode each row.
     /// </summary>
-    private static IEnumerable<byte[]> CoerceBranchRows(Selection branch, SqlType[] targetSchema, Func<List<string>, SqlValue>? outerResolver)
+    private static IEnumerable<byte[]> CoerceBranchRows(Selection branch, SqlType[] targetSchema, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var resultSet = branch.Execute(outerResolver);
         var sourceSchema = resultSet.Schema;
@@ -232,7 +229,7 @@ internal sealed partial class Selection
         }
     }
 
-    private static IEnumerable<byte[]> ConcatBranchRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    private static IEnumerable<byte[]> ConcatBranchRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
     {
         foreach (var r in CoerceBranchRows(left, schema, outer)) yield return r;
         foreach (var r in CoerceBranchRows(right, schema, outer)) yield return r;
@@ -252,7 +249,7 @@ internal sealed partial class Selection
         return values;
     }
 
-    private static IEnumerable<byte[]> DedupeUnionRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    private static IEnumerable<byte[]> DedupeUnionRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
     {
         var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
         foreach (var rowBytes in CoerceBranchRows(left, schema, outer).Concat(CoerceBranchRows(right, schema, outer)))
@@ -262,7 +259,7 @@ internal sealed partial class Selection
         }
     }
 
-    private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
     {
         var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
         foreach (var rb in CoerceBranchRows(right, schema, outer))
@@ -277,7 +274,7 @@ internal sealed partial class Selection
         }
     }
 
-    private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, Func<List<string>, SqlValue>? outer)
+    private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
     {
         var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
         foreach (var rb in CoerceBranchRows(right, schema, outer))
@@ -321,12 +318,11 @@ internal sealed partial class Selection
                 foreach (var rowBytes in allRows)
                 {
                     var values = DecodeRowToValues(rowBytes, schema);
-                    SqlValue ResolveByOutputName(List<string> name)
+                    SqlValue ResolveByOutputName(MultiPartName name)
                     {
-                        var lastPart = name[^1];
                         for (var j = 0; j < columnNames.Length; j++)
                         {
-                            if (Collation.Default.Equals(columnNames[j], lastPart))
+                            if (Collation.Default.Equals(columnNames[j], name.Leaf))
                                 return values[j];
                         }
                         throw SimulatedSqlException.InvalidColumnName(name);
@@ -359,7 +355,7 @@ internal sealed partial class Selection
     private static List<byte[]> BuildAggregateProjectionRows(
         FromSource[] sources,
         JoinSpec[] joins,
-        Func<List<string>, SqlType> resolveColumnType,
+        Func<MultiPartName, SqlType> resolveColumnType,
         List<Expression> expressions,
         FromClause fromClause,
         SqlType[] outputSchema,
@@ -367,7 +363,7 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<List<string>, SqlValue>? outerResolver)
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
         if (topCount == 0)
             return [];
@@ -398,7 +394,7 @@ internal sealed partial class Selection
         foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveColumn(List<string> name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
+            SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
 
             var include = true;
             foreach (var excluder in fromClause.Excluders)
@@ -450,12 +446,12 @@ internal sealed partial class Selection
             for (var i = 0; i < aggregates.Count; i++)
                 aggregates[i].BindResult(state.Aggregators[i].Result());
 
-            SqlValue ResolveByGroupKey(List<string> name)
+            SqlValue ResolveByGroupKey(MultiPartName name)
             {
                 for (var i = 0; i < groupByCount; i++)
                 {
                     if (groupByExpressions[i] is Reference r
-                        && Collation.Default.Equals(r.Name, name[^1]))
+                        && Collation.Default.Equals(r.Name, name.Leaf))
                     {
                         return state.KeyValues[i];
                     }
@@ -550,7 +546,7 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<List<string>, SqlValue>? outerResolver) =>
+        Func<MultiPartName, SqlValue>? outerResolver) =>
         !distinct && orderBy.Count == 0
             ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, outerResolver)
             : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver);
@@ -579,7 +575,7 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<List<string>, SqlValue>? outerResolver)
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
         return ApplyOffsetTake(InnerStream(), offsetCount, topCount ?? fetchCount);
 
@@ -588,7 +584,7 @@ internal sealed partial class Selection
             foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
             {
                 var localTuple = tuple;
-                SqlValue ResolveColumn(List<string> name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
+                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
 
                 var include = true;
                 foreach (var excluder in excluders)
@@ -623,14 +619,14 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<List<string>, SqlValue>? outerResolver)
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
 
         foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveSource(List<string> name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
 
             var include = true;
             foreach (var excluder in excluders)
@@ -684,9 +680,9 @@ internal sealed partial class Selection
     private static SqlValue ResolveAcrossTuple(
         FromSource[] sources,
         byte[]?[] tuple,
-        List<string> name,
-        Func<List<string>, SqlValue>? outerResolver,
-        Func<List<string>, SqlValue> selfRecursive)
+        MultiPartName name,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        Func<MultiPartName, SqlValue> selfRecursive)
     {
         var (s, c) = FindSourceColumn(sources, name);
         if (s == -1)
@@ -714,7 +710,7 @@ internal sealed partial class Selection
     private static IEnumerable<byte[]?[]> EnumerateJoinedRows(
         FromSource[] sources,
         JoinSpec[] joins,
-        Func<List<string>, SqlValue>? outerResolver)
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
         var tuple = new byte[]?[sources.Length];
 
@@ -728,7 +724,7 @@ internal sealed partial class Selection
             yield break;
         }
 
-        SqlValue Resolve(byte[]?[] currentTuple, List<string> name) =>
+        SqlValue Resolve(byte[]?[] currentTuple, MultiPartName name) =>
             ResolveAcrossTuple(sources, currentTuple, name, outerResolver, n => Resolve(currentTuple, n));
 
         foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 0))
@@ -747,7 +743,7 @@ internal sealed partial class Selection
         FromSource[] sources,
         JoinSpec[] joins,
         byte[]?[] tuple,
-        Func<byte[]?[], List<string>, SqlValue> resolve,
+        Func<byte[]?[], MultiPartName, SqlValue> resolve,
         int level)
     {
         if (level == sources.Length)
@@ -805,7 +801,7 @@ internal sealed partial class Selection
         FromSource source,
         int columnIndex,
         byte[] bytes,
-        Func<List<string>, SqlValue> resolveByName) =>
+        Func<MultiPartName, SqlValue> resolveByName) =>
         source.StorageOrdinals is null
             ? RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore)
             : source.Columns[columnIndex].Computed is { } computedExpr && !source.Columns[columnIndex].IsPersisted
@@ -826,7 +822,7 @@ internal sealed partial class Selection
         SqlValue[] projected,
         string[] outputColumnNames,
         bool distinct,
-        Func<List<string>, SqlValue> resolveSource)
+        Func<MultiPartName, SqlValue> resolveSource)
     {
         var keys = new SqlValue[orderBy.Count];
         for (var i = 0; i < orderBy.Count; i++)
@@ -840,10 +836,9 @@ internal sealed partial class Selection
 
             keys[i] = spec.Expr!.Run(name =>
             {
-                var lastPart = name[^1];
                 for (var j = 0; j < outputColumnNames.Length; j++)
                 {
-                    if (Collation.Default.Equals(outputColumnNames[j], lastPart))
+                    if (Collation.Default.Equals(outputColumnNames[j], name.Leaf))
                         return projected[j];
                 }
                 return distinct

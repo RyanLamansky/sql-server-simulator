@@ -25,7 +25,7 @@ internal sealed class CharIndex : Expression
             this.start = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var n = needle.Run(getColumnValue);
         var h = haystack.Run(getColumnValue);
@@ -52,7 +52,7 @@ internal sealed class CharIndex : Expression
         return SqlValue.FromInt32(found < 0 ? 0 : found + 1);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => start is null
         ? $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()})"

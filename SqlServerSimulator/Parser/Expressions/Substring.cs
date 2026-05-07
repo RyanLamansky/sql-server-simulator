@@ -31,7 +31,7 @@ internal sealed class Substring : Expression
         this.length = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var s = source.Run(getColumnValue);
         var startValue = start.Run(getColumnValue);
@@ -57,7 +57,7 @@ internal sealed class Substring : Expression
         return SqlValue.FromString(s.Type, input.Substring(effectiveStart, effectiveLength));
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()}, {length.DebugDisplay()})";
 }

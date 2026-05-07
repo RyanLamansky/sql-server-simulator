@@ -63,12 +63,11 @@ partial class Simulation
             if (where is not null)
             {
                 var localValues = fullValues!;
-                SqlValue Resolve(List<string> name)
+                SqlValue Resolve(MultiPartName name)
                 {
-                    var leaf = name[^1];
                     for (var k = 0; k < table.Columns.Length; k++)
                     {
-                        if (Collation.Default.Equals(table.Columns[k].Name, leaf))
+                        if (Collation.Default.Equals(table.Columns[k].Name, name.Leaf))
                             return localValues[k];
                     }
                     throw SimulatedSqlException.InvalidColumnName(name);

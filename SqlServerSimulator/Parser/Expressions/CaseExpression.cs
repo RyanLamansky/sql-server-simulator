@@ -56,13 +56,13 @@ internal sealed class CaseExpression : Expression
         this.elseBranch = elseBranch;
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var raw = this.input is null ? FindSearchedMatch(getColumnValue) : FindSimpleMatch(getColumnValue);
         return this.cachedResultType is { } target && !raw.IsNull ? raw.CoerceTo(target) : raw;
     }
 
-    private SqlValue FindSearchedMatch(Func<List<string>, SqlValue> getColumnValue)
+    private SqlValue FindSearchedMatch(Func<MultiPartName, SqlValue> getColumnValue)
     {
         for (var i = 0; i < this.searchedWhens!.Length; i++)
         {
@@ -72,7 +72,7 @@ internal sealed class CaseExpression : Expression
         return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(getColumnValue);
     }
 
-    private SqlValue FindSimpleMatch(Func<List<string>, SqlValue> getColumnValue)
+    private SqlValue FindSimpleMatch(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var inputValue = this.input!.Run(getColumnValue);
         for (var i = 0; i < this.compareValues!.Length; i++)
@@ -84,7 +84,7 @@ internal sealed class CaseExpression : Expression
         return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(getColumnValue);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
     {
         var t = this.thens[0].GetSqlType(resolveColumnType);
         for (var i = 1; i < this.thens.Length; i++)

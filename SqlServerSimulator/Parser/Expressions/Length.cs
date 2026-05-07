@@ -17,7 +17,7 @@ internal sealed class Length(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
         // NULL passes through any string function regardless of its underlying
@@ -31,7 +31,7 @@ internal sealed class Length(ParserContext context) : Expression
         return SqlValue.FromInt32(trimmed.Length);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
 }

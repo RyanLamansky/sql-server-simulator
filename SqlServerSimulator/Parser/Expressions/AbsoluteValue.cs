@@ -9,7 +9,7 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         var value = source.Run(getColumnValue);
         if (!SqlType.IsIntegerCategory(value.Type))
@@ -30,7 +30,7 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
             : SqlValue.FromInt64(abs);
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"ABS({source.DebugDisplay()})";
 }

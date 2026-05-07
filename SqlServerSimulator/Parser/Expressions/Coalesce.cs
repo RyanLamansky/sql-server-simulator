@@ -27,7 +27,7 @@ internal sealed class Coalesce : Expression
         this.arguments = [.. args];
     }
 
-    public override SqlValue Run(Func<List<string>, SqlValue> getColumnValue)
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
         SqlValue value = default;
         for (var i = 0; i < this.arguments.Length; i++)
@@ -39,7 +39,7 @@ internal sealed class Coalesce : Expression
         return value; // all NULL — return the last (typed-NULL) result
     }
 
-    public override SqlType GetSqlType(Func<List<string>, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
     {
         var t = this.arguments[0].GetSqlType(resolveColumnType);
         for (var i = 1; i < this.arguments.Length; i++)

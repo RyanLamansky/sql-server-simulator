@@ -248,15 +248,15 @@ internal sealed class SimulatedSqlException : DbException
     /// </summary>
     /// <param name="name">The name of the column.</param>
     /// <returns>The exception.</returns>
-    internal static SimulatedSqlException ColumnReferenceNotAllowed(IEnumerable<string> name)
-        => new($"The reference to column \"{string.Join('.', name)}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
+    internal static SimulatedSqlException ColumnReferenceNotAllowed(MultiPartName name)
+        => new($"The reference to column \"{name}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
 
     internal static SimulatedSqlException IdentifierTooLong(ReadOnlySpan<char> first128)
         => new($"The identifier that starts with '{first128}' is too long. Maximum length is 128.", 103, 15, 4);
 
     internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
 
-    internal static SimulatedSqlException InvalidColumnName(IEnumerable<string> name) => InvalidColumnName(string.Join('.', name));
+    internal static SimulatedSqlException InvalidColumnName(MultiPartName name) => InvalidColumnName(name.ToString());
 
     /// <summary>
     /// Mimics SQL Server's Msg 209 — fired when an unqualified column

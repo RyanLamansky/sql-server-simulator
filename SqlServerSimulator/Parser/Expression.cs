@@ -145,7 +145,7 @@ internal abstract class Expression
     /// Evaluates the expression against a row's column values and returns its result.
     /// </summary>
     /// <param name="getColumnValue">Provides the value for a column.</param>
-    public abstract Storage.SqlValue Run(Func<List<string>, Storage.SqlValue> getColumnValue);
+    public abstract Storage.SqlValue Run(Func<MultiPartName, Storage.SqlValue> getColumnValue);
 
     /// <summary>
     /// Static type-of resolver for projection planning: returns the
@@ -154,7 +154,7 @@ internal abstract class Expression
     /// SELECT plan its output schema before any rows are read.
     /// </summary>
     /// <param name="resolveColumnType">Callback that, given a multi-part column name, returns its declared type or throws if unresolvable.</param>
-    public abstract Storage.SqlType GetSqlType(Func<List<string>, Storage.SqlType> resolveColumnType);
+    public abstract Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType);
 
     /// <summary>
     /// Diagnostic-only string rendering, surfaced to debuggers via
