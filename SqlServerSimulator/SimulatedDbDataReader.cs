@@ -11,6 +11,7 @@ sealed class SimulatedDbDataReader : DbDataReader
     private readonly IEnumerator<SimulatedQueryResult> results;
     private RowCursor cursor;
     private int recordsAffected;
+    private bool closed;
 
     public SimulatedDbDataReader(IEnumerable<SimulatedQueryResult> results)
     {
@@ -20,15 +21,20 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override object this[int ordinal] => GetValue(ordinal);
 
-    public override object this[string name] => throw new NotImplementedException();
+    public override object this[string name] => GetValue(GetOrdinal(name));
 
-    public override int Depth => throw new NotImplementedException();
+    /// <summary>
+    /// Always 0. SqlClient's <c>SqlDataReader</c> documents this as the
+    /// nesting level of the current row; SQL Server doesn't surface a
+    /// non-zero value for in-band result sets, and the simulator follows.
+    /// </summary>
+    public override int Depth => 0;
 
     public override int FieldCount => cursor.FieldCount;
 
-    public override bool HasRows => throw new NotImplementedException();
+    public override bool HasRows => cursor.HasRows;
 
-    public override bool IsClosed => throw new NotImplementedException();
+    public override bool IsClosed => closed;
 
     public override int RecordsAffected => recordsAffected;
 
@@ -40,28 +46,77 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override byte GetByte(int ordinal)
     {
-        throw new NotImplementedException();
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsByte;
     }
 
+    /// <summary>
+    /// Materializes the column's bytes and copies the requested window into
+    /// the caller's buffer. Real SqlClient streams from off-row pages;
+    /// the simulator decodes the column once via <see cref="RowDecoder"/>
+    /// and slices, so behavior matches per-call but the streaming-memory
+    /// guarantee doesn't. Honors SqlClient's <c>buffer == null</c> contract:
+    /// returns the total length without copying so callers can size their
+    /// own buffer.
+    /// </summary>
     public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
     {
-        throw new NotImplementedException();
+        var v = cursor[ordinal];
+        if (v.IsNull)
+            throw new SqlNullValueException();
+        var bytes = v.AsBytes;
+        if (buffer is null)
+            return bytes.Length;
+        if (dataOffset is < 0 or > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(dataOffset));
+        if (dataOffset >= bytes.Length)
+            return 0;
+        var available = bytes.Length - (int)dataOffset;
+        var toCopy = Math.Min(length, available);
+        if (toCopy <= 0)
+            return 0;
+        Buffer.BlockCopy(bytes, (int)dataOffset, buffer, bufferOffset, toCopy);
+        return toCopy;
     }
 
-    public override char GetChar(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    /// <summary>
+    /// SqlClient surfaces a single character as <see cref="char"/> from
+    /// catalog rows that are exactly <c>nchar(1)</c>; the documented
+    /// contract throws <see cref="InvalidCastException"/> for everything
+    /// else, and even the supported case is rare enough that we mirror
+    /// the throw here.
+    /// </summary>
+    public override char GetChar(int ordinal) =>
+        throw new InvalidCastException("GetChar is not supported by SQL Server's data reader.");
 
+    /// <summary>
+    /// String-column counterpart to <see cref="GetBytes"/>: materializes the
+    /// column's value and copies the requested window into the caller's
+    /// buffer. Length is in <see cref="char"/> units (UTF-16 code units),
+    /// matching SqlClient. Honors the <c>buffer == null</c> length-only
+    /// contract.
+    /// </summary>
     public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
     {
-        throw new NotImplementedException();
+        var v = cursor[ordinal];
+        if (v.IsNull)
+            throw new SqlNullValueException();
+        var s = v.AsString;
+        if (buffer is null)
+            return s.Length;
+        if (dataOffset is < 0 or > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(dataOffset));
+        if (dataOffset >= s.Length)
+            return 0;
+        var available = s.Length - (int)dataOffset;
+        var toCopy = Math.Min(length, available);
+        if (toCopy <= 0)
+            return 0;
+        s.CopyTo((int)dataOffset, buffer, bufferOffset, toCopy);
+        return toCopy;
     }
 
-    public override string GetDataTypeName(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override string GetDataTypeName(int ordinal) => CurrentSchema[ordinal].SqlServerName;
 
     /// <summary>
     /// Mirrors SqlClient's polymorphic <c>GetDateTime</c>: a <c>date</c> column
@@ -105,16 +160,11 @@ sealed class SimulatedDbDataReader : DbDataReader
         return v.IsNull ? throw new SqlNullValueException() : v.AsDouble;
     }
 
-    public override IEnumerator GetEnumerator()
-    {
-        throw new NotImplementedException();
-    }
+    public override IEnumerator GetEnumerator() => new DbEnumerator(this, closeReader: false);
 
     [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
-    public override Type GetFieldType(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    [UnconditionalSuppressMessage("Trimming", "IL2073:Member return value does not satisfy 'DynamicallyAccessedMembersAttribute' requirements.", Justification = "The closed set of concrete SqlType subclasses returns BCL types whose public surface is not trimmed away in practice; the simulator never feeds linker-pruned types here.")]
+    public override Type GetFieldType(int ordinal) => CurrentSchema[ordinal].ClrType;
 
     public override float GetFloat(int ordinal)
     {
@@ -142,7 +192,8 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override long GetInt64(int ordinal)
     {
-        throw new NotImplementedException();
+        var v = cursor[ordinal];
+        return v.IsNull ? throw new SqlNullValueException() : v.AsInt64;
     }
 
     public override string GetName(int ordinal)
@@ -156,9 +207,30 @@ sealed class SimulatedDbDataReader : DbDataReader
         return this.results.Current.ColumnNames[ordinal];
     }
 
+    /// <summary>
+    /// Two-pass linear scan of the current result set's column names:
+    /// case-sensitive first, then case-insensitive — matching SqlClient's
+    /// documented match precedence. Typical column counts are small enough
+    /// that this is cheaper than building and caching a dictionary per
+    /// result set.
+    /// </summary>
     public override int GetOrdinal(string name)
     {
-        throw new NotImplementedException();
+        ArgumentNullException.ThrowIfNull(name);
+        var names = this.results.Current.ColumnNames;
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (string.Equals(names[i], name, StringComparison.Ordinal))
+                return i;
+        }
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (string.Equals(names[i], name, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+#pragma warning disable CA2201 // SqlDataReader throws IndexOutOfRangeException for unknown column names.
+        throw new IndexOutOfRangeException(name);
+#pragma warning restore
     }
 
     public override string GetString(int ordinal)
@@ -199,7 +271,11 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override int GetValues(object[] values)
     {
-        throw new NotImplementedException();
+        ArgumentNullException.ThrowIfNull(values);
+        var count = Math.Min(values.Length, this.FieldCount);
+        for (var i = 0; i < count; i++)
+            values[i] = this.GetValue(i);
+        return count;
     }
 
     public override bool IsDBNull(int ordinal) => cursor[ordinal].IsNull;
@@ -229,18 +305,23 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     protected override void Dispose(bool disposing)
     {
+        this.closed = true;
         base.Dispose(disposing);
 
         this.results.Dispose();
         this.cursor.Dispose();
     }
 
-    /// <summary>Stand-in cursor used after the last result-set is exhausted.</summary>
+    private SqlType[] CurrentSchema => this.results.Current.Schema;
+
+    /// <summary>Stand-in cursor used before any result-set is opened or after the last is exhausted.</summary>
     private sealed class EmptyCursor : RowCursor
     {
         public static readonly EmptyCursor Instance = new();
 
         public override int FieldCount => 0;
+
+        public override bool HasRows => false;
 
         public override bool MoveNext() => false;
 

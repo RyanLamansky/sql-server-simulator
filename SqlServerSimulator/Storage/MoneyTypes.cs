@@ -13,6 +13,8 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money)
 {
+    public override Type ClrType => typeof(decimal);
+
     /// <summary>Number of fractional decimal digits represented in the scaled int.</summary>
     public const int Scale = 4;
 
@@ -44,6 +46,8 @@ internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money)
 /// </summary>
 internal sealed class SmallMoneySqlType() : SqlType(SqlTypeCategory.Money)
 {
+    public override Type ClrType => typeof(decimal);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 4;

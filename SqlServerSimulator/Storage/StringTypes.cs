@@ -5,6 +5,8 @@ namespace SqlServerSimulator.Storage;
 
 internal sealed class VarcharSqlType() : SqlType(SqlTypeCategory.String)
 {
+    public override Type ClrType => typeof(string);
+
     public override bool IsFixedLength => false;
 
     public override int GetVariableByteCount(SqlValue value) => CharSqlType.Cp1252Encoder.GetByteCount(value.AsString);
@@ -20,6 +22,8 @@ internal sealed class VarcharSqlType() : SqlType(SqlTypeCategory.String)
 
 internal sealed class NVarcharSqlType() : SqlType(SqlTypeCategory.String)
 {
+    public override Type ClrType => typeof(string);
+
     public override bool IsFixedLength => false;
 
     public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
@@ -35,6 +39,8 @@ internal sealed class NVarcharSqlType() : SqlType(SqlTypeCategory.String)
 
 internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 {
+    public override Type ClrType => typeof(string);
+
     public override bool IsFixedLength => false;
 
     public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
@@ -50,6 +56,8 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 
 internal sealed class VarbinarySqlType() : SqlType(SqlTypeCategory.Other)
 {
+    public override Type ClrType => typeof(byte[]);
+
     public override bool IsFixedLength => false;
 
     public override int GetVariableByteCount(SqlValue value) => value.AsBytes.Length;
@@ -78,6 +86,8 @@ internal sealed class VarbinarySqlType() : SqlType(SqlTypeCategory.Other)
 /// </summary>
 internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
 {
+    public override Type ClrType => typeof(string);
+
     public override bool IsFixedLength => false;
 
     public override bool IsLob => true;
@@ -100,6 +110,8 @@ internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
 /// </summary>
 internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
 {
+    public override Type ClrType => typeof(string);
+
     public override bool IsFixedLength => false;
 
     public override bool IsLob => true;
@@ -122,6 +134,8 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
 /// </summary>
 internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
 {
+    public override Type ClrType => typeof(byte[]);
+
     public override bool IsFixedLength => false;
 
     public override bool IsLob => true;
@@ -154,6 +168,10 @@ internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
 internal sealed class CharSqlType(short length) : SqlType(SqlTypeCategory.String)
 {
     public readonly short length = length;
+
+    public override Type ClrType => typeof(string);
+
+    public override string SqlServerName => "char";
 
     public override bool IsFixedLength => true;
 
@@ -197,6 +215,10 @@ internal sealed class NCharSqlType(short length) : SqlType(SqlTypeCategory.Strin
 {
     public readonly short length = length;
 
+    public override Type ClrType => typeof(string);
+
+    public override string SqlServerName => "nchar";
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => this.length * 2;
@@ -225,6 +247,10 @@ internal sealed class NCharSqlType(short length) : SqlType(SqlTypeCategory.Strin
 internal sealed class BinarySqlType(short length) : SqlType(SqlTypeCategory.Other)
 {
     public readonly short length = length;
+
+    public override Type ClrType => typeof(byte[]);
+
+    public override string SqlServerName => "binary";
 
     public override bool IsFixedLength => true;
 

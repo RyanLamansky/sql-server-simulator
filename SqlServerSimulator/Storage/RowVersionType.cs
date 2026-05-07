@@ -23,6 +23,8 @@ namespace SqlServerSimulator.Storage;
 /// </remarks>
 internal sealed class RowVersionSqlType() : SqlType(SqlTypeCategory.Other)
 {
+    public override Type ClrType => typeof(byte[]);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 8;

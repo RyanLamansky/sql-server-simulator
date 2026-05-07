@@ -1,3 +1,5 @@
+using SqlServerSimulator.Storage;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -13,6 +15,13 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
 
     /// <summary>Column names in result order; empty string for anonymous columns.</summary>
     public abstract string[] ColumnNames { get; }
+
+    /// <summary>
+    /// SQL types in result order. Carried alongside <see cref="ColumnNames"/>
+    /// so the data reader can answer <c>GetDataTypeName</c> / <c>GetFieldType</c>
+    /// without holding (or having to navigate) any current row.
+    /// </summary>
+    public abstract SqlType[] Schema { get; }
 
     /// <summary>Creates a fresh cursor that iterates this result's rows.</summary>
     public abstract RowCursor CreateCursor();

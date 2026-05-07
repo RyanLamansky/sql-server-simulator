@@ -4,6 +4,8 @@ namespace SqlServerSimulator.Storage;
 
 internal sealed class DateSqlType() : SqlType(SqlTypeCategory.DateTime)
 {
+    public override Type ClrType => typeof(DateTime);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 3;
@@ -40,6 +42,8 @@ internal sealed class DateSqlType() : SqlType(SqlTypeCategory.DateTime)
 /// </summary>
 internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 {
+    public override Type ClrType => typeof(DateTime);
+
     /// <summary>Reference date for the day-count portion of legacy datetime.</summary>
     public static readonly DateTime BaseDate = new(1900, 1, 1);
 
@@ -91,6 +95,8 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 /// </summary>
 internal sealed class SmallDateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 {
+    public override Type ClrType => typeof(DateTime);
+
     /// <summary>Reference date for the day-count portion of smalldatetime.</summary>
     public static readonly DateTime BaseDate = new(1900, 1, 1);
 
@@ -150,6 +156,10 @@ internal sealed class DateTime2SqlType(int precision) : SqlType(SqlTypeCategory.
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
     public readonly long ticksPerUnit = TicksPerPrecisionUnit(precision);
 
+    public override Type ClrType => typeof(DateTime);
+
+    public override string SqlServerName => "datetime2";
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => this.timeBytes + 3;
@@ -200,6 +210,10 @@ internal sealed class TimeSqlType(int precision) : SqlType(SqlTypeCategory.DateT
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
     public readonly long ticksPerUnit = TicksPerPrecisionUnit(precision);
 
+    public override Type ClrType => typeof(TimeSpan);
+
+    public override string SqlServerName => "time";
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => this.timeBytes;
@@ -248,6 +262,10 @@ internal sealed class DateTimeOffsetSqlType(int precision) : SqlType(SqlTypeCate
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
     public readonly long ticksPerUnit = TicksPerPrecisionUnit(precision);
+
+    public override Type ClrType => typeof(DateTimeOffset);
+
+    public override string SqlServerName => "datetimeoffset";
 
     public override bool IsFixedLength => true;
 

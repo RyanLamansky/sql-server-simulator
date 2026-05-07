@@ -26,6 +26,10 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
     public readonly byte precision = precision;
     public readonly byte scale = scale;
 
+    public override Type ClrType => typeof(decimal);
+
+    public override string SqlServerName => "decimal";
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => StorageWidth(this.precision);

@@ -208,6 +208,22 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 ### `text` / `ntext` / `image` restrictions
 Comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) are enforced.
 
+### `SimulatedDbDataReader` accessor surface
+The `DbDataReader` contract is fully implemented (no remaining `NotImplementedException` throws on supported paths). Typed accessors (`GetBoolean` / `GetInt16` / `GetInt32` / `GetInt64` / `GetByte` / `GetDouble` / `GetFloat` / `GetGuid` / `GetString` / `GetDateTime` / `GetDecimal`) read each column's `SqlValue` directly via the cursor's indexer (`cursor[ordinal]`) and unwrap via `As*` — no `object` boxing. NULL on a typed accessor raises `SqlNullValueException` (matches SqlClient). Polymorphic accessors keep their multi-type fan-in inline:
+- `GetDateTime`: `Date` / `DateTime` / `SmallDateTime` / `DateTime2` all return `DateTime`; `Date` surfaces at midnight (`Kind=Unspecified`), matching SqlClient.
+- `GetDecimal`: `Decimal` / `Numeric` / `Money` / `SmallMoney`.
+- `GetFieldValue<T>`: covers EF Core's `DateOnly`-over-`Date` and `TimeOnly`-over-`Time` direct paths without going through `ToObject()`; other T fall through to `ToObject()` + `(T)` cast.
+
+Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `SimulatedQueryResult.Schema[ordinal]`, which is the abstract metadata channel parallel to `ColumnNames`. `SqlType.SqlServerName` returns the bare catalog name (e.g. `"decimal"`, not `"decimal(18,2)"`); `SqlType.ClrType` returns the BCL type returned by the untyped path. `GetFieldType` carries the trim-aware `[DynamicallyAccessedMembers]` annotation and a single `[UnconditionalSuppressMessage]` covering the closed set of concrete `SqlType` subclasses (which are all well-known BCL types, never linker-pruned in practice), so concrete types stay annotation-free.
+
+`GetOrdinal(name)` is a two-pass linear scan (case-sensitive then case-insensitive — SqlClient's documented match precedence). Typical column counts make this cheaper than building a per-result-set dictionary. `this[string]` routes through it.
+
+`HasRows` is a sticky bit on `RowCursor`. `SqlValueCursor` owns a one-row lookahead — first read of `HasRows` peeks the source enumerator and buffers the row; subsequent `MoveNext()` serves the buffered row. The sticky `everHadRows` flag preserves SqlClient's "remains true after exhaustion" semantic. SqlClient gets this cheap via TDS token peek (one byte tells it whether a `ROW` token follows); the simulator's source has no token discriminator (each `byte[]` *is* a row), so peek-and-buffer is the natural analog.
+
+`GetBytes` / `GetChars` materialize the column's value (the typed `As*` accessor already does this) and slice into the caller's buffer. They honor SqlClient's `buffer == null` length-only contract. Quirk: real SqlClient streams from off-row LOB pages; the simulator decodes the full value per call. Behavior matches per-call observation; the streaming-memory guarantee doesn't.
+
+`GetChar(int)` always raises `InvalidCastException` — same as SqlClient, which only succeeds for `nchar(1)` and otherwise throws.
+
 ---
 
 ## Not modeled
@@ -248,3 +264,4 @@ Comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 fr
 - **DELETE / UPDATE leak page space**: deleted (or UPDATE-relocated) row payload bytes stay in their original page until process exit; only the slot is tombstoned. Slot directory entries are also never reused. SQL Server has ghost-cleanup background work that the simulator doesn't model.
 - **DELETE / UPDATE leak LOB chains**: when a row is removed or its LOB-pointed value replaced, the orphaned LOB chain stays in `Heap.LobPages`. Other rows reference LOB pages by stable index, so list compaction would corrupt them; full LOB lifecycle (free-list / tombstones) is a follow-up bundle.
 - **Mass-shift UPDATE on a unique key**: `UPDATE t SET k = k + 1` where `k` is PK / UNIQUE produces a per-row collision check that may spuriously raise Msg 2627 — the simulator's two-phase validator compares each affected row's new key against other affected rows' new keys, so a "shift" pattern where post-shift values overlap pre-shift values triggers a false positive. SQL Server uses a temp store that staging-applies all updates before validation. Real EF Core SaveChanges patterns don't hit this.
+- **`GetBytes` / `GetChars` materialize, don't stream**: each call decodes the full column value via `RowDecoder` and slices into the caller's buffer. Real SqlClient streams from off-row LOB pages; the simulator's per-call observation matches but the streaming-memory guarantee doesn't.

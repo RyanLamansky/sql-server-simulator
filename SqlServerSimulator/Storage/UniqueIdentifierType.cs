@@ -17,6 +17,8 @@ namespace SqlServerSimulator.Storage;
 /// </remarks>
 internal sealed class UniqueIdentifierSqlType() : SqlType(SqlTypeCategory.UniqueIdentifier)
 {
+    public override Type ClrType => typeof(Guid);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 16;

@@ -12,6 +12,8 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal sealed class FloatSqlType() : SqlType(SqlTypeCategory.Approximate)
 {
+    public override Type ClrType => typeof(double);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 8;
@@ -37,6 +39,8 @@ internal sealed class FloatSqlType() : SqlType(SqlTypeCategory.Approximate)
 /// </summary>
 internal sealed class RealSqlType() : SqlType(SqlTypeCategory.Approximate)
 {
+    public override Type ClrType => typeof(float);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 4;

@@ -24,6 +24,27 @@ internal abstract class SqlType
     public readonly SqlTypeCategory Category;
 
     /// <summary>
+    /// CLR type that an out-of-the-box, untyped accessor on the data reader
+    /// returns for this SQL type. Used by <see cref="System.Data.Common.DbDataReader.GetFieldType"/>
+    /// to mirror SqlClient's per-column type metadata. The reader is the
+    /// only consumer that has to satisfy linker-aware annotations
+    /// (<c>DynamicallyAccessedMembers</c>); the concrete types here are a
+    /// closed set of well-known BCL types, so the suppression lives at the
+    /// reader and concrete <c>ClrType</c> overrides stay annotation-free.
+    /// </summary>
+    public abstract Type ClrType { get; }
+
+    /// <summary>
+    /// Bare SQL Server type name, without parameterization (e.g. <c>"decimal"</c>
+    /// not <c>"decimal(18,2)"</c>; <c>"varchar"</c> not <c>"varchar(50)"</c>).
+    /// Used by <see cref="System.Data.Common.DbDataReader.GetDataTypeName"/>,
+    /// which mirrors SqlClient's documented behavior of returning the
+    /// catalog type name with no decoration. Defaults to <see cref="object.ToString"/>;
+    /// parameterized types override to drop the parens.
+    /// </summary>
+    public virtual string SqlServerName => this.ToString()!;
+
+    /// <summary>
     /// True for types whose stored bytes are a constant width, regardless of value.
     /// </summary>
     public abstract bool IsFixedLength { get; }

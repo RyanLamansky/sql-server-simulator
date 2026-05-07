@@ -5,6 +5,8 @@ namespace SqlServerSimulator.Storage;
 
 internal sealed class Int32SqlType() : SqlType(SqlTypeCategory.Integer)
 {
+    public override Type ClrType => typeof(int);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 4;
@@ -26,6 +28,8 @@ internal sealed class Int32SqlType() : SqlType(SqlTypeCategory.Integer)
 
 internal sealed class BigIntSqlType() : SqlType(SqlTypeCategory.Integer)
 {
+    public override Type ClrType => typeof(long);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 8;
@@ -47,6 +51,8 @@ internal sealed class BigIntSqlType() : SqlType(SqlTypeCategory.Integer)
 
 internal sealed class SmallIntSqlType() : SqlType(SqlTypeCategory.Integer)
 {
+    public override Type ClrType => typeof(short);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 2;
@@ -71,6 +77,8 @@ internal sealed class SmallIntSqlType() : SqlType(SqlTypeCategory.Integer)
 /// </remarks>
 internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer)
 {
+    public override Type ClrType => typeof(byte);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 1;
@@ -100,6 +108,8 @@ internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer)
 /// </remarks>
 internal sealed class BitSqlType() : SqlType(SqlTypeCategory.Integer)
 {
+    public override Type ClrType => typeof(bool);
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 1;

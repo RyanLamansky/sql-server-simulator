@@ -15,6 +15,16 @@ internal abstract class RowCursor : IDisposable
 
     public abstract int FieldCount { get; }
 
+    /// <summary>
+    /// True if this cursor's underlying result set produced at least one
+    /// row. Sticky once observed: stays true after every row has been
+    /// consumed via <see cref="MoveNext"/>, matching SqlClient's semantics
+    /// for <c>SqlDataReader.HasRows</c>. Implementations may need to peek
+    /// the source to answer the first call; the peeked row, if any, is
+    /// served by the next <see cref="MoveNext"/>.
+    /// </summary>
+    public abstract bool HasRows { get; }
+
     public abstract bool MoveNext();
 
     /// <summary>
