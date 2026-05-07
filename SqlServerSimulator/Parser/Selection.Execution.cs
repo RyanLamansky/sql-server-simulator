@@ -768,6 +768,29 @@ internal sealed partial class Selection
 
         var join = joins[level - 1];
         var matched = false;
+
+        // Lateral source (right side of CROSS APPLY / OUTER APPLY): the
+        // plan re-executes per outer tuple, and its result rows are this
+        // level's contribution to the join. No ON predicate — correlation
+        // lives inside the lateral plan's own WHERE clause.
+        if (sources[level].LateralPlan is { } lateralPlan)
+        {
+            foreach (var row in lateralPlan.Execute(name => resolve(tuple, name)).RowBytes)
+            {
+                tuple[level] = row;
+                matched = true;
+                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+                    yield return t;
+            }
+            tuple[level] = null;
+            if (!matched && join.Kind == JoinKind.OuterApply)
+            {
+                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+                    yield return t;
+            }
+            yield break;
+        }
+
         foreach (var row in sources[level].Rows)
         {
             tuple[level] = row;

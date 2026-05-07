@@ -32,7 +32,8 @@ internal sealed class FromSource(
     HeapColumn[] storedSchema,
     int[]? storageOrdinals,
     Heap? lobStore,
-    IEnumerable<byte[]> rows)
+    IEnumerable<byte[]> rows,
+    Selection? lateralPlan = null)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -41,6 +42,17 @@ internal sealed class FromSource(
     public readonly int[]? StorageOrdinals = storageOrdinals;
     public readonly Heap? LobStore = lobStore;
     public readonly IEnumerable<byte[]> Rows = rows;
+
+    /// <summary>
+    /// When non-null, this source is the right side of a <c>CROSS APPLY</c>
+    /// or <c>OUTER APPLY</c>. <see cref="Rows"/> is unused; the join driver
+    /// invokes <c>lateralPlan.Execute(currentRowResolver)</c> per outer
+    /// tuple to produce rows that may correlate with the left side. The
+    /// <see cref="JoinSpec"/> kind paired with this source is
+    /// <see cref="JoinKind.CrossApply"/> or <see cref="JoinKind.OuterApply"/>;
+    /// the latter null-fills the slot when the plan yields zero rows.
+    /// </summary>
+    public readonly Selection? LateralPlan = lateralPlan;
 }
 
 /// <summary>
@@ -73,6 +85,22 @@ internal enum JoinKind
     Inner,
     Left,
     Cross,
+
+    /// <summary>
+    /// <c>CROSS APPLY</c>: the right source is a correlated derived table
+    /// (<see cref="FromSource.LateralPlan"/>) re-executed per left-side row.
+    /// Like <c>INNER JOIN</c>, an outer row with zero matches is dropped.
+    /// No <c>ON</c> predicate — the correlation lives inside the lateral
+    /// plan's own <c>WHERE</c>.
+    /// </summary>
+    CrossApply,
+
+    /// <summary>
+    /// <c>OUTER APPLY</c>: like <see cref="CrossApply"/>, but null-fills
+    /// the right side when the lateral plan yields zero rows for an outer
+    /// tuple — the LEFT JOIN counterpart.
+    /// </summary>
+    OuterApply,
 }
 
 /// <summary>

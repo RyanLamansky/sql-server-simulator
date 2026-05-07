@@ -154,7 +154,9 @@ Precedence: INTERSECT > UNION/EXCEPT (which are co-equal, left-to-right). Mismat
 ORDER BY: a non-set-op SELECT keeps branch-internal ORDER BY (which can reference non-projected source columns); when a set-op follows the first branch, per-branch ORDER BY → Msg 156. Top-level ORDER BY (after the chain) wraps via `ApplyTopLevelOrderBy` and references first-branch column names only — no source-column fallback. `Selection.HasOrderBy` is the parse-time signal that gates Msg 156 in `CombineSetOps`.
 
 ### JOINs
-`INNER JOIN ... ON`, bare `JOIN` (= INNER), `LEFT [OUTER] JOIN ... ON`, `CROSS JOIN`. Multi-table chains compose left-to-right. Self-joins via alias work. ON-predicate UNKNOWN excludes. Aliases parse with or without `AS`.
+`INNER JOIN ... ON`, bare `JOIN` (= INNER), `LEFT [OUTER] JOIN ... ON`, `CROSS JOIN`, `CROSS APPLY (...) [AS alias]`, `OUTER APPLY (...) [AS alias]`. Multi-table chains compose left-to-right. Self-joins via alias work. ON-predicate UNKNOWN excludes. Aliases parse with or without `AS`.
+
+APPLY is the lateral form: the right side is a derived-table SELECT re-executed per outer row, with the outer tuple's columns visible inside its WHERE / projection. CROSS APPLY drops outer rows whose plan yields zero rows (INNER-style); OUTER APPLY null-fills the right side (LEFT-style). No `ON` clause — correlation lives inside the inner WHERE. The lateral plan stays deferred (`FromSource.LateralPlan`) and re-executes via `Selection.Execute(currentTupleResolver)` per outer tuple in `JoinDriver`. EF Core 10 emits `CROSS APPLY` for `SelectMany(a => a.Books.Where(...))` over a collection navigation; older EF Core's top-N projection shapes that used `OUTER APPLY` now go through `ROW_NUMBER() OVER` + `LEFT JOIN` instead.
 
 ### CASE
 Searched (`CASE WHEN cond THEN ... [ELSE ...] END`) and simple (`CASE input WHEN val ...`). Branches evaluate in order; first true predicate wins. UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through. Result type computed via `SqlType.Promote` across all THEN/ELSE, cached on first `GetSqlType`; `Run` coerces matched values to the common type. No-match-no-ELSE → typed NULL.
@@ -240,7 +242,7 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 - Transactions / locks / MVCC.
 - `RIGHT JOIN` (rewrite as LEFT with sources swapped); `FULL OUTER JOIN`. Both raise `NotSupportedException` at parse.
 - Comma-separated FROM (legacy ANSI-89 join syntax).
-- `CROSS APPLY` / `OUTER APPLY` (lateral). Derived tables in FROM don't see outer scope.
+- Plain derived tables in FROM (without APPLY) don't see outer scope — they execute eagerly at parse time. Lateral access requires `CROSS APPLY` / `OUTER APPLY`. SQL Server actually allows derived-table-sees-outer in any FROM subquery; the gap shows up in compound shapes like `(SELECT … FROM (SELECT TOP(N) … WHERE outer.col = …) AS t)` where the inner correlation isn't expressed via APPLY.
 - `ANY` / `SOME` / `ALL` quantifiers.
 - `UNION` / `UNION ALL` inside a subquery body.
 - Row-constructor `IN ((1,2), (3,4))`.

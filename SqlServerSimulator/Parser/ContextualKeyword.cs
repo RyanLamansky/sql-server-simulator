@@ -20,6 +20,7 @@ namespace SqlServerSimulator.Parser;
 enum ContextualKeyword
 {
     _ = 0, // Default — current token isn't a contextual keyword.
+    Apply,
     Compatibility_Level,
     Configuration,
     First,

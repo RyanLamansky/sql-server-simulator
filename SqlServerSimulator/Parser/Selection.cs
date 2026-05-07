@@ -415,6 +415,15 @@ internal sealed partial class Selection
         // LEFT, CROSS, etc.). Loop while we see a JOIN-introducing keyword.
         while (TryParseJoinKeyword(context, out var kind))
         {
+            if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
+            {
+                sources.Add(ParseLateralFromSource(context, depth, sources, outerTypeResolver));
+                if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
+                joins.Add(new JoinSpec(kind, onPredicate: null));
+                continue;
+            }
+
             sources.Add(ParseSingleFromSource(context, depth));
             BooleanExpression? on = null;
             if (kind == JoinKind.Cross)
@@ -434,6 +443,52 @@ internal sealed partial class Selection
 
         // Now register the multi-source type resolver and parse WHERE / etc.
         ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
+    }
+
+    /// <summary>
+    /// Parses the right side of <c>CROSS APPLY</c> / <c>OUTER APPLY</c>:
+    /// <c>(SELECT ...) [AS alias]</c>. The inner SELECT is parsed with a
+    /// chained outer-type resolver that includes <paramref name="leftSources"/>
+    /// (already collected by the surrounding FROM parse) so its body's
+    /// references to the left side resolve at parse time. Unlike
+    /// <see cref="ParseSingleFromSource"/>, the inner is left as a deferred
+    /// <see cref="Selection"/> plan on the returned <see cref="FromSource"/>;
+    /// the join driver re-executes it per outer row.
+    /// </summary>
+    private static FromSource ParseLateralFromSource(
+        ParserContext context,
+        uint depth,
+        List<FromSource> leftSources,
+        Func<MultiPartName, SqlType>? surroundingOuter)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var leftSnapshot = leftSources.ToArray();
+        SqlType ChainedResolver(MultiPartName name) =>
+            ResolveColumnTypeAcrossSources(leftSnapshot, name, surroundingOuter);
+
+        var lateralPlan = Selection.Parse(context, depth + 1, outerTypeResolver: ChainedResolver);
+
+        var schema = lateralPlan.Schema;
+        var columnNames = lateralPlan.ColumnNames;
+        var lateralColumns = new HeapColumn[schema.Length];
+        for (var ci = 0; ci < lateralColumns.Length; ci++)
+            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true);
+
+        var alias = ConsumeOptionalAlias(context);
+
+        return new FromSource(
+            qualifier: alias,
+            columnNames: columnNames,
+            columns: lateralColumns,
+            storedSchema: lateralColumns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: [],
+            lateralPlan: lateralPlan);
     }
 
     /// <summary>
@@ -560,9 +615,26 @@ internal sealed partial class Selection
 
             case Keyword.Cross:
                 context.MoveNextRequired();
-                if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Join })
+                {
+                    kind = JoinKind.Cross;
+                    return true;
+                }
+                if (context.MatchContextual(ContextualKeyword.Apply))
+                {
+                    kind = JoinKind.CrossApply;
+                    return true;
+                }
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            // OUTER as a leading keyword introduces OUTER APPLY (the
+            // LEFT/RIGHT/FULL OUTER forms consume OUTER inside their own
+            // cases above). The cursor is on OUTER; advance and require APPLY.
+            case Keyword.Outer:
+                context.MoveNextRequired();
+                if (!context.MatchContextual(ContextualKeyword.Apply))
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                kind = JoinKind.Cross;
+                kind = JoinKind.OuterApply;
                 return true;
 
             default:

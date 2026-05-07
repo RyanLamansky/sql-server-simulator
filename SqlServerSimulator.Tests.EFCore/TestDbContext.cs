@@ -284,6 +284,34 @@ internal class CustomerOrder
     public decimal Amount { get; set; }
 }
 
+/// <summary>
+/// Parent of <see cref="Book"/> with an explicit collection navigation
+/// (<see cref="Books"/>). EF Core emits <c>CROSS APPLY</c> for
+/// <c>SelectMany(a =&gt; a.Books.Where(...))</c> against this shape — the
+/// fidelity oracle for the simulator's APPLY support.
+/// </summary>
+internal class Author
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "nvarchar(50)")]
+    public string Name { get; set; } = "";
+
+    public List<Book> Books { get; set; } = [];
+}
+
+internal class Book
+{
+    public int Id { get; set; }
+
+    public int AuthorId { get; set; }
+
+    [Column(TypeName = "nvarchar(50)")]
+    public string Title { get; set; } = "";
+
+    public int Score { get; set; }
+}
+
 internal class TestDbContext(Simulation simulation) : DbContext
 {
     public Simulation Simulation { get; set; } = simulation;
@@ -350,6 +378,10 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Customer> Customers => Set<Customer>();
 
     public DbSet<CustomerOrder> CustomerOrders => Set<CustomerOrder>();
+
+    public DbSet<Author> Authors => Set<Author>();
+
+    public DbSet<Book> Books => Set<Book>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -517,6 +549,27 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     NullableC int null,
                     IsActive bit not null,
                     Status nvarchar(20) null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateAuthorsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Authors (
+                    Id int identity(1, 1) not null primary key,
+                    Name nvarchar(50) not null
+                );
+                create table Books (
+                    Id int identity(1, 1) not null primary key,
+                    AuthorId int not null,
+                    Title nvarchar(50) not null,
+                    Score int not null
                 )
                 """)
             .ExecuteNonQuery();
