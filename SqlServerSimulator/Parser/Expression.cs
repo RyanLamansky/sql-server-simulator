@@ -66,6 +66,7 @@ internal abstract class Expression
                 ? new LastIdentityExpression(context.Simulation)
                 : new Value(doubleAtPrefixedString),
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
+            ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
             // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved keywords
             // but dispatch as function calls when followed by '(' — the
             // surrounding loop hands the call shape off to ResolveBuiltIn.

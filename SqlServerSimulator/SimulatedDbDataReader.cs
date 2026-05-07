@@ -30,10 +30,7 @@ sealed class SimulatedDbDataReader : DbDataReader
 
     public override int RecordsAffected => recordsAffected;
 
-    public override bool GetBoolean(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
+    public override bool GetBoolean(int ordinal) => (bool)this[ordinal];
 
     public override byte GetByte(int ordinal)
     {
