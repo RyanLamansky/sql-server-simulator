@@ -615,14 +615,14 @@ internal sealed partial class Selection
         if (nextToken is ReservedKeyword { Keyword: Keyword.As })
         {
             var alias = context.GetNextRequired<Name>().Value;
-            _ = context.GetNextOptional();
+            context.MoveNextOptional();
             return alias;
         }
         // Bare-Name alias form (without the AS keyword): "FROM t a JOIN ..."
         // SQL Server accepts this as an alias.
         if (nextToken is Name aliasName)
         {
-            _ = context.GetNextOptional();
+            context.MoveNextOptional();
             return aliasName.Value;
         }
         return null;
