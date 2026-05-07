@@ -1,0 +1,94 @@
+namespace SqlServerSimulator;
+
+partial class SimulatedSqlException
+{
+    /// <summary>
+    /// Mimics SQL Server's verbose truncation error (Msg 2628): a string value
+    /// would not fit within the destination column's declared maximum length.
+    /// The displayed "truncated value" is the prefix of the offending value
+    /// clipped to the column's max length.
+    /// </summary>
+    /// <remarks>
+    /// Introduced in SQL Server 2019 (compatibility level 150) behind trace
+    /// flag 460 or <c>ALTER DATABASE SCOPED CONFIGURATION SET VERBOSE_TRUNCATION_WARNINGS = ON</c>;
+    /// became the default in SQL Server 2022+ (compatibility level 160+),
+    /// superseding the legacy <see cref="StringOrBinaryWouldBeTruncatedLegacy"/>
+    /// (Msg 8152). The simulator selects between the two via
+    /// <see cref="Simulation.IsVerboseTruncationActive"/>.
+    /// </remarks>
+    internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, string value, int max)
+    {
+        var prefix = value.Length <= max ? value : value[..max];
+        return new($"String or binary data would be truncated in table '{tableName}', column '{columnName}'. Truncated value: '{prefix}'.", 2628, 16, 1);
+    }
+
+    /// <summary>
+    /// Binary overload of the verbose truncation factory: renders the
+    /// truncated prefix as a SQL hex literal (<c>0xABCD…</c>), matching SQL
+    /// Server's varbinary formatting in Msg 2628.
+    /// </summary>
+    internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, byte[] value, int max)
+    {
+        var prefix = value.Length <= max ? value : value[..max];
+        var hex = $"0x{Convert.ToHexString(prefix)}";
+        return new($"String or binary data would be truncated in table '{tableName}', column '{columnName}'. Truncated value: '{hex}'.", 2628, 16, 1);
+    }
+
+    /// <summary>
+    /// Mimics the legacy SQL Server truncation error (Msg 8152): same trigger
+    /// as the verbose factory above but without the table, column, or value
+    /// detail. Default behavior on compatibility levels before 160 (SQL Server
+    /// 2022) and on older levels with the verbose option off.
+    /// </summary>
+    internal static SimulatedSqlException StringOrBinaryWouldBeTruncatedLegacy() =>
+        new("String or binary data would be truncated.", 8152, 16, 14);
+
+    /// <summary>
+    /// Mimics SQL Server error 511: an INSERT or UPDATE produced a row that
+    /// exceeds the per-row size limit even after pushing every variable-length
+    /// column to row-overflow / LOB storage. Distinct from Msg 1701 (schema
+    /// is impossible) — Msg 511 fires per-row when the values supplied happen
+    /// to exceed the limit despite the schema being legal.
+    /// </summary>
+    internal static SimulatedSqlException RowSizeExceedsAllowableMaximum(int requested, int max) =>
+        new($"Cannot create a row of size {requested} which is greater than the allowable maximum row size of {max}.", 511, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 515: an INSERT or UPDATE supplied (or fell
+    /// through to) <c>NULL</c> for a column whose declaration disallows
+    /// nulls. The fixed text uses the database-qualified table name; the
+    /// simulator's single-database model emits <c>"claude.dbo.&lt;t&gt;"</c>'s
+    /// shape with the simulator's default database name.
+    /// <paramref name="verb"/> picks between <c>"INSERT"</c> (the default)
+    /// and <c>"UPDATE"</c> for the trailing <c>"… fails."</c> clause —
+    /// real SQL Server emits the per-statement verb verbatim there.
+    /// </summary>
+    internal static SimulatedSqlException CannotInsertNull(string columnName, string tableName, string verb = "INSERT") =>
+        new($"Cannot insert the value NULL into column '{columnName}', table '{Simulation.DefaultDatabaseName}.dbo.{tableName}'; column does not allow nulls. {verb} fails.", 515, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 547: an INSERT / UPDATE / MERGE row failed a
+    /// CHECK constraint's predicate. SQL Server's wording adds a
+    /// <c>column 'X'</c> suffix only for inline single-column CHECKs;
+    /// table-level CHECK omits it — matching the real-server probe. The DB
+    /// name slot uses <see cref="Simulation.DefaultDatabaseName"/>.
+    /// </summary>
+    internal static SimulatedSqlException CheckConstraintViolation(string constraintName, string tableName, string? inlineColumn, string verb = "INSERT")
+    {
+        var columnSuffix = inlineColumn is null ? "" : $", column '{inlineColumn}'";
+        return new($"The {verb} statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.", 547, 16, 0);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 2627: an INSERT or UPDATE produced a row whose
+    /// PRIMARY KEY or UNIQUE-constraint key tuple already existed in the
+    /// table. SQL Server uses Msg 2627 for both PK and UNIQUE *constraint*
+    /// violations (Msg 2601 is for unique-index violations from
+    /// <c>CREATE UNIQUE INDEX</c>, which the simulator doesn't model).
+    /// <paramref name="kindWord"/> selects between <c>"PRIMARY KEY"</c> and
+    /// <c>"UNIQUE KEY"</c>; <paramref name="formattedKeyValues"/> is the
+    /// rendered tuple text without enclosing parens (e.g. <c>"1, &lt;NULL&gt;"</c>).
+    /// </summary>
+    internal static SimulatedSqlException ViolationOfKeyConstraint(string kindWord, string constraintName, string tableName, string formattedKeyValues) =>
+        new($"Violation of {kindWord} constraint '{constraintName}'. Cannot insert duplicate key in object 'dbo.{tableName}'. The duplicate key value is ({formattedKeyValues}).", 2627, 14, 1);
+}

@@ -93,7 +93,15 @@ internal static SimulatedSqlException ArithmeticOverflow(string targetType) =>
     new($"Arithmetic overflow error converting expression to data type {targetType}.", 8115, 16, 8);
 ```
 
-When adding error coverage: add a factory; never construct directly. The number lands in `Data["HelpLink.EvtID"]` for tests to assert.
+The number lands in `Data["HelpLink.EvtID"]` for tests to assert. When adding error coverage: add a factory in the partial that matches the error's theme — never construct directly.
+
+`SimulatedSqlException.cs` holds the type definition (fields, constructor, the `[SuppressMessage]` for CA1032). Factories are split across topical partials in the same directory:
+- `SimulatedSqlException.TypeErrors.cs` — type lookup, size, CAST / CONVERT, conversion, arithmetic. Largest at ~30 factories.
+- `SimulatedSqlException.SchemaErrors.cs` — DDL rules (identity, rowversion, computed columns, table-level invariants, compatibility level).
+- `SimulatedSqlException.ConstraintErrors.cs` — per-row write violations (NOT NULL, CHECK, PK / UNIQUE, truncation, row size).
+- `SimulatedSqlException.ResolutionErrors.cs` — column / object / identifier resolution.
+- `SimulatedSqlException.QueryErrors.cs` — set ops, ORDER BY, aggregates, subqueries, pagination, function lookup.
+- `SimulatedSqlException.SyntaxErrors.cs` — generic parse-time errors.
 
 ### Aggregators
 
