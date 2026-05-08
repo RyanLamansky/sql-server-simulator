@@ -30,6 +30,7 @@ enum ContextualKeyword
     Offset,
     Only,
     Output,
+    Partition,
     Persisted,
     Row,
     Rows,

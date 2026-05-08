@@ -196,20 +196,25 @@ internal sealed partial class Selection
     /// </summary>
     private static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
-        // Save / restore the parser's aggregate collector so each branch
-        // gets its own scope. Aggregates parsed inside the projection /
-        // HAVING register here; the executor uses the populated list to
-        // switch into aggregate mode.
-        var savedCollector = context.AggregateCollector;
+        // Save / restore the parser's aggregate and window collectors so
+        // each branch gets its own scope. Aggregates and window functions
+        // parsed inside the projection / HAVING register into the
+        // respective lists; the executor uses the populated lists to
+        // switch into aggregate or windowed-projection mode.
+        var savedAggregateCollector = context.AggregateCollector;
+        var savedWindowCollector = context.WindowCollector;
         var aggregates = new List<AggregateExpression>();
+        var windows = new List<WindowExpression>();
         context.AggregateCollector = aggregates;
+        context.WindowCollector = windows;
         try
         {
-            return ParseInner(context, depth, aggregates, outerTypeResolver, allowOrderBy);
+            return ParseInner(context, depth, aggregates, windows, outerTypeResolver, allowOrderBy);
         }
         finally
         {
-            context.AggregateCollector = savedCollector;
+            context.AggregateCollector = savedAggregateCollector;
+            context.WindowCollector = savedWindowCollector;
         }
     }
 
@@ -241,7 +246,7 @@ internal sealed partial class Selection
         public int? FetchCount;
     }
 
-    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
+    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, List<WindowExpression> windows, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         var distinct = false;
         int? topCount = null;
@@ -354,7 +359,7 @@ internal sealed partial class Selection
                     ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
                     if (topCount is not null && fromClause.OffsetCount is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, outerTypeResolver);
+                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver);
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
                     ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);

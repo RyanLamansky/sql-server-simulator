@@ -258,6 +258,7 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 _ => null
             },

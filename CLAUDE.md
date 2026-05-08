@@ -178,6 +178,13 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 ### Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (integer-truncating; `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. Standalone and inside `GROUP BY` / `HAVING`.
 
+### Window functions
+`ROW_NUMBER() OVER([PARTITION BY <expr-list>] ORDER BY <expr-list-with-direction>)` only — the single shape EF Core 10 emits for top-N / Skip+Take per group. `RANK` / `DENSE_RANK` / analytic family (`LAG` / `LEAD` / `FIRST_VALUE`) and frame specs (`ROWS BETWEEN`, `RANGE BETWEEN`) aren't modeled — EF Core 10 doesn't emit them from idiomatic LINQ. Result type is `bigint`. ORDER BY is required inside OVER (without it, parse fails — SQL Server raises Msg 4112).
+
+`WindowExpression` (`Parser/Expressions/WindowExpression.cs`) registers itself in `ParserContext.WindowCollector` like aggregates do with `AggregateCollector`. The executor's `ProjectWindowedRows` buffers post-WHERE tuples, partitions by each window's PARTITION BY keys, sorts each partition by ORDER BY keys, assigns row numbers per partition, then walks the buffer in original order binding per-tuple results before projecting. Combining window functions with GROUP BY / HAVING / aggregates raises `NotSupportedException` (EF Core 10 doesn't emit the combination, so the simulator hasn't built it).
+
+EF Core 10 always wraps ROW_NUMBER in a derived-table subquery: `SELECT ... FROM (SELECT cols, ROW_NUMBER() OVER(...) AS row FROM T) AS sub WHERE sub.row <= N` (Take) or `WHERE 1 < sub.row AND sub.row <= K` (Skip+Take). The simulator's plain-derived-table-doesn't-see-outer-scope limitation doesn't bite here because the ROW_NUMBER subquery has no outer correlation — its OVER refers only to the inner FROM.
+
 ### Date scalar functions: `DATEPART` / `DATEADD`
 Both take a bare datepart keyword as the first argument (parse-time `Name` token, not an expression). Canonical keywords + common aliases: `year`/`yy`/`yyyy`, `quarter`/`qq`/`q`, `month`/`mm`/`m`, `dayofyear`/`dy`/`y`, `day`/`dd`/`d`, `week`/`wk`/`ww`, `iso_week`/`isowk`/`isoww`, `weekday`/`dw`, `hour`/`hh`, `minute`/`mi`/`n`, `second`/`ss`/`s`, `millisecond`/`ms`, `microsecond`/`mcs`, `nanosecond`/`ns`, `tzoffset`/`tz`. `DATEPART` always returns `int`; `DATEADD` preserves the input's SQL type (`date` stays `date`, `time(N)` stays `time(N)`, etc.).
 
@@ -246,7 +253,7 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 - `ANY` / `SOME` / `ALL` quantifiers.
 - `UNION` / `UNION ALL` inside a subquery body.
 - Row-constructor `IN ((1,2), (3,4))`.
-- Window-function aggregate form (`OVER (...)`).
+- Window functions other than `ROW_NUMBER`: `RANK` / `DENSE_RANK`, analytic (`LAG` / `LEAD` / `FIRST_VALUE` / `LAST_VALUE`), aggregate-OVER form (`SUM(x) OVER(...)` / `COUNT(*) OVER(...)`), frame specs (`ROWS BETWEEN` / `RANGE BETWEEN`). EF Core 10 doesn't emit any of these from idiomatic LINQ.
 - `STRING_AGG`'s `WITHIN GROUP (ORDER BY ...)`.
 - `LIKE` with `COLLATE` override (default collation only — case-insensitive Latin1_General-shaped).
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string. Other styles raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date parsing not modeled.

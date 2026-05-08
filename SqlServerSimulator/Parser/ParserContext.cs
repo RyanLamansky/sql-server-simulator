@@ -75,6 +75,15 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public List<Expressions.AggregateExpression>? AggregateCollector;
 
     /// <summary>
+    /// When non-null, every <see cref="Expressions.WindowExpression"/>
+    /// constructor registers itself here. Scoped by Selection.Parse around
+    /// projection parsing — the executor needs the list to detect the
+    /// windowed-projection branch (buffer + partition + sort + bind) and
+    /// to know which expressions to bind row-number values into per row.
+    /// </summary>
+    public List<Expressions.WindowExpression>? WindowCollector;
+
+    /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
     /// the output schema of a correlated subquery whose projection references
     /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s
