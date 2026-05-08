@@ -8,6 +8,18 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
 {
     private readonly Simulation simulation = simulation;
 
+    /// <summary>
+    /// The single active explicit transaction on this connection, or null if
+    /// none. SqlClient rejects parallel transactions on the same connection
+    /// (probe-confirmed: <c>InvalidOperationException: SqlConnection does
+    /// not support parallel transactions.</c>); the simulator mirrors that.
+    /// Statements executed via this connection consult this field through
+    /// <see cref="Simulation.RunMutation"/> — when set, mutations append to
+    /// the transaction's <see cref="Storage.UndoLog"/> so an eventual
+    /// <see cref="SimulatedDbTransaction.Rollback"/> can unwind them.
+    /// </summary>
+    internal SimulatedDbTransaction? CurrentTransaction;
+
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }
 
@@ -28,7 +40,19 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
 
     public override void Close()
     {
+        // SqlClient auto-rolls-back any active transaction when its
+        // connection closes. The transaction's own dispose handles the
+        // explicit using-pattern; this branch covers raw Close() without
+        // disposing the transaction first.
+        this.CurrentTransaction?.Rollback();
         this.state = ConnectionState.Closed;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            this.CurrentTransaction?.Dispose();
+        base.Dispose(disposing);
     }
 
     public override void Open()
@@ -38,7 +62,11 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
 
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
-        return new SimulatedDbTransaction(this.simulation, this, isolationLevel);
+        if (this.CurrentTransaction is not null)
+            throw new InvalidOperationException("SqlConnection does not support parallel transactions.");
+        var tx = new SimulatedDbTransaction(this.simulation, this, isolationLevel);
+        this.CurrentTransaction = tx;
+        return tx;
     }
 
     protected override DbCommand CreateDbCommand()

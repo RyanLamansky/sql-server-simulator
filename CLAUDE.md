@@ -196,14 +196,18 @@ Per-type keyword compatibility mirrors SQL Server (verified against Kardax7 2026
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree backing.
 
-### Transactions (statement-level atomicity, Bundle 1)
-Auto-commit-mode statement atomicity: a single INSERT / UPDATE / DELETE / MERGE that throws mid-execution rolls back its partial writes. A multi-row INSERT whose third row violates a constraint leaves zero rows behind, not two. Probe-confirmed against SQL Server 2025 (2026-05-08).
+### Transactions
+Three layers, each landed in its own bundle:
 
-`Storage/UndoLog.cs` records heap mutations as a row-level LIFO list (`(Heap, UndoKind, pageIdx, slotIdx)` tuples). `Heap.Insert` / `Heap.DeleteAt` take an optional log; on success they append. `Simulation.RunMutation` wraps each mutation statement: install a fresh log on `ParserContext.CurrentUndoLog`, run the body, on exception walk the log backwards (insert → tombstone slot, delete → clear tombstone) before re-raising.
+**Bundle 1 — statement-level atomicity** (auto-commit). A single INSERT / UPDATE / DELETE / MERGE that throws mid-execution rolls back its partial writes. A multi-row INSERT whose third row violates a constraint leaves zero rows behind, not two. Probe-confirmed against SQL Server 2025 (2026-05-08).
 
-Identity counters and the database-scoped rowversion counter intentionally bypass the log — probe-confirmed: both keep advancing even when their consuming inserts are rolled back. LOB chains allocated for rolled-back inserts also bypass the log; they leak the same way committed deletes leak (existing quirk).
+**Bundle 2 — explicit transactions via SqlClient API** + savepoints. `DbConnection.BeginTransaction()` returns a `SimulatedDbTransaction` with a real cross-statement undo log. `Commit()` discards the log; `Rollback()` walks it backwards. Disposing the transaction without an explicit Commit / Rollback auto-rolls-back (mirrors `SqlTransaction`). Parallel transactions on the same connection raise `InvalidOperationException` ("SqlConnection does not support parallel transactions.") matching SqlClient. `SAVE TRAN[SACTION] <name>` / `ROLLBACK TRAN[SACTION] <name>` SQL is parsed (the EF Core 10 SaveChanges-inside-tx path emits these around each save). Names are case-insensitive identifiers; re-saving a name overwrites the prior marker.
 
-Explicit transactions (`Database.BeginTransaction()`, `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` SQL) aren't yet wired through. `BeginTransaction` returns a `SimulatedDbTransaction` whose `Commit()` is a no-op and whose `Rollback()` still throws `NotImplementedException`. Bundle 2 will lift the log to a per-connection lifetime spanning multiple statements; Bundle 3 will add SQL-text BEGIN / COMMIT / ROLLBACK and TRANCOUNT semantics.
+`Storage/UndoLog.cs` is a row-level LIFO list (`(Heap, UndoKind, pageIdx, slotIdx)` tuples) with a `Position` / `RollbackTo(position)` marker pattern. Statement-level rollback uses position-at-statement-start as the marker; an explicit transaction's full rollback uses position 0; a savepoint rollback uses the position recorded when SAVE TRANSACTION ran. `Heap.Insert` / `Heap.DeleteAt` take an optional log; on success they append. `Simulation.RunMutation` wraps each mutation statement: route to the connection's active-transaction log when one exists (Bundle 2 path) or create a fresh per-statement log (Bundle 1 path), capture marker, on exception `RollbackTo(marker)` before re-raising.
+
+A failed statement inside an explicit transaction leaves the surrounding tx alive — only the failed statement's own writes are unwound (probe-confirmed, EF Core 10 relies on this for its mid-batch SaveChanges-failure recovery path).
+
+Identity counters and the database-scoped rowversion counter intentionally bypass the log — both keep advancing even when their consuming inserts are rolled back. LOB chains allocated for rolled-back inserts also bypass the log; they leak the same way committed deletes leak.
 
 ### UPDATE / DELETE
 - `UPDATE table SET col = expr [, col = expr]* [WHERE pred]` and `DELETE [FROM] table [WHERE pred]`.
@@ -255,7 +259,7 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 
 ## Not modeled
 
-- Explicit transactions across statements (Bundle 2): `Database.BeginTransaction()` returns a `SimulatedDbTransaction` whose `Commit()` is a no-op and whose `Rollback()` throws `NotImplementedException`. SQL-text `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` (Bundle 3) and TRANCOUNT semantics. Savepoints (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION sp`). Locks / MVCC / isolation levels.
+- SQL-text `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` (Bundle 3, optional — EF Core uses SqlClient's API instead, so this is hand-written-SQL fidelity only) and TRANCOUNT-based nesting semantics. `ROLLBACK TRANSACTION` without a savepoint name (full-tx rollback as SQL text). Locks / MVCC / isolation levels.
 - `RIGHT JOIN` (rewrite as LEFT with sources swapped); `FULL OUTER JOIN`. Both raise `NotSupportedException` at parse.
 - Comma-separated FROM (legacy ANSI-89 join syntax).
 - Plain derived tables in FROM (without APPLY) don't see outer scope — they execute eagerly at parse time. Lateral access requires `CROSS APPLY` / `OUTER APPLY`. SQL Server actually allows derived-table-sees-outer in any FROM subquery; the gap shows up in compound shapes like `(SELECT … FROM (SELECT TOP(N) … WHERE outer.col = …) AS t)` where the inner correlation isn't expressed via APPLY.

@@ -213,6 +213,8 @@ public sealed partial class Simulation
                     yield return RunMutation(context, ParseDelete);
                     continue;
 
+                case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
+                case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackToSavepoint(context):
                 case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
                 case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
                 case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
@@ -226,19 +228,80 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
-    /// statement-level atomicity: a fresh <see cref="UndoLog"/> is
-    /// installed on <paramref name="context"/> for the duration of
-    /// <paramref name="body"/>. On success the log is dropped; on
-    /// exception the log walks itself back, restoring heap state to the
-    /// pre-statement snapshot before the exception propagates. Mirrors
-    /// SQL Server's auto-commit-mode statement atomicity (probe-confirmed
-    /// 2026-05-08): a multi-row INSERT whose third row violates a
-    /// constraint leaves zero rows behind, not two. Identity / rowversion
-    /// counters intentionally stay outside the log — also probe-confirmed.
+    /// statement-level atomicity. Routes mutations to the connection's
+    /// active transaction's <see cref="UndoLog"/> when one exists (Bundle 2
+    /// — explicit <c>BeginTransaction</c>); otherwise creates a fresh
+    /// per-statement log (Bundle 1 — auto-commit). In both cases the
+    /// statement captures a marker at entry; on exception only the entries
+    /// appended this statement are unwound, which matches SQL Server's
+    /// "failed statement leaves the surrounding transaction alive" behavior
+    /// (probe-confirmed 2026-05-08). Identity / rowversion counters bypass
+    /// the log entirely.
     /// </summary>
+    /// <summary>
+    /// Parses <c>SAVE TRAN[SACTION] &lt;name&gt;</c> and records the active
+    /// transaction's current undo-log position against the name. EF Core 10
+    /// emits this per SaveChanges call inside an active
+    /// <c>Database.BeginTransaction</c> so a failed SaveChanges can roll
+    /// back just that save's writes via <c>ROLLBACK TRANSACTION &lt;name&gt;</c>.
+    /// Returns false if the next token isn't <c>TRAN</c> / <c>TRANSACTION</c>
+    /// (the <c>case … when</c> dispatch falls through to a syntax error).
+    /// </summary>
+    private static bool TryParseSavepoint(ParserContext context)
+    {
+        if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
+            return false;
+        var name = context.GetNextRequired<Name>().Value;
+        context.MoveNextOptional();
+
+        var connection = context.Command.Connection as SimulatedDbConnection
+            ?? throw new InvalidOperationException("SAVE TRANSACTION requires a SimulatedDbConnection.");
+        var tx = connection.CurrentTransaction
+            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        tx.Savepoints[name] = tx.UndoLog.Position;
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ROLLBACK TRAN[SACTION] &lt;name&gt;</c> and rolls back the
+    /// active transaction's undo log to the saved position for that name.
+    /// EF Core 10 emits this when a SaveChanges inside a
+    /// <c>Database.BeginTransaction</c> fails — only the writes since the
+    /// matching <c>SAVE TRANSACTION</c> are undone; the surrounding
+    /// transaction stays alive. Returns false if the next token isn't
+    /// <c>TRAN</c> / <c>TRANSACTION</c> followed by an identifier; bare
+    /// <c>ROLLBACK [TRANSACTION]</c> without a savepoint name (full-tx
+    /// rollback as SQL text) isn't yet modeled — EF uses SqlClient's API
+    /// for that path.
+    /// </summary>
+    private static bool TryParseRollbackToSavepoint(ParserContext context)
+    {
+        if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
+            return false;
+        // Lookahead: only consume if a savepoint name follows. Bare
+        // ROLLBACK TRANSACTION (no name) is the full-tx-rollback form,
+        // which we leave to SqlClient's API today.
+        if (!context.MoveNext() || context.Token is not Name nameToken)
+            return false;
+        var name = nameToken.Value;
+        context.MoveNextOptional();
+
+        var connection = context.Command.Connection as SimulatedDbConnection
+            ?? throw new InvalidOperationException("ROLLBACK TRANSACTION requires a SimulatedDbConnection.");
+        var tx = connection.CurrentTransaction
+            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (!tx.Savepoints.TryGetValue(name, out var marker))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        tx.UndoLog.RollbackTo(marker);
+        return true;
+    }
+
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
-        var log = new UndoLog();
+        var connection = context.Command.Connection as SimulatedDbConnection;
+        var log = connection?.CurrentTransaction?.UndoLog ?? new UndoLog();
+        var marker = log.Position;
+
         var savedLog = context.CurrentUndoLog;
         context.CurrentUndoLog = log;
         try
@@ -247,7 +310,7 @@ public sealed partial class Simulation
         }
         catch
         {
-            log.Rollback();
+            log.RollbackTo(marker);
             throw;
         }
         finally

@@ -39,14 +39,25 @@ internal sealed class UndoLog
         this.entries.Add((heap, UndoKind.Delete, pageIndex, slotIndex));
 
     /// <summary>
-    /// Walks the log in LIFO order and applies the inverse operation for
-    /// each entry. Safe to call when the log is empty (no-op). Clears
-    /// the log on completion so the same instance can be reused for a
-    /// subsequent statement.
+    /// Current end-of-log position, captured by callers as a marker before a
+    /// scope of mutations so a later <see cref="RollbackTo"/> can undo only
+    /// that scope. Used both for statement-level atomicity (marker = position
+    /// at statement start) and for explicit transactions where a failed
+    /// statement undoes its own writes without disturbing prior committed-
+    /// to-the-tx writes.
     /// </summary>
-    public void Rollback()
+    public int Position => this.entries.Count;
+
+    /// <summary>
+    /// Walks the log in LIFO order from the current end down to (and not
+    /// including) <paramref name="position"/>, applying the inverse
+    /// operation for each entry, and trims the log to that length. A
+    /// position of 0 unwinds the entire log (equivalent to
+    /// <see cref="Rollback"/>).
+    /// </summary>
+    public void RollbackTo(int position)
     {
-        for (var i = this.entries.Count - 1; i >= 0; i--)
+        for (var i = this.entries.Count - 1; i >= position; i--)
         {
             var (heap, kind, pageIndex, slotIndex) = this.entries[i];
             var page = heap.Pages[pageIndex];
@@ -60,6 +71,19 @@ internal sealed class UndoLog
                     break;
             }
         }
-        this.entries.Clear();
+        this.entries.RemoveRange(position, this.entries.Count - position);
     }
+
+    /// <summary>
+    /// Convenience — full rollback to position 0. Equivalent to
+    /// <c>RollbackTo(0)</c>.
+    /// </summary>
+    public void Rollback() => RollbackTo(0);
+
+    /// <summary>
+    /// Discards all entries without undoing them — the writes stay in the
+    /// heap. Called on transaction commit: the log's purpose was to enable
+    /// rollback, and a successful commit means rollback won't be needed.
+    /// </summary>
+    public void Clear() => this.entries.Clear();
 }
