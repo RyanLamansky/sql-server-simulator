@@ -248,6 +248,7 @@ internal abstract class Expression
             8 => uppercaseName switch
             {
                 "COALESCE" => new Coalesce(context),
+                "DATEDIFF" => new DateDiff.Standard(context),
                 "DATEPART" => new DatePart(context),
                 _ => null
             },
@@ -273,6 +274,7 @@ internal abstract class Expression
             12 => uppercaseName switch
             {
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
+                "DATEDIFF_BIG" => new DateDiff.Big(context),
                 _ => null
             },
             13 => uppercaseName switch

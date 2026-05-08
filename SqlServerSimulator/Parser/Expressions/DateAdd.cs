@@ -21,7 +21,7 @@ internal sealed class DateAdd : Expression
         this.keywordText = context.Token is Name name
             ? name.Value
             : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText);
+        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, "dateadd");
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.number = Parse(context.MoveNextRequiredReturnSelf());

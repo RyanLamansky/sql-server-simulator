@@ -89,10 +89,14 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 155: the first argument to <c>DATEPART</c> /
     /// <c>DATEADD</c> / <c>DATEDIFF</c> / etc. wasn't a recognized datepart
-    /// keyword (year / month / day / hour / minute / second / etc.).
+    /// keyword (year / month / day / hour / minute / second / etc.). The
+    /// message embeds the calling function's name verbatim
+    /// (<c>"... is not a recognized datepart option."</c> for <c>DATEPART</c>,
+    /// <c>"... datediff_big option."</c> for <c>DATEDIFF_BIG</c>, etc.) —
+    /// probed against SQL Server 2025 (2026-05-08).
     /// </summary>
-    internal static SimulatedSqlException NotARecognizedDatepartOption(string keyword) =>
-        new($"'{keyword}' is not a recognized datepart option.", 155, 15, 1);
+    internal static SimulatedSqlException NotARecognizedDatepartOption(string keyword, string functionLowerName) =>
+        new($"'{keyword}' is not a recognized {functionLowerName} option.", 155, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 9810: a datepart keyword is incompatible with
@@ -103,6 +107,16 @@ partial class SimulatedSqlException
         new($"The datepart {datepart} is not supported by date function {function} for data type {typeName}.", 9810, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 9806: a datepart keyword is unconditionally
+    /// rejected by a function regardless of operand type. Probe-confirmed
+    /// against SQL Server 2025 (2026-05-08): <c>DATEDIFF</c> / <c>DATEDIFF_BIG</c>
+    /// reject <c>tzoffset</c> and <c>iso_week</c> with this message, with no
+    /// trailing "for data type X" clause.
+    /// </summary>
+    internal static SimulatedSqlException DatepartNotSupportedForFunction(string datepart, string functionLowerName) =>
+        new($"The datepart {datepart} is not supported by date function {functionLowerName}.", 9806, 16, 0);
+
+    /// <summary>
     /// Mimics SQL Server error 517: <c>DATEADD</c>'s output value falls
     /// outside the date/time type's representable range. The type-name slot
     /// is the *input* column's type (e.g. <c>'date'</c>), not the abstract
@@ -110,6 +124,17 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DateAddOverflow(string typeName) =>
         new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 535: <c>DATEDIFF</c> / <c>DATEDIFF_BIG</c>
+    /// produced a value outside the result type's range (int for DATEDIFF,
+    /// bigint for DATEDIFF_BIG). The function name appears twice in the
+    /// message — first naming the function that overflowed, then in the
+    /// "Try to use {fn} with a less precise datepart" remediation hint.
+    /// Probe-confirmed against SQL Server 2025 (2026-05-08): Class 16, State 0.
+    /// </summary>
+    internal static SimulatedSqlException DateDiffOverflow(string functionLowerName) =>
+        new($"The {functionLowerName} function resulted in an overflow. The number of dateparts separating two date/time instances is too large. Try to use {functionLowerName} with a less precise datepart.", 535, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 506: the <c>ESCAPE</c> clause of a <c>LIKE</c>

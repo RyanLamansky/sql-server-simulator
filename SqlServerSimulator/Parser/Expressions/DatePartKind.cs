@@ -32,10 +32,13 @@ internal static class DatePartKinds
 {
     /// <summary>
     /// Maps a SQL Server datepart keyword (canonical or alias) to its
-    /// <see cref="DatePartKind"/>. Throws Msg 155 for an unknown keyword.
+    /// <see cref="DatePartKind"/>. Throws Msg 155 for an unknown keyword,
+    /// embedding <paramref name="functionLowerName"/> in the message
+    /// ("... is not a recognized datepart/dateadd/datediff/datediff_big
+    /// option.") to match SQL Server's per-caller wording.
     /// </summary>
-    public static DatePartKind ResolveOrThrow(string keyword) =>
-        Resolve(keyword) ?? throw SimulatedSqlException.NotARecognizedDatepartOption(keyword);
+    public static DatePartKind ResolveOrThrow(string keyword, string functionLowerName) =>
+        Resolve(keyword) ?? throw SimulatedSqlException.NotARecognizedDatepartOption(keyword, functionLowerName);
 
     /// <summary>
     /// Span-based keyword dispatch — matches the pattern used in
@@ -118,11 +121,15 @@ internal static class DatePartKinds
                 "DAYOFYEAR" => DatePartKind.DayOfYear,
                 _ => null,
             },
+            10 => upper switch
+            {
+                "NANOSECOND" => DatePartKind.Nanosecond,
+                _ => null,
+            },
             11 => upper switch
             {
                 "MILLISECOND" => DatePartKind.Millisecond,
                 "MICROSECOND" => DatePartKind.Microsecond,
-                "NANOSECOND" => DatePartKind.Nanosecond,
                 _ => null,
             },
             _ => null,
@@ -164,6 +171,107 @@ internal static class DatePartKinds
         };
         if (!ok)
             throw SimulatedSqlException.DatepartNotSupportedForType(keywordText, functionLowerName, FamilyRootName(type));
+    }
+
+    /// <summary>
+    /// Enforces the function-level subset rule for <c>DATEDIFF</c> /
+    /// <c>DATEDIFF_BIG</c>: probe-confirmed against SQL Server 2025
+    /// (2026-05-08), <c>tzoffset</c> and <c>iso_week</c> are rejected with
+    /// Msg 9806 regardless of operand type — <i>any</i> other datepart is
+    /// accepted for any combination of date/time-family operands. (The
+    /// per-type filter that DATEPART/DATEADD enforce via
+    /// <see cref="RequireCompatible"/> doesn't apply.)
+    /// </summary>
+    public static void RequireCompatibleForDiff(DatePartKind kind, string keywordText, string functionLowerName)
+    {
+        if (kind is DatePartKind.TzOffset or DatePartKind.IsoWeek)
+            throw SimulatedSqlException.DatepartNotSupportedForFunction(keywordText, functionLowerName);
+    }
+
+    /// <summary>
+    /// Returns the count of <paramref name="kind"/> boundaries crossed
+    /// going from <paramref name="start"/> to <paramref name="end"/> — the
+    /// SQL Server <c>DATEDIFF</c> / <c>DATEDIFF_BIG</c> semantic. Both inputs
+    /// must be non-NULL date/time-family values; mixed types are anchored
+    /// (<c>date</c> at midnight, <c>time</c> on 1900-01-01,
+    /// <c>datetimeoffset</c> via UTC instant).
+    /// </summary>
+    public static long Diff(DatePartKind kind, SqlValue start, SqlValue end)
+    {
+        var (startTicks, startYear, startMonth) = ToDiffAnchor(start);
+        var (endTicks, endYear, endMonth) = ToDiffAnchor(end);
+        return kind switch
+        {
+            DatePartKind.Year => endYear - startYear,
+            DatePartKind.Quarter => QuarterIndex(endYear, endMonth) - QuarterIndex(startYear, startMonth),
+            DatePartKind.Month => MonthIndex(endYear, endMonth) - MonthIndex(startYear, startMonth),
+            DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => DayIndex(endTicks) - DayIndex(startTicks),
+            DatePartKind.Week => SundayWeekIndex(endTicks) - SundayWeekIndex(startTicks),
+            DatePartKind.Hour => (endTicks / TimeSpan.TicksPerHour) - (startTicks / TimeSpan.TicksPerHour),
+            DatePartKind.Minute => (endTicks / TimeSpan.TicksPerMinute) - (startTicks / TimeSpan.TicksPerMinute),
+            DatePartKind.Second => (endTicks / TimeSpan.TicksPerSecond) - (startTicks / TimeSpan.TicksPerSecond),
+            DatePartKind.Millisecond => (endTicks / TimeSpan.TicksPerMillisecond) - (startTicks / TimeSpan.TicksPerMillisecond),
+            DatePartKind.Microsecond => (endTicks / 10) - (startTicks / 10),
+            DatePartKind.Nanosecond => checked((endTicks - startTicks) * 100),
+            _ => throw new NotSupportedException($"DATEDIFF({kind}) isn't implemented."),
+        };
+    }
+
+    private static long MonthIndex(int year, int month) => ((long)year * 12) + (month - 1);
+
+    private static long QuarterIndex(int year, int month) => ((long)year * 4) + ((month - 1) / 3);
+
+    private static long DayIndex(long ticks) => ticks / TimeSpan.TicksPerDay;
+
+    /// <summary>
+    /// Sunday-anchored week-bucket index for a tick value. <c>DateTime</c>'s
+    /// epoch (0001-01-01) was a Monday, so the running day index is offset by
+    /// +1 before dividing by 7 to align bucket boundaries on Sundays.
+    /// Probe-confirmed: Sat→Sun crosses, Sun→Sat doesn't.
+    /// </summary>
+    private static long SundayWeekIndex(long ticks) => (DayIndex(ticks) + 1) / 7;
+
+    /// <summary>
+    /// Reduces a date/time-family value to (ticks-since-DateTime.MinValue,
+    /// year, month) — the inputs the per-part bucket-index subtraction in
+    /// <see cref="Diff"/> needs. Anchoring rules verified against SQL Server
+    /// 2025 (2026-05-08): bare <c>date</c> → midnight; bare <c>time</c> →
+    /// 1900-01-01; <c>datetimeoffset</c> → UTC instant (year/month read off
+    /// the UTC clock too).
+    /// </summary>
+    private static (long ticks, int year, int month) ToDiffAnchor(SqlValue value)
+    {
+        if (value.Type == SqlType.Date)
+        {
+            var d = value.AsDate;
+            return (d.ToDateTime(TimeOnly.MinValue).Ticks, d.Year, d.Month);
+        }
+        if (value.Type is TimeSqlType)
+        {
+            var anchor = new DateTime(1900, 1, 1).Add(value.AsTime);
+            return (anchor.Ticks, 1900, 1);
+        }
+        if (value.Type == SqlType.DateTime)
+        {
+            var dt = value.AsDateTime;
+            return (dt.Ticks, dt.Year, dt.Month);
+        }
+        if (value.Type == SqlType.SmallDateTime)
+        {
+            var dt = value.AsSmallDateTime;
+            return (dt.Ticks, dt.Year, dt.Month);
+        }
+        if (value.Type is DateTime2SqlType)
+        {
+            var dt = value.AsDateTime2;
+            return (dt.Ticks, dt.Year, dt.Month);
+        }
+        if (value.Type is DateTimeOffsetSqlType)
+        {
+            var utc = value.AsDateTimeOffset.UtcDateTime;
+            return (utc.Ticks, utc.Year, utc.Month);
+        }
+        throw new NotSupportedException($"DATEDIFF: unhandled type {value.Type}.");
     }
 
     private static string FamilyRootName(SqlType type) => type switch
