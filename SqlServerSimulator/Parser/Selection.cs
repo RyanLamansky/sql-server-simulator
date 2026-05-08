@@ -413,7 +413,7 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlType>? outerTypeResolver,
         bool allowOrderBy)
     {
-        sources.Add(ParseSingleFromSource(context, depth));
+        sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
 
         // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
         // the lookahead-after-source token (e.g. WHERE, ORDER, JOIN, INNER,
@@ -429,7 +429,13 @@ internal sealed partial class Selection
                 continue;
             }
 
-            sources.Add(ParseSingleFromSource(context, depth));
+            // Joined-source derived tables can also correlate, but the JoinDriver
+            // path for non-leftmost LateralPlan sources doesn't apply ON
+            // predicates or LEFT-fill. Keep the chained outer-type-resolver in
+            // play so a correlated derived table here is at least diagnosed
+            // (NotSupportedException at execute time) rather than silently
+            // resolving against a wrong scope.
+            sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
             BooleanExpression? on = null;
             if (kind == JoinKind.Cross)
             {
@@ -504,7 +510,7 @@ internal sealed partial class Selection
     /// return, the cursor is at the first un-consumed token after the
     /// source — typically WHERE / ORDER / a JOIN keyword / ON / etc.
     /// </summary>
-    private static FromSource ParseSingleFromSource(ParserContext context, uint depth)
+    private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var token = context.GetNextRequired();
         switch (token)
@@ -536,23 +542,36 @@ internal sealed partial class Selection
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
-                // Derived tables don't see the outer scope of the
-                // enclosing SELECT — pass null for the inner Parse so
-                // projection-time references can't reach out.
-                // (SQL Server's actual rule allows this only with
-                // APPLY / lateral; we don't support those yet.)
-                var derivedSelection = Selection.Parse(context, depth + 1, outerTypeResolver: null);
-                if (derivedSelection.Execute() is not SimulatedSqlResultSet derived)
-                    throw new InvalidOperationException("Inner SELECT produced a non-Pages result set; this should be unreachable.");
+                // Derived tables can correlate to outer scope (SQL Server
+                // allows any FROM derived table to reference outer columns,
+                // not just APPLY). Static parse-time correlation detection
+                // misses runtime-only references (WHERE / ON predicates use
+                // Run, not GetSqlType), so the safe path is to always defer
+                // execution into FromSource.LateralPlan and re-run per outer
+                // resolver invocation. Non-correlated derived tables pay the
+                // same per-Execute cost as before (the inner plan still runs
+                // once per outer Execute call, just routed through
+                // lateralPlan.Execute).
+                //
+                // Pass through the chained outer-type-resolver so the inner
+                // Parse can statically type-resolve any projection / GROUP
+                // BY references that point at outer columns. Both
+                // <see cref="ParserContext.OuterTypeResolver"/> (set inside
+                // the WHERE / GROUP BY / HAVING parse of the enclosing
+                // Selection) and the explicit <paramref name="outerTypeResolver"/>
+                // chain (set when this FROM source is itself nested inside
+                // a subquery) are honored.
+                var derivedSelection = Selection.Parse(context, depth + 1,
+                    outerTypeResolver: context.OuterTypeResolver ?? outerTypeResolver);
 
                 // Inner SELECT result rows are LOB-inline (projections never
                 // emit LOB pointers because they have no destination Heap),
                 // so build a HeapColumn[] schema from the SqlType[] so the
                 // decoder still strips marker bytes for text/ntext/image
                 // columns; lobStore is null because no chain to follow.
-                var derivedColumns = new HeapColumn[derived.Schema.Length];
+                var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
-                    derivedColumns[ci] = new HeapColumn(string.Empty, derived.Schema[ci], maxLength: null, nullable: true);
+                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true);
 
                 // Derived tables have no native name; the alias is the
                 // qualifier when present, otherwise null disables the
@@ -562,12 +581,13 @@ internal sealed partial class Selection
 
                 return new FromSource(
                     qualifier: derivedQualifier,
-                    columnNames: derived.ColumnNames,
+                    columnNames: derivedSelection.ColumnNames,
                     columns: derivedColumns,
                     storedSchema: derivedColumns,
                     storageOrdinals: null,
                     lobStore: null,
-                    rows: derived.RowBytes);
+                    rows: [],
+                    lateralPlan: derivedSelection);
 
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);

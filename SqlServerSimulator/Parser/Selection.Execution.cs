@@ -912,7 +912,16 @@ internal sealed partial class Selection
 
         if (joins.Length == 0)
         {
-            foreach (var row in sources[0].Rows)
+            // Single FROM source. A correlated derived table here carries a
+            // LateralPlan whose execution depends on the enclosing scope's
+            // resolver (no per-row tuple to feed yet — we're at the outermost
+            // level of this Selection). Run it once with the outer resolver
+            // and stream its rows; eager (non-correlated) sources iterate
+            // their pre-evaluated row bytes the same way as before.
+            var rows = sources[0].LateralPlan is { } leftmostLateralPlan
+                ? leftmostLateralPlan.Execute(outerResolver).RowBytes
+                : sources[0].Rows;
+            foreach (var row in rows)
             {
                 tuple[0] = row;
                 yield return tuple;
@@ -922,6 +931,22 @@ internal sealed partial class Selection
 
         SqlValue Resolve(byte[]?[] currentTuple, MultiPartName name) =>
             ResolveAcrossTuple(sources, currentTuple, name, outerResolver, n => Resolve(currentTuple, n));
+
+        // Leftmost-source lateral plan in a multi-source FROM: same as the
+        // joins.Length==0 case — drive it from the outer resolver, then let
+        // the join driver chain through the remaining sources. The level==0
+        // branch in JoinDriver handles non-lateral leftmost sources; we
+        // pre-feed the lateral row stream via a temporary FromSource swap.
+        if (sources[0].LateralPlan is { } leadLateralPlan)
+        {
+            foreach (var row in leadLateralPlan.Execute(outerResolver).RowBytes)
+            {
+                tuple[0] = row;
+                foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 1))
+                    yield return t;
+            }
+            yield break;
+        }
 
         foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 0))
             yield return t;
@@ -965,21 +990,27 @@ internal sealed partial class Selection
         var join = joins[level - 1];
         var matched = false;
 
-        // Lateral source (right side of CROSS APPLY / OUTER APPLY): the
-        // plan re-executes per outer tuple, and its result rows are this
-        // level's contribution to the join. No ON predicate — correlation
-        // lives inside the lateral plan's own WHERE clause.
+        // Lateral source: any source backed by a deferred plan. APPLY brings
+        // its own join kind (CrossApply / OuterApply, no ON predicate) and
+        // correlates via the inner WHERE; ordinary derived tables in INNER /
+        // LEFT / CROSS JOIN slots also flow here since
+        // <see cref="ParseSingleFromSource"/> always defers (correlation isn't
+        // statically detectable). Apply the ON predicate when the join has
+        // one, and null-fill for both LEFT and OUTER APPLY when nothing
+        // matched.
         if (sources[level].LateralPlan is { } lateralPlan)
         {
             foreach (var row in lateralPlan.Execute(name => resolve(tuple, name)).RowBytes)
             {
                 tuple[level] = row;
+                if (join.OnPredicate is not null && join.OnPredicate.Run(name => resolve(tuple, name)) != true)
+                    continue;
                 matched = true;
                 foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
                     yield return t;
             }
             tuple[level] = null;
-            if (!matched && join.Kind == JoinKind.OuterApply)
+            if (!matched && join.Kind is JoinKind.OuterApply or JoinKind.Left)
             {
                 foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
                     yield return t;

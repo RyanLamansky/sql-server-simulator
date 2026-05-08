@@ -121,4 +121,35 @@ public class EFCoreSubquery
             .ToArray();
         CollectionAssert.AreEqual(new[] { 2 }, customerIds);
     }
+
+    [TestMethod]
+    public void Projection_DistinctCorrelatedCount_EmitsCorrelatedDerivedTable()
+    {
+        // EF Core 10 emits `(SELECT COUNT(*) FROM (SELECT DISTINCT col FROM t
+        // WHERE t.k = outer.k) AS sub)` for `Distinct().Count()` over a
+        // correlated subset — the inner derived table references the outer
+        // scope via its WHERE. Before the always-defer derived-table fix
+        // this raised "Invalid column name" because plain derived tables
+        // didn't see outer scope.
+        using var context = SeededContext();
+        var rows = context.Customers
+            .OrderBy(c => c.Id)
+            .Select(c => new
+            {
+                c.Id,
+                DistinctAmounts = context.CustomerOrders
+                    .Where(o => o.CustomerId == c.Id)
+                    .Select(o => o.Amount)
+                    .Distinct()
+                    .Count(),
+            })
+            .ToArray();
+        Assert.HasCount(3, rows);
+        // c.Id=1 has orders [10, 20] → 2 distinct amounts.
+        // c.Id=2 has order [30] → 1.
+        // c.Id=3 has none → 0.
+        Assert.AreEqual(2, rows[0].DistinctAmounts);
+        Assert.AreEqual(1, rows[1].DistinctAmounts);
+        Assert.AreEqual(0, rows[2].DistinctAmounts);
+    }
 }
