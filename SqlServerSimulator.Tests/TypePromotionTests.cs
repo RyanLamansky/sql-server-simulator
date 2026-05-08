@@ -392,4 +392,215 @@ public class TypePromotionTests
         var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar("select cast('2024-01-15' as datetime) - cast('2024-01-15' as date)"));
         AreEqual("The data types datetime and date are incompatible in the subtract operator.", ex.Message);
     }
+
+    // ─── Integer ↔ string Promote (probe-confirmed against SQL Server 2025) ───
+
+    [TestMethod]
+    [DataRow("int", "5", "'5'")]
+    [DataRow("int", "5", "'+5'")]      // sign prefix
+    [DataRow("int", "-5", "'-5'")]
+    [DataRow("int", "5", "' 5'")]      // leading whitespace
+    [DataRow("int", "5", "'5 '")]      // trailing whitespace
+    [DataRow("tinyint", "5", "'5'")]
+    [DataRow("smallint", "5", "'5'")]
+    [DataRow("bigint", "5", "'5'")]
+    public void Comparison_IntegerEqualsString_ParsesAndMatches(string columnType, string seed, string literal)
+    {
+        // Per probe (SQL Server 2025): integer wins, string parses to the
+        // integer's specific type. Whitespace trims; sign prefixes work.
+        AreEqual(1, ExecuteScalar<int>($"select case when cast({seed} as {columnType}) = {literal} then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    public void Comparison_OperandOrderIndependent()
+    {
+        // 'lhs op rhs' must produce the same result as 'rhs op lhs'.
+        AreEqual(1, ExecuteScalar<int>("select case when '5' = 5 then 1 else 0 end"));
+        AreEqual(1, ExecuteScalar<int>("select case when 5 = '5' then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    [DataRow("int", "5", "''")]        // empty string parses to 0
+    [DataRow("int", "0", "''")]        // 0 = '' is true (empty → 0)
+    public void Comparison_EmptyString_ParsesToZero(string columnType, string seed, string literal)
+    {
+        // SQL Server's string→int CAST treats empty / whitespace-only as 0.
+        var expectMatch = seed == "0";
+        AreEqual(expectMatch ? 1 : 0, ExecuteScalar<int>($"select case when cast({seed} as {columnType}) = {literal} then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    [DataRow("'abc'")]
+    [DataRow("'5.5'")]   // decimal-shaped: SQL Server does NOT route through decimal
+    [DataRow("'5.0'")]   // decimal-shaped with trailing zero — still rejected
+    [DataRow("'0x05'")]  // hex notation: rejected (only `0x` literal accepts hex)
+    public void Comparison_UnparseableString_RaisesMsg245(string literal)
+    {
+        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar($"select case when 5 = {literal} then 1 else 0 end"));
+        StartsWith("Conversion failed when converting the varchar value", ex.Message);
+        Contains("to data type int", ex.Message);
+    }
+
+    [TestMethod]
+    public void Comparison_NullIntegerVsString_IsUnknown()
+    {
+        // NULL on either side → UNKNOWN (the WHEN excludes; ELSE arm wins).
+        AreEqual(-1, ExecuteScalar<int>("select case when cast(null as int) = '5' then 1 when not (cast(null as int) = '5') then 0 else -1 end"));
+        AreEqual(-1, ExecuteScalar<int>("select case when 5 = cast(null as varchar(10)) then 1 when not (5 = cast(null as varchar(10))) then 0 else -1 end"));
+    }
+
+    [TestMethod]
+    public void Comparison_BitVsStringForms_AllWorkThroughCastPath()
+    {
+        // bit ↔ string COMPARISON works through string→bit CAST: '1', 'true'/'TRUE'
+        // map to true; '0', 'false', and empty map to false.
+        AreEqual(1, ExecuteScalar<int>("select case when cast(1 as bit) = '1' then 1 else 0 end"));
+        AreEqual(1, ExecuteScalar<int>("select case when cast(1 as bit) = 'true' then 1 else 0 end"));
+        AreEqual(1, ExecuteScalar<int>("select case when cast(1 as bit) = 'TRUE' then 1 else 0 end"));
+        AreEqual(1, ExecuteScalar<int>("select case when cast(0 as bit) = 'false' then 1 else 0 end"));
+        AreEqual(1, ExecuteScalar<int>("select case when cast(0 as bit) = '' then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    [DataRow("+", 8)]
+    [DataRow("-", 2)]
+    [DataRow("*", 15)]
+    [DataRow("/", 1)]    // 5 / 3 = 1 (integer division)
+    [DataRow("%", 2)]    // 5 % 3 = 2
+    public void Arithmetic_IntegerWithString_ProducesIntegerResult(string op, int expected)
+    {
+        AreEqual(expected, ExecuteScalar<int>($"select 5 {op} '3'"));
+        AreEqual(expected, ExecuteScalar<int>($"select '5' {op} 3"));
+    }
+
+    [TestMethod]
+    public void Arithmetic_TinyintPlusString_StaysTinyint()
+    {
+        // The integer's specific type is preserved. Encoding the result as
+        // a wider int would mismatch the column's tinyint schema and the
+        // row encoder would reject the write.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t ( v tinyint )").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (cast(5 as tinyint) + '3')").ExecuteNonQuery();
+        using var select = connection.CreateCommand();
+        select.CommandText = "select v from t";
+        AreEqual((byte)8, select.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Arithmetic_BigintWithStringRhs_StaysBigint()
+    {
+        // Mirror of the tinyint case for the wider integer end: bigint + str
+        // returns bigint (verified against SQL Server 2025), not widened
+        // through int. Insert into a bigint column to confirm the runtime
+        // value's type matches the declared schema.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t ( v bigint )").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (cast(5 as bigint) + '3')").ExecuteNonQuery();
+        using var select = connection.CreateCommand();
+        select.CommandText = "select v from t";
+        AreEqual(8L, select.ExecuteScalar());
+    }
+
+    [TestMethod]
+    [DataRow("+", "add")]
+    [DataRow("-", "subtract")]
+    [DataRow("%", "modulo")]
+    public void Arithmetic_BitWithString_AdditiveAndModulo_RaiseMsg402(string op, string operatorName)
+    {
+        // Bit comparison with string works (string→bit CAST), but bit
+        // arithmetic with string is rejected: + / - / % use Msg 402 with
+        // both type names and the operator word.
+        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar($"select cast(1 as bit) {op} '1'"));
+        AreEqual($"The data types bit and varchar are incompatible in the {operatorName} operator.", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("*", "multiply")]
+    [DataRow("/", "divide")]
+    public void Arithmetic_BitWithString_MultiplicativeAndDivisive_RaiseMsg8117(string op, string operatorName)
+    {
+        // Multiplicative ops use the date-style Msg 8117 instead of Msg 402,
+        // naming only the LEFT operand's type.
+        var leftEx = Throws<System.Data.Common.DbException>(() => ExecuteScalar($"select cast(1 as bit) {op} '1'"));
+        AreEqual($"Operand data type bit is invalid for {operatorName} operator.", leftEx.Message);
+
+        // Operand-order matters for Msg 8117: the message names the LEFT side.
+        var rightEx = Throws<System.Data.Common.DbException>(() => ExecuteScalar($"select '1' {op} cast(1 as bit)"));
+        AreEqual($"Operand data type varchar is invalid for {operatorName} operator.", rightEx.Message);
+    }
+
+    [TestMethod]
+    public void Arithmetic_NullPropagation()
+    {
+        AreEqual(System.DBNull.Value, ExecuteScalar("select cast(null as int) + '3'"));
+        AreEqual(System.DBNull.Value, ExecuteScalar("select 5 + cast(null as varchar(10))"));
+    }
+
+    [TestMethod]
+    public void WhereClause_ColumnEqualsStringParameter_ParsesAndMatches()
+    {
+        // The EF Core / SqlClient pattern: bind a string parameter against
+        // an int column. With Promote landing int, the comparison runs
+        // through string→int CAST per row.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t ( id int )").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (5), (10), (15)").ExecuteNonQuery();
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "select id from t where id = @p";
+        var p = select.CreateParameter();
+        p.ParameterName = "@p";
+        p.DbType = System.Data.DbType.String;
+        p.Value = "10";
+        _ = select.Parameters.Add(p);
+
+        using var reader = select.ExecuteReader();
+        IsTrue(reader.Read()); AreEqual(10, reader[0]);
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void WhereClause_VarcharColumnComparedToInt_RaisesPerRowOnUnparseable()
+    {
+        // Reverse direction: varchar column compared to int literal. Per
+        // probe (SQL Server 2025): a single unparseable row halts the whole
+        // query — the failure isn't isolated to one UNKNOWN row.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t ( s varchar(10) )").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values ('5'), ('abc'), ('15')").ExecuteNonQuery();
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "select s from t where s = 5";
+        var ex = Throws<System.Data.Common.DbException>(() =>
+        {
+            using var reader = select.ExecuteReader();
+            while (reader.Read()) { }
+        });
+        StartsWith("Conversion failed when converting the varchar value 'abc'", ex.Message);
+    }
+
+    [TestMethod]
+    public void InList_IntegerLhsWithStringValues_Works()
+    {
+        AreEqual(1, ExecuteScalar<int>("select case when 5 in ('1','5','9') then 1 else 0 end"));
+        AreEqual(0, ExecuteScalar<int>("select case when 5 in ('1','9') then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    public void Coalesce_IntegerAndString_ResultIsInteger()
+    {
+        // coalesce(int, varchar) returns int — the first arg's type drives
+        // when it's non-null; the second is parsed to int if needed.
+        AreEqual(5, ExecuteScalar<int>("select coalesce(5, '99')"));
+        AreEqual(99, ExecuteScalar<int>("select coalesce(cast(null as int), '99')"));
+    }
+
+    [TestMethod]
+    public void Case_ThenIntegerElseString_ResultIsInteger()
+    {
+        AreEqual(5, ExecuteScalar<int>("select case when 1=1 then 5 else '99' end"));
+        AreEqual(99, ExecuteScalar<int>("select case when 1=0 then 5 else '99' end"));
+    }
+
 }

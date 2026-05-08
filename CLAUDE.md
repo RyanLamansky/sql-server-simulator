@@ -185,6 +185,15 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 ### Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (integer-truncating; `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. Standalone and inside `GROUP BY` / `HAVING`.
 
+### Integer ↔ string promotion
+Cross-category integer ↔ string promotion lands the integer's specific subtype (`tinyint + '3'` stays tinyint, `bigint + '3'` stays bigint — probe-confirmed against SQL Server 2025, 2026-05-08). The string side parses through the integer's existing CAST path at runtime — empty / whitespace-only → 0, `+`/`-` sign prefixes accepted, leading/trailing whitespace trimmed. **Decimal-shaped strings (`'5.5'`, `'5.0'`) raise Msg 245** rather than routing through decimal — SQL Server's int-target string parse rejects any non-integer literal. Hex notation (`'0x05'`) likewise rejected; the `0x` literal form is a different parse path.
+
+`PromoteFromInteger`'s `String => a` arm and `PromoteFromString`'s `Integer => b` arm are the static rule; `IntegerArithmetic` in `TwoSidedExpression` normalizes the string operand by `CoerceTo(integerType)` before dispatching to `PureIntegerArithmetic`. The bit asymmetry: `bit ↔ string` **comparison** works through string→bit CAST (with `'true'` / `'false'` / empty all accepted), but `bit + str` (and other bit-arithmetic with strings) is rejected — `+` / `-` / `%` raise **Msg 402** (`"The data types bit and varchar are incompatible in the {add|subtract|modulo} operator."`); `*` / `/` raise **Msg 8117** with the LEFT operand's type only (`"Operand data type bit is invalid for {multiply|divide} operator."`). The asymmetry mirrors SQL Server's same bit-arithmetic restriction with another bit, which is also rejected.
+
+WHERE on a varchar column compared against an int (or vice versa) halts the whole query on the first unparseable row — the failure isn't isolated as per-row UNKNOWN. SQL Server's lazy-IN quirk (where an unparseable value in an IN list is suppressed when any other value matches) isn't modeled — strict semantics: any conversion error in an IN-list propagates immediately.
+
+`BuildSynthesizedSqlRow` (the FROM-less SELECT path) runs each expression first to surface runtime-only errors with their operator-name wording, then calls `GetSqlType` to populate the projection schema and bridges any runtime/schema type mismatch via `CoerceTo` — required for mixed-type CASE / Coalesce expressions (`case when 1=0 then 5 else '99' end` lands as int 99 even without a FROM clause).
+
 ### Decimal arithmetic precision / scale
 SQL Server has per-operator scale rules for decimal that differ from the joint-envelope rule used for comparison / COALESCE / set-op type unification (probe-confirmed against SQL Server 2025, 2026-05-08):
 
@@ -300,7 +309,6 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 - `STRING_AGG`'s `WITHIN GROUP (ORDER BY ...)`.
 - `LIKE` with `COLLATE` override (default collation only — case-insensitive Latin1_General-shaped).
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string. Other styles raise Msg 281; money / float / binary style codes and `CONVERT(date, str, 103)`-style date parsing not modeled.
-- Cross-category `Promote` for integer ↔ string. Only CAST works that pair.
 - `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
 - `OUTPUT INTO @table_var`, `OUTPUT DELETED.*` / `INSERTED.*` star expansion. Per-column `OUTPUT INSERTED.<col>` / `OUTPUT DELETED.<col>` *is* supported (UPDATE / DELETE both); only the star-expansion form is missing. `OUTPUT INTO` (sending the projection to a table variable rather than the result set) isn't.
 - Joined-source UPDATE / DELETE FROM clauses (`UPDATE a SET ... FROM t AS a JOIN u AS b ON ...`). The single-source alias form (`UPDATE a SET ... FROM t AS a [WHERE ...]`, `DELETE FROM a FROM t AS a [WHERE ...]`) IS supported — that's what EF7+ `ExecuteUpdate` / `ExecuteDelete` emit, verified against real SQL Server 2025. Adding sources beyond the single aliased target raises `NotSupportedException` so the gap is visible.

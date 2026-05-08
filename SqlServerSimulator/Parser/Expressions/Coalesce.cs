@@ -13,6 +13,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal sealed class Coalesce : Expression
 {
     private readonly Expression[] arguments;
+    private SqlType? cachedResultType;
 
     public Coalesce(ParserContext context)
     {
@@ -34,7 +35,7 @@ internal sealed class Coalesce : Expression
         {
             value = this.arguments[i].Run(getColumnValue);
             if (!value.IsNull)
-                return value;
+                return this.cachedResultType is { } target && value.Type != target ? value.CoerceTo(target) : value;
         }
         return value; // all NULL — return the last (typed-NULL) result
     }
@@ -44,6 +45,7 @@ internal sealed class Coalesce : Expression
         var t = this.arguments[0].GetSqlType(resolveColumnType);
         for (var i = 1; i < this.arguments.Length; i++)
             t = SqlType.Promote(t, this.arguments[i].GetSqlType(resolveColumnType));
+        this.cachedResultType = t;
         return t;
     }
 

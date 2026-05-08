@@ -103,9 +103,16 @@ internal abstract partial class SqlType
     /// <summary>
     /// Integer vs each numeric / string / date-time category. Integer
     /// canonicalizes to its decimal equivalent for decimal/money partners.
-    /// Integer vs date/time only succeeds for the legacy datetime types
-    /// (datetime, smalldatetime); other date/time types raise the
-    /// operand-type-clash error.
+    /// Integer vs string keeps the integer's specific type (probe-confirmed
+    /// against SQL Server 2025: <c>tinyint + '3'</c> → tinyint,
+    /// <c>bigint + '3'</c> → bigint); the string side parses through the
+    /// integer's CAST path at runtime, which fails with Msg 245 for
+    /// decimal-shaped strings (<c>'5.5'</c>, <c>'5.0'</c>) — SQL Server
+    /// does not route through decimal even when the string represents an
+    /// exact-integer value with a fractional zero. Integer vs date/time
+    /// only succeeds for the legacy datetime types (datetime,
+    /// smalldatetime); other date/time types raise the operand-type-clash
+    /// error.
     /// </summary>
     private static SqlType PromoteFromInteger(SqlType a, SqlType b) => b.Category switch
     {
@@ -113,6 +120,7 @@ internal abstract partial class SqlType
         SqlTypeCategory.Decimal => PromoteDecimalPair(IntegerAsDecimalType(a), (DecimalSqlType)b),
         SqlTypeCategory.Money => b,
         SqlTypeCategory.Integer => a.Precedence >= b.Precedence ? a : b,
+        SqlTypeCategory.String => a,
         SqlTypeCategory.DateTime => b == DateTime || b == SmallDateTime ? b : throw SimulatedSqlException.OperandTypeClash(a, b),
         _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
     };
@@ -124,13 +132,12 @@ internal abstract partial class SqlType
     /// nchar &gt; varchar &gt; char). For two parameterized siblings of
     /// the same kind (e.g. char(5) vs char(10)), the longer length wins so
     /// the shorter side doesn't truncate. String vs uniqueidentifier
-    /// promotes to uid; string vs integer falls through to
-    /// <see cref="NotSupportedException"/> because that promotion path
-    /// isn't modeled yet.
+    /// promotes to uid; string vs integer keeps the integer's specific
+    /// type (so <c>'5' + cast(3 as bigint)</c> → bigint).
     /// </summary>
     private static SqlType PromoteFromString(SqlType a, SqlType b) => b.Category switch
     {
-        SqlTypeCategory.Approximate or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier => b,
+        SqlTypeCategory.Approximate or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier or SqlTypeCategory.Integer => b,
         SqlTypeCategory.String => (a, b) switch
         {
             (CharSqlType ca, CharSqlType cb) => ca.length >= cb.length ? a : b,

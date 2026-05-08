@@ -32,8 +32,33 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
     /// with each arm a switch on the right operand's category, keeping the
     /// hot path one byte-comparison deep and jump-table-friendly.
     /// </summary>
-    private protected static SqlValue IntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute) =>
-        left.Type.Category switch
+    /// <remarks>
+    /// Cross-category integer ↔ string is normalized at the top: the string
+    /// operand parses to the integer side's specific type (<c>tinyint + '3'</c>
+    /// stays tinyint, <c>bigint + '3'</c> stays bigint — verified against
+    /// SQL Server 2025), so the rest of the dispatcher stays integer ↔
+    /// integer. Bit is the sole exception: bit + string raises Msg 402 (for
+    /// <c>+ - %</c>) or Msg 8117 (for <c>* /</c>) without parsing, mirroring
+    /// SQL Server's same treatment of bit arithmetic with another bit and
+    /// matching the bitwise-operator restrictions on strings (which also
+    /// fail rather than coerce).
+    /// </remarks>
+    private protected static SqlValue IntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute)
+    {
+        if (left.Type.Category == SqlTypeCategory.Integer && right.Type.Category == SqlTypeCategory.String && op is not '&' and not '|' and not '^')
+        {
+            if (left.Type == SqlType.Bit)
+                throw BitWithStringArithmetic(left.Type, right.Type, op);
+            right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
+        }
+        else if (left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.Integer && op is not '&' and not '|' and not '^')
+        {
+            if (right.Type == SqlType.Bit)
+                throw BitWithStringArithmetic(left.Type, right.Type, op);
+            left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
+        }
+
+        return left.Type.Category switch
         {
             SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
             SqlTypeCategory.Decimal => right.Type.Category switch
@@ -59,6 +84,22 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
             },
             _ => throw UnsupportedNumericPair(left, right, op),
         };
+    }
+
+    private static SimulatedSqlException BitWithStringArithmetic(SqlType left, SqlType right, char op) =>
+        op is '*' or '/'
+            ? SimulatedSqlException.OperandDataTypeInvalid(left, OperatorWord(op))
+            : SimulatedSqlException.IncompatibleDataTypesInOperator(left, right, OperatorWord(op));
+
+    private static string OperatorWord(char op) => op switch
+    {
+        '+' => "add",
+        '-' => "subtract",
+        '*' => "multiply",
+        '/' => "divide",
+        '%' => "modulo",
+        _ => op.ToString(),
+    };
 
     /// <summary>
     /// Integer-only path: both sides are guaranteed integer-category.

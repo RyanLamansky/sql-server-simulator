@@ -917,11 +917,19 @@ internal sealed partial class Selection
         var schema = new SqlType[expressions.Count];
         var columnNames = new string[expressions.Count];
 
+        // Run-then-GetSqlType: any expression whose runtime path raises a
+        // type-error message with operator-name wording (e.g. <c>dt + time</c>
+        // → "add operator") emits that error from Run before GetSqlType has
+        // a chance to throw a Promote-side message with comparison-only
+        // wording. For successful runs, GetSqlType then bridges the matched
+        // branch's runtime type to the joint-promoted schema (CASE / Coalesce
+        // with mixed-type branches in a FROM-less SELECT).
         for (var i = 0; i < expressions.Count; i++)
         {
-            values[i] = expressions[i].Run(column => throw SimulatedSqlException.InvalidColumnName(column));
-            schema[i] = values[i].Type;
+            var raw = expressions[i].Run(column => throw SimulatedSqlException.InvalidColumnName(column));
+            schema[i] = expressions[i].GetSqlType(column => throw SimulatedSqlException.InvalidColumnName(column));
             columnNames[i] = expressions[i].Name;
+            values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
         }
 
         return new Selection(schema, columnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
