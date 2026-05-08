@@ -246,14 +246,15 @@ internal sealed class WindowExpression : Expression
             context.MoveNextRequired();
             var expr = Expression.Parse(context);
             var descending = false;
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Asc })
+            switch (context.Token)
             {
-                context.MoveNextOptional();
-            }
-            else if (context.Token is ReservedKeyword { Keyword: Keyword.Desc })
-            {
-                descending = true;
-                context.MoveNextOptional();
+                case ReservedKeyword { Keyword: Keyword.Asc }:
+                    context.MoveNextOptional();
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Desc }:
+                    descending = true;
+                    context.MoveNextOptional();
+                    break;
             }
             items.Add(OrderBySpec.FromExpression(expr, descending));
             if (context.Token is not Operator { Character: ',' })

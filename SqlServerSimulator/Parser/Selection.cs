@@ -868,14 +868,15 @@ internal sealed partial class Selection
             var expr = Expression.Parse(context);
 
             var descending = false;
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Asc })
+            switch (context.Token)
             {
-                context.MoveNextOptional();
-            }
-            else if (context.Token is ReservedKeyword { Keyword: Keyword.Desc })
-            {
-                descending = true;
-                context.MoveNextOptional();
+                case ReservedKeyword { Keyword: Keyword.Asc }:
+                    context.MoveNextOptional();
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Desc }:
+                    descending = true;
+                    context.MoveNextOptional();
+                    break;
             }
 
             // A bare integer literal is the ordinal form (validated against the
