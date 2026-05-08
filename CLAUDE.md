@@ -43,7 +43,9 @@ If `obj/` permission errors appear (e.g. `Up2Date` access denied), the user has 
 Top-level layout (`SqlServerSimulator/`):
 - `Storage/` — pages, types, row encoder/decoder, heap, constraints
 - `Parser/` — tokenizer, expressions, query planning + execution
-- root — `Simulated*` ADO.NET implementations, `Simulation`
+- `Simulation/` — `Simulation` partial-class root and per-statement-kind partials (`Simulation.Create.cs`, `Simulation.Insert.cs`, etc.)
+- `Errors/` — `SimulatedSqlException` partial-class root and topical factory partials (`SimulatedSqlException.TypeErrors.cs`, etc.)
+- root — `Simulated*` ADO.NET implementations
 
 ### Storage
 
