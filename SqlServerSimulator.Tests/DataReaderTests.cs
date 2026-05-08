@@ -203,10 +203,53 @@ public sealed class DataReaderTests
     [DataRow("cast('12:00' as time(3))", typeof(TimeSpan))]
     [DataRow("cast('2024-01-01T12:00:00+00:00' as datetimeoffset(3))", typeof(DateTimeOffset))]
     [DataRow("cast('00000000-0000-0000-0000-000000000000' as uniqueidentifier)", typeof(Guid))]
+    [DataRow("cast(1 as smallmoney)", typeof(decimal))]
+    [DataRow("cast('2024-01-01' as smalldatetime)", typeof(DateTime))]
+    [DataRow("cast('abc' as char(5))", typeof(string))]
+    [DataRow("cast('abc' as nchar(5))", typeof(string))]
+    [DataRow("cast(0x1234 as binary(4))", typeof(byte[]))]
     public void GetFieldType_ReturnsClrType(string expression, Type expected)
     {
         using var reader = OpenReader($"select {expression}");
         AreEqual(expected, reader.GetFieldType(0));
+    }
+
+    [TestMethod]
+    [DataRow("text", "text", typeof(string))]
+    [DataRow("ntext", "ntext", typeof(string))]
+    [DataRow("image", "image", typeof(byte[]))]
+    public void LobTypes_FieldTypeAndDataTypeName_ViaColumnRoundTrip(string columnType, string expectedSqlName, Type expectedClr)
+    {
+        // text / ntext / image can't appear as a CAST target; reach their
+        // type-metadata paths by declaring a column and reading it back.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (id int, c {columnType})");
+        _ = sim.ExecuteNonQuery("insert t (id) values (1)");
+        using var reader = sim.ExecuteReader("select c from t");
+        AreEqual(expectedSqlName, reader.GetDataTypeName(0));
+        AreEqual(expectedClr, reader.GetFieldType(0));
+    }
+
+    [TestMethod]
+    public void RowVersion_FieldTypeAndDataTypeName_ViaColumnRoundTrip()
+    {
+        // rowversion stores 8 bytes, surfaces under the legacy "timestamp" name.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, rv rowversion)");
+        _ = sim.ExecuteNonQuery("insert t (id) values (1)");
+        using var reader = sim.ExecuteReader("select rv from t");
+        AreEqual("timestamp", reader.GetDataTypeName(0));
+        AreEqual(typeof(byte[]), reader.GetFieldType(0));
+    }
+
+    [TestMethod]
+    public void SysName_FieldTypeAndDataTypeName_ViaSystemTable()
+    {
+        // sysname can't be declared in user CREATE TABLE; the systypes
+        // catalog table exposes it via the "name" column.
+        using var reader = new Simulation().ExecuteReader("select name from systypes");
+        AreEqual("sysname", reader.GetDataTypeName(0));
+        AreEqual(typeof(string), reader.GetFieldType(0));
     }
 
     [TestMethod]
@@ -298,5 +341,21 @@ public sealed class DataReaderTests
         using var reader = OpenReader("select cast('a' as char(1))");
         IsTrue(reader.Read());
         _ = ThrowsExactly<InvalidCastException>(() => reader.GetChar(0));
+    }
+
+    [TestMethod]
+    public void GetFloat_ReadsRealColumn()
+    {
+        using var reader = OpenReader("select cast(3.5 as real)");
+        IsTrue(reader.Read());
+        AreEqual(3.5f, reader.GetFloat(0));
+    }
+
+    [TestMethod]
+    public void GetFloat_OnNull_ThrowsSqlNullValueException()
+    {
+        using var reader = OpenReader("select cast(null as real)");
+        IsTrue(reader.Read());
+        _ = Throws<SqlNullValueException>(() => reader.GetFloat(0));
     }
 }

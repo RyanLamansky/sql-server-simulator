@@ -86,6 +86,16 @@ public class SelectTests
     }
 
     [TestMethod]
+    public void UnsupportedCharacter_RaisesMsg102()
+    {
+        // Hits the tokenizer's catch-all for characters outside the supported
+        // operator / literal / identifier character classes.
+        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar("select 1 ~ 2"));
+        Assert.AreEqual("Incorrect syntax near '~'.", ex.Message);
+        Assert.AreEqual("102", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
     [DataRow("select 1", "", 1)]
     [DataRow("select 1 c", "c", 1)]
     [DataRow("select 1 as c", "c", 1)]

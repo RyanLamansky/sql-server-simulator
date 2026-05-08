@@ -90,4 +90,23 @@ public class TopTests
         IsTrue(topReader.Read()); AreEqual(4, topReader[0]);
         IsFalse(topReader.Read());
     }
+
+    [TestMethod]
+    public void Top_ColumnReference_RaisesMsg4115()
+    {
+        // TOP / OFFSET / FETCH cannot reference a column from the same query's FROM.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int)");
+        _ = sim.ExecuteNonQuery("insert t values (1)");
+        var ex = Throws<System.Data.Common.DbException>(() => sim.ExecuteScalar("select top (v) v from t"));
+        AreEqual("4115", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Top_NonIntegerExpression_RaisesMsg1060()
+    {
+        // TOP requires an integer; a string-typed expression triggers Msg 1060.
+        var ex = Throws<System.Data.Common.DbException>(() => new Simulation().ExecuteScalar("select top ('abc') 1"));
+        AreEqual("1060", ex.Data["HelpLink.EvtID"]);
+    }
 }

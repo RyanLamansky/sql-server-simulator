@@ -101,10 +101,12 @@ internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer)
 /// <remarks>
 /// <see cref="FixedLength"/> is 1 (a single bit's standalone byte width),
 /// but the row encoder doesn't actually use this path: it packs runs of
-/// consecutive bit columns into shared bytes (8 bits per byte). The
-/// <see cref="Encode"/> / <see cref="Decode"/> overrides remain for
-/// completeness and are exercised only when bit values round-trip outside
-/// the row format.
+/// consecutive bit columns into shared bytes (8 bits per byte). The base
+/// class's virtual <see cref="SqlType.Encode"/> / <see cref="SqlType.Decode"/>
+/// throw if anyone routes a bit value through the standalone-encoding path
+/// — that should never happen in practice, but the throw is a tripwire
+/// that surfaces architectural drift if RowEncoder's bit-special-case
+/// is ever removed without thinking it through.
 /// </remarks>
 internal sealed class BitSqlType() : SqlType(SqlTypeCategory.Integer)
 {
@@ -113,19 +115,6 @@ internal sealed class BitSqlType() : SqlType(SqlTypeCategory.Integer)
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 1;
-
-    public override int Encode(SqlValue value, Span<byte> destination)
-    {
-        destination[0] = value.AsBoolean ? (byte)0x01 : (byte)0x00;
-        return 1;
-    }
-
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => source[0] switch
-    {
-        0x00 => SqlValue.FromBoolean(false),
-        0x01 => SqlValue.FromBoolean(true),
-        var b => throw new InvalidDataException($"Invalid Bit byte: 0x{b:X2}."),
-    };
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromBoolean((bool)raw);
 

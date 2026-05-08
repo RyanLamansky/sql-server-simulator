@@ -52,6 +52,15 @@ public sealed class DatePartTests
         AreEqual(-420, ExecuteScalar("select datepart(tzoffset, cast('2024-06-15 13:45:30 -07:00' as datetimeoffset))"));
 
     [TestMethod]
+    [DataRow("2024-01-01", 1)]   // Jan 1 is always week 1.
+    [DataRow("2024-01-06", 1)]   // Saturday before first Sunday roll → still week 1.
+    [DataRow("2024-01-07", 2)]   // Sunday → week 2 begins.
+    [DataRow("2024-06-15", 24)]  // Mid-year, default us_english Sunday-anchored.
+    [DataRow("2024-12-31", 53)]  // Last day of year — straddles into week 53.
+    public void DatePart_Week_DefaultUsEnglishSundayAnchored(string dateStr, int expectedWeek) =>
+        AreEqual(expectedWeek, ExecuteScalar($"select datepart(week, cast('{dateStr}' as date))"));
+
+    [TestMethod]
     public void DatePart_NullInput_ReturnsNullInt() =>
         IsInstanceOfType<DBNull>(ExecuteScalar("select datepart(year, cast(null as datetime2))"));
 

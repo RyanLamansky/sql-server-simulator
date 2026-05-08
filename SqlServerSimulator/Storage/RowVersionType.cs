@@ -38,9 +38,6 @@ internal sealed class RowVersionSqlType() : SqlType(SqlTypeCategory.Other)
     public override SqlValue Decode(ReadOnlySpan<byte> source) =>
         SqlValue.FromRowVersion(BinaryPrimitives.ReadInt64BigEndian(source));
 
-    public override SqlValue ConvertParameter(object raw) =>
-        SqlValue.FromRowVersion(BinaryPrimitives.ReadInt64BigEndian((byte[])raw));
-
     /// <summary>
     /// SQL Server reports the type as <c>timestamp</c> in
     /// <c>information_schema.columns</c> and in SqlClient's

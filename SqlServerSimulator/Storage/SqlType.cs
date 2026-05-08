@@ -85,24 +85,39 @@ internal abstract class SqlType
     /// <summary>
     /// Writes a non-NULL value's bytes to <paramref name="destination"/>.
     /// NULL handling is the row encoder's responsibility (via the row-level NULL bitmap).
+    /// Virtual so types whose row representation isn't a contiguous byte run
+    /// (currently only <see cref="BitSqlType"/>, which is bit-packed by
+    /// <c>RowEncoder</c>) can opt out — the throwing default acts as a
+    /// tripwire if anyone ever routes such a type through the standard path.
     /// </summary>
     /// <returns>The number of bytes written.</returns>
-    public abstract int Encode(SqlValue value, Span<byte> destination);
+    public virtual int Encode(SqlValue value, Span<byte> destination) =>
+        throw new NotSupportedException($"{this} doesn't participate in standalone byte encoding (e.g. bit values are packed by RowEncoder).");
 
     /// <summary>
     /// Reads bytes and reconstructs a non-NULL value.
     /// For fixed-length types, <paramref name="source"/>'s length is the type's fixed width.
     /// For variable-length types, <paramref name="source"/>'s length is the value's byte count.
+    /// Virtual with a throwing default for the same reason as <see cref="Encode"/>.
     /// </summary>
-    public abstract SqlValue Decode(ReadOnlySpan<byte> source);
+    public virtual SqlValue Decode(ReadOnlySpan<byte> source) =>
+        throw new NotSupportedException($"{this} doesn't participate in standalone byte decoding (e.g. bit values are unpacked by RowDecoder).");
 
     /// <summary>
     /// Converts a non-NULL CLR parameter value into a typed <see cref="SqlValue"/>
     /// of this type. Used at the <c>DbParameter</c> boundary; NULL handling
     /// is the caller's responsibility.
+    /// Virtual so types that aren't reachable through <c>DbParameter.DbType</c>
+    /// (the only mapping path consumers use) can opt out — the throwing
+    /// default acts as a tripwire if the parameter-binding path ever starts
+    /// dispatching to one of them. The unreachable set today: <c>char(N)</c>,
+    /// <c>nchar(N)</c>, <c>binary(N)</c>, <c>text</c>, <c>ntext</c>,
+    /// <c>image</c>, <c>rowversion</c>, <c>sysname</c>, <c>smallmoney</c> —
+    /// none of which appear in <see cref="GetByDbType"/>'s output.
     /// </summary>
     /// <exception cref="NotSupportedException">No conversion exists from <paramref name="raw"/>'s CLR type to this <see cref="SqlType"/>.</exception>
-    public abstract SqlValue ConvertParameter(object raw);
+    public virtual SqlValue ConvertParameter(object raw) =>
+        throw new NotSupportedException($"{this} isn't reachable as a parameter type via DbParameter.DbType; ConvertParameter is unreachable in normal binding.");
 
     /// <summary>
     /// SQL Server data-type precedence for implicit conversion. Higher means

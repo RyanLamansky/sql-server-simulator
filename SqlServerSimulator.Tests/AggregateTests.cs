@@ -97,6 +97,20 @@ public sealed class AggregateTests
     }
 
     [TestMethod]
+    public void Sum_Float_AccumulatesViaDouble()
+    {
+        using var connection = Seeded("a float", "(1.5), (2.25), (0.25)");
+        AreEqual(4.0, connection.CreateCommand("select sum(a) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Sum_Real_AccumulatesViaDoubleAndNarrowsBack()
+    {
+        using var connection = Seeded("a real", "(1.5), (2.25), (0.25)");
+        AreEqual(4.0f, connection.CreateCommand("select sum(a) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
     public void Avg_Int_TruncatesByIntegerDivision()
     {
         // SQL Server: `avg(int)` returns int via integer division. (1+2+2)/3 = 1.

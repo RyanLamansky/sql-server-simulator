@@ -377,4 +377,14 @@ public class CreateTableTests
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(42, reader.GetInt32(0));
     }
+
+    [TestMethod]
+    public void CreateTable_DuplicateName_RaisesMsg2714()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table dup (a int)");
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("create table dup (a int)"));
+        Assert.AreEqual("There is already an object named 'dup' in the database.", ex.Message);
+        Assert.AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+    }
 }

@@ -235,6 +235,24 @@ public sealed class SmallDateTimeTests
     }
 
     [TestMethod]
+    public void Parameter_SmallDateTime_AcceptsDateOnlyValue()
+    {
+        // Date-only value lands at midnight on the smalldatetime field.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (d smalldatetime)");
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "insert into t values (@x)";
+        var p = command.CreateParameter();
+        p.ParameterName = "@x";
+        p.DbType = DbType.DateTime;
+        p.Value = new DateOnly(2024, 1, 15);
+        _ = command.Parameters.Add(p);
+        AreEqual(1, command.ExecuteNonQuery());
+        AreEqual(new DateTime(2024, 1, 15, 0, 0, 0), sim.ExecuteScalar("select d from t"));
+    }
+
+    [TestMethod]
     public void Equality_TwoSmallDateTimeValuesAtSameMinute_AreEqual()
     {
         var sim = new Simulation();

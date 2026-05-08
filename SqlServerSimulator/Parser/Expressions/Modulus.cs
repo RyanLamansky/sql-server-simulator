@@ -2,7 +2,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal sealed class Modulus(Expression left, ParserContext context) : TwoSidedExpression(left, context)
 {
-    public override byte Precedence => 3;
+    public override byte Precedence => 2;
 
     protected override Storage.SqlValue Run(Storage.SqlValue left, Storage.SqlValue right) => IntegerArithmetic(left, right, '%', static (a, b) => a % b);
 
