@@ -164,6 +164,18 @@ internal sealed class HeapPage
         BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue | SlotTombstoneBit));
     }
 
+    /// <summary>
+    /// Clears the tombstone bit on a slot — the inverse of
+    /// <see cref="DeleteSlot"/>. Used by <see cref="UndoLog"/> when
+    /// rolling back a delete (or the delete half of an UPDATE).
+    /// </summary>
+    public void UndeleteSlot(int slotIndex)
+    {
+        var slotByteOffset = PageSize - (2 * (slotIndex + 1));
+        var slotValue = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2));
+        BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue & ~SlotTombstoneBit));
+    }
+
     private bool IsSlotDeleted(int slotIndex) =>
         (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotTombstoneBit) != 0;
 

@@ -198,19 +198,19 @@ public sealed partial class Simulation
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Insert }:
-                    yield return ParseInsert(context);
+                    yield return RunMutation(context, ParseInsert);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Merge }:
-                    yield return ParseMerge(context);
+                    yield return RunMutation(context, ParseMerge);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Update }:
-                    yield return ParseUpdate(context);
+                    yield return RunMutation(context, ParseUpdate);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Delete }:
-                    yield return ParseDelete(context);
+                    yield return RunMutation(context, ParseDelete);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
@@ -221,6 +221,38 @@ public sealed partial class Simulation
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+    }
+
+    /// <summary>
+    /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
+    /// statement-level atomicity: a fresh <see cref="UndoLog"/> is
+    /// installed on <paramref name="context"/> for the duration of
+    /// <paramref name="body"/>. On success the log is dropped; on
+    /// exception the log walks itself back, restoring heap state to the
+    /// pre-statement snapshot before the exception propagates. Mirrors
+    /// SQL Server's auto-commit-mode statement atomicity (probe-confirmed
+    /// 2026-05-08): a multi-row INSERT whose third row violates a
+    /// constraint leaves zero rows behind, not two. Identity / rowversion
+    /// counters intentionally stay outside the log — also probe-confirmed.
+    /// </summary>
+    private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
+    {
+        var log = new UndoLog();
+        var savedLog = context.CurrentUndoLog;
+        context.CurrentUndoLog = log;
+        try
+        {
+            return body(context);
+        }
+        catch
+        {
+            log.Rollback();
+            throw;
+        }
+        finally
+        {
+            context.CurrentUndoLog = savedLog;
         }
     }
 }

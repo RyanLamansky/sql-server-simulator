@@ -43,6 +43,30 @@ public class EFCorePrimaryKey
     }
 
     [TestMethod]
+    public void SaveChanges_BatchWithMidBatchPkViolation_RollsBackEntireBatch()
+    {
+        // EF Core 10 batches multiple Add()s of the same entity type into a
+        // single multi-row INSERT statement. SQL Server's auto-commit-mode
+        // statement atomicity (Bundle 1) means a mid-batch PK collision rolls
+        // back the entire INSERT — neither the valid rows before nor after
+        // the collision land in the table.
+        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation());
+        _ = context.Inventory.Add(new Inventory { Sku = "EXISTING", Quantity = 1 });
+        _ = context.SaveChanges();
+
+        using var context2 = new TestDbContext(context.Simulation);
+        _ = context2.Inventory.Add(new Inventory { Sku = "NEW-1", Quantity = 10 });
+        _ = context2.Inventory.Add(new Inventory { Sku = "EXISTING", Quantity = 99 });
+        _ = context2.Inventory.Add(new Inventory { Sku = "NEW-2", Quantity = 30 });
+
+        _ = Assert.Throws<DbUpdateException>(() => context2.SaveChanges());
+
+        using var context3 = new TestDbContext(context.Simulation);
+        var skus = context3.Inventory.AsNoTracking().Select(i => i.Sku).OrderBy(s => s).ToArray();
+        CollectionAssert.AreEqual(new[] { "EXISTING" }, skus);
+    }
+
+    [TestMethod]
     public async Task SaveChangesAsync_DuplicateKey_RaisesDbUpdateException()
     {
         await using var context = new TestDbContext(TestDbContext.CreateInventorySimulation());

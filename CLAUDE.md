@@ -196,6 +196,15 @@ Per-type keyword compatibility mirrors SQL Server (verified against Kardax7 2026
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree backing.
 
+### Transactions (statement-level atomicity, Bundle 1)
+Auto-commit-mode statement atomicity: a single INSERT / UPDATE / DELETE / MERGE that throws mid-execution rolls back its partial writes. A multi-row INSERT whose third row violates a constraint leaves zero rows behind, not two. Probe-confirmed against SQL Server 2025 (2026-05-08).
+
+`Storage/UndoLog.cs` records heap mutations as a row-level LIFO list (`(Heap, UndoKind, pageIdx, slotIdx)` tuples). `Heap.Insert` / `Heap.DeleteAt` take an optional log; on success they append. `Simulation.RunMutation` wraps each mutation statement: install a fresh log on `ParserContext.CurrentUndoLog`, run the body, on exception walk the log backwards (insert → tombstone slot, delete → clear tombstone) before re-raising.
+
+Identity counters and the database-scoped rowversion counter intentionally bypass the log — probe-confirmed: both keep advancing even when their consuming inserts are rolled back. LOB chains allocated for rolled-back inserts also bypass the log; they leak the same way committed deletes leak (existing quirk).
+
+Explicit transactions (`Database.BeginTransaction()`, `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` SQL) aren't yet wired through. `BeginTransaction` returns a `SimulatedDbTransaction` whose `Commit()` is a no-op and whose `Rollback()` still throws `NotImplementedException`. Bundle 2 will lift the log to a per-connection lifetime spanning multiple statements; Bundle 3 will add SQL-text BEGIN / COMMIT / ROLLBACK and TRANCOUNT semantics.
+
 ### UPDATE / DELETE
 - `UPDATE table SET col = expr [, col = expr]* [WHERE pred]` and `DELETE [FROM] table [WHERE pred]`.
 - Multi-table-syntax form (`UPDATE alias SET alias.col = expr FROM table AS alias [WHERE pred]`, `DELETE FROM alias FROM table AS alias [WHERE pred]`) is the EF7+ `ExecuteUpdate` / `ExecuteDelete` shape. Single-source-only — additional sources or joins on the FROM clause raise `NotSupportedException`. Two-pass parsing: collect raw `(columnName, expr)` pairs without resolving ordinals, then bind to the FROM-clause table once known. SET LHS supports both bare `col = expr` and alias-qualified `[a].[col] = expr`; the alias prefix is accepted verbatim and not cross-checked against the FROM-clause's alias since the simulator's row resolvers use `name.Leaf` (the alias is moot for single-source). OUTPUT is only supported on the single-table form (EF doesn't combine OUTPUT with multi-table-syntax) — see `Simulation.Update.cs` / `Simulation.Delete.cs` for the deferred-table-binding pattern.
@@ -246,7 +255,7 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 
 ## Not modeled
 
-- Transactions / locks / MVCC.
+- Explicit transactions across statements (Bundle 2): `Database.BeginTransaction()` returns a `SimulatedDbTransaction` whose `Commit()` is a no-op and whose `Rollback()` throws `NotImplementedException`. SQL-text `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` (Bundle 3) and TRANCOUNT semantics. Savepoints (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION sp`). Locks / MVCC / isolation levels.
 - `RIGHT JOIN` (rewrite as LEFT with sources swapped); `FULL OUTER JOIN`. Both raise `NotSupportedException` at parse.
 - Comma-separated FROM (legacy ANSI-89 join syntax).
 - Plain derived tables in FROM (without APPLY) don't see outer scope — they execute eagerly at parse time. Lateral access requires `CROSS APPLY` / `OUTER APPLY`. SQL Server actually allows derived-table-sees-outer in any FROM subquery; the gap shows up in compound shapes like `(SELECT … FROM (SELECT TOP(N) … WHERE outer.col = …) AS t)` where the inner correlation isn't expressed via APPLY.

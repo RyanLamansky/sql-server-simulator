@@ -216,12 +216,16 @@ partial class Simulation
         // Phase 2: PK / UNIQUE validation against the post-update virtual state.
         EnforceKeyConstraintsForUpdate(table, affected);
 
-        // Phase 3: tombstone old, insert new. Validation has already passed,
-        // so no rollback is required.
+        // Phase 3: tombstone old, insert new. Validation has already passed —
+        // no statement-level rollback gets triggered for these writes, but
+        // pass the undo log anyway so an explicit transaction (Bundle 2) can
+        // unwind them later. Each pair (delete-old, insert-new) records two
+        // log entries; LIFO walk pops the insert first, then the delete,
+        // restoring the original row.
         foreach (var (pageIndex, slotIndex, _, _) in affected)
-            table.Heap.DeleteAt(pageIndex, slotIndex);
+            table.Heap.DeleteAt(pageIndex, slotIndex, context.CurrentUndoLog);
         foreach (var (_, _, fullNew, _) in affected)
-            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap));
+            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), context.CurrentUndoLog);
 
         if (output is not null)
         {

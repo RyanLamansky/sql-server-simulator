@@ -98,7 +98,7 @@ partial class Simulation
         }
 
         foreach (var (pageIndex, slotIndex, _) in deleted)
-            table.Heap.DeleteAt(pageIndex, slotIndex);
+            table.Heap.DeleteAt(pageIndex, slotIndex, context.CurrentUndoLog);
 
         if (output is not null)
         {

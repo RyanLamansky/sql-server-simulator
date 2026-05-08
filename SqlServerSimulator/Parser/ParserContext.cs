@@ -53,6 +53,20 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public Token? Token;
 
     /// <summary>
+    /// Heap-mutation undo log scoped to the current top-level statement. Set
+    /// by <see cref="Simulation.CreateResultSetsForCommand"/>'s mutation
+    /// dispatch around each INSERT / UPDATE / DELETE / MERGE; the
+    /// <see cref="Heap.Insert"/> / <see cref="Heap.DeleteAt"/>
+    /// call sites read it from here and append entries on success. A
+    /// statement that throws mid-execution (e.g. a multi-row INSERT whose
+    /// fourth row violates a constraint) walks the log backwards before
+    /// the exception propagates, restoring the heap to its pre-statement
+    /// state. Bundle 2 will reuse the same log shape, lifetime extended
+    /// across statements when an explicit <c>BeginTransaction</c> is open.
+    /// </summary>
+    public UndoLog? CurrentUndoLog;
+
+    /// <summary>
     /// True while an <c>Expression.Parse</c> call is running for a
     /// <c>CREATE TABLE</c> column's <c>DEFAULT</c> clause. Set by the
     /// CREATE-TABLE parser around the call to

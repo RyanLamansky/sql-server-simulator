@@ -47,25 +47,34 @@ internal sealed class Heap
     /// columns off-row to honor that cap; this method only enforces it as
     /// a defensive guard against bypassed callers.
     /// </summary>
-    public void Insert(ReadOnlySpan<byte> row)
+    public void Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null)
     {
         if (row.Length > MaxRowSize)
             throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; the encoder should have pushed variable-length columns off-row.");
 
+        int pageIndex;
         if (this.Pages.Count > 0 && this.Pages[^1].TryInsert(row))
-            return;
-
-        var newPage = new HeapPage();
-        if (this.Pages.Count > 0)
         {
-            var prevIndex = this.Pages.Count - 1;
-            this.Pages[prevIndex].NextPageIndex = prevIndex + 1;
-            newPage.PrevPageIndex = prevIndex;
+            pageIndex = this.Pages.Count - 1;
         }
-        this.Pages.Add(newPage);
+        else
+        {
+            var newPage = new HeapPage();
+            if (this.Pages.Count > 0)
+            {
+                var prevIndex = this.Pages.Count - 1;
+                this.Pages[prevIndex].NextPageIndex = prevIndex + 1;
+                newPage.PrevPageIndex = prevIndex;
+            }
+            this.Pages.Add(newPage);
+            if (!newPage.TryInsert(row))
+                throw new InvalidOperationException($"Row of {row.Length} bytes failed to insert into a fresh page; this should be impossible because the size was validated.");
+            pageIndex = this.Pages.Count - 1;
+        }
 
-        if (!newPage.TryInsert(row))
-            throw new InvalidOperationException($"Row of {row.Length} bytes failed to insert into a fresh page; this should be impossible because the size was validated.");
+        // The new row went into the slot at SlotCount-1 of the chosen page —
+        // TryInsert appends a new directory entry as the highest-index slot.
+        undoLog?.RecordInsert(this, pageIndex, this.Pages[pageIndex].SlotCount - 1);
     }
 
     /// <summary>
@@ -106,8 +115,11 @@ internal sealed class Heap
     /// orphaned (left in <see cref="LobPages"/>) — see CLAUDE.md for the
     /// LOB-leak quirk on UPDATE / DELETE.
     /// </summary>
-    public void DeleteAt(int pageIndex, int slotIndex) =>
+    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null)
+    {
+        undoLog?.RecordDelete(this, pageIndex, slotIndex);
         this.Pages[pageIndex].DeleteSlot(slotIndex);
+    }
 
     /// <summary>Total row count across all pages.</summary>
     public int RowCount

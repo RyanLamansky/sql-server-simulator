@@ -311,7 +311,7 @@ partial class Simulation
 
             var storedValues = ProjectStoredValues(destinationTable, rowValues);
             EnforceKeyConstraints(destinationTable, storedValues);
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap));
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.CurrentUndoLog);
             insertedCount++;
 
             if (output is { } o)
