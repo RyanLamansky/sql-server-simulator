@@ -21,4 +21,20 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(Token? token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
 
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3902: a <c>COMMIT</c> was issued with no
+    /// active transaction. Probe-confirmed against SQL Server 2025
+    /// (2026-05-08): Class 16, State 1, exact wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException NoCorrespondingBeginCommit() =>
+        new("The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3902, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3903: a <c>ROLLBACK</c> was issued with no
+    /// active transaction. Probe-confirmed against SQL Server 2025
+    /// (2026-05-08): Class 16, State 1, exact wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException NoCorrespondingBeginRollback() =>
+        new("The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3903, 16, 1);
 }

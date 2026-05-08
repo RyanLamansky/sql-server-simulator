@@ -213,8 +213,10 @@ public sealed partial class Simulation
                     yield return RunMutation(context, ParseDelete);
                     continue;
 
+                case ReservedKeyword { Keyword: Keyword.Begin } when TryParseBeginTransaction(context):
+                case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
                 case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
-                case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackToSavepoint(context):
+                case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
                 case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
                 case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
                 case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
@@ -254,52 +256,126 @@ public sealed partial class Simulation
         var name = context.GetNextRequired<Name>().Value;
         context.MoveNextOptional();
 
-        var connection = context.Command.Connection as SimulatedDbConnection
-            ?? throw new InvalidOperationException("SAVE TRANSACTION requires a SimulatedDbConnection.");
-        var tx = connection.CurrentTransaction
+        var tx = context.Connection.CurrentTransaction
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         tx.Savepoints[name] = tx.UndoLog.Position;
         return true;
     }
 
     /// <summary>
-    /// Parses <c>ROLLBACK TRAN[SACTION] &lt;name&gt;</c> and rolls back the
-    /// active transaction's undo log to the saved position for that name.
-    /// EF Core 10 emits this when a SaveChanges inside a
-    /// <c>Database.BeginTransaction</c> fails — only the writes since the
-    /// matching <c>SAVE TRANSACTION</c> are undone; the surrounding
-    /// transaction stays alive. Returns false if the next token isn't
-    /// <c>TRAN</c> / <c>TRANSACTION</c> followed by an identifier; bare
-    /// <c>ROLLBACK [TRANSACTION]</c> without a savepoint name (full-tx
-    /// rollback as SQL text) isn't yet modeled — EF uses SqlClient's API
-    /// for that path.
+    /// Parses <c>BEGIN TRAN[SACTION] [name] [WITH MARK 'description']</c>.
+    /// Opens a fresh <see cref="SimulatedDbTransaction"/> on the connection
+    /// when none is active (TRANCOUNT 0 → 1) or increments
+    /// <see cref="SimulatedDbTransaction.TranCount"/> when one already is
+    /// (nested-BEGIN TRANCOUNT bump, no real nesting). The optional name and
+    /// WITH MARK clause are accepted but cosmetic — SQL Server treats the
+    /// name as documentation only, and only the outermost COMMIT actually
+    /// commits regardless of which name the COMMIT references.
     /// </summary>
-    private static bool TryParseRollbackToSavepoint(ParserContext context)
+    private static bool TryParseBeginTransaction(ParserContext context)
     {
         if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             return false;
-        // Lookahead: only consume if a savepoint name follows. Bare
-        // ROLLBACK TRANSACTION (no name) is the full-tx-rollback form,
-        // which we leave to SqlClient's API today.
-        if (!context.MoveNext() || context.Token is not Name nameToken)
-            return false;
-        var name = nameToken.Value;
-        context.MoveNextOptional();
+        // Optional name (BEGIN TRANSACTION my_tx). Cosmetic; consume and ignore.
+        if (context.MoveNext() && context.Token is Name)
+            context.MoveNextOptional();
 
-        var connection = context.Command.Connection as SimulatedDbConnection
-            ?? throw new InvalidOperationException("ROLLBACK TRANSACTION requires a SimulatedDbConnection.");
-        var tx = connection.CurrentTransaction
-            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (!tx.Savepoints.TryGetValue(name, out var marker))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        tx.UndoLog.RollbackTo(marker);
+        if (context.Connection.CurrentTransaction is { } existing)
+        {
+            existing.TranCount++;
+        }
+        else
+        {
+            context.Connection.CurrentTransaction = new SimulatedDbTransaction(
+                context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>COMMIT [TRAN[SACTION]] [name] [WORK]</c>. Decrements
+    /// <see cref="SimulatedDbTransaction.TranCount"/>; when it reaches 0
+    /// the transaction actually commits (drops the undo log and clears
+    /// <see cref="SimulatedDbConnection.CurrentTransaction"/>). Raises
+    /// <see cref="SimulatedSqlException.NoCorrespondingBeginCommit"/>
+    /// (Msg 3902) when no transaction is active — probe-confirmed wording.
+    /// </summary>
+    private static bool TryParseCommit(ParserContext context)
+    {
+        // COMMIT alone is the bare form; followed by TRAN/TRANSACTION/WORK
+        // gives the qualified form, optionally followed by a name.
+        if (context.MoveNext()
+            && context.Token is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
+        {
+            // Optional savepoint-style name. Consume and ignore.
+            if (context.MoveNext() && context.Token is Name)
+                context.MoveNextOptional();
+        }
+        // COMMIT WORK is an ANSI-equivalent. WORK isn't reserved in the
+        // simulator's keyword list; accept it as an unquoted identifier
+        // following COMMIT.
+        else if (context.Token is UnquotedString u && u.Span.Equals("WORK", StringComparison.OrdinalIgnoreCase))
+        {
+            context.MoveNextOptional();
+        }
+
+        var tx = context.Connection.CurrentTransaction
+            ?? throw SimulatedSqlException.NoCorrespondingBeginCommit();
+
+        tx.TranCount--;
+        if (tx.TranCount == 0)
+            tx.Commit();
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ROLLBACK [TRAN[SACTION]] [name] [WORK]</c>. Two shapes:
+    /// with a savepoint name → partial rollback to the saved position
+    /// (EF Core 10's SaveChanges-failure recovery path); without a name →
+    /// full transaction rollback regardless of TRANCOUNT depth (probe-
+    /// confirmed). Bare <c>ROLLBACK</c> with no active transaction raises
+    /// <see cref="SimulatedSqlException.NoCorrespondingBeginRollback"/>
+    /// (Msg 3903).
+    /// </summary>
+    private static bool TryParseRollbackTransaction(ParserContext context)
+    {
+        // After ROLLBACK, accept TRAN/TRANSACTION/WORK or fall through to
+        // bare-ROLLBACK with the cursor on the next un-consumed token.
+        if (context.MoveNext())
+        {
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
+            {
+                if (context.MoveNext() && context.Token is Name nameToken)
+                {
+                    // Savepoint-name path: partial rollback to the saved position.
+                    var name = nameToken.Value;
+                    context.MoveNextOptional();
+
+                    var tx = context.Connection.CurrentTransaction
+                        ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
+                    if (!tx.Savepoints.TryGetValue(name, out var marker))
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    tx.UndoLog.RollbackTo(marker);
+                    return true;
+                }
+            }
+            else if (context.Token is UnquotedString u && u.Span.Equals("WORK", StringComparison.OrdinalIgnoreCase))
+            {
+                context.MoveNextOptional();
+            }
+        }
+
+        // Bare ROLLBACK (or ROLLBACK TRAN / ROLLBACK WORK with no name) →
+        // full rollback regardless of TRANCOUNT.
+        var activeTx = context.Connection.CurrentTransaction
+            ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
+        activeTx.Rollback();
         return true;
     }
 
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
-        var connection = context.Command.Connection as SimulatedDbConnection;
-        var log = connection?.CurrentTransaction?.UndoLog ?? new UndoLog();
+        var log = context.Connection.CurrentTransaction?.UndoLog ?? new UndoLog();
         var marker = log.Position;
 
         var savedLog = context.CurrentUndoLog;

@@ -124,6 +124,16 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public Simulation Simulation => Command.simulation;
 
     /// <summary>
+    /// The connection backing <see cref="Command"/>. Always a
+    /// <see cref="SimulatedDbConnection"/>: <see cref="SimulatedDbCommand"/>'s
+    /// constructor takes one and the setter rejects re-assignment, so once
+    /// the command exists this cast is never wrong and never null. Used by
+    /// transaction-related parsers and <see cref="Expressions.TranCountExpression"/>
+    /// to reach the connection's <see cref="SimulatedDbConnection.CurrentTransaction"/>.
+    /// </summary>
+    public SimulatedDbConnection Connection => (SimulatedDbConnection)Command.Connection!;
+
+    /// <summary>
     /// Gets the value of the variable with the provided <paramref name="name"/>.
     /// </summary>
     /// <param name="name">The name of the variable.</param>

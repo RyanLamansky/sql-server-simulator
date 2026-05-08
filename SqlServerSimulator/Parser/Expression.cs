@@ -62,9 +62,12 @@ internal abstract class Expression
             Numeric number => new Value(number.Value),
             Literal literal => new Value(literal.Value),
             AtPrefixedString atPrefixed => new Value(atPrefixed, context),
-            DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() == AtAtKeyword.Identity
-                ? new LastIdentityExpression(context.Simulation)
-                : new Value(doubleAtPrefixedString),
+            DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
+            {
+                AtAtKeyword.Identity => new LastIdentityExpression(context.Simulation),
+                AtAtKeyword.TranCount => new TranCountExpression(context),
+                _ => new Value(doubleAtPrefixedString),
+            },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
             ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
             // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved keywords

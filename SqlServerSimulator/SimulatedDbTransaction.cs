@@ -21,6 +21,17 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     internal readonly UndoLog UndoLog = new();
 
     /// <summary>
+    /// SQL Server's <c>@@TRANCOUNT</c> nesting depth. Starts at 1 when this
+    /// transaction is created (via either SqlClient API or SQL-text
+    /// <c>BEGIN TRANSACTION</c>). Each subsequent SQL-text <c>BEGIN</c>
+    /// increments it; each SQL-text <c>COMMIT</c> decrements; only when it
+    /// reaches 0 does the transaction actually commit. <c>ROLLBACK</c>
+    /// (without a savepoint name) zeroes it regardless of depth — matches
+    /// SQL Server's documented behavior (probe-confirmed 2026-05-08).
+    /// </summary>
+    internal int TranCount = 1;
+
+    /// <summary>
     /// Savepoint name → log position at the time of <c>SAVE TRANSACTION</c>.
     /// EF Core 10's <c>RelationalTransaction.CreateSavepoint</c> emits
     /// <c>SAVE TRANSACTION &lt;name&gt;</c> per SaveChanges call inside an
@@ -48,6 +59,9 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     {
         if (this.finished)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+        this.TranCount--;
+        if (this.TranCount > 0)
+            return;
         this.UndoLog.Clear();
         this.connection.CurrentTransaction = null;
         this.finished = true;
@@ -58,6 +72,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         if (this.finished)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
         this.UndoLog.Rollback();
+        this.TranCount = 0;
         this.connection.CurrentTransaction = null;
         this.finished = true;
     }

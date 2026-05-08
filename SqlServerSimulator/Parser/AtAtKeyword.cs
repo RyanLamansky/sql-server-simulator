@@ -17,5 +17,6 @@ enum AtAtKeyword
     ServiceName,
     SpId,
     TextSize,
+    TranCount,
     Version
 }
