@@ -308,7 +308,8 @@ internal abstract class SqlType
     /// <summary>
     /// Joint-envelope decimal promotion used by comparison / COALESCE-style
     /// common-type decisions. Per-operator arithmetic precision/scale rules
-    /// (multiplication, division, etc.) live in the binary-expression layer.
+    /// (multiplication, division, etc.) live in
+    /// <see cref="PromoteForArithmetic"/>.
     /// </summary>
     private static SqlType PromoteDecimalPair(DecimalSqlType a, DecimalSqlType b)
     {
@@ -316,6 +317,125 @@ internal abstract class SqlType
         var integerPart = Math.Max(a.precision - a.scale, b.precision - b.scale);
         return GetDecimal(Math.Min(38, integerPart + scale), scale);
     }
+
+    /// <summary>
+    /// Per-operator type promotion for binary arithmetic — the rules SQL
+    /// Server applies to <c>+</c> / <c>-</c> / <c>*</c> / <c>/</c> / <c>%</c>
+    /// when computing the result type. Differs from
+    /// <see cref="Promote"/> only in the decimal-involving cases: each
+    /// operator has its own precision / scale formula (probed against SQL
+    /// Server 2025), and the 38-precision cap reduces scale by the excess
+    /// down to <c>min(originalScale, 6)</c> — effectively "never below 6
+    /// for division (which always produces scale ≥ 6 anyway)" and "never
+    /// below the original scale for the other operators when the original
+    /// was already ≤ 6". Non-decimal categories (integer × integer, money
+    /// × money, float × *, etc.) reuse <see cref="Promote"/> since their
+    /// arithmetic result type matches the joint-envelope rule.
+    /// </summary>
+    /// <remarks>
+    /// Decimal scale formulas (verified against SQL Server 2025, 2026-05-08):
+    /// <list type="bullet">
+    /// <item><c>+</c>/<c>-</c>: <c>p = max(p1-s1, p2-s2) + max(s1,s2) + 1</c>,
+    /// <c>s = max(s1, s2)</c></item>
+    /// <item><c>*</c>: <c>p = p1+p2+1</c>, <c>s = s1+s2</c></item>
+    /// <item><c>/</c>: <c>s = max(6, s1+p2+1)</c>,
+    /// <c>p = p1-s1+s2+s</c></item>
+    /// <item><c>%</c>: <c>p = min(p1-s1, p2-s2) + max(s1,s2)</c>,
+    /// <c>s = max(s1, s2)</c></item>
+    /// </list>
+    /// Integer / money operands canonicalize to their decimal equivalent
+    /// (bit→(1,0), tinyint→(3,0), smallint→(5,0), int→(10,0), bigint→(19,0),
+    /// money→(19,4), smallmoney→(10,4)) before the formulas apply. Pure
+    /// integer-pair and money-pair arithmetic skips the decimal path entirely
+    /// — those produce wider integer / money results that match
+    /// <see cref="Promote"/>.
+    /// </remarks>
+    public static SqlType PromoteForArithmetic(SqlType a, SqlType b, char op)
+    {
+        // Bitwise operators (&, |, ^) don't have per-operator scale rules
+        // and don't accept decimal operands anyway — fall through to the
+        // joint-envelope rule for type unification (decimal × bitwise will
+        // raise the unsupported-numeric-pair error at runtime instead).
+        if (op is '&' or '|' or '^')
+            return Promote(a, b);
+
+        // Float / real win over everything else, same as the joint-envelope
+        // path; no decimal-style scale dance needed.
+        if (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)
+            return Promote(a, b);
+
+        // Decimal-involving cases: the per-operator formula applies. Money
+        // and integer canonicalize to their decimal equivalent so the
+        // formula sees a uniform (precision, scale) pair on both sides.
+        var aIsDecimal = a is DecimalSqlType;
+        var bIsDecimal = b is DecimalSqlType;
+        if (aIsDecimal || bIsDecimal)
+        {
+            var (p1, s1) = AsDecimalPrecisionScale(a);
+            var (p2, s2) = AsDecimalPrecisionScale(b);
+            return ComputeDecimalArithmeticResultType(p1, s1, p2, s2, op);
+        }
+
+        // Pure integer / money / date / string pairs: arithmetic result type
+        // matches the joint-envelope rule (e.g., int + bigint → bigint;
+        // money + money → money; int + int → int).
+        return Promote(a, b);
+    }
+
+    /// <summary>
+    /// Computes a decimal arithmetic result type from raw (p1, s1, p2, s2)
+    /// quadruples. Public to <see cref="Storage"/> via
+    /// <see cref="PromoteForArithmetic"/>; the binary-expression layer
+    /// reuses this directly so the static (GetSqlType) and runtime
+    /// (DecimalArithmetic) paths share one formula.
+    /// </summary>
+    internal static DecimalSqlType ComputeDecimalArithmeticResultType(int p1, int s1, int p2, int s2, char op)
+    {
+        int p, s;
+        switch (op)
+        {
+            case '+' or '-':
+                p = Math.Max(p1 - s1, p2 - s2) + Math.Max(s1, s2) + 1;
+                s = Math.Max(s1, s2);
+                break;
+            case '*':
+                p = p1 + p2 + 1;
+                s = s1 + s2;
+                break;
+            case '/':
+                s = Math.Max(6, s1 + p2 + 1);
+                p = p1 - s1 + s2 + s;
+                break;
+            case '%':
+                p = Math.Min(p1 - s1, p2 - s2) + Math.Max(s1, s2);
+                s = Math.Max(s1, s2);
+                break;
+            default:
+                throw new NotSupportedException($"Decimal arithmetic operator '{op}' isn't supported.");
+        }
+
+        // 38-precision cap: scale reduces by the excess, but never below
+        // min(originalScale, 6). For division s is always ≥ 6 so the floor
+        // effectively becomes 6; for the other operators the floor binds
+        // only when the original scale was already ≤ 6, preserving it.
+        if (p > 38)
+        {
+            s = Math.Max(s - (p - 38), Math.Min(s, 6));
+            p = 38;
+        }
+        if (s < 0) s = 0;
+        return (DecimalSqlType)GetDecimal(p, s);
+    }
+
+    /// <summary>
+    /// Canonicalizes any decimal-arithmetic-eligible operand type to its
+    /// (precision, scale) pair. Decimals return their declared p/s; money
+    /// and integers map to documented equivalents.
+    /// </summary>
+    private static (int Precision, int Scale) AsDecimalPrecisionScale(SqlType type) =>
+        type is DecimalSqlType d ? (d.precision, d.scale)
+        : IsMoneyCategory(type) ? MoneyAsDecimal(type)
+        : IntegerAsDecimal(type);
 
     private static DecimalSqlType IntegerAsDecimalType(SqlType integer)
     {

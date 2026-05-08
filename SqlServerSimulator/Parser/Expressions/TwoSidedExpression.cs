@@ -21,7 +21,7 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
     protected abstract SqlValue Run(SqlValue left, SqlValue right);
 
     public sealed override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        SqlType.Promote(left.GetSqlType(resolveColumnType), right.GetSqlType(resolveColumnType));
+        SqlType.PromoteForArithmetic(left.GetSqlType(resolveColumnType), right.GetSqlType(resolveColumnType), this.Operator);
 
     /// <summary>
     /// Numeric binary-operator dispatcher. Despite the name, this is the
@@ -84,68 +84,19 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
         new($"Operator '{op}' currently supports only integer operands; got {left.Type} and {right.Type}.");
 
     /// <summary>
-    /// Decimal arithmetic with SQL Server's per-operator precision/scale
-    /// formulas (verified against SQL Server 2025):
-    /// <list type="bullet">
-    /// <item><c>+</c>/<c>-</c>: <c>p = max(p1-s1, p2-s2) + max(s1,s2) + 1</c>,
-    /// <c>s = max(s1, s2)</c></item>
-    /// <item><c>*</c>: <c>p = p1+p2+1</c>, <c>s = s1+s2</c></item>
-    /// <item><c>/</c>: <c>s = max(6, s1+p2+1)</c>,
-    /// <c>p = p1-s1+s2+s</c></item>
-    /// <item><c>%</c>: <c>p = min(p1-s1, p2-s2) + max(s1,s2)</c>,
-    /// <c>s = max(s1, s2)</c></item>
-    /// </list>
-    /// Computed precision is capped at 38; excess scale is dropped, with a
-    /// floor of 6 for division. Integer operands canonicalize to their
-    /// equivalent decimal form (bit→(1,0), tinyint→(3,0), smallint→(5,0),
-    /// int→(10,0), bigint→(19,0)) before the formulas apply.
+    /// Decimal arithmetic. The result-type computation is delegated to
+    /// <see cref="SqlType.PromoteForArithmetic"/> (which encodes the same
+    /// per-operator scale formulas verified against SQL Server 2025), so
+    /// the static <see cref="GetSqlType"/> path and this runtime path
+    /// always agree on the schema. Integer / money operands canonicalize
+    /// to their decimal equivalent before the .NET-decimal compute step.
     /// </summary>
     private protected static SqlValue DecimalArithmetic(SqlValue left, SqlValue right, char op)
     {
-        var (p1, s1) = AsDecimalPrecisionScale(left.Type);
-        var (p2, s2) = AsDecimalPrecisionScale(right.Type);
+        var resultType = (DecimalSqlType)SqlType.PromoteForArithmetic(left.Type, right.Type, op);
+        var resultPrecision = (int)resultType.precision;
+        var resultScale = (int)resultType.scale;
 
-        int resultPrecision, resultScale;
-        switch (op)
-        {
-            case '+' or '-':
-                resultPrecision = Math.Max(p1 - s1, p2 - s2) + Math.Max(s1, s2) + 1;
-                resultScale = Math.Max(s1, s2);
-                break;
-            case '*':
-                resultPrecision = p1 + p2 + 1;
-                resultScale = s1 + s2;
-                break;
-            case '/':
-                resultScale = Math.Max(6, s1 + p2 + 1);
-                resultPrecision = p1 - s1 + s2 + resultScale;
-                break;
-            case '%':
-                resultPrecision = Math.Min(p1 - s1, p2 - s2) + Math.Max(s1, s2);
-                resultScale = Math.Max(s1, s2);
-                break;
-            default:
-                throw new NotSupportedException($"Operator '{op}' on decimal operands isn't implemented.");
-        }
-
-        // 38-cap with scale-truncation. Division enforces a min scale of 6
-        // (SQL Server's documented division behavior — verified
-        // <c>d(38,30)/d(38,30) → d(38,6)</c>). Other operators allow scale
-        // to drop to 0; precision is always capped first.
-        if (resultPrecision > 38)
-        {
-            var minScale = op == '/' ? 6 : 0;
-            var excess = resultPrecision - 38;
-            resultScale = Math.Max(minScale, resultScale - excess);
-            resultPrecision = 38;
-        }
-        // Defensive clamp: scale shouldn't exceed precision (theoretically the
-        // formulas keep this invariant, but if the 38-cap dropped scale below
-        // zero, normalize back).
-        if (resultScale < 0)
-            resultScale = 0;
-
-        var resultType = SqlType.GetDecimal(resultPrecision, resultScale);
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 
@@ -189,11 +140,6 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
             ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
             : SqlValue.FromDecimal(resultType, rounded);
     }
-
-    private static (int Precision, int Scale) AsDecimalPrecisionScale(SqlType type) =>
-        type is DecimalSqlType d ? (d.precision, d.scale)
-        : SqlType.IsMoneyCategory(type) ? SqlType.MoneyAsDecimal(type)
-        : SqlType.IntegerAsDecimal(type);
 
     private static decimal ToDecimal(SqlValue v) =>
         v.Type is DecimalSqlType ? v.AsDecimal

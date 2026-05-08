@@ -123,6 +123,31 @@ public class EFCoreSubquery
     }
 
     [TestMethod]
+    public void Projection_PercentOfTotal_DecimalDivisionScalePreserved()
+    {
+        // EF Core emits `s.Amount * 100m / (correlated SUM(...))` for the
+        // percent-of-total LINQ shape. The chained multiply+divide produces
+        // a wide-scale decimal at runtime (d(38,24)) that the static
+        // schema must agree with — otherwise the row encoder rejects on
+        // schema mismatch.
+        using var context = SeededContext();
+        var rows = context.CustomerOrders
+            .OrderBy(o => o.Id)
+            .Select(o => new
+            {
+                o.Id,
+                Pct = o.Amount * 100m / context.CustomerOrders.Where(x => x.CustomerId == o.CustomerId).Sum(x => x.Amount),
+            })
+            .ToArray();
+        Assert.HasCount(3, rows);
+        // Customer 1: orders 10 + 20 = 30. Pct for amount=10 → 33.33...; for amount=20 → 66.66...
+        // Customer 2: order 30 → 100%.
+        Assert.AreEqual(decimal.Round(10m * 100m / 30m, 6), decimal.Round(rows[0].Pct, 6));
+        Assert.AreEqual(decimal.Round(20m * 100m / 30m, 6), decimal.Round(rows[1].Pct, 6));
+        Assert.AreEqual(100m, rows[2].Pct);
+    }
+
+    [TestMethod]
     public void Projection_DistinctCorrelatedCount_EmitsCorrelatedDerivedTable()
     {
         // EF Core 10 emits `(SELECT COUNT(*) FROM (SELECT DISTINCT col FROM t

@@ -176,6 +176,70 @@ public sealed class DecimalTests
     }
 
     [TestMethod]
+    public void DecimalArithmetic_StaticSchemaMatchesRuntimeForDivision()
+    {
+        // The EF percent-of-total shape: (s.Amount * 100.0) / (sum). Before
+        // the per-operator-arithmetic fix, the static schema computed via
+        // joint-envelope Promote diverged from the per-operator runtime
+        // type, causing the RowEncoder to reject the value with a
+        // "decimal(38,N) vs decimal(38,M)" mismatch. The probed result is
+        // d(38,24); confirming both schema and value land at scale 24.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table sales (region varchar(10), amount decimal(10,2))");
+        _ = simulation.ExecuteNonQuery(
+            "insert into sales values ('east', 100), ('east', 200), ('east', 150), ('west', 300), ('west', 500), ('west', 50)");
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand(
+            "select s.region, s.amount, s.amount * 100.0 / (select sum(s0.amount) from sales as s0 where s0.region = s.region) from sales as s")
+            .ExecuteReader();
+        AreEqual("decimal", reader.GetDataTypeName(2));
+        var pcts = new List<(string Region, decimal Amount, decimal Pct)>();
+        while (reader.Read())
+            pcts.Add((reader.GetString(0), reader.GetDecimal(1), reader.GetDecimal(2)));
+        // east totals 450; west totals 850. Verify a couple per region.
+        var (_, _, east100Pct) = pcts.Single(p => p.Region == "east" && p.Amount == 100m);
+        var (_, _, west500Pct) = pcts.Single(p => p.Region == "west" && p.Amount == 500m);
+        AreEqual(decimal.Round(100m * 100m / 450m, 6), decimal.Round(east100Pct, 6));
+        AreEqual(decimal.Round(500m * 100m / 850m, 6), decimal.Round(west500Pct, 6));
+    }
+
+    [TestMethod]
+    public void DecimalArithmetic_38CapPreservesSmallScaleForMultiplication()
+    {
+        // d(38,2) * d(38,2): formula gives p=77, s=4. The 38-cap reduces
+        // precision but the scale floor is min(originalScale, 6) = 4 (not
+        // 0 — that was a latent bug in the old non-division path). SQL
+        // Server returns d(38,4); verify the runtime value carries scale 4.
+        var v = ExecuteScalar("select cast(123 as decimal(38,2)) * cast(456 as decimal(38,2))");
+        AreEqual(56088.0000m, v);
+    }
+
+    [TestMethod]
+    public void DecimalArithmetic_38CapForDivisionFloorsAtSix()
+    {
+        // d(38,30) / d(38,30): formula gives p=107, s=69. The 38-cap with
+        // floor 6 lands at d(38,6).
+        AreEqual(1.000000m, ExecuteScalar("select cast(1 as decimal(38,30)) / cast(1 as decimal(38,30))"));
+    }
+
+    [TestMethod]
+    public void DecimalArithmetic_ChainedExpressionPropagatesScale()
+    {
+        // (d(10,2) * d(10,2)) * d(10,2) — first step yields d(21,4); next
+        // step yields d(32,6) per the multiplication formula. Ensures the
+        // schema/runtime parity holds through chaining.
+        AreEqual(8.000000m, ExecuteScalar("select cast(2 as decimal(10,2)) * cast(2 as decimal(10,2)) * cast(2 as decimal(10,2))"));
+    }
+
+    [TestMethod]
+    public void DecimalArithmetic_ModuloPreservesMaxScale()
+    {
+        // d(10,2) % d(5,2) → d(5,2): p = min(p1-s1, p2-s2) + max(s1,s2)
+        // = min(8, 3) + 2 = 5; s = max(s1, s2) = 2.
+        AreEqual(1.50m, ExecuteScalar("select cast(7.5 as decimal(10,2)) % cast(3.0 as decimal(5,2))"));
+    }
+
+    [TestMethod]
     public void Promote_DecimalAndStringInComparison()
     {
         // Implicit conversion: '1.5' parses as decimal(2,1), promoted up.

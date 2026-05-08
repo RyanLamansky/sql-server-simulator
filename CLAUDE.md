@@ -182,6 +182,22 @@ Top-level OFFSET/FETCH (post-set-op chain) attaches alongside the top-level ORDE
 ### Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT expr)` / `COUNT_BIG`, `SUM` / `AVG` (integer-truncating; `decimal(38, max(s, 6))` widening for AVG over decimals), `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. Standalone and inside `GROUP BY` / `HAVING`.
 
+### Decimal arithmetic precision / scale
+SQL Server has per-operator scale rules for decimal that differ from the joint-envelope rule used for comparison / COALESCE / set-op type unification (probe-confirmed against SQL Server 2025, 2026-05-08):
+
+- `+` / `-`: `p = max(p1-s1, p2-s2) + max(s1, s2) + 1`, `s = max(s1, s2)`
+- `*`: `p = p1 + p2 + 1`, `s = s1 + s2`
+- `/`: `s = max(6, s1 + p2 + 1)`, `p = p1 - s1 + s2 + s`
+- `%`: `p = min(p1-s1, p2-s2) + max(s1, s2)`, `s = max(s1, s2)`
+
+When the computed precision exceeds 38, scale reduces by the excess down to a floor of `min(originalScale, 6)` and precision clips to 38. The 6-floor is what makes division stable: division always produces `s ≥ 6`, so the floor effectively becomes 6; for `+ - * %` the floor binds only when the original scale was already ≤ 6 and preserves it. `decimal(38,2) * decimal(38,2)` → `decimal(38,4)` (small scale preserved); `decimal(38,30) / decimal(38,30)` → `decimal(38,6)` (floor binds); EF Core's `decimal(10,2) * 100.0 / decimal(38,2)` → `decimal(38,24)`.
+
+Integer / money operands canonicalize to their decimal equivalent before the formulas apply (bit→(1,0) … bigint→(19,0); money→(19,4); smallmoney→(10,4)). Pure integer-pair, pure money-pair, and float-involving arithmetic skip the decimal path entirely — those produce wider integer / money / float results that match the joint-envelope `Promote`.
+
+`SqlType.PromoteForArithmetic(a, b, op)` is the single source of truth: `TwoSidedExpression.GetSqlType` calls it for the static schema, and `DecimalArithmetic` calls it for the runtime result type. The static / runtime parity is required because the row encoder rejects values whose runtime type doesn't match the schema's declared type.
+
+`SqlType.Promote` (joint-envelope, `scale = max(s1, s2); precision = min(38, max(p1-s1, p2-s2) + scale)`) is still the right rule for non-arithmetic uses (CASE, COALESCE, set ops, comparison common-type) and stays unchanged.
+
 ### Window functions
 Two shapes are modeled:
 - `ROW_NUMBER() OVER([PARTITION BY <expr-list>] ORDER BY <expr-list-with-direction>)` — for EF Core 10's top-N / Skip+Take per group. Result type `bigint`. ORDER BY is required inside OVER (parse fails otherwise — SQL Server raises Msg 4112).
