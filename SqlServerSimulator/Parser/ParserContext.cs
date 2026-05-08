@@ -98,6 +98,15 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public List<Expressions.WindowExpression>? WindowCollector;
 
     /// <summary>
+    /// When false, registering a <see cref="Expressions.WindowExpression"/>
+    /// raises Msg 4108 (`"Windowed functions can only appear in the SELECT
+    /// or ORDER BY clauses."`). Default true; the Selection parser flips it
+    /// false around the WHERE / GROUP BY / HAVING / ON / JOIN-predicate
+    /// parses where SQL Server rejects windowed functions.
+    /// </summary>
+    public bool AllowsWindowExpressions = true;
+
+    /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
     /// the output schema of a correlated subquery whose projection references
     /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s

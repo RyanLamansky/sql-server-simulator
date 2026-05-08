@@ -130,6 +130,20 @@ internal abstract class Expression
                         // past it; advancing here would skip an extra token.
                         continue;
                     }
+                // OVER following an aggregate function call promotes the
+                // aggregate into a window expression. ROW_NUMBER's OVER is
+                // already consumed inside its own parser; reaching this case
+                // means the inner parse left the cursor on `)` of an
+                // aggregate, the outer GetNextOptional advanced past it, and
+                // landed here. STRING_AGG OVER is rejected by WrapAggregate
+                // (Msg 4113).
+                case ReservedKeyword { Keyword: Keyword.Over }:
+                    {
+                        if (expression is not AggregateExpression aggregate)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        expression = WindowExpression.WrapAggregate(aggregate, context);
+                        continue;
+                    }
             }
 
             return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;

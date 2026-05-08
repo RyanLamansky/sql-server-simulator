@@ -173,4 +173,26 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException OrderByPositionOutOfRange(int position) =>
         new($"The ORDER BY position number {position} is out of range of the number of items in the select list.", 108, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4108 — a windowed (OVER) function appeared
+    /// somewhere other than the SELECT projection or ORDER BY: WHERE, HAVING,
+    /// GROUP BY, ON, etc.
+    /// </summary>
+    internal static SimulatedSqlException WindowedFunctionInWrongClause() =>
+        new("Windowed functions can only appear in the SELECT or ORDER BY clauses.", 4108, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10759 — <c>DISTINCT</c> isn't allowed in
+    /// combination with the <c>OVER</c> clause (e.g. <c>COUNT(DISTINCT x) OVER (...)</c>).
+    /// </summary>
+    internal static SimulatedSqlException DistinctNotAllowedInOver() =>
+        new("Use of DISTINCT is not allowed with the OVER clause.", 10759, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4113 — an aggregate that has no windowed form
+    /// (currently <c>STRING_AGG</c>) was used with <c>OVER</c>.
+    /// </summary>
+    internal static SimulatedSqlException FunctionNotValidForOver(string functionLowerName) =>
+        new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, 4);
 }

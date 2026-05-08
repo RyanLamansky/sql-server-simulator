@@ -32,6 +32,7 @@ enum ContextualKeyword
     Output,
     Partition,
     Persisted,
+    Range,
     Row,
     Rows,
     Scoped,

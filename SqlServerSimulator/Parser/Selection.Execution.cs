@@ -147,11 +147,27 @@ internal sealed partial class Selection
         var offsetCount = fromClause.OffsetCount;
         var fetchCount = fromClause.FetchCount;
 
+        // Pre-resolve operand and result types for any aggregate windows so
+        // the runtime path doesn't need a column-type resolver. ROW_NUMBER
+        // windows leave both null — they don't carry an operand and have a
+        // fixed bigint result.
+        var windowOperandTypes = new SqlType[windows.Count];
+        var windowResultTypes = new SqlType[windows.Count];
+        for (var i = 0; i < windows.Count; i++)
+        {
+            if (windows[i].Kind == WindowKind.Aggregate)
+            {
+                var aggregate = windows[i].AggregateInfo!;
+                windowOperandTypes[i] = aggregate.Operand?.GetSqlType(ResolveColumnType) ?? SqlType.Int32;
+                windowResultTypes[i] = windows[i].GetSqlType(ResolveColumnType);
+            }
+        }
+
         return new Selection(outputSchema, outputColumnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
             aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
                 ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, outerResolver)
                 : windows.Count > 0
-                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, outerResolver)
+                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, outerResolver)
                     : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver));
     }
 
@@ -698,6 +714,8 @@ internal sealed partial class Selection
         int? offsetCount,
         int? fetchCount,
         List<WindowExpression> windows,
+        SqlType[] windowOperandTypes,
+        SqlType[] windowResultTypes,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
         // Step 1: buffer post-WHERE tuples. The same byte[]?[] instance is
@@ -741,15 +759,17 @@ internal sealed partial class Selection
             perWindowKeys.Add(keys);
         }
 
-        // Step 2: for each window, group buffered tuples by partition key,
-        // sort each partition by order keys, assign row numbers. Maps
-        // tuple index → row number (long, matching ROW_NUMBER's bigint
-        // result type).
-        var perWindowRowNumbers = new long[windows.Count][];
+        // Step 2: for each window, group buffered tuples by partition key
+        // and compute the per-tuple result. ROW_NUMBER sorts each partition
+        // and assigns 1..N ranks; aggregate windows run an Aggregator over
+        // every tuple in the partition (no sort) and broadcast the
+        // per-partition Result to every tuple in the same partition. The
+        // result array is kept as SqlValue[] so the two kinds share storage.
+        var perWindowResults = new SqlValue[windows.Count][];
         for (var w = 0; w < windows.Count; w++)
         {
             var win = windows[w];
-            var rowNumbers = new long[buffered.Count];
+            var results = new SqlValue[buffered.Count];
             var partitions = new Dictionary<SqlValue[], List<int>>(RowEqualityComparer.Instance);
             for (var i = 0; i < buffered.Count; i++)
             {
@@ -762,27 +782,57 @@ internal sealed partial class Selection
                 list.Add(i);
             }
 
-            var orderByList = new List<OrderBySpec>(win.OrderBy);
-            foreach (var (_, indices) in partitions)
+            if (win.Kind == WindowKind.RowNumber)
             {
-                indices.Sort((a, b) =>
-                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                for (var rank = 0; rank < indices.Count; rank++)
-                    rowNumbers[indices[rank]] = rank + 1;
+                var orderByList = new List<OrderBySpec>(win.OrderBy);
+                foreach (var (_, indices) in partitions)
+                {
+                    indices.Sort((a, b) =>
+                        CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                    for (var rank = 0; rank < indices.Count; rank++)
+                        results[indices[rank]] = SqlValue.FromInt64(rank + 1);
+                }
+            }
+            else
+            {
+                // Aggregate window: build one Aggregator per partition,
+                // accumulate across all rows in the partition (insertion
+                // order — no ORDER BY in OVER for aggregates per Decision
+                // A), and broadcast the Result to every row. Operand and
+                // result types were pre-resolved by BuildSqlProjection.
+                var aggregate = win.AggregateInfo!;
+                var operandType = windowOperandTypes[w];
+                var resultType = windowResultTypes[w];
+                foreach (var (_, indices) in partitions)
+                {
+                    var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                    foreach (var i in indices)
+                    {
+                        var localTuple = buffered[i];
+                        SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
+                        var operandValue = aggregate.Operand is null
+                            ? SqlValue.Null(SqlType.Int32)
+                            : aggregate.Operand.Run(ResolveSource);
+                        aggregator.Add(operandValue);
+                    }
+                    var result = aggregator.Result();
+                    foreach (var i in indices)
+                        results[i] = result;
+                }
             }
 
-            perWindowRowNumbers[w] = rowNumbers;
+            perWindowResults[w] = results;
         }
 
         // Step 3: walk buffered tuples in original order, bind each
-        // window's row number for this tuple, then project. From here on,
+        // window's per-tuple result, then project. From here on,
         // mirror ProjectBuffered's DISTINCT / ORDER BY / OFFSET / TAKE
         // post-processing.
         var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
         for (var i = 0; i < buffered.Count; i++)
         {
             for (var w = 0; w < windows.Count; w++)
-                windows[w].BindResult(SqlValue.FromInt64(perWindowRowNumbers[w][i]));
+                windows[w].BindResult(perWindowResults[w][i]);
 
             var localTuple = buffered[i];
             SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);

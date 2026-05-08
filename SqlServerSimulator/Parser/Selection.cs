@@ -723,25 +723,38 @@ internal sealed partial class Selection
     /// </remarks>
     private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy)
     {
-        while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
+        // WHERE / GROUP BY / HAVING reject windowed functions (Msg 4108).
+        // Toggle the parser-context flag for the duration of those parses;
+        // ORDER BY (which DOES allow windows) is parsed below outside the
+        // toggle.
+        var savedAllowsWindows = context.AllowsWindowExpressions;
+        context.AllowsWindowExpressions = false;
+        try
         {
-            fromClause.Excluders.Add(BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
-        }
-
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
-        {
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            do
+            while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
             {
-                context.MoveNextRequired();
-                fromClause.GroupBy.Add(Expression.Parse(context));
-            } while (context.Token is Operator { Character: ',' });
-        }
+                fromClause.Excluders.Add(BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
+            }
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
+            {
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                do
+                {
+                    context.MoveNextRequired();
+                    fromClause.GroupBy.Add(Expression.Parse(context));
+                } while (context.Token is Operator { Character: ',' });
+            }
+
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
+            {
+                fromClause.Having = BooleanExpression.Parse(context.MoveNextRequiredReturnSelf());
+            }
+        }
+        finally
         {
-            fromClause.Having = BooleanExpression.Parse(context.MoveNextRequiredReturnSelf());
+            context.AllowsWindowExpressions = savedAllowsWindows;
         }
 
         // Skip ORDER BY when this branch is part of a set-op chain — the
