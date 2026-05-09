@@ -21,6 +21,7 @@ enum ContextualKeyword
 {
     _ = 0, // Default — current token isn't a contextual keyword.
     Apply,
+    At,
     Compatibility_Level,
     Configuration,
     First,
@@ -36,9 +37,11 @@ enum ContextualKeyword
     Row,
     Rows,
     Scoped,
+    Time,
     TraceOff,
     TraceOn,
     Using,
     Verbose_Truncation_Warnings,
     Within,
+    Zone,
 }

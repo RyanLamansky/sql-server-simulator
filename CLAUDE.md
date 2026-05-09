@@ -269,6 +269,20 @@ The variable-precision builders (`datetime2` / `datetimeoffset` / `time`) accept
 
 `DatePartsBuilder` (`Parser/Expressions/`) is a single class with a `DatePartsBuilderKind` discriminator covering all six builders; `EOMonth` lives in its own file because its argument shape (date input + optional int offset) is structurally different from the parts-list pattern.
 
+### `AT TIME ZONE`
+Postfix operator that converts the LHS to `datetimeoffset` in the supplied zone. Two semantics, distinguished by LHS type (probe-confirmed against SQL Server 2025 on 2026-05-09):
+
+- **`datetime2 / datetime / smalldatetime AT TIME ZONE 'X'`**: treats the LHS wall-clock as already in zone X and attaches X's offset for that wall-clock. Skipped (spring-forward) wall-clocks shift forward by the DST delta and stamp the post-transition daylight offset; ambiguous (fall-back) wall-clocks pick the daylight (pre-fall-back) offset.
+- **`datetimeoffset AT TIME ZONE 'X'`**: preserves the UTC instant and re-expresses it in zone X — both offset and wall-clock change to match.
+
+Result type is always `datetimeoffset` with the LHS's fractional precision preserved: `datetime2(N)` / `datetimeoffset(N)` → `datetimeoffset(N)`; legacy `datetime` / `smalldatetime` → `datetimeoffset(3)`. **`date` and `time` LHS raise Msg 8116** (`"Argument data type {type} is invalid for argument 1 of AT TIME ZONE function."`). Unrecognized zone names raise **Msg 9820** (`"The time zone parameter '{name}' provided to AT TIME ZONE clause is invalid."`). NULL on either side propagates to NULL of the result type.
+
+Zone-name resolution routes through .NET 6+'s `TimeZoneInfo.FindSystemTimeZoneById`, which accepts both Windows-style identifiers (`'Pacific Standard Time'`) and IANA names (`'America/Los_Angeles'`) cross-platform via ICU. Lookups are cached in a process-static `ConcurrentDictionary` to keep per-row overhead at a hashtable lookup.
+
+**Precedence**: `AT TIME ZONE` binds tighter than `+` (probe-confirmed: `expr AT TIME ZONE 'UT' + 'C'` raises Msg 402 because real SQL Server parses it as `(expr AT TIME ZONE 'UT') + 'C'`, not `expr AT TIME ZONE 'UTC'`). The simulator models this by parsing the zone-name slot as a primary expression only — literals, `@variables`, single-segment column refs, or parenthesized full expressions. Multi-part dotted column refs and binary-operator chains in the zone-name slot aren't modeled; wrap in parens (`AT TIME ZONE (a + b)`) for those.
+
+`AT`, `TIME`, and `ZONE` are contextual keywords (added to `ContextualKeyword`) — they remain valid identifiers everywhere else, so existing `create table t (Time int, Zone int)` shapes still work.
+
 ### Constraints
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree.

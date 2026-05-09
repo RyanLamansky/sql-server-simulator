@@ -139,6 +139,25 @@ partial class SimulatedSqlException
         new($"Scale argument is not valid. Valid expressions for data type {typeName} scale argument are integer constants and integer constant expressions.", 10760, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 8116: the LHS of an <c>AT TIME ZONE</c>
+    /// expression is a type SQL Server doesn't accept (<c>date</c> or
+    /// <c>time</c>). Probe-confirmed against SQL Server 2025 (2026-05-09);
+    /// the wording uses the family-root name (<c>date</c> / <c>time</c>),
+    /// not a parameterized form.
+    /// </summary>
+    internal static SimulatedSqlException AtTimeZoneInvalidArgument(string typeName) =>
+        new($"Argument data type {typeName} is invalid for argument 1 of AT TIME ZONE function.", 8116, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 9820: the time-zone string supplied to
+    /// <c>AT TIME ZONE</c> isn't recognized. Includes the offending name
+    /// verbatim (empty string renders as <c>''</c>). Probe-confirmed against
+    /// SQL Server 2025 (2026-05-09).
+    /// </summary>
+    internal static SimulatedSqlException InvalidTimeZoneParameter(string name) =>
+        new($"The time zone parameter '{name}' provided to AT TIME ZONE clause is invalid.", 9820, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 241: a string value could not be parsed as a
     /// date or time value (e.g. <c>CAST('not-a-date' AS date)</c>). Covers
     /// the <c>date</c> / <c>datetime</c> / <c>datetime2</c> / <c>time</c> /

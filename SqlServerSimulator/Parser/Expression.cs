@@ -181,6 +181,17 @@ internal abstract class Expression
                         ParseWithinGroupOrderBy(aggregateForOrderBy, context);
                         continue;
                     }
+                // AT TIME ZONE postfix on a date/time expression. AT, TIME,
+                // and ZONE are all contextual identifiers (SQL Server doesn't
+                // reserve any of them); the runtime check rejects date/time
+                // LHS with Msg 8116. Binds tighter than `+` so the zone-name
+                // slot is a primary expression — full expressions need parens.
+                case UnquotedString atToken when context.AsContextual() == ContextualKeyword.At:
+                    {
+                        _ = atToken;
+                        expression = AtTimeZone.ParsePostfix(expression, context);
+                        continue;
+                    }
             }
 
             return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;
