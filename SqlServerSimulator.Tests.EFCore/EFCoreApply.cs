@@ -4,10 +4,7 @@ namespace SqlServerSimulator;
 /// End-to-end tests for the LINQ shapes EF Core 10 translates to
 /// <c>CROSS APPLY</c> / <c>OUTER APPLY</c>: <c>SelectMany</c> over a filtered
 /// collection navigation, and the same shape with <c>DefaultIfEmpty</c> for
-/// the OUTER variant. EF Core 10's emission for top-N projections moved to
-/// <c>ROW_NUMBER() OVER</c> + <c>LEFT JOIN</c>, so APPLY only emerges
-/// here — when the inner correlates by something more than top-level
-/// equality.
+/// the OUTER variant.
 /// </summary>
 [TestClass]
 public class EFCoreApply
@@ -35,9 +32,6 @@ public class EFCoreApply
     [TestMethod]
     public void SelectMany_FilteredNavigation_EmitsCrossApply()
     {
-        // EF Core 10 emits CROSS APPLY for SelectMany over a filtered
-        // collection navigation. Verifies end-to-end correctness against
-        // the shape probe-confirmed against real SQL Server 2025.
         using var context = SeededContext();
         var pairs = context.Authors
             .SelectMany(a => a.Books.Where(b => b.Score > 10),
@@ -52,8 +46,7 @@ public class EFCoreApply
     [TestMethod]
     public void SelectMany_FilterReferencesOuter_EmitsCrossApply()
     {
-        // Inner WHERE references both outer and inner columns —
-        // can't lift to a JOIN, must be APPLY.
+        // Inner WHERE references both outer and inner columns — can't lift to JOIN, must be APPLY.
         using var context = SeededContext();
         var pairs = context.Authors
             .SelectMany(a => a.Books.Where(b => b.Score >= a.Id * 5),

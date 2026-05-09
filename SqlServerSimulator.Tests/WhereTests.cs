@@ -1,5 +1,7 @@
-﻿using System.Data;
+using System.Data;
+using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -45,10 +47,8 @@ public class WhereTests
     [DataRow("1 ! < 0", 1)]
     [DataRow("1 ! < 1", 1)]
     [DataRow("1 ! < 2", 0)]
-    public void PureExpressionFilter(string whereExpression, int expectedCount)
-    {
+    public void PureExpressionFilter(string whereExpression, int expectedCount) =>
         AreEqual(expectedCount, new Simulation().ExecuteReader($"select 1 where {whereExpression}").EnumerateRecords().Count());
-    }
 
     [TestMethod]
     public void TablelessWhere_NullOperand_ReturnsZeroRows()
@@ -58,7 +58,6 @@ public class WhereTests
     public void FromTableWhere_FiltersByEqualityToLiteral()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( id int, v int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 1, 100 ), ( 2, 200 ), ( 3, 300 )").ExecuteNonQuery();
 
@@ -73,7 +72,6 @@ public class WhereTests
     public void FromTableWhere_FiltersByGreaterThan()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 1 ), ( 2 ), ( 3 ), ( 4 )").ExecuteNonQuery();
 
@@ -87,7 +85,6 @@ public class WhereTests
     public void FromTableWhere_NullColumnNeverMatches()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( id int, v int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t ( id ) values ( 1 )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 2, 99 )").ExecuteNonQuery();
@@ -102,7 +99,6 @@ public class WhereTests
     public void FromTableWhere_FiltersByParameter()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( id int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 1 ), ( 2 ), ( 3 )").ExecuteNonQuery();
 
@@ -120,7 +116,6 @@ public class WhereTests
     public void FromTableWhere_FiltersByDateEquality()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( id int, d date )").ExecuteNonQuery();
 
         using var ins = connection.CreateCommand();
@@ -144,7 +139,6 @@ public class WhereTests
     public void FromTableWhere_FiltersByDateOrdering()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( id int, d date )").ExecuteNonQuery();
 
         using var ins = connection.CreateCommand();
@@ -203,8 +197,7 @@ public class WhereTests
     [TestMethod]
     public void FromTableWhere_CrossPrecisionDateTime2Comparison()
     {
-        // Stored at precision 3; compared against a precision-7 parameter.
-        // Promotion widens both to precision 7 so a same-tick match succeeds.
+        // Stored at precision 3, compared against precision-7 parameter — promotion widens both to p=7.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( id int, d datetime2(3) )").ExecuteNonQuery();
 
@@ -247,7 +240,6 @@ public class WhereTests
     [TestMethod]
     public void FromTableWhere_CrossPrecisionTimeComparison()
     {
-        // Stored at precision 3; compared against precision-7 parameter.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( id int, t time(3) )").ExecuteNonQuery();
 
@@ -267,8 +259,7 @@ public class WhereTests
     [TestMethod]
     public void FromTableWhere_FiltersByDateTimeOffsetEquality_AcrossOffsets()
     {
-        // The stored row and the parameter share a UTC instant but carry
-        // different offsets; SQL Server compares by UTC, so they should match.
+        // Row and parameter share a UTC instant but carry different offsets; SQL Server compares by UTC.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( id int, d datetimeoffset(7) )").ExecuteNonQuery();
 
@@ -278,7 +269,6 @@ public class WhereTests
         AddTypedParameter(ins, "b", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 14, 45, 30, TimeSpan.FromHours(-7)));
         _ = ins.ExecuteNonQuery();
 
-        // Equivalent UTC instant to row 1 but expressed in +03:00.
         using var select = connection.CreateCommand();
         select.CommandText = "select id from t where d = @target";
         AddTypedParameter(select, "target", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 23, 45, 30, TimeSpan.FromHours(3)));
@@ -315,7 +305,6 @@ public class WhereTests
     [TestMethod]
     public void FromTableWhere_CrossPrecisionDateTimeOffsetComparison()
     {
-        // Stored at precision 0; compared against a precision-7 parameter.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( id int, d datetimeoffset(0) )").ExecuteNonQuery();
 
@@ -335,11 +324,7 @@ public class WhereTests
     [TestMethod]
     public void Where_AndChain_TwoPredicates_BothMustHold()
     {
-        // Regression for the silent-wrong-rows bug: pre-fix, `where a=X and
-        // b=Y` parsed only `a=X` and dropped `and b=Y`, returning the first
-        // row matching just the left predicate. With composite-PK row
-        // (1,3,200) present, the right answer is 200, not the (1,2,100) row
-        // that matches only `a=1`.
+        // Regression: pre-fix, `where a=X and b=Y` parsed only `a=X` and dropped `and b=Y`.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int not null, b int not null, c int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (1, 2, 100), (1, 3, 200), (2, 2, 300)").ExecuteNonQuery();
@@ -363,13 +348,10 @@ public class WhereTests
     [TestMethod]
     public void Where_AndChain_NullOperand_ExcludesRow()
     {
-        // SQL Server WHERE: NULL on either side of AND treats the row as
-        // excluded (the whole predicate evaluates to false/UNKNOWN).
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (1, null), (1, 2)").ExecuteNonQuery();
 
-        // Only (1, 2) passes both predicates; (1, NULL) fails the b=2 side.
         using var reader = connection.CreateCommand("select b from t where a = 1 and b = 2").ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(2, reader[0]);
@@ -391,133 +373,50 @@ public class WhereTests
     }
 
     [TestMethod]
-    public void Where_AndOrPrecedence_AndBindsTighter()
+    [DataRow("a = 1 or b = 2 and c = 2", 3)]    // AND binds tighter: (1,2,3),(1,3,2),(2,2,2)
+    [DataRow("(a = 1 or b = 2) and c = 2", 2)]  // parens flip precedence: (1,3,2),(2,2,2)
+    public void Where_AndOrPrecedence(string predicate, int expected)
     {
-        // `a=1 OR b=2 AND c=2` parses as `a=1 OR (b=2 AND c=2)` — standard
-        // SQL precedence (AND binds tighter than OR). Probe of real SQL
-        // Server returned 3 rows for this dataset; simulator must match.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (1, 2, 3), (1, 3, 2), (2, 2, 2), (0, 0, 5)").ExecuteNonQuery();
 
-        var matched = CountWhere(connection, "a = 1 or b = 2 and c = 2");
-        AreEqual(3, matched); // (1,2,3), (1,3,2), (2,2,2)
+        AreEqual(expected, CountWhere(connection, predicate));
     }
 
     [TestMethod]
-    public void Where_ParensOverridePrecedence()
-    {
-        // Same data as the precedence test but with explicit parens forcing
-        // `(a=1 OR b=2) AND c=2` — only rows where c=2 AND (a=1 OR b=2).
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 2, 3), (1, 3, 2), (2, 2, 2), (0, 0, 5)").ExecuteNonQuery();
-
-        var matched = CountWhere(connection, "(a = 1 or b = 2) and c = 2");
-        AreEqual(2, matched); // (1,3,2), (2,2,2)
-    }
-
-    [TestMethod]
-    public void Where_NotPredicate_ExcludesNullViaTriState()
-    {
-        // SQL Server: NOT (NULL = 1) → NOT NULL → NULL → row excluded by
-        // WHERE. Simulator's tri-state Run propagates UNKNOWN; only a true
-        // Run result lets a row through.
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
-
-        AreEqual(1, CountWhere(connection, "not (a = 1)")); // only the row with a=2 passes
-    }
-
-    [TestMethod]
-    public void Where_NotEqual_ExcludesEqualAndNull()
-    {
-        // <> mirrors NOT (a = X)'s tri-state semantics: NULL operand → null
-        // → exclude.
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
-
-        AreEqual(1, CountWhere(connection, "a <> 1"));
-    }
-
-    [TestMethod]
-    public void Where_DoubleNot_CancelsToOriginal()
+    [DataRow("not (a = 1)", 1)]              // NULL is excluded by tri-state
+    [DataRow("a <> 1", 1)]                   // mirrors NOT (a=1) tri-state
+    [DataRow("not not (a = 1)", 1)]
+    [DataRow("((a = 1))", 1)]
+    [DataRow("a is null", 1)]
+    [DataRow("a is not null", 2)]
+    [DataRow("a = 1 or a is null", 2)]
+    public void Where_TriStateAndIsNull_OnNullableIntColumn(string predicate, int expected)
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
 
-        AreEqual(1, CountWhere(connection, "not not (a = 1)"));
+        AreEqual(expected, CountWhere(connection, predicate));
     }
 
     [TestMethod]
-    public void Where_NestedParensPredicate()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 2), (1, 3), (2, 2)").ExecuteNonQuery();
-
-        AreEqual(1, CountWhere(connection, "((a = 1 and b = 2))"));
-    }
-
-    [TestMethod]
-    public void Where_IsNull_MatchesNullsOnly()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
-
-        AreEqual(1, CountWhere(connection, "a is null"));
-    }
-
-    [TestMethod]
-    public void Where_IsNotNull_ExcludesNulls()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
-
-        AreEqual(2, CountWhere(connection, "a is not null"));
-    }
-
-    [TestMethod]
-    public void Where_IsNullCombinesWithOr()
-    {
-        // The standard "include NULLs in addition to a value match" shape.
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
-
-        AreEqual(2, CountWhere(connection, "a = 1 or a is null"));
-    }
-
-    [TestMethod]
-    public void Where_InList_MatchesAnyMember()
+    [DataRow("a in (1, 3)", 2)]
+    [DataRow("a not in (1, 3)", 2)]
+    public void Where_InNotIn_BasicMembership(string predicate, int expected)
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (1), (2), (3), (4)").ExecuteNonQuery();
 
-        AreEqual(2, CountWhere(connection, "a in (1, 3)"));
-    }
-
-    [TestMethod]
-    public void Where_NotInList_ExcludesMembers()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1), (2), (3), (4)").ExecuteNonQuery();
-
-        AreEqual(2, CountWhere(connection, "a not in (1, 3)"));
+        AreEqual(expected, CountWhere(connection, predicate));
     }
 
     [TestMethod]
     public void Where_InList_NullLeftSideIsExcluded()
     {
-        // `NULL IN (1, 2)` is UNKNOWN per three-valued logic; UNKNOWN
-        // excludes from WHERE.
+        // `NULL IN (1, 2)` is UNKNOWN; UNKNOWN excludes from WHERE.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
@@ -528,10 +427,7 @@ public class WhereTests
     [TestMethod]
     public void Where_NotInList_WithNullElementExcludesEverythingViaUnknown()
     {
-        // `1 NOT IN (1, NULL)` is false (1 matches 1).
-        // `2 NOT IN (1, NULL)` is UNKNOWN (no match seen but NULL might be 2)
-        // → excluded from WHERE. Only the matched-and-thus-false row is
-        // excluded explicitly; the other rows fall through UNKNOWN-as-exclude.
+        // `1 NOT IN (1, NULL)` = false (1 matches 1). `2 NOT IN (1, NULL)` = UNKNOWN → excluded.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (1), (2), (3)").ExecuteNonQuery();
@@ -552,9 +448,7 @@ public class WhereTests
     [TestMethod]
     public void Where_InList_PromotesAcrossNumericTypes()
     {
-        // Member-list values are numeric literals (int by default); column
-        // is bigint. SQL Server promotes to a common numeric type for the
-        // comparison.
+        // Member-list values are int literals; column is bigint. SQL Server promotes to a common numeric type.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a bigint)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert into t values (1), (2), (3)").ExecuteNonQuery();
@@ -562,7 +456,11 @@ public class WhereTests
         AreEqual(2, CountWhere(connection, "a in (1, 3)"));
     }
 
-    private static int CountWhere(System.Data.Common.DbConnection connection, string predicate)
+    [TestMethod]
+    public void Where_FivePartColumnReference_RaisesMsg4104()
+        => AssertSqlError("select 1 where a.b.c.d.e = 1", 4104, "The multi-part identifier \"a.b.c.d.e\" could not be bound.");
+
+    private static int CountWhere(DbConnection connection, string predicate)
     {
         using var reader = connection.CreateCommand($"select a from t where {predicate}").ExecuteReader();
         var n = 0;
@@ -571,27 +469,12 @@ public class WhereTests
         return n;
     }
 
-    private static void AddTypedParameter(System.Data.Common.DbCommand command, string name, DbType dbType, object value)
+    private static void AddTypedParameter(DbCommand command, string name, DbType dbType, object value)
     {
         var parameter = command.CreateParameter();
         parameter.ParameterName = name;
         parameter.DbType = dbType;
         parameter.Value = value;
         _ = command.Parameters.Add(parameter);
-    }
-
-    [TestMethod]
-    public void Where_FivePartColumnReference_RaisesMsg4104()
-    {
-        // SQL Server's grammar caps qualified column references at 4 parts
-        // (linked.db.schema.object). Real SQL Server parses arbitrary-many
-        // parts and fails at resolution with Msg 4104; the simulator's
-        // MultiPartName cap raises the same Msg 4104 at parse time, with
-        // the full attempted dotted name in the message — matching the
-        // user-visible wire effect.
-        var ex = Throws<System.Data.Common.DbException>(() =>
-            _ = new Simulation().ExecuteScalar("select 1 where a.b.c.d.e = 1"));
-        AreEqual("4104", ex.Data["HelpLink.EvtID"]);
-        AreEqual("The multi-part identifier \"a.b.c.d.e\" could not be bound.", ex.Message);
     }
 }

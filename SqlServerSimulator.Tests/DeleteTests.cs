@@ -4,12 +4,9 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for <c>DELETE FROM table [WHERE pred]</c> (the
-/// <c>FROM</c> keyword is optional in T-SQL). Covers row-count return,
-/// no-WHERE bulk delete, no-match zero-affected, post-delete enumeration
-/// (tombstoned slots invisible), and post-delete INSERT (slot directory
-/// continues from current count). LOB chain reclamation isn't part of
-/// this bundle — see CLAUDE.md for the leak quirk.
+/// Behavioral tests for <c>DELETE FROM table [WHERE pred]</c> (FROM is optional in T-SQL).
+/// Covers row-count return, no-WHERE bulk delete, no-match zero-affected, post-delete enumeration
+/// (tombstoned slots invisible), post-delete INSERT, and the EF7+ multi-table-syntax form.
 /// </summary>
 [TestClass]
 public sealed class DeleteTests
@@ -30,11 +27,8 @@ public sealed class DeleteTests
         _ = simulation.ExecuteNonQuery("create table t (id int, v int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1, 10), (2, 20), (3, 30)");
 
-        var affected = simulation.ExecuteNonQuery("delete from t where id = 2");
-        AreEqual(1, affected);
-
-        var values = ReadInts(simulation.CreateCommand("select id from t order by id"));
-        CollectionAssert.AreEqual(new[] { 1, 3 }, values);
+        AreEqual(1, simulation.ExecuteNonQuery("delete from t where id = 2"));
+        CollectionAssert.AreEqual(new[] { 1, 3 }, ReadInts(simulation.CreateCommand("select id from t order by id")));
     }
 
     [TestMethod]
@@ -44,11 +38,8 @@ public sealed class DeleteTests
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3), (4)");
 
-        var affected = simulation.ExecuteNonQuery("delete from t");
-        AreEqual(4, affected);
-
-        var values = ReadInts(simulation.CreateCommand("select id from t"));
-        IsEmpty(values);
+        AreEqual(4, simulation.ExecuteNonQuery("delete from t"));
+        IsEmpty(ReadInts(simulation.CreateCommand("select id from t")));
     }
 
     [TestMethod]
@@ -58,45 +49,33 @@ public sealed class DeleteTests
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2)");
 
-        var affected = simulation.ExecuteNonQuery("delete from t where id = 999");
-        AreEqual(0, affected);
-
-        var values = ReadInts(simulation.CreateCommand("select id from t order by id"));
-        CollectionAssert.AreEqual(new[] { 1, 2 }, values);
+        AreEqual(0, simulation.ExecuteNonQuery("delete from t where id = 999"));
+        CollectionAssert.AreEqual(new[] { 1, 2 }, ReadInts(simulation.CreateCommand("select id from t order by id")));
     }
 
     [TestMethod]
     public void Delete_OptionalFromKeyword_StillWorks()
     {
-        // T-SQL allows DELETE without FROM (FROM is optional in single-table form).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2)");
-
-        var affected = simulation.ExecuteNonQuery("delete t where id = 1");
-        AreEqual(1, affected);
+        AreEqual(1, simulation.ExecuteNonQuery("delete t where id = 1"));
     }
 
     [TestMethod]
     public void Delete_NonexistentTable_RaisesMsg208()
-    {
-        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteNonQuery("delete from no_such"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
-    }
+        => _ = new Simulation().AssertSqlError("delete from no_such", 208);
 
     [TestMethod]
     public void Delete_ThenInsert_NewRowVisibleAfterTombstone()
     {
-        // Verifies tombstoned slots don't block subsequent INSERTs from
-        // creating new visible rows in the heap.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int, v varchar(20))");
         _ = simulation.ExecuteNonQuery("insert into t values (1, 'a'), (2, 'b')");
         _ = simulation.ExecuteNonQuery("delete from t where id = 1");
         _ = simulation.ExecuteNonQuery("insert into t values (3, 'c')");
 
-        var values = ReadInts(simulation.CreateCommand("select id from t order by id"));
-        CollectionAssert.AreEqual(new[] { 2, 3 }, values);
+        CollectionAssert.AreEqual(new[] { 2, 3 }, ReadInts(simulation.CreateCommand("select id from t order by id")));
     }
 
     [TestMethod]
@@ -108,18 +87,12 @@ public sealed class DeleteTests
         _ = simulation.ExecuteNonQuery("delete from t");
         _ = simulation.ExecuteNonQuery("insert into t values (4), (5)");
 
-        var values = ReadInts(simulation.CreateCommand("select id from t order by id"));
-        CollectionAssert.AreEqual(new[] { 4, 5 }, values);
+        CollectionAssert.AreEqual(new[] { 4, 5 }, ReadInts(simulation.CreateCommand("select id from t order by id")));
     }
-
-    // === OUTPUT clause (literal-only) ===
 
     [TestMethod]
     public void Delete_OutputLiteralOne_YieldsOneRowPerAffected()
     {
-        // EF Core emits `DELETE FROM ... OUTPUT 1 WHERE ...` on
-        // SaveChanges-Remove. Verifies the OUTPUT projection runs once per
-        // deleted row.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3)");
@@ -135,44 +108,33 @@ public sealed class DeleteTests
     [TestMethod]
     public void Delete_OutputDeletedColumn_YieldsRemovedValue()
     {
-        // DELETED.<col> on DELETE returns the pre-delete value (probe-confirmed).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1)");
-
-        var deletedId = simulation.ExecuteScalar("delete from t output deleted.id where id = 1");
-        AreEqual(1, deletedId);
+        AreEqual(1, simulation.ExecuteScalar("delete from t output deleted.id where id = 1"));
     }
 
     [TestMethod]
     public void Delete_OutputInsertedColumn_RaisesMsg4104()
     {
-        // INSERTED isn't a valid qualifier in DELETE OUTPUT (probe-confirmed Msg 4104).
+        // INSERTED isn't valid in DELETE OUTPUT.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1)");
-
-        var ex = Throws<DbException>(() =>
-            _ = simulation.ExecuteScalar("delete from t output inserted.id where id = 1"));
-        AreEqual("4104", ex.Data["HelpLink.EvtID"]);
+        _ = simulation.AssertSqlError("delete from t output inserted.id where id = 1", 4104);
     }
 
     [TestMethod]
     public void Delete_PrimaryKeyTable_AllowsReinsertAfterDelete()
     {
-        // After DELETE removes the row with k=1, a new INSERT of k=1
-        // must succeed (no PK collision against tombstoned data).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (k int primary key, v int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1, 10)");
         _ = simulation.ExecuteNonQuery("delete from t where k = 1");
         _ = simulation.ExecuteNonQuery("insert into t values (1, 20)");
 
-        var values = ReadInts(simulation.CreateCommand("select v from t"));
-        CollectionAssert.AreEqual(new[] { 20 }, values);
+        CollectionAssert.AreEqual(new[] { 20 }, ReadInts(simulation.CreateCommand("select v from t")));
     }
-
-    // === Multi-table-syntax DELETE (EF7+ ExecuteDelete emission) ===
 
     [TestMethod]
     public void Delete_MultiTableSyntax_AcceptsAliasFormWithFromClause()
@@ -181,12 +143,8 @@ public sealed class DeleteTests
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3)");
 
-        var rows = simulation.ExecuteNonQuery(
-            "delete from [a] from t as [a] where [a].[id] = 2");
-        AreEqual(1, rows);
-
-        var ids = ReadInts(simulation.CreateCommand("select id from t order by id"));
-        CollectionAssert.AreEqual(new[] { 1, 3 }, ids);
+        AreEqual(1, simulation.ExecuteNonQuery("delete from [a] from t as [a] where [a].[id] = 2"));
+        CollectionAssert.AreEqual(new[] { 1, 3 }, ReadInts(simulation.CreateCommand("select id from t order by id")));
     }
 
     [TestMethod]
@@ -195,9 +153,7 @@ public sealed class DeleteTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3)");
-
-        var rows = simulation.ExecuteNonQuery("delete from [a] from t as [a]");
-        AreEqual(3, rows);
+        AreEqual(3, simulation.ExecuteNonQuery("delete from [a] from t as [a]"));
     }
 
     [TestMethod]
@@ -205,7 +161,6 @@ public sealed class DeleteTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
-
         var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("delete from [unknown]"));
         Contains("Invalid object name", ex.Message);
     }
@@ -219,9 +174,8 @@ public sealed class DeleteTests
         _ = simulation.ExecuteNonQuery("insert customers values (1, 'A'), (2, 'B'), (3, 'C')");
         _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 50), (11, 1, 200), (12, 2, 150), (13, 2, 250)");
 
-        var rows = simulation.ExecuteNonQuery(
-            "delete c from customers c inner join orders o on o.customerId = c.id where o.total > 100");
-        AreEqual(2, rows);
+        AreEqual(2, simulation.ExecuteNonQuery(
+            "delete c from customers c inner join orders o on o.customerId = c.id where o.total > 100"));
 
         var statuses = new List<string>();
         using (var reader = simulation.CreateCommand("select status from customers order by id").ExecuteReader())
@@ -232,18 +186,15 @@ public sealed class DeleteTests
     [TestMethod]
     public void Delete_JoinedFromClause_DeleteFromAliasSyntax_AlsoWorks()
     {
-        // DELETE FROM <alias> FROM ... JOIN ... — the form with the extra
-        // FROM keyword. SQL Server accepts both DELETE alias and DELETE FROM
-        // alias; EF Core 10's ExecuteDelete emits the DELETE alias form.
+        // DELETE FROM <alias> FROM ... JOIN ... — both forms accepted (EF Core 10 emits the DELETE alias form).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
         _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
         _ = simulation.ExecuteNonQuery("insert customers values (1, 'A'), (2, 'B')");
         _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 200)");
 
-        var rows = simulation.ExecuteNonQuery(
-            "delete from c from customers c inner join orders o on o.customerId = c.id where o.total > 100");
-        AreEqual(1, rows);
+        AreEqual(1, simulation.ExecuteNonQuery(
+            "delete from c from customers c inner join orders o on o.customerId = c.id where o.total > 100"));
     }
 
     [TestMethod]
@@ -260,17 +211,15 @@ public sealed class DeleteTests
     [TestMethod]
     public void Delete_JoinedFromClause_TargetOnRightSide_DeletesFromTarget()
     {
-        // Target alias on the right side of the join (delete orders, not
-        // customers). Probe O from the design probe.
+        // Target alias on right side of join (delete orders, not customers).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
         _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
         _ = simulation.ExecuteNonQuery("insert customers values (1, 'X')");
         _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 50), (11, 1, 200)");
 
-        var rows = simulation.ExecuteNonQuery(
-            "delete o from customers c inner join orders o on o.customerId = c.id where o.total > 100");
-        AreEqual(1, rows);
+        AreEqual(1, simulation.ExecuteNonQuery(
+            "delete o from customers c inner join orders o on o.customerId = c.id where o.total > 100"));
 
         var totals = new List<decimal>();
         using var reader = simulation.CreateCommand("select total from orders order by id").ExecuteReader();

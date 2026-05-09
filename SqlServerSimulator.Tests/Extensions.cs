@@ -92,4 +92,25 @@ static class Extensions
         while (reader.Read())
             yield return reader;
     }
+
+    /// <summary>
+    /// Verifies that <paramref name="commandText"/> against this simulation raises a
+    /// <see cref="DbException"/> whose SQL Server error number matches
+    /// <paramref name="errorNumber"/>. Returns the exception for further assertions.
+    /// </summary>
+    public static DbException AssertSqlError(this Simulation simulation, string commandText, int errorNumber)
+    {
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteScalar(commandText));
+        Assert.AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
+        return ex;
+    }
+
+    /// <summary>
+    /// Exact-message variant of <see cref="AssertSqlError(Simulation, string, int)"/>.
+    /// </summary>
+    public static void AssertSqlError(this Simulation simulation, string commandText, int errorNumber, string expectedMessage)
+    {
+        var ex = simulation.AssertSqlError(commandText, errorNumber);
+        Assert.AreEqual(expectedMessage, ex.Message);
+    }
 }

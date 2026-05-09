@@ -1,5 +1,6 @@
-﻿using System.Data;
+using System.Data;
 using System.Data.Common;
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
 
@@ -7,7 +8,7 @@ namespace SqlServerSimulator;
 public class InsertTests
 {
     [TestMethod]
-    public void InsertRequiresTableToExist() => Assert.Throws<DbException>(() => new Simulation()
+    public void InsertRequiresTableToExist() => Throws<DbException>(() => new Simulation()
         .CreateOpenConnection()
         .CreateCommand("insert t ( v ) values ( 1 )")
         .ExecuteNonQuery()
@@ -22,16 +23,9 @@ public class InsertTests
     public void Insert(string commandText, int expectedRecordsAffected)
     {
         var simulation = new Simulation();
-        _ = simulation
-            .CreateOpenConnection()
-            .CreateCommand("create table t ( v int )")
-            .ExecuteNonQuery();
-
-        var result = simulation
-            .CreateCommand($"insert {commandText}")
-            .ExecuteNonQuery();
-
-        Assert.AreEqual(expectedRecordsAffected, result);
+        _ = simulation.CreateOpenConnection().CreateCommand("create table t ( v int )").ExecuteNonQuery();
+        var result = simulation.CreateCommand($"insert {commandText}").ExecuteNonQuery();
+        AreEqual(expectedRecordsAffected, result);
     }
 
     [TestMethod]
@@ -41,61 +35,38 @@ public class InsertTests
             .CreateOpenConnection()
             .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p0", 1))
             .ExecuteNonQuery();
-
-        Assert.AreEqual(1, result);
+        AreEqual(1, result);
     }
 
     [TestMethod]
-    public void InsertParameterizedNameMismatch() => Assert.Throws<DbException>(() => new Simulation()
+    public void InsertParameterizedNameMismatch() => Throws<DbException>(() => new Simulation()
         .CreateOpenConnection()
         .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
         .ExecuteNonQuery()
     );
 
     [TestMethod]
-    public void InsertRequiresValidColumnNames() => Assert.Throws<DbException>(() => new Simulation()
+    public void InsertRequiresValidColumnNames() => Throws<DbException>(() => new Simulation()
         .CreateOpenConnection()
         .CreateCommand("create table t ( v int );insert t ( x ) values ( 1 )")
         .ExecuteNonQuery()
     );
 
     [TestMethod]
-    public void InsertCoercion_Int32LiteralIntoTinyInt_NarrowsInRange()
+    [DataRow("tinyint", "200", (byte)200)]
+    [DataRow("smallint", "12345", (short)12345)]
+    [DataRow("int", "-42", -42)]
+    public void InsertCoercion_IntLiteralIntoColumn(string columnType, string literal, object expected)
     {
         using var connection = new Simulation().CreateOpenConnection();
-
-        _ = connection.CreateCommand("create table t ( v tinyint )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( 200 )").ExecuteNonQuery();
-
-        Assert.AreEqual((byte)200, connection.CreateCommand("select v from t").ExecuteScalar());
-    }
-
-    [TestMethod]
-    public void InsertCoercion_Int32LiteralIntoSmallInt_NarrowsInRange()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-
-        _ = connection.CreateCommand("create table t ( v smallint )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( 12345 )").ExecuteNonQuery();
-
-        Assert.AreEqual((short)12345, connection.CreateCommand("select v from t").ExecuteScalar());
-    }
-
-    [TestMethod]
-    public void InsertCoercion_NegativeLiteral_LandsAsNegative()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( -42 )").ExecuteNonQuery();
-
-        Assert.AreEqual(-42, connection.CreateCommand("select v from t").ExecuteScalar());
+        _ = connection.CreateCommand($"create table t ( v {columnType} )").ExecuteNonQuery();
+        _ = connection.CreateCommand($"insert t values ( {literal} )").ExecuteNonQuery();
+        AreEqual(expected, connection.CreateCommand("select v from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertCoercion_ExpressionValue_IsEvaluated()
     {
-        // INSERT VALUES accepts arbitrary scalar expressions (arithmetic,
-        // parenthesized, function calls) — anything Expression.Parse handles.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 2 + 3 * 4 ), ( -(10 - 7) ), ( abs(-9) )").ExecuteNonQuery();
@@ -111,179 +82,158 @@ public class InsertTests
     public void InsertCoercion_Int32LiteralIntoTinyInt_OverflowRaisesSqlException()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v tinyint )").ExecuteNonQuery();
-        var insert = connection.CreateCommand("insert t values ( 300 )");
-        var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        Assert.Contains("Arithmetic overflow", ex.Message);
-        Assert.Contains("tinyint", ex.Message);
+        var ex = Throws<DbException>(() => connection.CreateCommand("insert t values ( 300 )").ExecuteNonQuery());
+        Contains("Arithmetic overflow", ex.Message);
+        Contains("tinyint", ex.Message);
     }
 
     [TestMethod]
     public void InsertCoercion_TinyIntParameterIntoInt32Column_Widens()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
 
         using (var insert = connection.CreateCommand())
         {
             insert.CommandText = "insert t values ( @p )";
             AddTypedParameter(insert, "p", DbType.Byte, (byte)200);
-            Assert.AreEqual(1, insert.ExecuteNonQuery());
+            AreEqual(1, insert.ExecuteNonQuery());
         }
 
-        Assert.AreEqual(200, connection.CreateCommand("select v from t").ExecuteScalar());
+        AreEqual(200, connection.CreateCommand("select v from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertCoercion_Int32ParameterIntoTinyIntColumn_OverflowRaisesSqlException()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v tinyint )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Int32, 300);
 
-        var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        Assert.Contains("Arithmetic overflow", ex.Message);
+        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
+        Contains("Arithmetic overflow", ex.Message);
     }
 
     [TestMethod]
     public void InsertVarchar_AtMaxLength_Succeeds()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varchar(5) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.AnsiString, "hello");
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
     }
 
     [TestMethod]
     public void InsertVarchar_OverMaxLength_RaisesTruncation()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varchar(5) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.AnsiString, "hello world");
 
-        var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        Assert.AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: 'hello'.", ex.Message);
+        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
+        AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: 'hello'.", ex.Message);
     }
 
     [TestMethod]
     public void InsertNVarchar_OverMaxLength_RaisesTruncation()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v nvarchar(3) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.String, "héllo");
 
-        var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        Assert.AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: 'hél'.", ex.Message);
+        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
+        AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: 'hél'.", ex.Message);
     }
 
     [TestMethod]
     public void InsertVarchar_Cp1252Char_CountsAsOneByte()
     {
-        // varchar uses Windows-1252; "café" is 4 bytes (every char in CP1252)
-        // and fits varchar(4) exactly. This is the inverse of the misconception
-        // that "multi-byte char in .NET = multi-byte in varchar" — true under
-        // UTF-8, false under SQL Server's default CP1252 collation.
+        // varchar uses Windows-1252; "café" is 4 bytes (every char in CP1252) and fits varchar(4).
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varchar(4) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.AnsiString, "café");
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
     }
 
     [TestMethod]
     public void InsertVarchar_OutOfCp1252Char_StoresAsReplacement()
     {
-        // Characters outside CP1252 are silently replaced with '?'. The simulator
-        // matches SQL Server's lossy default — "Ω" round-trips as "?".
+        // Characters outside CP1252 are silently replaced with '?'.
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varchar(10) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.AnsiString, "Ω");
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        var read = connection.CreateCommand("select v from t").ExecuteScalar();
-        Assert.AreEqual("?", read);
+        AreEqual("?", connection.CreateCommand("select v from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertNVarchar_MultiByteChar_CountsCodeUnitsNotBytes()
     {
-        // nvarchar limit is UCS-2 code units; "café" is 4 code units and fits in nvarchar(4).
+        // nvarchar limit is UCS-2 code units; "café" is 4 code units → fits nvarchar(4).
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v nvarchar(4) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.String, "café");
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
     }
 
     [TestMethod]
     public void InsertNullIntoConstrainedVarchar_Succeeds()
     {
-        // NULL bypasses the length check.
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varchar(5) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.AnsiString, DBNull.Value);
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
     }
 
     [TestMethod]
     public void InsertWithExplicitMultiColumnList_RoutesValuesByName()
     {
-        // INSERT t (b, a) VALUES (...) maps the first value to b and the second
-        // to a, regardless of declared column order. This is the comma-separated
-        // column list path EF Core depends on.
+        // INSERT t (b, a) VALUES maps first value to b regardless of declared order — the path EF Core depends on.
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( a int, b int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t ( b, a ) values ( 1, 2 )").ExecuteNonQuery();
 
         using var read = connection.CreateCommand("select a from t").ExecuteReader();
-        Assert.IsTrue(read.Read());
-        Assert.AreEqual(2, read.GetInt32(0));
+        IsTrue(read.Read());
+        AreEqual(2, read.GetInt32(0));
     }
 
     [TestMethod]
     public void InsertVarbinary_AtMaxLength_Succeeds()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varbinary(4) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Binary, new byte[] { 0x01, 0x02, 0x03, 0x04 });
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
         var read = (byte[]?)connection.CreateCommand("select v from t").ExecuteScalar();
         CollectionAssert.AreEqual(new byte[] { 0x01, 0x02, 0x03, 0x04 }, read);
@@ -292,31 +242,28 @@ public class InsertTests
     [TestMethod]
     public void InsertVarbinary_OverMaxLength_RaisesTruncationWithHexValue()
     {
-        // Verbose Msg 2628 should render the truncated prefix as 0xHEX rather
-        // than as a string, matching SQL Server's varbinary formatting.
+        // Msg 2628 renders the truncated prefix as 0xHEX — varbinary formatting.
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varbinary(2) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Binary, new byte[] { 0xDE, 0xAD, 0xBE, 0xEF });
 
-        var ex = Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
-        Assert.AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: '0xDEAD'.", ex.Message);
+        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
+        AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: '0xDEAD'.", ex.Message);
     }
 
     [TestMethod]
     public void InsertNullIntoConstrainedVarbinary_Succeeds()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v varbinary(4) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Binary, DBNull.Value);
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
     }
 
     [TestMethod]
@@ -328,42 +275,42 @@ public class InsertTests
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Date, new DateOnly(2026, 5, 4));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        var read = connection.CreateCommand("select d from t").ExecuteScalar();
-        Assert.AreEqual(new DateTime(2026, 5, 4), read);
+        AreEqual(new DateTime(2026, 5, 4), connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertDate_ViaDateTimeParameter_RoundTrips()
     {
-        // EF Core's legacy DateTime mapping arrives as DbType.Date with a
-        // DateTime value; only the date portion should land in storage.
+        // EF Core's legacy DateTime mapping arrives as DbType.Date with a DateTime value; only the date portion lands in storage.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( d date )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Date, new DateTime(2026, 5, 4, 13, 45, 30));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        var read = connection.CreateCommand("select d from t").ExecuteScalar();
-        Assert.AreEqual(new DateTime(2026, 5, 4), read);
+        AreEqual(new DateTime(2026, 5, 4), connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
-    public void InsertDate_NullValue_RoundTrips()
+    [DataRow("date", DbType.Date)]
+    [DataRow("datetime2(7)", DbType.DateTime2)]
+    [DataRow("time(7)", DbType.Time)]
+    [DataRow("datetimeoffset(7)", DbType.DateTimeOffset)]
+    public void InsertDateTimeFamily_NullValue_RoundTrips(string columnType, DbType dbType)
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( d date null )").ExecuteNonQuery();
+        _ = connection.CreateCommand($"create table t ( d {columnType} null )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand();
         insert.CommandText = "insert t values ( @p )";
-        AddTypedParameter(insert, "p", DbType.Date, DBNull.Value);
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AddTypedParameter(insert, "p", dbType, DBNull.Value);
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        var read = connection.CreateCommand("select d from t").ExecuteScalar();
-        Assert.AreEqual(DBNull.Value, read);
+        AreEqual(DBNull.Value, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -374,9 +321,9 @@ public class InsertTests
         _ = connection.CreateCommand("create table t ( d date )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", new DateOnly(2026, 5, 4)));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(new DateTime(2026, 5, 4), connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(new DateTime(2026, 5, 4), connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -387,55 +334,37 @@ public class InsertTests
 
         var dt = new DateTime(2026, 5, 4, 13, 45, 30).AddTicks(1234567);
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", dt));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(dt, connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(dt, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertDateTime2_LowerPrecisionTruncates()
     {
-        // Storing a precision-7 value into a precision-3 column rounds the
-        // sub-millisecond portion. The destination column's precision wins
-        // because that's how the value gets encoded into the column's bytes.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( d datetime2(3) )").ExecuteNonQuery();
 
         // 5_000 ticks (= 0.5ms) above the millisecond boundary rounds half-up.
         var dt = new DateTime(2026, 5, 4, 13, 45, 30, 100).AddTicks(5_000);
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", dt));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(new DateTime(2026, 5, 4, 13, 45, 30, 101), connection.CreateCommand("select d from t").ExecuteScalar());
-    }
-
-    [TestMethod]
-    public void InsertDateTime2_NullValue_RoundTrips()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( d datetime2(7) null )").ExecuteNonQuery();
-
-        using var insert = connection.CreateCommand();
-        insert.CommandText = "insert t values ( @p )";
-        AddTypedParameter(insert, "p", DbType.DateTime2, DBNull.Value);
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
-
-        Assert.AreEqual(DBNull.Value, connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(new DateTime(2026, 5, 4, 13, 45, 30, 101), connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertDateTime2_DefaultPrecisionColumn_AcceptsFullPrecisionValue()
     {
-        // `datetime2` (no parens) defaults to precision 7 in SQL Server; full
-        // DateTime ticks should round-trip without loss.
+        // `datetime2` (no parens) defaults to precision 7.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( d datetime2 )").ExecuteNonQuery();
 
         var dt = new DateTime(2026, 5, 4, 13, 45, 30).AddTicks(1234567);
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", dt));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(dt, connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(dt, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -446,22 +375,21 @@ public class InsertTests
 
         var ts = new TimeSpan(13, 45, 30).Add(TimeSpan.FromTicks(1234567));
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", ts));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(ts, connection.CreateCommand("select t from t").ExecuteScalar());
+        AreEqual(ts, connection.CreateCommand("select t from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertTime_ViaTimeOnlyParameter_RoundTrips()
     {
-        // EF Core's TimeOnly mapping arrives as DbType.Time with a TimeOnly value.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( t time(7) )").ExecuteNonQuery();
 
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", new TimeOnly(13, 45, 30)));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(new TimeSpan(13, 45, 30), connection.CreateCommand("select t from t").ExecuteScalar());
+        AreEqual(new TimeSpan(13, 45, 30), connection.CreateCommand("select t from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -470,26 +398,11 @@ public class InsertTests
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( t time(0) )").ExecuteNonQuery();
 
-        // 0.5s exactly => round half-up to next whole second.
         var ts = new TimeSpan(13, 45, 30).Add(TimeSpan.FromTicks(5_000_000));
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", ts));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(new TimeSpan(13, 45, 31), connection.CreateCommand("select t from t").ExecuteScalar());
-    }
-
-    [TestMethod]
-    public void InsertTime_NullValue_RoundTrips()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( t time(7) null )").ExecuteNonQuery();
-
-        using var insert = connection.CreateCommand();
-        insert.CommandText = "insert t values ( @p )";
-        AddTypedParameter(insert, "p", DbType.Time, DBNull.Value);
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
-
-        Assert.AreEqual(DBNull.Value, connection.CreateCommand("select t from t").ExecuteScalar());
+        AreEqual(new TimeSpan(13, 45, 31), connection.CreateCommand("select t from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -498,9 +411,7 @@ public class InsertTests
     [DataRow(TimeSpan.TicksPerDay + 1L)]    // past 24:00:00
     public void InsertTime_OutOfRangeParameter_Rejected(long ticks)
     {
-        // SQL Server's `time` is bounded to [00:00:00, 24:00:00). A TimeSpan
-        // outside that window has no valid encoding; the simulator surfaces it
-        // at parameter-conversion time rather than silently truncating.
+        // SQL Server's `time` is bounded to [00:00:00, 24:00:00); simulator surfaces it at parameter-conversion time.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( t time(7) )").ExecuteNonQuery();
 
@@ -508,7 +419,7 @@ public class InsertTests
         insert.CommandText = "insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Time, new TimeSpan(ticks));
 
-        _ = Assert.Throws<ArgumentOutOfRangeException>(() => insert.ExecuteNonQuery());
+        _ = Throws<ArgumentOutOfRangeException>(() => insert.ExecuteNonQuery());
     }
 
     [TestMethod]
@@ -519,17 +430,15 @@ public class InsertTests
 
         var dto = new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)).AddTicks(1234567);
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", dto));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(dto, connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(dto, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertDateTimeOffset_PreservesOffsetAcrossRoundTrip()
     {
-        // Two values share a UTC instant but differ in offset; both must
-        // come back unchanged (the offset is part of the user-visible value
-        // even though equality compares by UTC).
+        // Two values share a UTC instant but differ in offset; both round-trip with offset preserved.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( id int, d datetimeoffset(0) )").ExecuteNonQuery();
 
@@ -543,10 +452,10 @@ public class InsertTests
         while (reader.Read())
             rows.Add(((int)reader[0], (DateTimeOffset)reader[1]));
         rows.Sort((a, b) => a.id.CompareTo(b.id));
-        Assert.AreEqual(east, rows[0].d);
-        Assert.AreEqual(TimeSpan.FromHours(7), rows[0].d.Offset);
-        Assert.AreEqual(west, rows[1].d);
-        Assert.AreEqual(TimeSpan.FromHours(-7), rows[1].d.Offset);
+        AreEqual(east, rows[0].d);
+        AreEqual(TimeSpan.FromHours(7), rows[0].d.Offset);
+        AreEqual(west, rows[1].d);
+        AreEqual(TimeSpan.FromHours(-7), rows[1].d.Offset);
     }
 
     [TestMethod]
@@ -557,38 +466,23 @@ public class InsertTests
 
         var dto = new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)).AddTicks(5_000_000); // +0.5s
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", dto));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
         var expected = new DateTimeOffset(2026, 5, 4, 13, 45, 31, TimeSpan.FromHours(-7));
-        Assert.AreEqual(expected, connection.CreateCommand("select d from t").ExecuteScalar());
-    }
-
-    [TestMethod]
-    public void InsertDateTimeOffset_NullValue_RoundTrips()
-    {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( d datetimeoffset(7) null )").ExecuteNonQuery();
-
-        using var insert = connection.CreateCommand();
-        insert.CommandText = "insert t values ( @p )";
-        AddTypedParameter(insert, "p", DbType.DateTimeOffset, DBNull.Value);
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
-
-        Assert.AreEqual(DBNull.Value, connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(expected, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
     public void InsertDateTimeOffset_DefaultPrecisionColumn_AcceptsFullPrecisionValue()
     {
-        // `datetimeoffset` (no parens) defaults to precision 7 in SQL Server.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( d datetimeoffset )").ExecuteNonQuery();
 
         var dto = new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(2)).AddTicks(1234567);
         using var insert = connection.CreateCommand("insert t values ( @p )", ("p", dto));
-        Assert.AreEqual(1, insert.ExecuteNonQuery());
+        AreEqual(1, insert.ExecuteNonQuery());
 
-        Assert.AreEqual(dto, connection.CreateCommand("select d from t").ExecuteScalar());
+        AreEqual(dto, connection.CreateCommand("select d from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -596,20 +490,18 @@ public class InsertTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int not null)");
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t values (null)"));
-        Assert.AreEqual("Cannot insert the value NULL into column 'a', table 'simulated.dbo.t'; column does not allow nulls. INSERT fails.", ex.Message);
-        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        simulation.AssertSqlError(
+            "insert into t values (null)", 515,
+            "Cannot insert the value NULL into column 'a', table 'simulated.dbo.t'; column does not allow nulls. INSERT fails.");
     }
 
     [TestMethod]
     public void Insert_OmittedColumnFallsThroughToNullIntoNotNull_RaisesMsg515()
     {
-        // No DEFAULT, no IDENTITY → omitted column auto-fills with NULL,
-        // and NOT NULL enforcement catches it the same as an explicit NULL.
+        // No DEFAULT, no IDENTITY → omitted column auto-fills with NULL; NOT NULL catches it the same as explicit NULL.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int not null, x int)");
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (x) values (10)"));
-        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        _ = simulation.AssertSqlError("insert into t (x) values (10)", 515);
     }
 
     [TestMethod]
@@ -618,29 +510,24 @@ public class InsertTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int null)");
         _ = simulation.ExecuteNonQuery("insert into t values (null)");
-        Assert.AreEqual(DBNull.Value, simulation.ExecuteScalar("select a from t"));
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select a from t"));
     }
 
     [TestMethod]
     public void Insert_NullDefault_RaisesMsg515OnNotNullColumn()
     {
-        // DEFAULT NULL on a NOT NULL column is degenerate but parseable;
-        // the omitted insert fills NULL, then NOT NULL enforcement catches it.
+        // DEFAULT NULL on a NOT NULL column is degenerate but parseable; omitted insert fills NULL, NOT NULL catches it.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int not null default null, b int)");
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (b) values (1)"));
-        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        _ = simulation.AssertSqlError("insert into t (b) values (1)", 515);
     }
 
     [TestMethod]
     public void Insert_PersistedComputedNotNull_ResultNullRaisesMsg515()
     {
-        // Computed column declared PERSISTED NOT NULL; if the expression
-        // evaluates to NULL (e.g. NULL operand), the NOT NULL check fires.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int, c as a + 1 persisted not null)");
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (a) values (null)"));
-        Assert.AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        _ = simulation.AssertSqlError("insert into t (a) values (null)", 515);
     }
 
     private static void AddTypedParameter(DbCommand command, string name, DbType dbType, object value)

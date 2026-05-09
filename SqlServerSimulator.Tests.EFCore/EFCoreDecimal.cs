@@ -90,8 +90,6 @@ public class EFCoreDecimal
     [TestMethod]
     public void Cast_DecimalToDouble_ProjectsAsFloat()
     {
-        // (double)decimalCol — EF Core emits CAST(... AS float). Common when
-        // Math functions or aggregations need a wider numeric type.
         using var context = new TestDbContext(TestDbContext.CreateProductsSimulation());
         _ = context.Products.Add(new Product { Id = 1, Price = 19.99m });
         _ = context.SaveChanges();

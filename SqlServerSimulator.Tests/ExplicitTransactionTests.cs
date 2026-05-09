@@ -4,13 +4,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Tests for explicit transactions opened via <c>DbConnection.BeginTransaction()</c>
-/// — the SqlClient API EF Core 10's <c>Database.BeginTransaction()</c> uses.
-/// Confirms a connection-scoped <see cref="Storage.UndoLog"/> spans multiple
-/// statements, that <c>Commit()</c> persists everything and <c>Rollback()</c>
-/// undoes everything, and that a failed statement within a transaction only
-/// undoes its own writes (the surrounding transaction stays alive — probe-
-/// confirmed against SQL Server 2025).
+/// Tests for explicit transactions opened via <c>DbConnection.BeginTransaction()</c>.
+/// Covers connection-scoped <c>UndoLog</c> spanning multiple statements,
+/// <c>Commit</c> persistence, <c>Rollback</c> reversal, the per-statement-failure
+/// rule (only the failing statement's writes undo; the surrounding tx stays alive),
+/// and SAVE/ROLLBACK TRANSACTION savepoints (the path EF Core 10 emits per SaveChanges).
 /// </summary>
 [TestClass]
 public sealed class ExplicitTransactionTests
@@ -25,11 +23,6 @@ public sealed class ExplicitTransactionTests
         return conn;
     }
 
-    /// <summary>
-    /// Runs <paramref name="sql"/> as a non-query bound to <paramref name="tx"/>.
-    /// Keeps the test bodies focused on what's being executed rather than on
-    /// the four-line ceremony of building a tx-bound DbCommand.
-    /// </summary>
     private static void RunInTx(DbConnection conn, DbTransaction tx, string sql)
     {
         using var cmd = conn.CreateCommand();
@@ -76,17 +69,13 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void StatementFailureWithinTx_LeavesTxAlive_OnlyOwnWritesUndone()
     {
-        // Probe-confirmed: a statement that fails inside an explicit transaction
-        // rolls back ONLY its own writes; subsequent statements still run; commit
-        // persists the surviving (pre-failure + post-failure-success) writes.
+        // Probe-confirmed: a failing statement rolls back ONLY its own writes; subsequent statements still run.
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
         RunInTx(conn, tx, "insert into t values (1, 10)");
 
-        // Mid-tx failure: PK collision against the just-inserted row.
         _ = Throws<DbException>(() => RunInTx(conn, tx, "insert into t values (1, 99)"));
 
-        // Tx alive — third statement still works.
         RunInTx(conn, tx, "insert into t values (3, 30)");
         tx.Commit();
 
@@ -100,14 +89,10 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void Dispose_WithoutCommit_AutoRollsBack()
     {
-        // SqlClient's SqlTransaction auto-rolls-back on dispose if neither
-        // Commit nor Rollback ran. Mirrors `using var tx = ...; ... tx.Commit();`
-        // where an early exception path leaves dispose to do the rollback.
         using var conn = NewSeededConnection();
         {
             using var tx = conn.BeginTransaction();
             RunInTx(conn, tx, "insert into t values (1, 10)");
-            // Drop out of scope without committing.
         }
         AreEqual(0, CountRows(conn, "t"));
     }
@@ -115,7 +100,6 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void ParallelBeginTransaction_RaisesInvalidOperation()
     {
-        // SqlClient: "SqlConnection does not support parallel transactions."
         using var conn = NewSeededConnection();
         using var tx1 = conn.BeginTransaction();
         _ = Throws<InvalidOperationException>(() => _ = conn.BeginTransaction());
@@ -142,7 +126,6 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void NewTransaction_AfterCommit_Allowed()
     {
-        // Once committed, the connection is free to begin a fresh transaction.
         using var conn = NewSeededConnection();
         var tx1 = conn.BeginTransaction();
         RunInTx(conn, tx1, "insert into t values (1, 10)");
@@ -158,10 +141,7 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void Savepoint_RollbackToName_UndoesOnlyPostSavepointWrites()
     {
-        // SAVE TRANSACTION + ROLLBACK TRANSACTION savepoint_name partial
-        // rollback. EF Core 10 emits this around each SaveChanges within
-        // a Database.BeginTransaction so a failed save undoes only its
-        // own writes while the surrounding transaction stays alive.
+        // EF Core 10 emits SAVE TRAN / ROLLBACK TRAN savepoint per SaveChanges inside Database.BeginTransaction.
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
         RunInTx(conn, tx, "insert into t values (1, 10)");
@@ -181,7 +161,6 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void Savepoint_AcceptsTranAbbreviation()
     {
-        // SAVE TRAN / ROLLBACK TRAN are interchangeable with TRANSACTION.
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
         RunInTx(conn, tx, "insert into t values (1, 10)");
@@ -196,9 +175,7 @@ public sealed class ExplicitTransactionTests
     [TestMethod]
     public void Rollback_RestoresExistingRows_NotJustNewOnes()
     {
-        // A transaction that updates and deletes existing rows must restore
-        // them on rollback. UPDATE = delete-old + insert-new, so each affected
-        // row produces two log entries — undo unwinds both halves.
+        // UPDATE = delete-old + insert-new (two log entries unwound LIFO); DELETE preserves the old row.
         using var conn = NewSeededConnection();
         _ = conn.CreateCommand("insert into t values (1, 10), (2, 20), (3, 30)").ExecuteNonQuery();
 

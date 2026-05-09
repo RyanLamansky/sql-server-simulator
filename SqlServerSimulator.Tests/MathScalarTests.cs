@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -54,25 +53,12 @@ public sealed class MathScalarTests
     }
 
     [TestMethod]
-    public void Round_Null()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select round(cast(null as decimal(10,2)), 2)"));
-        AreEqual(DBNull.Value, ExecuteScalar("select round(cast(1.5 as decimal(10,2)), cast(null as int))"));
-    }
-
-    [TestMethod]
     public void Round_LengthOutOfRange_ClampsToNoOp()
-    {
-        AreEqual(1.5m, ExecuteScalar("select round(cast(1.5 as decimal(10,2)), 50)"));
-    }
+        => AreEqual(1.5m, ExecuteScalar("select round(cast(1.5 as decimal(10,2)), 50)"));
 
     [TestMethod]
     public void Round_NonIntegerLength_RaisesMsg8116()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select round(cast(1.5 as decimal(10,2)), 'two')"));
-        StartsWith("Argument data type varchar is invalid for argument 2 of round function.", ex.Message);
-        AreEqual("8116", ex.Data["HelpLink.EvtID"]);
-    }
+        => AssertSqlError("select round(cast(1.5 as decimal(10,2)), 'two')", 8116, "Argument data type varchar is invalid for argument 2 of round function.");
 
     [TestMethod]
     public void Floor_Decimal()
@@ -82,22 +68,10 @@ public sealed class MathScalarTests
     }
 
     [TestMethod]
-    public void Floor_Float()
-    {
-        AreEqual(1.0, ExecuteScalar("select floor(cast(1.7 as float))"));
-    }
+    public void Floor_Float() => AreEqual(1.0, ExecuteScalar("select floor(cast(1.7 as float))"));
 
     [TestMethod]
-    public void Floor_Int_NoOp()
-    {
-        AreEqual(5, ExecuteScalar<int>("select floor(5)"));
-    }
-
-    [TestMethod]
-    public void Floor_Null()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select floor(cast(null as decimal(10,2)))"));
-    }
+    public void Floor_Int_NoOp() => AreEqual(5, ExecuteScalar<int>("select floor(5)"));
 
     [TestMethod]
     public void Ceiling_Decimal()
@@ -107,10 +81,7 @@ public sealed class MathScalarTests
     }
 
     [TestMethod]
-    public void Ceiling_Float()
-    {
-        AreEqual(2.0, ExecuteScalar("select ceiling(cast(1.3 as float))"));
-    }
+    public void Ceiling_Float() => AreEqual(2.0, ExecuteScalar("select ceiling(cast(1.3 as float))"));
 
     [TestMethod]
     public void Power_IntInt()
@@ -120,60 +91,30 @@ public sealed class MathScalarTests
     }
 
     [TestMethod]
-    public void Power_DecimalInt()
-    {
-        AreEqual(6.25m, ExecuteScalar("select power(cast(2.5 as decimal(10,2)), 2)"));
-    }
+    public void Power_DecimalInt() => AreEqual(6.25m, ExecuteScalar("select power(cast(2.5 as decimal(10,2)), 2)"));
 
     [TestMethod]
-    public void Power_FloatFloat()
-    {
-        AreEqual(6.25, ExecuteScalar("select power(cast(2.5 as float), 2)"));
-    }
+    public void Power_FloatFloat() => AreEqual(6.25, ExecuteScalar("select power(cast(2.5 as float), 2)"));
 
     [TestMethod]
     public void Power_IntWithFractionalExponent_TruncatesToInt()
-    {
-        // POWER(2, 0.5) ≈ 1.414... but result type follows base (int) → 1.
-        AreEqual(1, ExecuteScalar<int>("select power(2, cast(0.5 as float))"));
-    }
+        => AreEqual(1, ExecuteScalar<int>("select power(2, cast(0.5 as float))"));
 
     [TestMethod]
     public void Power_IntWithNegativeExponent_TruncatesToZero()
-    {
-        AreEqual(0, ExecuteScalar<int>("select power(2, -1)"));
-    }
+        => AreEqual(0, ExecuteScalar<int>("select power(2, -1)"));
 
     [TestMethod]
     public void Power_NegativeBaseFractionalExponent_RaisesMsg3623()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select power(cast(-2.0 as float), cast(0.5 as float))"));
-        AreEqual("An invalid floating point operation occurred.", ex.Message);
-        AreEqual("3623", ex.Data["HelpLink.EvtID"]);
-    }
+        => AssertSqlError("select power(cast(-2.0 as float), cast(0.5 as float))", 3623, "An invalid floating point operation occurred.");
 
     [TestMethod]
     public void Power_ZeroNegativeExponent_RaisesMsg8134()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select power(cast(0 as float), -1)"));
-        AreEqual("Divide by zero error encountered.", ex.Message);
-        AreEqual("8134", ex.Data["HelpLink.EvtID"]);
-    }
+        => AssertSqlError("select power(cast(0 as float), -1)", 8134, "Divide by zero error encountered.");
 
     [TestMethod]
     public void Power_IntOverflow_RaisesMsg232()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select power(cast(2 as int), 100)"));
-        StartsWith("Arithmetic overflow error for type int, value =", ex.Message);
-        AreEqual("232", ex.Data["HelpLink.EvtID"]);
-    }
-
-    [TestMethod]
-    public void Power_Null()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select power(cast(null as int), 2)"));
-        AreEqual(DBNull.Value, ExecuteScalar("select power(2, cast(null as int))"));
-    }
+        => StartsWith("Arithmetic overflow error for type int, value =", AssertSqlError("select power(cast(2 as int), 100)", 232).Message);
 
     [TestMethod]
     public void Sqrt_Float()
@@ -185,24 +126,13 @@ public sealed class MathScalarTests
     [TestMethod]
     public void Sqrt_AlwaysFloatRegardlessOfInput()
     {
-        // SqlClient returns int columns as int, float as double.
         AreEqual(2.0, ExecuteScalar("select sqrt(cast(4 as int))"));
         AreEqual(2.0, ExecuteScalar("select sqrt(cast(4 as decimal(10,2)))"));
     }
 
     [TestMethod]
     public void Sqrt_Negative_RaisesMsg3623()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select sqrt(-1)"));
-        AreEqual("An invalid floating point operation occurred.", ex.Message);
-        AreEqual("3623", ex.Data["HelpLink.EvtID"]);
-    }
-
-    [TestMethod]
-    public void Sqrt_Null()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select sqrt(cast(null as int))"));
-    }
+        => AssertSqlError("select sqrt(-1)", 3623, "An invalid floating point operation occurred.");
 
     [TestMethod]
     public void Sign_Int()
@@ -221,83 +151,49 @@ public sealed class MathScalarTests
     }
 
     [TestMethod]
-    public void Sign_BigInt()
-    {
-        AreEqual(-1L, ExecuteScalar("select sign(cast(-1 as bigint))"));
-    }
+    public void Sign_BigInt() => AreEqual(-1L, ExecuteScalar("select sign(cast(-1 as bigint))"));
 
     [TestMethod]
-    public void Sign_Null()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select sign(cast(null as int))"));
-    }
+    public void Log_NaturalLog() => AreEqual(Math.Log(10), (double)ExecuteScalar("select log(10)")!, 1e-12);
 
     [TestMethod]
-    public void Log_NaturalLog()
-    {
-        var result = (double)ExecuteScalar("select log(10)")!;
-        AreEqual(Math.Log(10), result, 1e-12);
-    }
+    public void Log_WithBase() => AreEqual(3.0, ExecuteScalar("select log(8, 2)"));
 
     [TestMethod]
-    public void Log_WithBase()
-    {
-        AreEqual(3.0, ExecuteScalar("select log(8, 2)"));
-    }
-
-    [TestMethod]
-    public void Log_NonPositive_RaisesMsg3623()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select log(0)"));
-        AreEqual("3623", ex.Data["HelpLink.EvtID"]);
-
-        ex = Throws<DbException>(() => ExecuteScalar("select log(-1)"));
-        AreEqual("3623", ex.Data["HelpLink.EvtID"]);
-    }
-
-    [TestMethod]
-    public void Log_BaseOne_RaisesMsg3623()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select log(10, 1)"));
-        AreEqual("3623", ex.Data["HelpLink.EvtID"]);
-    }
-
-    [TestMethod]
-    public void Log_Null()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select log(cast(null as int))"));
-    }
+    [DataRow("log(0)")]
+    [DataRow("log(-1)")]
+    [DataRow("log(10, 1)")]
+    [DataRow("log10(0)")]
+    public void Log_DomainError_RaisesMsg3623(string expr) => AssertSqlError($"select {expr}", 3623);
 
     [TestMethod]
     public void Exp_Basic()
     {
         AreEqual(1.0, ExecuteScalar("select exp(0)"));
-        var e = (double)ExecuteScalar("select exp(1)")!;
-        AreEqual(Math.E, e, 1e-12);
+        AreEqual(Math.E, (double)ExecuteScalar("select exp(1)")!, 1e-12);
     }
 
     [TestMethod]
     public void Exp_Overflow_RaisesMsg8115()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select exp(1000)"));
-        StartsWith("Arithmetic overflow error converting expression to data type float", ex.Message);
-        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
-    }
+        => StartsWith("Arithmetic overflow error converting expression to data type float", AssertSqlError("select exp(1000)", 8115).Message);
 
     [TestMethod]
     public void Log10_Basic()
     {
         AreEqual(2.0, ExecuteScalar("select log10(100)"));
-        var result = (double)ExecuteScalar("select log10(2)")!;
-        AreEqual(Math.Log10(2), result, 1e-12);
+        AreEqual(Math.Log10(2), (double)ExecuteScalar("select log10(2)")!, 1e-12);
     }
 
     [TestMethod]
-    public void Log10_NonPositive_RaisesMsg3623()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select log10(0)"));
-        AreEqual("3623", ex.Data["HelpLink.EvtID"]);
-    }
+    [DataRow("round(cast(null as decimal(10,2)), 2)")]
+    [DataRow("round(cast(1.5 as decimal(10,2)), cast(null as int))")]
+    [DataRow("floor(cast(null as decimal(10,2)))")]
+    [DataRow("power(cast(null as int), 2)")]
+    [DataRow("power(2, cast(null as int))")]
+    [DataRow("sqrt(cast(null as int))")]
+    [DataRow("sign(cast(null as int))")]
+    [DataRow("log(cast(null as int))")]
+    public void NullPropagation(string expr) => AreEqual(DBNull.Value, ExecuteScalar($"select {expr}"));
 
     [TestMethod]
     public void Math_FromTableRow()

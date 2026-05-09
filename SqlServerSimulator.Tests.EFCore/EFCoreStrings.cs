@@ -3,11 +3,9 @@ using Microsoft.EntityFrameworkCore;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Exercises the simulator's <c>varchar</c> / <c>nvarchar</c> column support
-/// through EF Core's idiomatic surface: typed entities mapped via attributes,
-/// LINQ projections, and SaveChanges for the write path. Truncation surfaces
-/// as DbUpdateException with the simulator's SimulatedSqlException as the
-/// inner exception, matching real SQL Server's failure shape under EF Core.
+/// Exercises <c>varchar</c> / <c>nvarchar</c> / <c>varbinary</c> / fixed-length
+/// string and binary support through EF Core. Truncation surfaces as
+/// <c>DbUpdateException</c> wrapping <c>SimulatedSqlException</c>.
 /// </summary>
 [TestClass]
 public class EFCoreStrings
@@ -18,7 +16,6 @@ public class EFCoreStrings
     public void Insert_NameRoundTripsViaProjection()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Alice" });
         _ = context.SaveChanges();
 
@@ -29,7 +26,6 @@ public class EFCoreStrings
     public async Task InsertAsync_NameRoundTrips()
     {
         await using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Alice" });
         _ = await context.SaveChangesAsync(this.TestContext.CancellationToken);
 
@@ -39,9 +35,8 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_VarcharCodeRoundTrips()
     {
-        // Code is varchar(10) — the UTF-8 storage path. ASCII fits 1:1 with bytes.
+        // Code is varchar(10); ASCII fits 1:1 with bytes.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Bob", Code = "ABC123" });
         _ = context.SaveChanges();
 
@@ -52,7 +47,6 @@ public class EFCoreStrings
     public void Insert_NullableCodeAcceptsNull()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Carol", Code = null });
         _ = context.SaveChanges();
 
@@ -64,7 +58,6 @@ public class EFCoreStrings
     {
         // nvarchar(50) — 50 UCS-2 code units exactly fits.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         var atLimit = new string('x', 50);
         _ = context.People.Add(new Person { Id = 1, Name = atLimit });
         _ = context.SaveChanges();
@@ -75,11 +68,8 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_NameOverMaxLengthRaisesUpdateException()
     {
-        // EF Core wraps the simulator's SimulatedSqlException in DbUpdateException,
-        // matching real SQL Server's failure shape — the Msg 2628 truncation error
-        // surfaces on InnerException.
+        // EF Core wraps SimulatedSqlException in DbUpdateException; Msg 2628 surfaces on InnerException.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = new string('x', 51) });
 
         var ex = Assert.Throws<DbUpdateException>(() => context.SaveChanges());
@@ -92,11 +82,8 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_VarcharCodeOutOfCp1252_RoundTripsAsReplacement()
     {
-        // varchar uses Windows-1252; characters outside CP1252 (CJK, emoji,
-        // non-Latin scripts) silently round-trip as '?', matching SQL Server's
-        // default collation. EF Core surfaces this without intervention.
+        // varchar uses Windows-1252; non-CP1252 chars silently round-trip as '?'.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Eve", Code = "日本" });
         _ = context.SaveChanges();
 
@@ -106,11 +93,8 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_NVarcharAcceptsSupplementaryCharacter()
     {
-        // 🎉 is one Unicode code point but two UTF-16 code units (surrogate pair).
-        // It fits in nvarchar(50) — the simulator's check is on UTF-16 code units,
-        // matching SQL Server's nvarchar semantics.
+        // 🎉 is one code point but two UTF-16 code units (surrogate pair); fits nvarchar(50).
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "🎉 party 🎉" });
         _ = context.SaveChanges();
 
@@ -126,8 +110,7 @@ public class EFCoreStrings
         _ = context.People.Add(new Person { Id = 1, Name = "Frank", Avatar = bytes });
         _ = context.SaveChanges();
 
-        var read = context.People.Select(p => p.Avatar).FirstOrDefault();
-        CollectionAssert.AreEqual(bytes, read);
+        CollectionAssert.AreEqual(bytes, context.People.Select(p => p.Avatar).FirstOrDefault());
     }
 
     [TestMethod]
@@ -145,14 +128,13 @@ public class EFCoreStrings
         Assert.IsNotNull(ex.InnerException);
         Assert.Contains("would be truncated", ex.InnerException.Message);
         Assert.Contains("Avatar", ex.InnerException.Message);
-        Assert.Contains("0x", ex.InnerException.Message); // hex prefix, not string
+        Assert.Contains("0x", ex.InnerException.Message);
     }
 
     [TestMethod]
     public void Insert_NullableAvatarAcceptsNull()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Hank", Avatar = null });
         _ = context.SaveChanges();
 
@@ -162,14 +144,12 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_Length()
     {
-        // EF Core translates string.Length to CAST(LEN(x) AS int) — exercises
-        // LEN's trailing-space exclusion and CAST in one query.
+        // EF Core translates string.Length to CAST(LEN(x) AS int); LEN excludes trailing spaces.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
         _ = context.People.Add(new Person { Id = 1, Name = "Alice   " });
         _ = context.SaveChanges();
 
-        var len = context.People.Select(p => p.Name.Length).FirstOrDefault();
-        Assert.AreEqual(5, len);
+        Assert.AreEqual(5, context.People.Select(p => p.Name.Length).FirstOrDefault());
     }
 
     [TestMethod]
@@ -225,8 +205,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_Substring()
     {
-        // C# Substring(start, length) is 0-indexed; EF Core's translation to
-        // T-SQL SUBSTRING (1-indexed) handles the off-by-one.
+        // C# Substring is 0-indexed; T-SQL SUBSTRING is 1-indexed; EF handles the off-by-one.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
         _ = context.People.Add(new Person { Id = 1, Name = "alphabet" });
         _ = context.SaveChanges();
@@ -247,11 +226,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_FixedLengthChar_RoundTripsWithPadding()
     {
-        // char(5) is the simulator's fixed-length CP1252 type. EF Core maps
-        // strings to it via Column(TypeName="char(5)"); SaveChanges goes through
-        // SqlServerStringTypeMapping which sets SqlDbType.Char on the parameter.
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Iris", Tag = "hi" });
         _ = context.SaveChanges();
 
@@ -262,7 +237,6 @@ public class EFCoreStrings
     public void Insert_FixedLengthNChar_RoundTripsWithPadding()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Jane", Initials = "JD" });
         _ = context.SaveChanges();
 
@@ -273,12 +247,10 @@ public class EFCoreStrings
     public void Insert_FixedLengthBinary_RoundTripsWithZeroPadding()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
         _ = context.People.Add(new Person { Id = 1, Name = "Karl", Stamp = [0xCA, 0xFE] });
         _ = context.SaveChanges();
 
-        var read = context.People.Select(p => p.Stamp).FirstOrDefault();
-        CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE, 0, 0 }, read);
+        CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE, 0, 0 }, context.People.Select(p => p.Stamp).FirstOrDefault());
     }
 
     [TestMethod]
@@ -292,24 +264,19 @@ public class EFCoreStrings
             new Person { Id = 3, Name = "Carol", Code = null });
         _ = context.SaveChanges();
 
-        var names = context.People.Select(p => p.Name).ToArray();
-        var codes = context.People.Select(p => p.Code).ToArray();
-
-        CollectionAssert.AreEquivalent(new[] { "Alice", "Bob", "Carol" }, names);
-        CollectionAssert.AreEquivalent(new[] { "A", "B", null }, codes);
+        CollectionAssert.AreEquivalent(new[] { "Alice", "Bob", "Carol" }, context.People.Select(p => p.Name).ToArray());
+        CollectionAssert.AreEquivalent(new[] { "A", "B", null }, context.People.Select(p => p.Code).ToArray());
     }
 
     [TestMethod]
     public void StringFunction_IndexOf()
     {
-        // EF Core translates .IndexOf to CHARINDEX-1 (CHARINDEX is 1-based,
-        // .NET's IndexOf is 0-based; -1 conversion happens server-side).
+        // EF Core translates .IndexOf to CHARINDEX-1 (CHARINDEX is 1-based, IndexOf 0-based).
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
         _ = context.People.Add(new Person { Id = 1, Name = "hello world" });
         _ = context.SaveChanges();
 
         using var fresh = new TestDbContext(context.Simulation);
-        var index = fresh.People.Select(p => p.Name.IndexOf("world", StringComparison.Ordinal)).Single();
-        Assert.AreEqual(6, index);
+        Assert.AreEqual(6, fresh.People.Select(p => p.Name.IndexOf("world", StringComparison.Ordinal)).Single());
     }
 }

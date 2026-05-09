@@ -1,5 +1,4 @@
 using System.Data;
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -8,8 +7,6 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Behavioral tests for the legacy <c>datetime</c> type (1/300-second tick
 /// granularity, range 1753-01-01 through 9999-12-31 23:59:59.997).
-/// CAST-to/from-string lives here; the broader CAST tests stay in
-/// <see cref="CastTests"/>.
 /// </summary>
 [TestClass]
 public sealed class LegacyDateTimeTests
@@ -27,10 +24,7 @@ public sealed class LegacyDateTimeTests
     [DataRow("'2024'", "2024-01-01T00:00:00")]
     [DataRow("''", "1900-01-01T00:00:00")]
     public void Cast_StringToDateTime(string input, string expectedIso)
-    {
-        var value = ExecuteScalar($"select cast({input} as datetime)");
-        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), value);
-    }
+        => AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), ExecuteScalar($"select cast({input} as datetime)"));
 
     [TestMethod]
     [DataRow(0, 0)]
@@ -48,11 +42,8 @@ public sealed class LegacyDateTimeTests
     [DataRow(12, 4)]
     public void Cast_StringToDateTime_RoundsToNearest1_300Tick(int inputMs, int expectedTickIndex)
     {
-        // SQL Server's legacy datetime stores 1/300-second ticks; sub-tick
-        // millisecond inputs round half-up to the nearest tick boundary.
-        // Tick K maps to (K * 10_000_000 / 300) 100-ns ticks (with truncation),
-        // so the on-the-wire .NET DateTime.Millisecond doesn't match SQL's
-        // displayed .003/.007/.010 — the underlying canonical value does.
+        // SQL Server's legacy datetime stores 1/300-second ticks; sub-tick ms inputs round half-up to nearest tick.
+        // .NET's DateTime.Millisecond won't match SQL's displayed .003/.007/.010; the canonical tick value does.
         var value = (DateTime)ExecuteScalar($"select cast('2024-01-15 12:00:00.{inputMs:D3}' as datetime)")!;
         var expectedTimeTicks = expectedTickIndex * 10_000_000L / 300;
         AreEqual(new DateTime(2024, 1, 15).Ticks + (12 * TimeSpan.TicksPerHour) + expectedTimeTicks, value.Ticks);
@@ -60,28 +51,17 @@ public sealed class LegacyDateTimeTests
 
     [TestMethod]
     public void Cast_StringToDateTime_999RollsToNextSecond()
-    {
-        // .999 ms is closer to the next-second .000 tick than to .997 of the
-        // current second; SQL Server rounds it up.
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15 12:00:00.999' as datetime)")!;
-        AreEqual(new DateTime(2024, 1, 15, 12, 0, 1), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15, 12, 0, 1), (DateTime)ExecuteScalar("select cast('2024-01-15 12:00:00.999' as datetime)")!);
 
     [TestMethod]
     public void Cast_StringToDateTime_AtAbsoluteMaxRollsOver_RaisesMsg242()
-    {
-        // 9999-12-31 23:59:59.999 would round to 10000-01-01 00:00:00 — past
-        // the type's max — so SQL Server raises Msg 242 instead of clamping.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('9999-12-31 23:59:59.999' as datetime)"));
-        AreEqual("The conversion of a varchar data type to a datetime data type resulted in an out-of-range value.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('9999-12-31 23:59:59.999' as datetime)",
+            "The conversion of a varchar data type to a datetime data type resulted in an out-of-range value.");
 
     [TestMethod]
     public void Cast_StringToDateTime_998AtAbsoluteMax_RoundsToValidLastTick()
     {
-        // .998 rounds half-up to tick 25_919_999 (the last tick of the day),
-        // which materializes as 9999-12-31 23:59:59.9966666 in .NET (SQL
-        // Server formats this as ".997" via convert(..., 121)).
+        // .998 rounds half-up to tick 25_919_999 (last tick of day) → materializes as 23:59:59.9966666 in .NET.
         var value = (DateTime)ExecuteScalar("select cast('9999-12-31 23:59:59.998' as datetime)")!;
         var expected = new DateTime(9999, 12, 31).AddTicks(25_919_999L * TimeSpan.TicksPerSecond / 300);
         AreEqual(expected, value);
@@ -89,24 +69,17 @@ public sealed class LegacyDateTimeTests
 
     [TestMethod]
     public void Cast_StringToDateTime_BelowMin_RaisesMsg242()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('1752-12-31' as datetime)"));
-        AreEqual("The conversion of a varchar data type to a datetime data type resulted in an out-of-range value.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('1752-12-31' as datetime)",
+            "The conversion of a varchar data type to a datetime data type resulted in an out-of-range value.");
 
     [TestMethod]
     public void Cast_StringToDateTime_AtMin_Works()
-    {
-        var value = (DateTime)ExecuteScalar("select cast('1753-01-01' as datetime)")!;
-        AreEqual(new DateTime(1753, 1, 1), value);
-    }
+        => AreEqual(new DateTime(1753, 1, 1), (DateTime)ExecuteScalar("select cast('1753-01-01' as datetime)")!);
 
     [TestMethod]
     public void Cast_StringToDateTime_BadFormat_RaisesMsg241()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('not-a-date' as datetime)"));
-        AreEqual("Conversion failed when converting date and/or time from character string.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('not-a-date' as datetime)",
+            "Conversion failed when converting date and/or time from character string.");
 
     [TestMethod]
     [DataRow("2024-01-15 12:00:00", "Jan 15 2024 12:00PM")]
@@ -121,25 +94,16 @@ public sealed class LegacyDateTimeTests
 
     [TestMethod]
     public void Cast_DateToDateTime_FillsMidnight()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15' as date) as datetime)")!;
-        AreEqual(new DateTime(2024, 1, 15), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15), (DateTime)ExecuteScalar("select cast(cast('2024-01-15' as date) as datetime)")!);
 
     [TestMethod]
     public void Cast_DateTimeToDate_DropsTime()
-    {
-        // Reader surfaces date as DateTime at midnight.
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as datetime) as date)")!;
-        AreEqual(new DateTime(2024, 1, 15), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15), (DateTime)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as datetime) as date)")!);
 
     [TestMethod]
     public void Cast_DateTimeToDateTime2_PreservesValue()
     {
-        // datetime → datetime2(7) is lossless: the 1/300-tick value is
-        // already canonical at 100-ns resolution. .997 input rounds to
-        // tick 299, which materializes at 9_966_666 ticks past the second.
+        // datetime → datetime2(7) is lossless; .997 input rounds to tick 299 = 9_966_666 ticks past second.
         var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:00:00.997' as datetime) as datetime2(7))")!;
         var expectedTicks = new DateTime(2024, 1, 15, 12, 0, 0).Ticks + (299L * 10_000_000 / 300);
         AreEqual(expectedTicks, value.Ticks);
@@ -147,33 +111,23 @@ public sealed class LegacyDateTimeTests
 
     [TestMethod]
     public void Cast_DateTime2ToDateTime_RoundsToTick()
-    {
-        // datetime2(3) value of .500 ms is exactly at tick 150 (since
-        // 150 × 1/300 = .500); no rounding artifact.
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:00:00.500' as datetime2(3)) as datetime)")!;
-        AreEqual(new DateTime(2024, 1, 15, 12, 0, 0, 500), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15, 12, 0, 0, 500),
+            (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:00:00.500' as datetime2(3)) as datetime)")!);
 
     [TestMethod]
     public void Cast_TimeToDateTime_FillsLegacyDate()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('13:30:00' as time(0)) as datetime)")!;
-        AreEqual(new DateTime(1900, 1, 1, 13, 30, 0), value);
-    }
+        => AreEqual(new DateTime(1900, 1, 1, 13, 30, 0),
+            (DateTime)ExecuteScalar("select cast(cast('13:30:00' as time(0)) as datetime)")!);
 
     [TestMethod]
     public void Cast_DateTimeToTime_DropsDate()
-    {
-        var value = (TimeSpan)ExecuteScalar("select cast(cast('2024-01-15 13:30:45' as datetime) as time(0))")!;
-        AreEqual(new TimeSpan(13, 30, 45), value);
-    }
+        => AreEqual(new TimeSpan(13, 30, 45),
+            (TimeSpan)ExecuteScalar("select cast(cast('2024-01-15 13:30:45' as datetime) as time(0))")!);
 
     [TestMethod]
     public void Cast_DateTimeToDateTimeOffset_AssumesUtcOffset()
-    {
-        var value = (DateTimeOffset)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as datetime) as datetimeoffset(0))")!;
-        AreEqual(new DateTimeOffset(2024, 1, 15, 13, 30, 0, TimeSpan.Zero), value);
-    }
+        => AreEqual(new DateTimeOffset(2024, 1, 15, 13, 30, 0, TimeSpan.Zero),
+            (DateTimeOffset)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as datetime) as datetimeoffset(0))")!);
 
     [TestMethod]
     public void CreateTable_DateTimeColumn_RoundTripsRowsWithRoundedValues()
@@ -187,32 +141,22 @@ public sealed class LegacyDateTimeTests
             rows.Add(reader.GetDateTime(0));
         HasCount(2, rows);
         AreEqual(new DateTime(1900, 1, 1), rows[0]);
-        // .998 rounds half-up to the next tick boundary, materializing at
-        // 9_966_666 100-ns ticks past 12:00:00 (SQL Server displays this as
-        // ".997" via convert(..., 121); .NET's millisecond view is 996).
-        var expected = new DateTime(2024, 1, 15, 12, 0, 0).AddTicks(9_966_666);
-        AreEqual(expected, rows[1]);
+        // .998 rounds half-up; lands at 9_966_666 100-ns ticks past 12:00:00 (.NET sees ms=996).
+        AreEqual(new DateTime(2024, 1, 15, 12, 0, 0).AddTicks(9_966_666), rows[1]);
     }
 
     [TestMethod]
     public void CreateTable_DateTimeWithPrecisionParameter_RaisesMsg2716()
-    {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create table t (d datetime(3))"));
-        AreEqual("Column, parameter, or variable #1: Cannot specify a column width on data type datetime.", ex.Message);
-    }
+        => AssertSqlMessage("create table t (d datetime(3))",
+            "Column, parameter, or variable #1: Cannot specify a column width on data type datetime.");
 
     [TestMethod]
     public void CreateTable_DateTimeWithZeroPrecision_RaisesMsg1001()
-    {
-        // Length-or-precision-zero check fires before the column-width check.
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create table t (d datetime(0))"));
-        AreEqual("Line 1: Length or precision specification 0 is invalid.", ex.Message);
-    }
+        => AssertSqlMessage("create table t (d datetime(0))", "Line 1: Length or precision specification 0 is invalid.");
 
     [TestMethod]
     public void Parameter_DateTime_AcceptsDbTypeDateTime()
     {
-        // DbType.DateTime explicitly opts into legacy datetime.
         using var connection = new Simulation().CreateOpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = "select @x";
@@ -221,7 +165,7 @@ public sealed class LegacyDateTimeTests
         p.DbType = DbType.DateTime;
         p.Value = new DateTime(2024, 1, 15, 12, 0, 0, 999);
         _ = command.Parameters.Add(p);
-        // The .999 ms rolls to next-second .000 per the rounding rule.
+        // .999 ms rolls to next-second .000 per the rounding rule.
         AreEqual(new DateTime(2024, 1, 15, 12, 0, 1, 0), command.ExecuteScalar());
     }
 
@@ -260,21 +204,13 @@ public sealed class LegacyDateTimeTests
     [DataRow("2958463", "9999-12-31T00:00:00")]
     [DataRow("45000", "2023-03-17T00:00:00")]
     public void Cast_IntToDateTime_TreatsAsDaysSince1900(string input, string expectedIso)
-    {
-        // Legacy datetime accepts integer casts as days-since-1900-01-01.
-        var value = (DateTime)ExecuteScalar($"select cast({input} as datetime)")!;
-        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), value);
-    }
+        => AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture),
+            (DateTime)ExecuteScalar($"select cast({input} as datetime)")!);
 
     [TestMethod]
     public void Cast_IntToDateTime_BelowMin_RaisesMsg8115()
-    {
-        // -53691 is one day before 1753-01-01 — legacy datetime's minimum
-        // — so SQL Server raises arithmetic-overflow rather than the
-        // varchar-source Msg 242.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(-53691 as datetime)"));
-        AreEqual("Arithmetic overflow error converting expression to data type datetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(-53691 as datetime)",
+            "Arithmetic overflow error converting expression to data type datetime.");
 
     [TestMethod]
     [DataRow("0.5", "1900-01-01T12:00:00")]
@@ -282,43 +218,28 @@ public sealed class LegacyDateTimeTests
     [DataRow("1.5", "1900-01-02T12:00:00")]
     [DataRow("-0.5", "1899-12-31T12:00:00")]
     public void Cast_FractionalDecimalToDateTime_PicksUpTimeOfDay(string input, string expectedIso)
-    {
-        // Verified against SQL Server 2025: <c>cast(0.5 as datetime)</c>
-        // resolves to noon, <c>1.25</c> to 1900-01-02 06:00, etc.
-        var value = (DateTime)ExecuteScalar($"select cast({input} as datetime)")!;
-        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), value);
-    }
+        => AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture),
+            (DateTime)ExecuteScalar($"select cast({input} as datetime)")!);
 
     [TestMethod]
     public void Cast_FractionalFloatToDateTime_PicksUpTimeOfDay()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast(1.25 as float) as datetime)")!;
-        AreEqual(new DateTime(1900, 1, 2, 6, 0, 0), value);
-    }
+        => AreEqual(new DateTime(1900, 1, 2, 6, 0, 0),
+            (DateTime)ExecuteScalar("select cast(cast(1.25 as float) as datetime)")!);
 
     [TestMethod]
     public void Cast_FractionalToSmallDateTime_PicksUpTimeOfDay()
-    {
-        // smalldatetime has minute granularity; 0.5 days → noon exactly.
-        var value = (DateTime)ExecuteScalar("select cast(0.5 as smalldatetime)")!;
-        AreEqual(new DateTime(1900, 1, 1, 12, 0, 0), value);
-    }
+        => AreEqual(new DateTime(1900, 1, 1, 12, 0, 0),
+            (DateTime)ExecuteScalar("select cast(0.5 as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_IntToDateTime_AboveMax_RaisesMsg8115()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(2958464 as datetime)"));
-        AreEqual("Arithmetic overflow error converting expression to data type datetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(2958464 as datetime)",
+            "Arithmetic overflow error converting expression to data type datetime.");
 
     [TestMethod]
     public void Cast_BigintToDateTime_FarOutOfRange_RaisesMsg8115()
-    {
-        // Pick a value comfortably past datetime's MaxDayCount (2,958,463)
-        // that still fits in int — keeps the literal-parse path simple.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(cast(100000000 as bigint) as datetime)"));
-        AreEqual("Arithmetic overflow error converting expression to data type datetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(cast(100000000 as bigint) as datetime)",
+            "Arithmetic overflow error converting expression to data type datetime.");
 
     [TestMethod]
     [DataRow("'1900-01-01'", 0)]
@@ -330,10 +251,8 @@ public sealed class LegacyDateTimeTests
 
     [TestMethod]
     [DataRow("06:00:00", 0)]
-    // 11:59:59.998 quantizes to 11:59:59.997 (under half-day) → rounds down.
-    [DataRow("11:59:59.998", 0)]
-    // 11:59:59.999 quantizes to next-second tick → exactly half-day → up.
-    [DataRow("11:59:59.999", 1)]
+    [DataRow("11:59:59.998", 0)]    // quantizes to .997 tick → under half-day → down
+    [DataRow("11:59:59.999", 1)]    // quantizes to next-second tick → exactly half-day → up
     [DataRow("12:00:00", 1)]
     [DataRow("18:00:00", 1)]
     public void Cast_DateTimeToInt_RoundsHalfAwayFromZero(string time, int expectedDays) =>
@@ -342,19 +261,16 @@ public sealed class LegacyDateTimeTests
     [TestMethod]
     public void Cast_NegativeDateTimeToInt_RoundsTowardMoreNegative()
     {
-        // 1899-12-31 12:00:00 = -0.5 days → rounds to -1 (away from zero).
+        // 1899-12-31 12:00:00 = -0.5 days → -1 (away from zero).
         AreEqual(-1, ExecuteScalar("select cast(cast('1899-12-31 12:00:00' as datetime) as int)"));
-        // 1899-12-30 18:00:00 = -1.25 days → -0.25 fractional → -1 (toward zero).
+        // 1899-12-30 18:00:00 = -1.25 days → -1 (toward zero).
         AreEqual(-1, ExecuteScalar("select cast(cast('1899-12-30 18:00:00' as datetime) as int)"));
     }
 
     [TestMethod]
     public void Cast_DateTimeToTinyint_OverflowRaisesMsg8115()
-    {
-        // Day 256 = 1900-09-14, which doesn't fit in tinyint.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(cast('1900-09-14' as datetime) as tinyint)"));
-        AreEqual("Arithmetic overflow error converting expression to data type tinyint.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(cast('1900-09-14' as datetime) as tinyint)",
+            "Arithmetic overflow error converting expression to data type tinyint.");
 
     [TestMethod]
     public void Cast_DateTimeToBit_NonZeroIsTrue()
@@ -372,78 +288,48 @@ public sealed class LegacyDateTimeTests
 
     [TestMethod]
     public void Arithmetic_DateTimePlusInt_AddsDays()
-    {
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + 1")!;
-        AreEqual(new DateTime(2024, 1, 16), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 16), (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + 1")!);
 
     [TestMethod]
     public void Arithmetic_IntPlusDateTime_AddsDays()
-    {
-        var value = (DateTime)ExecuteScalar("select 1 + cast('2024-01-15' as datetime)")!;
-        AreEqual(new DateTime(2024, 1, 16), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 16), (DateTime)ExecuteScalar("select 1 + cast('2024-01-15' as datetime)")!);
 
     [TestMethod]
     public void Arithmetic_DateTimeMinusInt_SubtractsDays()
-    {
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) - 1")!;
-        AreEqual(new DateTime(2024, 1, 14), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 14), (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) - 1")!);
 
     [TestMethod]
     public void Arithmetic_DateTimePlusInt_PreservesTimeOfDay()
-    {
-        // Adding a whole-day integer doesn't disturb the time portion.
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15 13:30:00' as datetime) + 1")!;
-        AreEqual(new DateTime(2024, 1, 16, 13, 30, 0), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 16, 13, 30, 0),
+            (DateTime)ExecuteScalar("select cast('2024-01-15 13:30:00' as datetime) + 1")!);
 
     [TestMethod]
     public void Arithmetic_DateTimePlusBigInt_StaysDateTime()
-    {
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + cast(1 as bigint)")!;
-        AreEqual(new DateTime(2024, 1, 16), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 16),
+            (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + cast(1 as bigint)")!);
 
     [TestMethod]
     public void Arithmetic_DateTimePlusDateTime_SumDaysFromBase()
-    {
-        // SQL Server's legacy `dt + dt` quirk: re-interprets the sum of
-        // the two day-counts as days-since-1900-01-01. `'2024-01-15' +
-        // '2024-01-10'` lands at 90,605 days from 1900 = 2148-01-24.
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + cast('2024-01-10' as datetime)")!;
-        AreEqual(new DateTime(2148, 1, 24), value);
-    }
+        => AreEqual(new DateTime(2148, 1, 24),
+            (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + cast('2024-01-10' as datetime)")!);
 
     [TestMethod]
     public void Arithmetic_DateTimeMinusDateTime_DiffDaysFromBase()
-    {
-        // `'2024-01-15' - '2024-01-10'` = 5 days → re-interpret as
-        // 5 days from 1900-01-01 = 1900-01-06.
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) - cast('2024-01-10' as datetime)")!;
-        AreEqual(new DateTime(1900, 1, 6), value);
-    }
+        => AreEqual(new DateTime(1900, 1, 6),
+            (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) - cast('2024-01-10' as datetime)")!);
 
     [TestMethod]
     public void Arithmetic_DateTimePlus_OverflowRaisesMsg8115()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('9999-12-30' as datetime) + 100"));
-        AreEqual("Arithmetic overflow error converting expression to data type datetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('9999-12-30' as datetime) + 100",
+            "Arithmetic overflow error converting expression to data type datetime.");
 
     [TestMethod]
     public void Arithmetic_DateTimePlus_NullIntReturnsNull()
-    {
-        // DbDataReader surfaces SQL NULL as DBNull at the public boundary.
-        AreEqual(DBNull.Value, ExecuteScalar("select cast('2024-01-15' as datetime) + cast(null as int)"));
-    }
+        => AreEqual(DBNull.Value, ExecuteScalar("select cast('2024-01-15' as datetime) + cast(null as int)"));
 
     [TestMethod]
     public void Arithmetic_NullDateTimePlusInt_ReturnsNull()
-    {
-        AreEqual(DBNull.Value, ExecuteScalar("select cast(null as datetime) + 1"));
-    }
+        => AreEqual(DBNull.Value, ExecuteScalar("select cast(null as datetime) + 1"));
 
     [TestMethod]
     public void Ordering_DateTimeValues_CompareByInstant()

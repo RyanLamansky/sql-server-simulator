@@ -2,11 +2,10 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// End-to-end regression tests for EF Core's subquery emission patterns:
-/// LINQ <c>Any</c> against another DbSet inside a WHERE predicate
-/// translates to <c>EXISTS (SELECT 1 ...)</c>; LINQ <c>Contains</c> over a
-/// subquery projection translates to <c>IN (SELECT ...)</c>. Validates the
-/// simulator's correlated-subquery support against the SqlServer provider's
-/// actual emit shapes.
+/// <c>Any</c> against another DbSet → <c>EXISTS (SELECT 1 ...)</c>;
+/// <c>Contains</c> over a subquery projection → <c>IN (SELECT ...)</c>;
+/// aggregates / scalar comparisons against subqueries; correlated
+/// derived tables.
 /// </summary>
 [TestClass]
 public class EFCoreSubquery
@@ -21,7 +20,7 @@ public class EFCoreSubquery
             new Customer { Name = "beta" },
             new Customer { Name = "gamma" });
         _ = context.SaveChanges();
-        // Customer ids are 1, 2, 3 after the IDENTITY assignment.
+        // Customer ids are 1, 2, 3 after IDENTITY assignment.
         context.CustomerOrders.AddRange(
             new CustomerOrder { CustomerId = 1, Amount = 10m },
             new CustomerOrder { CustomerId = 1, Amount = 20m },
@@ -33,9 +32,6 @@ public class EFCoreSubquery
     [TestMethod]
     public void Where_AnyCorrelated_EmitsExistsSubquery()
     {
-        // EF Core translates `Any` against another DbSet to `WHERE EXISTS
-        // (SELECT 1 FROM CustomerOrders o WHERE o.CustomerId = c.Id)`.
-        // Customers 1 and 2 have orders; customer 3 doesn't.
         using var context = SeededContext();
         var ids = context.Customers
             .Where(c => context.CustomerOrders.Any(o => o.CustomerId == c.Id))
@@ -48,7 +44,6 @@ public class EFCoreSubquery
     [TestMethod]
     public void Where_NotAnyCorrelated_EmitsNotExistsSubquery()
     {
-        // The complement: customers without any order → only id 3.
         using var context = SeededContext();
         var ids = context.Customers
             .Where(c => !context.CustomerOrders.Any(o => o.CustomerId == c.Id))
@@ -61,9 +56,6 @@ public class EFCoreSubquery
     [TestMethod]
     public void Where_ContainsSubquery_EmitsInSelect()
     {
-        // EF Core translates `Contains` against a subquery to `IN (SELECT
-        // ...)`. The subquery projects CustomerId from CustomerOrders;
-        // customers with at least one order match.
         using var context = SeededContext();
         var ids = context.Customers
             .Where(c => context.CustomerOrders.Select(o => o.CustomerId).Contains(c.Id))
@@ -76,7 +68,6 @@ public class EFCoreSubquery
     [TestMethod]
     public void Where_AnyWithAdditionalPredicate_FiltersInsideSubquery()
     {
-        // Inner WHERE is also correlated: only customers with an order >= 25.
         using var context = SeededContext();
         var ids = context.Customers
             .Where(c => context.CustomerOrders.Any(o => o.CustomerId == c.Id && o.Amount >= 25m))
@@ -89,10 +80,6 @@ public class EFCoreSubquery
     [TestMethod]
     public void Projection_CountCorrelated_EmitsScalarSubquery()
     {
-        // EF Core translates `Count` of a related set in projection to a
-        // scalar subquery: `SELECT (SELECT COUNT(*) FROM CustomerOrders o
-        // WHERE o.CustomerId = c.Id) FROM Customers c`. Customers 1, 2, 3
-        // have order counts 2, 1, 0 respectively.
         using var context = SeededContext();
         var rows = context.Customers
             .OrderBy(c => c.Id)
@@ -111,9 +98,6 @@ public class EFCoreSubquery
     [TestMethod]
     public void Where_ScalarComparisonAgainstSubquery_FiltersByMaxAmount()
     {
-        // EF Core translates `o.Amount == context.CustomerOrders.Max(...)`
-        // to `WHERE o.Amount = (SELECT MAX(o.Amount) FROM CustomerOrders)`.
-        // Single highest-amount order: 30 (CustomerId=2).
         using var context = SeededContext();
         var customerIds = context.CustomerOrders
             .Where(o => o.Amount == context.CustomerOrders.Max(x => x.Amount))
@@ -125,11 +109,7 @@ public class EFCoreSubquery
     [TestMethod]
     public void Projection_PercentOfTotal_DecimalDivisionScalePreserved()
     {
-        // EF Core emits `s.Amount * 100m / (correlated SUM(...))` for the
-        // percent-of-total LINQ shape. The chained multiply+divide produces
-        // a wide-scale decimal at runtime (d(38,24)) that the static
-        // schema must agree with — otherwise the row encoder rejects on
-        // schema mismatch.
+        // Regression: chained multiply+divide produces d(38,24) at runtime; static schema must agree.
         using var context = SeededContext();
         var rows = context.CustomerOrders
             .OrderBy(o => o.Id)
@@ -140,8 +120,7 @@ public class EFCoreSubquery
             })
             .ToArray();
         Assert.HasCount(3, rows);
-        // Customer 1: orders 10 + 20 = 30. Pct for amount=10 → 33.33...; for amount=20 → 66.66...
-        // Customer 2: order 30 → 100%.
+        // Customer 1: 10+20=30. Pct(10)=33.33; Pct(20)=66.66. Customer 2: 30 → 100%.
         Assert.AreEqual(decimal.Round(10m * 100m / 30m, 6), decimal.Round(rows[0].Pct, 6));
         Assert.AreEqual(decimal.Round(20m * 100m / 30m, 6), decimal.Round(rows[1].Pct, 6));
         Assert.AreEqual(100m, rows[2].Pct);
@@ -150,12 +129,9 @@ public class EFCoreSubquery
     [TestMethod]
     public void Projection_DistinctCorrelatedCount_EmitsCorrelatedDerivedTable()
     {
-        // EF Core 10 emits `(SELECT COUNT(*) FROM (SELECT DISTINCT col FROM t
-        // WHERE t.k = outer.k) AS sub)` for `Distinct().Count()` over a
-        // correlated subset — the inner derived table references the outer
-        // scope via its WHERE. Before the always-defer derived-table fix
-        // this raised "Invalid column name" because plain derived tables
-        // didn't see outer scope.
+        // Regression: pre-fix, correlated derived tables raised "Invalid column name" because
+        // plain derived tables didn't see outer scope. Always-defer fix routes the inner plan
+        // through outerResolver per row.
         using var context = SeededContext();
         var rows = context.Customers
             .OrderBy(c => c.Id)
@@ -170,9 +146,7 @@ public class EFCoreSubquery
             })
             .ToArray();
         Assert.HasCount(3, rows);
-        // c.Id=1 has orders [10, 20] → 2 distinct amounts.
-        // c.Id=2 has order [30] → 1.
-        // c.Id=3 has none → 0.
+        // c.Id=1: amounts [10, 20] → 2 distinct. c.Id=2: [30] → 1. c.Id=3: none → 0.
         Assert.AreEqual(2, rows[0].DistinctAmounts);
         Assert.AreEqual(1, rows[1].DistinctAmounts);
         Assert.AreEqual(0, rows[2].DistinctAmounts);

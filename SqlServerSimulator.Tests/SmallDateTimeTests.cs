@@ -1,5 +1,4 @@
 using System.Data;
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -8,8 +7,6 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Behavioral tests for the <c>smalldatetime</c> type (4-byte storage,
 /// 1-minute granularity, range 1900-01-01 through 2079-06-06 23:59).
-/// CAST to/from string lives here; the broader CAST tests stay in
-/// <see cref="CastTests"/>.
 /// </summary>
 [TestClass]
 public sealed class SmallDateTimeTests
@@ -28,94 +25,63 @@ public sealed class SmallDateTimeTests
     [DataRow("''", "1900-01-01T00:00:00")]
     [DataRow("'12:30'", "1900-01-01T12:30:00")]
     public void Cast_StringToSmallDateTime(string input, string expectedIso)
-    {
-        var value = ExecuteScalar($"select cast({input} as smalldatetime)");
-        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), value);
-    }
+        => AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture),
+            ExecuteScalar($"select cast({input} as smalldatetime)"));
 
     [TestMethod]
     [DataRow("12:30:00", "12:30:00")]
     [DataRow("12:30:29", "12:30:00")]
     [DataRow("12:30:29.998", "12:30:00")]
-    // .999 quantizes to the next 1/300s tick (the 30s mark), then rounds up
-    // to the next minute — matching SQL Server's documented behavior.
-    [DataRow("12:30:29.999", "12:31:00")]
+    [DataRow("12:30:29.999", "12:31:00")]    // quantizes to 30s tick → rounds up
     [DataRow("12:30:30", "12:31:00")]
     [DataRow("12:30:30.001", "12:31:00")]
     [DataRow("12:30:59.998", "12:31:00")]
     [DataRow("12:30:59.999", "12:31:00")]
     public void Cast_StringToSmallDateTime_RoundsToNearestMinute(string inputTime, string expectedTime)
-    {
-        var value = (DateTime)ExecuteScalar($"select cast('2024-01-15 {inputTime}' as smalldatetime)")!;
-        AreEqual(
+        => AreEqual(
             DateTime.Parse($"2024-01-15T{expectedTime}", System.Globalization.CultureInfo.InvariantCulture),
-            value);
-    }
+            (DateTime)ExecuteScalar($"select cast('2024-01-15 {inputTime}' as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_EndOfDayRollsForward()
-    {
-        // 23:59:29.999 quantizes to 23:59:30, which rolls to 00:00 of the
-        // next day.
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15 23:59:29.999' as smalldatetime)")!;
-        AreEqual(new DateTime(2024, 1, 16, 0, 0, 0), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 16, 0, 0, 0),
+            (DateTime)ExecuteScalar("select cast('2024-01-15 23:59:29.999' as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_AtAbsoluteMaxRollsOver_RaisesMsg242()
-    {
-        // 2079-06-06 23:59:29.999 would round to 2079-06-07 00:00 — past the
-        // type's max — so SQL Server raises Msg 242.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('2079-06-06 23:59:29.999' as smalldatetime)"));
-        AreEqual("The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('2079-06-06 23:59:29.999' as smalldatetime)",
+            "The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.");
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_998AtAbsoluteMax_RoundsToValidLastMinute()
-    {
-        // 2079-06-06 23:59:29.998 quantizes down to 23:59:00 — the last
-        // representable minute.
-        var value = (DateTime)ExecuteScalar("select cast('2079-06-06 23:59:29.998' as smalldatetime)")!;
-        AreEqual(new DateTime(2079, 6, 6, 23, 59, 0), value);
-    }
+        => AreEqual(new DateTime(2079, 6, 6, 23, 59, 0),
+            (DateTime)ExecuteScalar("select cast('2079-06-06 23:59:29.998' as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_BelowMin_RaisesMsg242()
-    {
-        // smalldatetime can't represent dates before 1900-01-01 (uint16 day count).
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('1899-12-31' as smalldatetime)"));
-        AreEqual("The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('1899-12-31' as smalldatetime)",
+            "The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.");
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_AtMin_Works()
-    {
-        var value = (DateTime)ExecuteScalar("select cast('1900-01-01' as smalldatetime)")!;
-        AreEqual(new DateTime(1900, 1, 1), value);
-    }
+        => AreEqual(new DateTime(1900, 1, 1), (DateTime)ExecuteScalar("select cast('1900-01-01' as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_AboveMax_RaisesMsg242()
-    {
-        // 2079-06-07 is outside the uint16 day-count range for smalldatetime.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('2079-06-07' as smalldatetime)"));
-        AreEqual("The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('2079-06-07' as smalldatetime)",
+            "The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.");
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_AtAbsoluteMax_Works()
-    {
-        var value = (DateTime)ExecuteScalar("select cast('2079-06-06 23:59' as smalldatetime)")!;
-        AreEqual(new DateTime(2079, 6, 6, 23, 59, 0), value);
-    }
+        => AreEqual(new DateTime(2079, 6, 6, 23, 59, 0),
+            (DateTime)ExecuteScalar("select cast('2079-06-06 23:59' as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_StringToSmallDateTime_BadFormat_RaisesMsg295()
     {
-        // smalldatetime uses Msg 295 (distinct from Msg 241 used by every
-        // other date/time target).
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('not-a-date' as smalldatetime)"));
-        AreEqual("Conversion failed when converting character string to smalldatetime data type.", ex.Message);
+        // smalldatetime uses Msg 295 (distinct from Msg 241 used by every other date/time target).
+        AssertSqlMessage("select cast('not-a-date' as smalldatetime)",
+        "Conversion failed when converting character string to smalldatetime data type.");
     }
 
     [TestMethod]
@@ -130,61 +96,46 @@ public sealed class SmallDateTimeTests
 
     [TestMethod]
     public void Cast_DateToSmallDateTime_FillsMidnight()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15' as date) as smalldatetime)")!;
-        AreEqual(new DateTime(2024, 1, 15), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15),
+            (DateTime)ExecuteScalar("select cast(cast('2024-01-15' as date) as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_SmallDateTimeToDate_DropsTime()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as smalldatetime) as date)")!;
-        AreEqual(new DateTime(2024, 1, 15), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15),
+            (DateTime)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as smalldatetime) as date)")!);
 
     [TestMethod]
     public void Cast_SmallDateTimeToDateTime_PreservesValue()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:30:00' as smalldatetime) as datetime)")!;
-        AreEqual(new DateTime(2024, 1, 15, 12, 30, 0), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15, 12, 30, 0),
+            (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:30:00' as smalldatetime) as datetime)")!);
 
     [TestMethod]
     public void Cast_DateTimeToSmallDateTime_RoundsToMinute()
     {
-        // The .997 datetime tick at 12:30:29 keeps the value below the 30s
-        // half-up boundary, so it stays at 12:30.
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:30:29.997' as datetime) as smalldatetime)")!;
-        AreEqual(new DateTime(2024, 1, 15, 12, 30, 0), value);
+        // The .997 datetime tick at 12:30:29 stays below 30s half-up boundary → 12:30.
+        AreEqual(new DateTime(2024, 1, 15, 12, 30, 0),
+        (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:30:29.997' as datetime) as smalldatetime)")!);
     }
 
     [TestMethod]
     public void Cast_DateTime2ToSmallDateTime_RoundsToMinute()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:30:30' as datetime2(3)) as smalldatetime)")!;
-        AreEqual(new DateTime(2024, 1, 15, 12, 31, 0), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 15, 12, 31, 0),
+            (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:30:30' as datetime2(3)) as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_TimeToSmallDateTime_FillsLegacyDate()
-    {
-        var value = (DateTime)ExecuteScalar("select cast(cast('13:30:00' as time(0)) as smalldatetime)")!;
-        AreEqual(new DateTime(1900, 1, 1, 13, 30, 0), value);
-    }
+        => AreEqual(new DateTime(1900, 1, 1, 13, 30, 0),
+            (DateTime)ExecuteScalar("select cast(cast('13:30:00' as time(0)) as smalldatetime)")!);
 
     [TestMethod]
     public void Cast_SmallDateTimeToTime_DropsDate()
-    {
-        var value = (TimeSpan)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as smalldatetime) as time(0))")!;
-        AreEqual(new TimeSpan(13, 30, 0), value);
-    }
+        => AreEqual(new TimeSpan(13, 30, 0),
+            (TimeSpan)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as smalldatetime) as time(0))")!);
 
     [TestMethod]
     public void Cast_SmallDateTimeToDateTimeOffset_AssumesUtcOffset()
-    {
-        var value = (DateTimeOffset)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as smalldatetime) as datetimeoffset(0))")!;
-        AreEqual(new DateTimeOffset(2024, 1, 15, 13, 30, 0, TimeSpan.Zero), value);
-    }
+        => AreEqual(new DateTimeOffset(2024, 1, 15, 13, 30, 0, TimeSpan.Zero),
+            (DateTimeOffset)ExecuteScalar("select cast(cast('2024-01-15 13:30:00' as smalldatetime) as datetimeoffset(0))")!);
 
     [TestMethod]
     public void CreateTable_SmallDateTimeColumn_RoundTripsRowsWithRoundedValues()
@@ -204,17 +155,13 @@ public sealed class SmallDateTimeTests
 
     [TestMethod]
     public void CreateTable_SmallDateTimeWithPrecisionParameter_RaisesMsg2716()
-    {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create table t (d smalldatetime(3))"));
-        AreEqual("Column, parameter, or variable #1: Cannot specify a column width on data type smalldatetime.", ex.Message);
-    }
+        => AssertSqlMessage("create table t (d smalldatetime(3))",
+            "Column, parameter, or variable #1: Cannot specify a column width on data type smalldatetime.");
 
     [TestMethod]
     public void CreateTable_SmallDateTimeWithZeroPrecision_RaisesMsg1001()
-    {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create table t (d smalldatetime(0))"));
-        AreEqual("Line 1: Length or precision specification 0 is invalid.", ex.Message);
-    }
+        => AssertSqlMessage("create table t (d smalldatetime(0))",
+            "Line 1: Length or precision specification 0 is invalid.");
 
     [TestMethod]
     public void Parameter_SmallDateTime_AcceptsDateTimeValue()
@@ -237,7 +184,6 @@ public sealed class SmallDateTimeTests
     [TestMethod]
     public void Parameter_SmallDateTime_AcceptsDateOnlyValue()
     {
-        // Date-only value lands at midnight on the smalldatetime field.
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (d smalldatetime)");
         using var connection = sim.CreateOpenConnection();
@@ -271,24 +217,18 @@ public sealed class SmallDateTimeTests
     [DataRow("1", "1900-01-02T00:00:00")]
     [DataRow("65535", "2079-06-06T00:00:00")]
     public void Cast_IntToSmallDateTime_TreatsAsDaysSince1900(string input, string expectedIso) =>
-        AreEqual(
-            DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture),
+        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture),
             ExecuteScalar($"select cast({input} as smalldatetime)"));
 
     [TestMethod]
     public void Cast_NegativeIntToSmallDateTime_RaisesMsg8115()
-    {
-        // smalldatetime can't represent dates before 1900-01-01 (uint16 day count).
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(-1 as smalldatetime)"));
-        AreEqual("Arithmetic overflow error converting expression to data type smalldatetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(-1 as smalldatetime)",
+            "Arithmetic overflow error converting expression to data type smalldatetime.");
 
     [TestMethod]
     public void Cast_OversizedIntToSmallDateTime_RaisesMsg8115()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(65536 as smalldatetime)"));
-        AreEqual("Arithmetic overflow error converting expression to data type smalldatetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(65536 as smalldatetime)",
+            "Arithmetic overflow error converting expression to data type smalldatetime.");
 
     [TestMethod]
     public void Cast_SmallDateTimeToInt_ReturnsDaysSince1900()
@@ -301,46 +241,31 @@ public sealed class SmallDateTimeTests
 
     [TestMethod]
     public void Cast_SmallDateTimeToTinyint_OverflowRaisesMsg8115()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(cast('1900-09-14' as smalldatetime) as tinyint)"));
-        AreEqual("Arithmetic overflow error converting expression to data type tinyint.", ex.Message);
-    }
+        => AssertSqlMessage("select cast(cast('1900-09-14' as smalldatetime) as tinyint)",
+            "Arithmetic overflow error converting expression to data type tinyint.");
 
     [TestMethod]
     public void Arithmetic_SmallDateTimePlusInt_StaysSmallDateTime()
-    {
-        // `sd + int` returns smalldatetime (the date side wins regardless
-        // of order). Time portion is preserved through the addition.
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15 13:30:00' as smalldatetime) + 1")!;
-        AreEqual(new DateTime(2024, 1, 16, 13, 30, 0), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 16, 13, 30, 0),
+            (DateTime)ExecuteScalar("select cast('2024-01-15 13:30:00' as smalldatetime) + 1")!);
 
     [TestMethod]
     public void Arithmetic_SmallDateTimePlusSmallDateTime_SumDaysFromBase()
     {
-        // Same legacy quirk as `dt + dt`: re-interpret the sum as
-        // days-since-1900-01-01.
-        var value = (DateTime)ExecuteScalar("select cast('1900-01-15' as smalldatetime) + cast('1900-01-10' as smalldatetime)")!;
-        AreEqual(new DateTime(1900, 1, 24), value);
+        // Same legacy quirk as `dt + dt`: re-interpret sum as days-since-1900-01-01.
+        AreEqual(new DateTime(1900, 1, 24),
+        (DateTime)ExecuteScalar("select cast('1900-01-15' as smalldatetime) + cast('1900-01-10' as smalldatetime)")!);
     }
 
     [TestMethod]
     public void Arithmetic_SmallDateTimeMinusInt_UnderflowRaisesMsg8115()
-    {
-        // Subtraction below 1900-01-01 raises Msg 8115 — smalldatetime's
-        // uint16 day count can't go negative.
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast('1900-01-01' as smalldatetime) - 100"));
-        AreEqual("Arithmetic overflow error converting expression to data type smalldatetime.", ex.Message);
-    }
+        => AssertSqlMessage("select cast('1900-01-01' as smalldatetime) - 100",
+            "Arithmetic overflow error converting expression to data type smalldatetime.");
 
     [TestMethod]
     public void Arithmetic_DateTimePlusSmallDateTime_ReturnsDateTime()
-    {
-        // Cross-family promotion picks datetime (highest precedence in the
-        // legacy pair).
-        var value = (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + cast('1900-01-10' as smalldatetime)")!;
-        AreEqual(new DateTime(2024, 1, 24), value);
-    }
+        => AreEqual(new DateTime(2024, 1, 24),
+            (DateTime)ExecuteScalar("select cast('2024-01-15' as datetime) + cast('1900-01-10' as smalldatetime)")!);
 
     [TestMethod]
     public void Ordering_SmallDateTimeValues_CompareByInstant()

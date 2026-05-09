@@ -1,21 +1,11 @@
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Exercises the simulator's <c>datetime2(N)</c> and <c>datetimeoffset(N)</c>
-/// column support through EF Core's idiomatic surface. Confirms full-precision
-/// (precision 7) round trips and lower-precision (precision 3 / 0) rounding-
-/// on-store behavior land correctly through EF's parameter binding and reader
-/// hydration. Datetimeoffset additionally pins offset preservation across the
-/// round trip and equality-by-UTC-instant in <c>WHERE</c>.
+/// Exercises <c>datetime2(N)</c> and <c>datetimeoffset(N)</c> column support
+/// through EF Core. Confirms full-precision (precision 7) round trips,
+/// lower-precision rounding-on-store, datetimeoffset offset preservation,
+/// equality-by-UTC-instant, and legacy datetime tick-quantization round-trip.
 /// </summary>
-/// <remarks>
-/// Only <see cref="DateTime"/> and <see cref="DateTimeOffset"/> properties are
-/// covered — see <see cref="SimulatedDbParameter"/> for the per-mapping
-/// compatibility table explaining why the other date/time configurations
-/// (<c>DateOnly → date</c>, <c>TimeOnly → time</c>, <c>TimeSpan → time</c>,
-/// <c>DateTime → date</c>) are unreachable through EF Core until a bridge
-/// adapter ships.
-/// </remarks>
 [TestClass]
 public class EFCoreDateTime
 {
@@ -69,7 +59,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Insert_LowerPrecisionColumn_RoundsHalfUp()
     {
-        // Updated is datetime2(3); 0.5ms above a millisecond boundary rounds to next ms.
+        // Updated is datetime2(3); 0.5ms above ms boundary rounds to next ms.
         using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
         var updated = new DateTime(2026, 5, 4, 13, 45, 30, 100).AddTicks(5_000);
         _ = context.Events.Add(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4), Updated = updated });
@@ -90,8 +80,7 @@ public class EFCoreDateTime
             new Event { Id = 3, CreatedAt = new DateTime(2026, 5, 4, 15, 0, 0) });
         _ = context.SaveChanges();
 
-        var match = context.Events.Where(e => e.CreatedAt == target).Select(e => e.Id).Single();
-        Assert.AreEqual(2, match);
+        Assert.AreEqual(2, context.Events.Where(e => e.CreatedAt == target).Select(e => e.Id).Single());
     }
 
     [TestMethod]
@@ -146,7 +135,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Insert_DateTimeOffset_LowerPrecisionColumn_RoundsHalfUp()
     {
-        // Cancelled is datetimeoffset(3); 0.5ms above a millisecond boundary rounds to next ms.
+        // Cancelled is datetimeoffset(3); 0.5ms above ms boundary rounds to next ms.
         using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
         var cancelled = new DateTimeOffset(2026, 5, 4, 13, 45, 30, 100, TimeSpan.FromHours(-7)).AddTicks(5_000);
         _ = context.Events.Add(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4), OccurredAt = DateTimeOffset.UnixEpoch, Cancelled = cancelled });
@@ -159,8 +148,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Where_FiltersByDateTimeOffsetEquality_CrossOffset()
     {
-        // The stored value and the parameter share a UTC instant but carry
-        // different offsets; equality should still match.
+        // Stored value and parameter share UTC instant but carry different offsets; equality should match.
         using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
         var east = new DateTimeOffset(2026, 5, 4, 20, 45, 30, TimeSpan.FromHours(7));
         context.Events.AddRange(
@@ -169,30 +157,25 @@ public class EFCoreDateTime
         _ = context.SaveChanges();
 
         var west = new DateTimeOffset(2026, 5, 4, 6, 45, 30, TimeSpan.FromHours(-7));
-        var match = context.Events.Where(e => e.OccurredAt == west).Select(e => e.Id).Single();
-        Assert.AreEqual(1, match);
+        Assert.AreEqual(1, context.Events.Where(e => e.OccurredAt == west).Select(e => e.Id).Single());
     }
 
     [TestMethod]
     public void Insert_LegacyDateTime_RoundTripsAtTickGranularity()
     {
-        // Legacy datetime stores 1/300-second ticks. .997 input lands on
-        // tick 299 — preserved by EF Core's reader hydration since SqlClient
-        // reconstructs DateTime ticks deterministically from the stored unit.
+        // Legacy datetime stores 1/300-second ticks; .997 input → tick 299 = 9_966_666 100-ns ticks past second.
         using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
 
         var started = new DateTime(2026, 5, 4, 13, 45, 30, 997);
         _ = context.Events.Add(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4), Started = started });
         _ = context.SaveChanges();
 
-        // Round-trip preserves the tick-quantized value, not the raw ms.
         var read = context.Events.Select(e => e.Started).First();
         Assert.IsNotNull(read);
         Assert.AreEqual(started.Date, read.Value.Date);
         Assert.AreEqual(started.Hour, read.Value.Hour);
         Assert.AreEqual(started.Minute, read.Value.Minute);
         Assert.AreEqual(started.Second, read.Value.Second);
-        // .997 ms input → tick 299 → stored at 9_966_666 100-ns ticks past the second.
         Assert.AreEqual(9_966_666, read.Value.Ticks % TimeSpan.TicksPerSecond);
     }
 
@@ -228,8 +211,7 @@ public class EFCoreDateTime
             new Event { Id = 3, CreatedAt = new DateTime(2026, 5, 4), Started = new DateTime(2026, 5, 4, 15, 0, 0) });
         _ = context.SaveChanges();
 
-        var match = context.Events.Where(e => e.Started == target).Select(e => e.Id).Single();
-        Assert.AreEqual(2, match);
+        Assert.AreEqual(2, context.Events.Where(e => e.Started == target).Select(e => e.Id).Single());
     }
 
     [TestMethod]
@@ -246,9 +228,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Where_DateTimeYearExtraction_TranslatesToDatepart()
     {
-        // EF Core translates .Year (and .Month / .Day / .Hour / etc.) to
-        // DATEPART(year, col). Common in real apps for "events this year"
-        // filters.
+        // EF Core translates .Year to DATEPART(year, col).
         var simulation = TestDbContext.CreateEventsSimulation();
         using (var seed = new TestDbContext(simulation))
         {
@@ -267,7 +247,6 @@ public class EFCoreDateTime
     [TestMethod]
     public void Projection_DateTimeAddDays_TranslatesToDateadd()
     {
-        // EF Core translates .AddDays(N) to DATEADD(day, CAST(N AS int), col).
         var simulation = TestDbContext.CreateEventsSimulation();
         using (var seed = new TestDbContext(simulation))
         {
@@ -281,7 +260,6 @@ public class EFCoreDateTime
         }
 
         using var context = new TestDbContext(simulation);
-        var rolled = context.Events.Select(e => e.CreatedAt.AddDays(7)).Single();
-        Assert.AreEqual(new DateTime(2024, 6, 8), rolled);
+        Assert.AreEqual(new DateTime(2024, 6, 8), context.Events.Select(e => e.CreatedAt.AddDays(7)).Single());
     }
 }

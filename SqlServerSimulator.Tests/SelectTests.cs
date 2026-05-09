@@ -1,4 +1,5 @@
-﻿using System.Data.Common;
+using System.Data.Common;
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
@@ -9,26 +10,24 @@ public class SelectTests
     private static DbDataReader ExecuteReaderAndRead(string commandText)
     {
         var reader = new Simulation().ExecuteReader(commandText);
-        Assert.IsTrue(reader.Read());
+        IsTrue(reader.Read());
         return reader;
     }
 
     [TestMethod]
-    public void Select1ViaExecuteReaderIndexer()
-        => Assert.AreEqual(1, ExecuteReaderAndRead("select 1")[0]);
+    public void Select1ViaExecuteReaderIndexer() => AreEqual(1, ExecuteReaderAndRead("select 1")[0]);
 
     [TestMethod]
-    public void Select1ViaExecuteReaderGetInt32()
-        => Assert.AreEqual(1, ExecuteReaderAndRead("select 1").GetInt32(0));
+    public void Select1ViaExecuteReaderGetInt32() => AreEqual(1, ExecuteReaderAndRead("select 1").GetInt32(0));
 
     [TestMethod]
-    public void Null() => Assert.IsInstanceOfType<DBNull>(ExecuteScalar("select null"));
+    public void Null() => IsInstanceOfType<DBNull>(ExecuteScalar("select null"));
 
     [TestMethod]
     [DataRow("SELECT @@VERSION")]
     [DataRow("select @@version")]
     [DataRow("Select @@Version")]
-    public void SelectVersion(string commandText) => Assert.AreEqual("SQL Server Simulator", new Simulation().ExecuteScalar(commandText));
+    public void SelectVersion(string commandText) => AreEqual("SQL Server Simulator", new Simulation().ExecuteScalar(commandText));
 
     [TestMethod]
     [DataRow("select @p0", "p0", 5)]
@@ -41,7 +40,7 @@ public class SelectTests
             .CreateCommand(commandText, (name, value))
             .ExecuteScalar();
 
-        Assert.AreEqual(value, result);
+        AreEqual(value, result);
     }
 
     [TestMethod]
@@ -73,27 +72,16 @@ public class SelectTests
     public void Expression(string commandText, object value)
     {
         using var reader = new Simulation().ExecuteReader($"select {commandText}");
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(value, reader[0]);
+        IsTrue(reader.Read());
+        AreEqual(value, reader[0]);
     }
 
     [TestMethod]
-    public void BareAs()
-    {
-        var exception = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar("select as z"));
-        Assert.AreEqual("Incorrect syntax near the keyword 'as'.", exception.Message);
-    }
+    public void BareAs() => AssertSqlMessage("select as z", "Incorrect syntax near the keyword 'as'.");
 
     [TestMethod]
     public void UnsupportedCharacter_RaisesMsg102()
-    {
-        // Hits the tokenizer's catch-all for characters outside the supported
-        // operator / literal / identifier character classes.
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar("select 1 ~ 2"));
-        Assert.AreEqual("Incorrect syntax near '~'.", ex.Message);
-        Assert.AreEqual("102", ex.Data["HelpLink.EvtID"]);
-    }
+        => AssertSqlError("select 1 ~ 2", 102, "Incorrect syntax near '~'.");
 
     [TestMethod]
     [DataRow("select 1", "", 1)]
@@ -106,10 +94,9 @@ public class SelectTests
     public void NamedExpression(string commandText, string name, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(name, reader.GetName(0));
-        Assert.AreEqual(value, reader[0]);
+        IsTrue(reader.Read());
+        AreEqual(name, reader.GetName(0));
+        AreEqual(value, reader[0]);
     }
 
     [TestMethod]
@@ -120,16 +107,11 @@ public class SelectTests
     public void ExpressionFromTable(string commandText, int minimumRows, int uniqueRows, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
-
-        var results = reader
-            .EnumerateRecords()
-            .Take(minimumRows) // There might be more someday, but there won't be less.
-            .Select(reader => reader[0])
-            .ToArray();
+        var results = reader.EnumerateRecords().Take(minimumRows).Select(r => r[0]).ToArray();
 
         Assert.HasCount(minimumRows, results);
         Assert.HasCount(uniqueRows, results.ToHashSet());
-        Assert.AreEqual(value, results[0]);
+        AreEqual(value, results[0]);
     }
 
     [TestMethod]
@@ -142,20 +124,15 @@ public class SelectTests
     public void NamedExpressionFromTable(string commandText, int minimumRows, int uniqueRows, string name, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
-
-        var results = reader
-            .EnumerateRecords()
-            .Take(minimumRows) // There might be more someday, but there won't be less.
-            .Select(reader =>
-            {
-                Assert.AreEqual(name, reader.GetName(0));
-                return reader[0];
-            })
-            .ToArray();
+        var results = reader.EnumerateRecords().Take(minimumRows).Select(r =>
+        {
+            AreEqual(name, r.GetName(0));
+            return r[0];
+        }).ToArray();
 
         Assert.HasCount(minimumRows, results);
         Assert.HasCount(uniqueRows, results.ToHashSet());
-        Assert.AreEqual(value, results[0]);
+        AreEqual(value, results[0]);
     }
 
     [TestMethod]
@@ -164,54 +141,38 @@ public class SelectTests
     public void NamedExpressionAndColumnFromTable(string commandText, int minimumRows, string name0, object value0, string name1, object value1)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
-
-        var results = reader
-            .EnumerateRecords()
-            .Take(minimumRows) // There might be more someday, but there won't be less.
-            .Select(reader =>
-            {
-                Assert.AreEqual(name0, reader.GetName(0));
-                Assert.AreEqual(name1, reader.GetName(1));
-                return (C0: reader[0], C1: reader[1]);
-            })
-            .ToArray();
+        var results = reader.EnumerateRecords().Take(minimumRows).Select(r =>
+        {
+            AreEqual(name0, r.GetName(0));
+            AreEqual(name1, r.GetName(1));
+            return (C0: r[0], C1: r[1]);
+        }).ToArray();
 
         Assert.HasCount(minimumRows, results);
-        Assert.AreEqual(value0, results[0].C0);
-        Assert.AreEqual(value1, results[0].C1);
+        AreEqual(value0, results[0].C0);
+        AreEqual(value1, results[0].C1);
     }
 
     [TestMethod]
     public void Select1Comma2()
     {
         using var reader = new Simulation().ExecuteReader("select 1, 2");
-
-        var results = reader
-            .EnumerateRecords()
-            .Select(reader => (C1: reader.GetInt32(0), C2: reader.GetInt32(1)))
-            .ToArray();
+        var results = reader.EnumerateRecords().Select(r => (C1: r.GetInt32(0), C2: r.GetInt32(1))).ToArray();
 
         Assert.HasCount(1, results);
-        var (C1, C2) = results[0];
-        Assert.AreEqual(1, C1);
-        Assert.AreEqual(2, C2);
+        AreEqual(1, results[0].C1);
+        AreEqual(2, results[0].C2);
     }
 
     [TestMethod]
     public void SelectTwoColumns()
     {
         using var reader = new Simulation().ExecuteReader("select name, length from systypes");
-
-        var results = reader
-            .EnumerateRecords()
-            .Take(34) // There might be more someday, but there won't be less.
-            .Select(reader => (C1: reader.GetString(0), C2: reader.GetInt16(1)))
-            .ToArray();
+        var results = reader.EnumerateRecords().Take(34).Select(r => (C1: r.GetString(0), C2: r.GetInt16(1))).ToArray();
 
         Assert.HasCount(34, results);
-        var (C1, C2) = results[0];
-        Assert.AreEqual("image", C1);
-        Assert.AreEqual((short)16, C2);
+        AreEqual("image", results[0].C1);
+        AreEqual((short)16, results[0].C2);
     }
 
     [TestMethod]
@@ -226,17 +187,16 @@ public class SelectTests
     {
         var identifier = new string('z', 128);
         using var reader = new Simulation().ExecuteReader($"select 1 as {identifier}");
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(identifier, reader.GetName(0));
-        Assert.AreEqual(1, reader.GetInt32(0));
+        IsTrue(reader.Read());
+        AreEqual(identifier, reader.GetName(0));
+        AreEqual(1, reader.GetInt32(0));
     }
 
     [TestMethod]
     public void IdentifierTooLong()
     {
-        var exception = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar($"select 1 as {new string('z', 129)}"));
-        Assert.Contains("zzz", exception.Message);
+        var ex = Throws<DbException>(() => new Simulation().ExecuteScalar($"select 1 as {new string('z', 129)}"));
+        Contains("zzz", ex.Message);
     }
 
     [TestMethod]
@@ -245,61 +205,53 @@ public class SelectTests
     public void DerivedTable(string commandText, string name, object value)
     {
         using var reader = new Simulation().ExecuteReader(commandText);
-
-        var result = reader
-            .EnumerateRecords()
-            .Select(reader =>
-            {
-                Assert.AreEqual(name, reader.GetName(0));
-                return reader[0];
-            })
-            .SingleOrDefault();
-
-        Assert.AreEqual(value, result);
+        var result = reader.EnumerateRecords().Select(r =>
+        {
+            AreEqual(name, r.GetName(0));
+            return r[0];
+        }).SingleOrDefault();
+        AreEqual(value, result);
     }
 
     [TestMethod]
     public void MultiColumnNamedAndUnnamed()
     {
         using var reader = new Simulation().ExecuteReader("select 1 + 1 as x, 7 as y");
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(2, reader.FieldCount);
-        Assert.AreEqual("x", reader.GetName(0));
-        Assert.AreEqual("y", reader.GetName(1));
-        Assert.AreEqual(2, reader[0]);
-        Assert.AreEqual(7, reader[1]);
+        IsTrue(reader.Read());
+        AreEqual(2, reader.FieldCount);
+        AreEqual("x", reader.GetName(0));
+        AreEqual("y", reader.GetName(1));
+        AreEqual(2, reader[0]);
+        AreEqual(7, reader[1]);
     }
 
     [TestMethod]
-    public void NullPropagatesThroughArithmetic()
-        => Assert.AreEqual(DBNull.Value, ExecuteScalar("select null + 1"));
+    public void NullPropagatesThroughArithmetic() => AreEqual(DBNull.Value, ExecuteScalar("select null + 1"));
 
     [TestMethod]
     public void SelectFromEmptyTable_ReturnsNoRows()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select v from t").ExecuteReader();
-        Assert.IsFalse(reader.Read());
+        IsFalse(reader.Read());
     }
 
     [TestMethod]
     public void SelectFromTable_ProjectionReorderingAndSubsetting()
     {
         using var connection = new Simulation().CreateOpenConnection();
-
         _ = connection.CreateCommand("create table t ( a int, b int, c int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 1, 2, 3 )").ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select c, a from t").ExecuteReader();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(2, reader.FieldCount);
-        Assert.AreEqual("c", reader.GetName(0));
-        Assert.AreEqual("a", reader.GetName(1));
-        Assert.AreEqual(3, reader[0]);
-        Assert.AreEqual(1, reader[1]);
+        IsTrue(reader.Read());
+        AreEqual(2, reader.FieldCount);
+        AreEqual("c", reader.GetName(0));
+        AreEqual("a", reader.GetName(1));
+        AreEqual(3, reader[0]);
+        AreEqual(1, reader[1]);
     }
 
     [TestMethod]
@@ -308,40 +260,38 @@ public class SelectTests
         using var connection = new Simulation().CreateOpenConnection();
         using var reader = connection.CreateCommand("select 1; select 2; select 3").ExecuteReader();
 
-        Assert.IsTrue(reader.Read()); Assert.AreEqual(1, reader[0]);
-        Assert.IsFalse(reader.Read());
-        Assert.IsTrue(reader.NextResult());
-        Assert.IsTrue(reader.Read()); Assert.AreEqual(2, reader[0]);
-        Assert.IsFalse(reader.Read());
-        Assert.IsTrue(reader.NextResult());
-        Assert.IsTrue(reader.Read()); Assert.AreEqual(3, reader[0]);
-        Assert.IsFalse(reader.Read());
-        Assert.IsFalse(reader.NextResult());
+        IsTrue(reader.Read()); AreEqual(1, reader[0]);
+        IsFalse(reader.Read());
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read()); AreEqual(2, reader[0]);
+        IsFalse(reader.Read());
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read()); AreEqual(3, reader[0]);
+        IsFalse(reader.Read());
+        IsFalse(reader.NextResult());
     }
 
     [TestMethod]
     public void TrailingSemicolonOnTablelessSelect_IsAccepted()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("select 1;").ExecuteScalar());
+        AreEqual(1, connection.CreateCommand("select 1;").ExecuteScalar());
     }
 
     [TestMethod]
     public void RepeatedSemicolons_BetweenStatements_AreNoOps()
     {
-        // Empty statement (`;` alone) is legal; consecutive semicolons collapse.
         using var connection = new Simulation().CreateOpenConnection();
         using var reader = connection.CreateCommand("select 1;; ;select 2").ExecuteReader();
-        Assert.IsTrue(reader.Read()); Assert.AreEqual(1, reader[0]);
-        Assert.IsTrue(reader.NextResult());
-        Assert.IsTrue(reader.Read()); Assert.AreEqual(2, reader[0]);
+        IsTrue(reader.Read()); AreEqual(1, reader[0]);
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read()); AreEqual(2, reader[0]);
     }
 
     [TestMethod]
     public void UnaryMinusBeforeFrom_DoesNotSwallowFromClause()
     {
-        // The FROM keyword must survive a unary-minus projection: the
-        // expression parser cannot greedily consume past the projection's end.
+        // FROM keyword must survive a unary-minus projection: parser cannot greedily consume past the projection's end.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values ( 1 ), ( 2 ), ( 3 )").ExecuteNonQuery();
@@ -356,16 +306,12 @@ public class SelectTests
     [TestMethod]
     public void UnaryMinusInProjection_PreservesAlias()
     {
-        // Same boundary case as UnaryMinusBeforeFrom_*: the alias token
-        // following a unary-minus expression must not be silently dropped.
         using var connection = new Simulation().CreateOpenConnection();
         using var reader = connection.CreateCommand("select -1 n").ExecuteReader();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(-1, reader[0]);
-        Assert.AreEqual("n", reader.GetName(0));
+        IsTrue(reader.Read());
+        AreEqual(-1, reader[0]);
+        AreEqual("n", reader.GetName(0));
     }
-
-    // ─── SELECT * projection ───────────────────────────────────────────────
 
     [TestMethod]
     public void SelectStar_SingleSource_ProjectsAllColumnsInDeclaredOrder()
@@ -374,14 +320,14 @@ public class SelectTests
         _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values (1, 2, 3)").ExecuteNonQuery();
         using var reader = connection.CreateCommand("select * from t").ExecuteReader();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(3, reader.FieldCount);
-        Assert.AreEqual("a", reader.GetName(0));
-        Assert.AreEqual("b", reader.GetName(1));
-        Assert.AreEqual("c", reader.GetName(2));
-        Assert.AreEqual(1, reader[0]);
-        Assert.AreEqual(2, reader[1]);
-        Assert.AreEqual(3, reader[2]);
+        IsTrue(reader.Read());
+        AreEqual(3, reader.FieldCount);
+        AreEqual("a", reader.GetName(0));
+        AreEqual("b", reader.GetName(1));
+        AreEqual("c", reader.GetName(2));
+        AreEqual(1, reader[0]);
+        AreEqual(2, reader[1]);
+        AreEqual(3, reader[2]);
     }
 
     [TestMethod]
@@ -400,22 +346,19 @@ public class SelectTests
     [TestMethod]
     public void SelectStar_TwoSourceJoin_IncludesDuplicateColumnNames()
     {
-        // Multi-source `*` includes same-named columns from each source —
-        // SQL Server keeps the duplicate (no auto-disambiguation), and the
-        // qualified per-source References emitted by star-expansion let
-        // the resolver bind each duplicate without raising Msg 209.
+        // Multi-source `*` keeps duplicate column names; per-source qualifying lets the resolver bind without Msg 209.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
         _ = connection.CreateCommand("create table u (a int, c int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values (1, 2)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert u values (1, 9)").ExecuteNonQuery();
         using var reader = connection.CreateCommand("select * from t inner join u on t.a = u.a").ExecuteReader();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(4, reader.FieldCount);
-        Assert.AreEqual("a", reader.GetName(0));
-        Assert.AreEqual("b", reader.GetName(1));
-        Assert.AreEqual("a", reader.GetName(2));
-        Assert.AreEqual("c", reader.GetName(3));
+        IsTrue(reader.Read());
+        AreEqual(4, reader.FieldCount);
+        AreEqual("a", reader.GetName(0));
+        AreEqual("b", reader.GetName(1));
+        AreEqual("a", reader.GetName(2));
+        AreEqual("c", reader.GetName(3));
     }
 
     [TestMethod]
@@ -427,26 +370,22 @@ public class SelectTests
         _ = connection.CreateCommand("insert t values (1, 2)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert u values (1, 9)").ExecuteNonQuery();
         using var reader = connection.CreateCommand("select t.* from t inner join u on t.a = u.a").ExecuteReader();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(2, reader.FieldCount);
-        Assert.AreEqual("a", reader.GetName(0));
-        Assert.AreEqual("b", reader.GetName(1));
+        IsTrue(reader.Read());
+        AreEqual(2, reader.FieldCount);
+        AreEqual("a", reader.GetName(0));
+        AreEqual("b", reader.GetName(1));
     }
 
     [TestMethod]
     public void SelectStar_InsideDerivedTable_OuterReferencesProjectedColumns()
     {
-        // The inner `select *` expands against the inner FROM's columns,
-        // and the outer query then references those columns through the
-        // derived-table alias — the FromSqlInterpolated wrap shape EF Core
-        // emits.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values (1, 2), (3, 4)").ExecuteNonQuery();
         using var reader = connection.CreateCommand("select x.a from (select * from t) as x where x.a = 3").ExecuteReader();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(3, reader[0]);
-        Assert.IsFalse(reader.Read());
+        IsTrue(reader.Read());
+        AreEqual(3, reader[0]);
+        IsFalse(reader.Read());
     }
 
     [TestMethod]
@@ -454,7 +393,7 @@ public class SelectTests
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        var ex = Assert.Throws<DbException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
-        Assert.AreEqual("The multi-part identifier \"notbound.*\" could not be bound.", ex.Message);
+        var ex = Throws<DbException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
+        AreEqual("The multi-part identifier \"notbound.*\" could not be bound.", ex.Message);
     }
 }

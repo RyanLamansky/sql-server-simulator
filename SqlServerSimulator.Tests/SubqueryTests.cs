@@ -4,12 +4,10 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for <c>EXISTS (SELECT ...)</c> and
-/// <c>IN (SELECT ...)</c> / <c>NOT IN (SELECT ...)</c>: non-correlated and
-/// correlated forms, NULL semantics that mirror the literal-list IN, and
-/// SQL Server's single-column requirement for IN(SELECT) (Msg 116). NULL
-/// semantics, multi-column rejection, and correlation-across-multiple-levels
-/// are all sourced from probes against the SQL Server 2025 reference.
+/// Behavioral tests for <c>EXISTS (SELECT ...)</c> and <c>IN (SELECT ...)</c>
+/// / <c>NOT IN (SELECT ...)</c>: non-correlated and correlated forms, NULL
+/// semantics that mirror the literal-list IN, and SQL Server's single-column
+/// requirement (Msg 116).
 /// </summary>
 [TestClass]
 public sealed class SubqueryTests
@@ -23,41 +21,24 @@ public sealed class SubqueryTests
         return rows;
     }
 
-    // === EXISTS — non-correlated ===
-
     [TestMethod]
-    public void Exists_NonEmpty_ReturnsTrue()
-    {
-        AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select 1)"));
-    }
+    public void Exists_NonEmpty_ReturnsTrue() => AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select 1)"));
 
     [TestMethod]
     public void Exists_AllNullRow_ReturnsTrue()
-    {
-        // EXISTS counts rows; NULL contents don't matter.
-        AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select null)"));
-    }
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select null)"));
 
     [TestMethod]
     public void Exists_Empty_ReturnsFalse()
-    {
-        IsNull(new Simulation().ExecuteScalar("select 1 where exists (select 1 where 1=0)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("select 1 where exists (select 1 where 1=0)"));
 
     [TestMethod]
     public void NotExists_Empty_ReturnsTrue()
-    {
-        AreEqual(1, new Simulation().ExecuteScalar("select 1 where not exists (select 1 where 1=0)"));
-    }
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 where not exists (select 1 where 1=0)"));
 
     [TestMethod]
     public void Exists_MultiColumnInner_Allowed()
-    {
-        // EXISTS is the documented exception to the single-column rule.
-        AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select 1, 2)"));
-    }
-
-    // === EXISTS — correlated ===
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select 1, 2)"));
 
     [TestMethod]
     public void Exists_Correlated_FiltersByMatch()
@@ -92,8 +73,7 @@ public sealed class SubqueryTests
     [TestMethod]
     public void Exists_QualifierShadow_ResolvesOuterColumn()
     {
-        // Both tables have an `id` column. The qualifier `t1.id` inside the
-        // inner SELECT must resolve to the outer scope's id, not the inner.
+        // Both tables have `id`; qualifier `t1.id` inside inner SELECT must resolve to outer scope's id, not inner's.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t1 (id int)");
         _ = simulation.ExecuteNonQuery("create table t2 (id int, parent_id int)");
@@ -101,14 +81,10 @@ public sealed class SubqueryTests
         _ = simulation.ExecuteNonQuery("insert into t2 values (20, 10)");
 
         using var connection = simulation.CreateOpenConnection();
-        // Inner predicate `t2.parent_id = t1.id` — t1.id resolves to the
-        // outer t1's id (10), not to t2.id (20).
         var matched = ReadIntColumn(connection.CreateCommand(
             "select t1.id from t1 where exists (select 1 from t2 where t2.parent_id = t1.id)"));
         CollectionAssert.AreEqual(new int?[] { 10 }, matched);
     }
-
-    // === IN (SELECT) — non-correlated, NULL semantics ===
 
     [TestMethod]
     public void InSelect_Match_ReturnsTrue()
@@ -140,7 +116,6 @@ public sealed class SubqueryTests
     [TestMethod]
     public void InSelect_NullRowOnly_ReturnsUnknown()
     {
-        // 5 IN (NULL) is UNKNOWN — same as 5 = NULL.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (v int null)");
         _ = simulation.ExecuteNonQuery("insert into t values (null)");
@@ -168,8 +143,7 @@ public sealed class SubqueryTests
     [TestMethod]
     public void NotInSelect_NoMatchPlusNullRow_ReturnsUnknown()
     {
-        // The classic NOT IN gotcha: NULL in the subquery turns the answer
-        // UNKNOWN even when the LHS clearly isn't a non-NULL match.
+        // Classic NOT IN gotcha: NULL in subquery → UNKNOWN even when LHS clearly isn't a non-NULL match.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (v int null)");
         _ = simulation.ExecuteNonQuery("insert into t values (5), (null)");
@@ -201,8 +175,6 @@ public sealed class SubqueryTests
         AreEqual(1, simulation.ExecuteScalar("select 1 where 5 not in (select v from t)"));
     }
 
-    // === IN (SELECT) — correlated ===
-
     [TestMethod]
     public void InSelect_Correlated_FiltersByMatch()
     {
@@ -218,18 +190,10 @@ public sealed class SubqueryTests
         CollectionAssert.AreEquivalent(new int?[] { 1, 2 }, matched);
     }
 
-    // === Single-column requirement (Msg 116) ===
-
     [TestMethod]
     public void InSelect_MultiColumnInner_RaisesMsg116()
-    {
-        var ex = Throws<DbException>(() =>
-            _ = new Simulation().ExecuteScalar("select 1 where 5 in (select 1, 2)"));
-        AreEqual("116", ex.Data["HelpLink.EvtID"]);
-        AreEqual("Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.", ex.Message);
-    }
-
-    // === Combined with HAVING ===
+        => new Simulation().AssertSqlError("select 1 where 5 in (select 1, 2)", 116,
+            "Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.");
 
     [TestMethod]
     public void InSelect_InHavingClause_FiltersGroups()
@@ -241,13 +205,11 @@ public sealed class SubqueryTests
         _ = simulation.ExecuteNonQuery("insert into allowed values (30), (50)");
 
         using var connection = simulation.CreateOpenConnection();
-        // group sums: k=1 → 30, k=2 → 30. Both match `s in (30)` so both groups pass.
+        // Group sums: k=1 → 30, k=2 → 30. Both match `s in (30)`.
         var matched = ReadIntColumn(connection.CreateCommand(
             "select k from q group by k having sum(v) in (select s from allowed)"));
         CollectionAssert.AreEquivalent(new int?[] { 1, 2 }, matched);
     }
-
-    // === Two-level nesting ===
 
     [TestMethod]
     public void Exists_TwoLevelNesting_ResolvesOuterAcrossMiddle()
@@ -261,22 +223,15 @@ public sealed class SubqueryTests
         _ = simulation.ExecuteNonQuery("insert into c values (1)");
 
         using var connection = simulation.CreateOpenConnection();
-        // Innermost predicate `c.z = a.x` reaches a TWO levels up — through
-        // b's scope, which doesn't shadow `a.x` because the qualifier `a.`
-        // routes past it.
+        // Innermost predicate `c.z = a.x` reaches TWO levels up — through b's scope.
         var matched = ReadIntColumn(connection.CreateCommand(
             "select x from a where exists (select 1 from b where exists (select 1 from c where c.z = a.x))"));
         CollectionAssert.AreEqual(new int?[] { 1 }, matched);
     }
 
-    // === Plan reuse — non-correlated re-execution per outer row ===
-
     [TestMethod]
     public void InSelect_NonCorrelated_ScansSubqueryPerOuterRow()
     {
-        // Functional check that the subquery semantically matches per outer
-        // row even when the inner SELECT is non-correlated. (Performance
-        // optimization to cache the inner result is left for later.)
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table outer_t (v int)");
         _ = simulation.ExecuteNonQuery("create table inner_t (v int)");
@@ -289,31 +244,20 @@ public sealed class SubqueryTests
         CollectionAssert.AreEquivalent(new int?[] { 2, 4 }, matched);
     }
 
-    // === Scalar subqueries ===
-
     [TestMethod]
-    public void Scalar_InProjection_ReturnsValue()
-    {
-        AreEqual(1, new Simulation().ExecuteScalar("select (select 1)"));
-    }
+    public void Scalar_InProjection_ReturnsValue() => AreEqual(1, new Simulation().ExecuteScalar("select (select 1)"));
 
     [TestMethod]
     public void Scalar_InArithmetic_FlowsThroughOperator()
-    {
-        AreEqual(6, new Simulation().ExecuteScalar("select (select 1) + 5"));
-    }
+        => AreEqual(6, new Simulation().ExecuteScalar("select (select 1) + 5"));
 
     [TestMethod]
     public void Scalar_EmptyResult_IsNull()
-    {
-        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select 1 where 1=0)"));
-    }
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select 1 where 1=0)"));
 
     [TestMethod]
     public void Scalar_EmptyInArithmetic_PropagatesNull()
-    {
-        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select 1 where 1=0) + 5"));
-    }
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select 1 where 1=0) + 5"));
 
     [TestMethod]
     public void Scalar_InWhereComparison_FiltersByValue()
@@ -329,10 +273,7 @@ public sealed class SubqueryTests
 
     [TestMethod]
     public void Scalar_NullValueInRow_PropagatesNull()
-    {
-        // Single-row inner with a NULL column value flows through normally.
-        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select cast(null as int)) + 5"));
-    }
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select (select cast(null as int)) + 5"));
 
     [TestMethod]
     public void Scalar_MultiRow_RaisesMsg512()
@@ -341,18 +282,13 @@ public sealed class SubqueryTests
         _ = simulation.ExecuteNonQuery("create table t (x int)");
         _ = simulation.ExecuteNonQuery("insert into t values (1), (2)");
 
-        var ex = Throws<DbException>(() => _ = simulation.ExecuteScalar("select (select x from t)"));
-        AreEqual("512", ex.Data["HelpLink.EvtID"]);
-        AreEqual("Subquery returned more than 1 value. This is not permitted when the subquery follows =, !=, <, <= , >, >= or when the subquery is used as an expression.", ex.Message);
+        simulation.AssertSqlError("select (select x from t)", 512,
+            "Subquery returned more than 1 value. This is not permitted when the subquery follows =, !=, <, <= , >, >= or when the subquery is used as an expression.");
     }
 
     [TestMethod]
     public void Scalar_MultiColumn_RaisesMsg116()
-    {
-        var ex = Throws<DbException>(() =>
-            _ = new Simulation().ExecuteScalar("select (select 1, 2)"));
-        AreEqual("116", ex.Data["HelpLink.EvtID"]);
-    }
+        => _ = new Simulation().AssertSqlError("select (select 1, 2)", 116);
 
     [TestMethod]
     public void Scalar_Correlated_ResolvesPerRow()
@@ -380,7 +316,7 @@ public sealed class SubqueryTests
     [TestMethod]
     public void Scalar_CorrelatedMultiRow_RaisesMsg512()
     {
-        // Per-outer-row Msg 512: a.id=1 matches two b rows, hits the limit.
+        // Per-outer-row Msg 512: a.id=1 matches two b rows.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table a (id int)");
         _ = simulation.ExecuteNonQuery("create table b (id int, val int)");
@@ -391,7 +327,7 @@ public sealed class SubqueryTests
         var ex = Throws<DbException>(() =>
         {
             using var reader = connection.CreateCommand("select (select b.val from b where b.id = a.id) from a").ExecuteReader();
-            while (reader.Read()) { /* exhaust */ }
+            while (reader.Read()) { }
         });
         AreEqual("512", ex.Data["HelpLink.EvtID"]);
     }
@@ -399,7 +335,6 @@ public sealed class SubqueryTests
     [TestMethod]
     public void Scalar_AggregateInner_ReturnsAggregate()
     {
-        // Common EF Core pattern: scalar subquery with COUNT.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table a (id int)");
         _ = simulation.ExecuteNonQuery("create table b (id int)");
@@ -419,8 +354,6 @@ public sealed class SubqueryTests
         CollectionAssert.AreEqual(new[] { 3, 3 }, counts);
     }
 
-    // === EXISTS with table-alias resolution ===
-
     [TestMethod]
     public void Exists_TableAlias_QualifiesCorrelatedRef()
     {
@@ -431,8 +364,6 @@ public sealed class SubqueryTests
         _ = simulation.ExecuteNonQuery("insert into child values (1)");
 
         using var connection = simulation.CreateOpenConnection();
-        // The alias `p` qualifies the outer reference inside the correlated
-        // subquery, distinct from the inner alias `c`.
         var matched = ReadIntColumn(connection.CreateCommand(
             "select p.id from parent as p where exists (select 1 from child as c where c.parent_id = p.id)"));
         CollectionAssert.AreEqual(new int?[] { 1 }, matched);

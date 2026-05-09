@@ -1,14 +1,12 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for the <c>uniqueidentifier</c> type: 16-byte fixed-length
-/// GUID storage, NEWID(), CAST round-trips through string and varbinary, the
-/// SQL-Server-specific sort order, parameter binding, and the rejected
-/// conversions.
+/// Behavioral tests for <c>uniqueidentifier</c>: 16-byte fixed-length GUID
+/// storage, NEWID(), CAST round-trips through string and varbinary, the
+/// SQL-Server-specific sort order, parameter binding, and rejected conversions.
 /// </summary>
 [TestClass]
 public sealed class UniqueIdentifierTests
@@ -16,99 +14,69 @@ public sealed class UniqueIdentifierTests
     private const string Sample = "AABBCCDD-EEFF-0011-2233-445566778899";
 
     [TestMethod]
-    public void NewId_ReturnsUniqueidentifier()
-    {
-        var value = ExecuteScalar("select newid()");
-        _ = IsInstanceOfType<Guid>(value);
-    }
+    public void NewId_ReturnsUniqueidentifier() => _ = IsInstanceOfType<Guid>(ExecuteScalar("select newid()"));
 
     [TestMethod]
     public void NewId_ProducesDistinctValuesAcrossCalls()
     {
         var simulation = new Simulation();
-        var first = simulation.ExecuteScalar<Guid>("select newid()");
-        var second = simulation.ExecuteScalar<Guid>("select newid()");
-        AreNotEqual(first, second);
+        AreNotEqual(simulation.ExecuteScalar<Guid>("select newid()"), simulation.ExecuteScalar<Guid>("select newid()"));
     }
 
     [TestMethod]
     [DataRow("'aabbccdd-eeff-0011-2233-445566778899'")]
     [DataRow("'AABBCCDD-EEFF-0011-2233-445566778899'")]
     [DataRow("'{aabbccdd-eeff-0011-2233-445566778899}'")]
-    // Trailing whitespace is accepted by SQL Server; leading is not.
-    [DataRow("'aabbccdd-eeff-0011-2233-445566778899   '")]
+    [DataRow("'aabbccdd-eeff-0011-2233-445566778899   '")]    // trailing whitespace accepted
     [DataRow("N'aabbccdd-eeff-0011-2233-445566778899'")]
     public void Cast_StringToUniqueIdentifier_AcceptsValidForms(string literal)
-    {
-        var value = ExecuteScalar<Guid>($"select cast({literal} as uniqueidentifier)");
-        AreEqual(Guid.Parse("aabbccdd-eeff-0011-2233-445566778899"), value);
-    }
+        => AreEqual(Guid.Parse("aabbccdd-eeff-0011-2233-445566778899"),
+            ExecuteScalar<Guid>($"select cast({literal} as uniqueidentifier)"));
 
     [TestMethod]
     [DataRow("'not-a-guid'")]
-    // Wrong length (one digit short).
-    [DataRow("'aabbccdd-eeff-0011-2233-44556677889'")]
-    // SQL Server rejects parens-as-braces; only `{}` is accepted.
-    [DataRow("'(aabbccdd-eeff-0011-2233-445566778899)'")]
-    // No-dashes form (.NET's `N` format) is rejected.
-    [DataRow("'aabbccddeeff00112233445566778899'")]
-    // Leading whitespace is rejected.
-    [DataRow("' aabbccdd-eeff-0011-2233-445566778899'")]
+    [DataRow("'aabbccdd-eeff-0011-2233-44556677889'")]    // wrong length
+    [DataRow("'(aabbccdd-eeff-0011-2233-445566778899)'")] // parens not accepted (only `{}`)
+    [DataRow("'aabbccddeeff00112233445566778899'")]       // no-dashes form rejected
+    [DataRow("' aabbccdd-eeff-0011-2233-445566778899'")]  // leading whitespace rejected
     public void Cast_StringToUniqueIdentifier_BadFormatRaisesMsg8169(string literal)
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar($"select cast({literal} as uniqueidentifier)"));
-        AreEqual("Conversion failed when converting from a character string to uniqueidentifier.", ex.Message);
-    }
+        => AssertSqlMessage($"select cast({literal} as uniqueidentifier)",
+            "Conversion failed when converting from a character string to uniqueidentifier.");
 
     [TestMethod]
     public void Cast_UniqueIdentifierToVarchar_EmitsUppercaseDashedForm()
-    {
-        var value = ExecuteScalar($"select cast(cast('{Sample}' as uniqueidentifier) as varchar(64))");
-        AreEqual(Sample, value);
-    }
+        => AreEqual(Sample, ExecuteScalar($"select cast(cast('{Sample}' as uniqueidentifier) as varchar(64))"));
 
     [TestMethod]
     public void Cast_UniqueIdentifierToNVarchar_EmitsUppercaseDashedForm()
-    {
-        var value = ExecuteScalar($"select cast(cast('{Sample}' as uniqueidentifier) as nvarchar(64))");
-        AreEqual(Sample, value);
-    }
+        => AreEqual(Sample, ExecuteScalar($"select cast(cast('{Sample}' as uniqueidentifier) as nvarchar(64))"));
 
     [TestMethod]
     public void Cast_UniqueIdentifierToVarcharBelow36_RaisesMsg8170()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar(
-            $"select cast(cast('{Sample}' as uniqueidentifier) as varchar(35))"));
-        AreEqual("Insufficient result space to convert uniqueidentifier value to char.", ex.Message);
-    }
+        => AssertSqlMessage($"select cast(cast('{Sample}' as uniqueidentifier) as varchar(35))",
+            "Insufficient result space to convert uniqueidentifier value to char.");
 
     [TestMethod]
     public void Cast_UniqueIdentifierToNVarcharBelow36_RaisesMsg8115()
     {
-        // SQL Server uses the generic arithmetic-overflow message for
-        // nchar/nvarchar, not the dedicated 8170 text it uses for char/varchar.
-        var ex = Throws<DbException>(() => ExecuteScalar(
-            $"select cast(cast('{Sample}' as uniqueidentifier) as nvarchar(35))"));
-        AreEqual("Arithmetic overflow error converting expression to data type nvarchar.", ex.Message);
+        // SQL Server uses generic arithmetic-overflow for nchar/nvarchar (not the dedicated 8170 used for char/varchar).
+        AssertSqlMessage($"select cast(cast('{Sample}' as uniqueidentifier) as nvarchar(35))",
+        "Arithmetic overflow error converting expression to data type nvarchar.");
     }
 
     [TestMethod]
     public void Cast_NullUniqueIdentifierToTooNarrowVarchar_PassesThroughAsDBNull()
     {
-        // SQL Server's length check is value-conditional: NULL doesn't fire
-        // either Msg 8170 or 8115.
+        // Length check is value-conditional: NULL doesn't fire either Msg 8170 or 8115.
         _ = IsInstanceOfType<DBNull>(ExecuteScalar(
-            "select cast(cast(cast(null as varchar(36)) as uniqueidentifier) as varchar(35))"));
+        "select cast(cast(cast(null as varchar(36)) as uniqueidentifier) as varchar(35))"));
     }
 
     [TestMethod]
     public void Cast_VarbinaryToUniqueIdentifier_RoundTripsByteOrder()
     {
-        // Real SQL Server's on-disk byte layout matches Guid.ToByteArray():
-        // first three groups are reversed, last group is raw bytes.
-        // 0x33221100554477668899AABBCCDDEEFF ↔ 00112233-4455-6677-8899-aabbccddeeff
-        var value = ExecuteScalar<Guid>(
-            "select cast(0x33221100554477668899AABBCCDDEEFF as uniqueidentifier)");
+        // SQL Server's on-disk byte layout matches Guid.ToByteArray(): first three groups reversed, last group raw.
+        var value = ExecuteScalar<Guid>("select cast(0x33221100554477668899AABBCCDDEEFF as uniqueidentifier)");
         AreEqual(Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"), value);
     }
 
@@ -125,20 +93,15 @@ public sealed class UniqueIdentifierTests
     [TestMethod]
     public void Cast_VarbinaryShorterThan16_PadsRightWithZeros()
     {
-        // 15-byte varbinary becomes byte 15 = 0 in the GUID. SQL Server is
-        // lenient about length here — no error.
-        var value = ExecuteScalar<Guid>(
-            "select cast(0xaabbccddeeff001122334455667788 as uniqueidentifier)");
-        // Bytes [aa,bb,cc,dd, ee,ff, 00,11, 22,33,44,55,66,77,88, 00] →
-        // ddccbbaa-ffee-1100-2233-445566778800
+        // 15-byte varbinary becomes byte 15 = 0 in the GUID. SQL Server is lenient here — no error.
+        var value = ExecuteScalar<Guid>("select cast(0xaabbccddeeff001122334455667788 as uniqueidentifier)");
         AreEqual(Guid.Parse("ddccbbaa-ffee-1100-2233-445566778800"), value);
     }
 
     [TestMethod]
     public void Cast_VarbinaryLongerThan16_TruncatesFromTheRight()
     {
-        var value = ExecuteScalar<Guid>(
-            "select cast(0xaabbccddeeff0011223344556677889900 as uniqueidentifier)");
+        var value = ExecuteScalar<Guid>("select cast(0xaabbccddeeff0011223344556677889900 as uniqueidentifier)");
         AreEqual(Guid.Parse("ddccbbaa-ffee-1100-2233-445566778899"), value);
     }
 
@@ -149,28 +112,19 @@ public sealed class UniqueIdentifierTests
     [DataRow("date")]
     public void Cast_DisallowedSourceToUniqueIdentifier_RaisesMsg529(string sourceTypeSql)
     {
-        // Use a same-type literal: cast 0 (or '2024-01-01') first to source,
-        // then to uniqueidentifier.
         var literal = sourceTypeSql == "date" ? "'2024-01-01'" : "0";
-        var ex = Throws<DbException>(() => ExecuteScalar(
-            $"select cast(cast({literal} as {sourceTypeSql}) as uniqueidentifier)"));
-        Assert.StartsWith($"Explicit conversion from data type {sourceTypeSql} to uniqueidentifier is not allowed.", ex.Message);
+        var ex = AssertSqlError($"select cast(cast({literal} as {sourceTypeSql}) as uniqueidentifier)", 529);
+        StartsWith($"Explicit conversion from data type {sourceTypeSql} to uniqueidentifier is not allowed.", ex.Message);
     }
 
     [TestMethod]
     public void Cast_UniqueIdentifierToDisallowedTarget_RaisesMsg529()
-    {
-        var ex = Throws<DbException>(() => ExecuteScalar(
-            $"select cast(cast('{Sample}' as uniqueidentifier) as int)"));
-        AreEqual("Explicit conversion from data type uniqueidentifier to int is not allowed.", ex.Message);
-    }
+        => AssertSqlMessage($"select cast(cast('{Sample}' as uniqueidentifier) as int)",
+            "Explicit conversion from data type uniqueidentifier to int is not allowed.");
 
     [TestMethod]
     public void UniqueIdentifier_EqualityIsCaseInsensitiveOnHex_ViaWhere()
     {
-        // Round-trip through a heap table with a WHERE filter: case-insensitive
-        // hex parsing means rows inserted via lowercase compare equal to the
-        // uppercase literal in the WHERE clause.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery("insert into t (id) values (cast('aabbccdd-eeff-0011-2233-445566778899' as uniqueidentifier))");
@@ -185,8 +139,7 @@ public sealed class UniqueIdentifierTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery($"insert into t (id) values (cast('{Sample}' as uniqueidentifier))");
-        var match = simulation.ExecuteScalar<Guid>($"select id from t where id = '{Sample}'");
-        AreEqual(Guid.Parse(Sample), match);
+        AreEqual(Guid.Parse(Sample), simulation.ExecuteScalar<Guid>($"select id from t where id = '{Sample}'"));
     }
 
     [TestMethod]
@@ -195,8 +148,7 @@ public sealed class UniqueIdentifierTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery($"insert into t (id) values (cast('{Sample}' as uniqueidentifier))");
-        var match = simulation.ExecuteScalar<Guid>($"select id from t where '{Sample}' = id");
-        AreEqual(Guid.Parse(Sample), match);
+        AreEqual(Guid.Parse(Sample), simulation.ExecuteScalar<Guid>($"select id from t where '{Sample}' = id"));
     }
 
     [TestMethod]
@@ -205,8 +157,7 @@ public sealed class UniqueIdentifierTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery($"insert into t (id) values (cast('{Sample}' as uniqueidentifier))");
-        var match = simulation.ExecuteScalar<Guid>($"select id from t where id = N'{Sample}'");
-        AreEqual(Guid.Parse(Sample), match);
+        AreEqual(Guid.Parse(Sample), simulation.ExecuteScalar<Guid>($"select id from t where id = N'{Sample}'"));
     }
 
     [TestMethod]
@@ -216,9 +167,7 @@ public sealed class UniqueIdentifierTests
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery($"insert into t (id) values (cast('{Sample}' as uniqueidentifier))");
         _ = simulation.ExecuteNonQuery("insert into t (id) values (cast('00000000-0000-0000-0000-000000000001' as uniqueidentifier))");
-        // Filter out one row by string-form inequality; one row remains.
-        var match = simulation.ExecuteScalar<Guid>($"select id from t where id <> '{Sample}'");
-        AreEqual(Guid.Parse("00000000-0000-0000-0000-000000000001"), match);
+        AreEqual(Guid.Parse("00000000-0000-0000-0000-000000000001"), simulation.ExecuteScalar<Guid>($"select id from t where id <> '{Sample}'"));
     }
 
     [TestMethod]
@@ -227,20 +176,17 @@ public sealed class UniqueIdentifierTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery($"insert into t (id) values (cast('{Sample}' as uniqueidentifier))");
-        var ex = Throws<DbException>(() => simulation.ExecuteScalar("select id from t where id = 'not-a-guid'"));
-        AreEqual("Conversion failed when converting from a character string to uniqueidentifier.", ex.Message);
+        simulation.AssertSqlError("select id from t where id = 'not-a-guid'", 8169,
+            "Conversion failed when converting from a character string to uniqueidentifier.");
     }
 
     [TestMethod]
     public void Insert_StringLiteralIntoUniqueIdentifierColumn_ParsesAndStores()
     {
-        // Direct INSERT path: the string literal coerces through the uid
-        // type-converter just like in CAST. Should round-trip identically.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         _ = simulation.ExecuteNonQuery($"insert into t (id) values ('{Sample}')");
-        var stored = simulation.ExecuteScalar<Guid>("select id from t");
-        AreEqual(Guid.Parse(Sample), stored);
+        AreEqual(Guid.Parse(Sample), simulation.ExecuteScalar<Guid>("select id from t"));
     }
 
     [TestMethod]
@@ -248,38 +194,30 @@ public sealed class UniqueIdentifierTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
-        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("insert into t (id) values ('not-a-guid')"));
-        AreEqual("Conversion failed when converting from a character string to uniqueidentifier.", ex.Message);
+        simulation.AssertSqlError("insert into t (id) values ('not-a-guid')", 8169,
+            "Conversion failed when converting from a character string to uniqueidentifier.");
     }
 
     [TestMethod]
     public void Cast_NullToUniqueIdentifier_ReturnsDBNull()
-    {
-        _ = IsInstanceOfType<DBNull>(ExecuteScalar("select cast(cast(null as varchar(36)) as uniqueidentifier)"));
-    }
+        => _ = IsInstanceOfType<DBNull>(ExecuteScalar("select cast(cast(null as varchar(36)) as uniqueidentifier)"));
 
     [TestMethod]
     public void Cast_NullUniqueIdentifierToVarchar_ReturnsDBNull()
-    {
-        _ = IsInstanceOfType<DBNull>(ExecuteScalar("select cast(cast(cast(null as varchar(36)) as uniqueidentifier) as varchar(64))"));
-    }
+        => _ = IsInstanceOfType<DBNull>(ExecuteScalar(
+            "select cast(cast(cast(null as varchar(36)) as uniqueidentifier) as varchar(64))"));
 
     [TestMethod]
     public void UniqueIdentifier_WidthSpecifierInColumnDeclarationRaisesMsg2716()
     {
-        // Fixed-length type rejects (N) on a column declaration via the
-        // existing Msg 2716 path.
-        var simulation = new Simulation();
-        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("create table t (id uniqueidentifier(16))"));
-        Assert.Contains("Cannot specify a column width on data type uniqueidentifier", ex.Message);
+        var ex = new Simulation().AssertSqlError("create table t (id uniqueidentifier(16))", 2716);
+        Contains("Cannot specify a column width on data type uniqueidentifier", ex.Message);
     }
 
     [TestMethod]
     public void UniqueIdentifier_OrderBy_UsesSqlServerSortOrder()
     {
-        // SQL Server's quirky sort: bytes 10..15 most significant. The
-        // string-form orderings here would be reversed under .NET's
-        // natural Guid.CompareTo.
+        // SQL Server sort: bytes 10..15 most significant. Inverse of .NET's natural Guid.CompareTo on string-form.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id uniqueidentifier)");
         string[] inserts =
@@ -295,13 +233,11 @@ public sealed class UniqueIdentifierTests
             _ = simulation.ExecuteNonQuery($"insert into t (id) values (cast('{s}' as uniqueidentifier))");
 
         using var connection = simulation.CreateOpenConnection();
-        using var command = connection.CreateCommand("select id from t order by id");
-        using var reader = command.ExecuteReader();
+        using var reader = connection.CreateCommand("select id from t order by id").ExecuteReader();
         var ordered = new List<Guid>();
         while (reader.Read())
             ordered.Add(reader.GetGuid(0));
 
-        // Expected order, verified against SQL Server 2025.
         CollectionAssert.AreEqual(
             new[]
             {
@@ -320,9 +256,7 @@ public sealed class UniqueIdentifierTests
     {
         var expected = Guid.Parse(Sample);
         using var connection = new Simulation().CreateOpenConnection();
-        using var command = connection.CreateCommand("select @p", ("@p", expected));
-        var actual = command.ExecuteScalar();
-        AreEqual(expected, actual);
+        AreEqual(expected, connection.CreateCommand("select @p", ("@p", expected)).ExecuteScalar());
     }
 
     [TestMethod]
@@ -330,8 +264,7 @@ public sealed class UniqueIdentifierTests
     {
         var expected = Guid.Parse(Sample);
         using var connection = new Simulation().CreateOpenConnection();
-        using var command = connection.CreateCommand("select @p", ("@p", expected));
-        using var reader = command.ExecuteReader();
+        using var reader = connection.CreateCommand("select @p", ("@p", expected)).ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(expected, reader.GetGuid(0));
     }

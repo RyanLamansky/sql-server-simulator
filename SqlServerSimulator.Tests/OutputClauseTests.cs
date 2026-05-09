@@ -1,13 +1,10 @@
-using System.Data.Common;
-
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Direct-SQL coverage for the <c>INSERT ... OUTPUT INSERTED.&lt;col&gt;</c>
-/// clause and the narrowly-shaped <c>MERGE INTO ... USING (VALUES) ON 1 = 0
-/// WHEN NOT MATCHED THEN INSERT ... OUTPUT</c> form that EF Core emits for
-/// multi-row SaveChanges. Behavior pinned here; EF-side coverage lives in
-/// <c>EFCoreIdentity</c>.
+/// Direct-SQL coverage for <c>INSERT ... OUTPUT INSERTED.&lt;col&gt;</c> and
+/// the narrowly-shaped <c>MERGE INTO ... USING (VALUES) ON 1 = 0 WHEN NOT
+/// MATCHED THEN INSERT ... OUTPUT</c> form that EF Core emits for multi-row
+/// SaveChanges.
 /// </summary>
 [TestClass]
 public class OutputClauseTests
@@ -18,9 +15,7 @@ public class OutputClauseTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int identity(1, 1) not null, name nvarchar(20) not null )");
 
-        using var reader = simulation
-            .CreateCommand("insert into t (name) output inserted.id values ('a')")
-            .ExecuteReader();
+        using var reader = simulation.CreateCommand("insert into t (name) output inserted.id values ('a')").ExecuteReader();
 
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(1, reader.GetInt32(0));
@@ -65,8 +60,6 @@ public class OutputClauseTests
     [TestMethod]
     public void InsertOutput_OnNonIdentityColumns_StillProjects()
     {
-        // OUTPUT isn't identity-specific — it streams whatever columns the
-        // caller asks for from the inserted row.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( a int, b int )");
 
@@ -97,34 +90,24 @@ public class OutputClauseTests
     [TestMethod]
     public void InsertOutput_UnprefixedColumnReference_RaisesMsg4104()
     {
-        // Real SQL Server: identifiers in OUTPUT must be prefixed with INSERTED
-        // or DELETED (or a MERGE source alias). Bare/destination-prefixed
-        // references fail with Msg 4104 "could not be bound".
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( a int )");
-
-        var ex = Assert.Throws<DbException>(() =>
-            simulation.ExecuteScalar("insert into t output a values (1)"));
+        var ex = simulation.AssertSqlError("insert into t output a values (1)", 4104);
         Assert.Contains("could not be bound", ex.Message);
     }
 
     [TestMethod]
     public void InsertOutput_DeletedReference_RaisesMsg4104()
     {
-        // INSERT has no DELETED rows; referencing DELETED.col fails like real SQL Server.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int )");
-
-        var ex = Assert.Throws<DbException>(() =>
-            simulation.ExecuteScalar("insert into t output deleted.id values (1)"));
+        var ex = simulation.AssertSqlError("insert into t output deleted.id values (1)", 4104);
         Assert.Contains("could not be bound", ex.Message);
     }
 
     [TestMethod]
     public void InsertOutput_PersistsRowsInTable()
     {
-        // OUTPUT shouldn't change INSERT's persistence semantics — the rows
-        // are still inserted, just with the projection streamed back.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int identity(1, 1) not null, name nvarchar(20) not null )");
 
@@ -167,9 +150,8 @@ public class OutputClauseTests
     [TestMethod]
     public void Merge_OutputProjectsInsertedAndSourceColumns()
     {
-        // EF Core's multi-row insert pattern: OUTPUT projects both INSERTED.id
-        // (the auto-generated key) and a positional column carried through the
-        // source alias so EF can stitch generated keys back to original entities.
+        // EF Core's multi-row insert pattern: OUTPUT projects INSERTED.id (auto-key) plus a positional
+        // column from the source alias so EF can stitch generated keys back to original entities.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int identity(1, 1) not null, name nvarchar(20) not null )");
 
@@ -198,8 +180,7 @@ public class OutputClauseTests
     [TestMethod]
     public void Merge_WithoutInto_AcceptsEFsForm()
     {
-        // EF Core emits "MERGE [target]" with no INTO; real SQL Server accepts
-        // both forms. The simulator must follow.
+        // EF Core emits "MERGE [target]" with no INTO; SQL Server accepts both.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int identity(1, 1) not null, v int not null )");
 
@@ -213,11 +194,7 @@ public class OutputClauseTests
     [TestMethod]
     public void Merge_AutoPopulatesRowVersionOnNotMatchedInsert()
     {
-        // EF Core's batched insert into a [Timestamp] entity emits a MERGE
-        // WHEN NOT MATCHED INSERT against a rowversion-bearing table; the
-        // simulator must auto-bump rowversion the same way INSERT does
-        // (the standalone INSERT path had this; MERGE was a parallel path
-        // that missed it).
+        // Regression: standalone INSERT auto-bumped rowversion; the parallel MERGE path missed it.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int primary key, name nvarchar(50), rv rowversion)");
 
@@ -227,8 +204,6 @@ public class OutputClauseTests
             """);
         Assert.AreEqual(2, affected);
 
-        // Both inserted rows must have non-NULL rowversion bytes; values
-        // distinct because rowversion is monotonic per-allocation.
         using var reader = simulation.ExecuteReader("select id, rv from t order by id");
         Assert.IsTrue(reader.Read());
         var row1 = (byte[])reader.GetValue(1);
@@ -240,25 +215,20 @@ public class OutputClauseTests
     [TestMethod]
     public void Merge_ExplicitRowVersionInColumnList_RaisesMsg273()
     {
-        // Mirrors INSERT's Msg 273 rejection. The MERGE INSERT branch must
-        // refuse explicit values for a rowversion column the same way.
+        // MERGE INSERT branch must refuse explicit values for rowversion (mirrors INSERT's Msg 273).
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int primary key, rv rowversion)");
 
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("""
+        _ = simulation.AssertSqlError("""
             merge t using (values (1, 0x0000000000000001)) as s (id, rv) on 1 = 0
             when not matched then insert (id, rv) values (s.id, s.rv);
-            """));
-        Assert.AreEqual(273, ex.Data["HelpLink.EvtID"] is string s ? int.Parse(s) : 0);
+            """, 273);
     }
 
     [TestMethod]
     public void Merge_WhenMatchedFires_RaisesNotSupported()
     {
-        // The simulator parses WHEN MATCHED syntactically but throws if the ON
-        // predicate ever steers a source row into that branch. EF never does
-        // (its predicate is literal `1 = 0`), but a hand-written MERGE that
-        // does should fail loudly so the gap is visible.
+        // Simulator parses WHEN MATCHED but throws if the ON predicate ever steers a source row there.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int, v int )");
 
@@ -272,9 +242,6 @@ public class OutputClauseTests
     [TestMethod]
     public void Merge_FirstSourceTuple_DeterminesAliasSchema()
     {
-        // Source-alias column types come from the first VALUES tuple — used
-        // for OUTPUT planning. A literal 0 here is int; OUTPUT picks that up
-        // even though all real SQL Server cares about at runtime is the value.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int identity(1, 1) not null, v int not null )");
 
@@ -295,7 +262,6 @@ public class OutputClauseTests
     [TestMethod]
     public void Merge_UpdatesScopeIdentity()
     {
-        // SCOPE_IDENTITY/@@IDENTITY behave the same after MERGE-driven inserts.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t ( id int identity(1, 1) not null, v int not null )");
 

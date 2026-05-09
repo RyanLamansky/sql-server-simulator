@@ -4,11 +4,9 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for SQL aggregate functions: COUNT/COUNT_BIG/SUM/AVG/
-/// MAX/MIN, the statistical family (STDEV, STDEVP, VAR, VARP),
-/// STRING_AGG, CHECKSUM_AGG, APPROX_COUNT_DISTINCT — both standalone and
-/// in combination with GROUP BY / HAVING. Result types and NULL / empty-
-/// input semantics are sourced from probes against SQL Server 2025.
+/// Behavioral tests for SQL aggregate functions: COUNT/COUNT_BIG/SUM/AVG/MAX/MIN,
+/// the statistical family (STDEV, STDEVP, VAR, VARP), STRING_AGG, CHECKSUM_AGG,
+/// APPROX_COUNT_DISTINCT — both standalone and with GROUP BY / HAVING.
 /// </summary>
 [TestClass]
 public sealed class AggregateTests
@@ -68,8 +66,6 @@ public sealed class AggregateTests
     [TestMethod]
     public void Sum_Decimal_PreservesScale()
     {
-        // SQL Server: SUM(decimal(p, s)) → decimal(38, s). Probed against
-        // SQL Server 2025 — scale 2 stays 2.
         using var connection = Seeded("p decimal(10, 2)", "(1.50), (2.50), (3.00)");
         AreEqual(7.00m, connection.CreateCommand("select sum(p) from t").ExecuteScalar());
     }
@@ -113,7 +109,6 @@ public sealed class AggregateTests
     [TestMethod]
     public void Avg_Int_TruncatesByIntegerDivision()
     {
-        // SQL Server: `avg(int)` returns int via integer division. (1+2+2)/3 = 1.
         using var connection = Seeded("a int", "(1), (2), (2)");
         AreEqual(1, connection.CreateCommand("select avg(a) from t").ExecuteScalar());
     }
@@ -121,11 +116,8 @@ public sealed class AggregateTests
     [TestMethod]
     public void Avg_Decimal_WidensToDecimal38_6()
     {
-        // SQL Server: avg(decimal(p, s)) → decimal(38, max(s, 6)). Scale 2
-        // input → scale 6 output.
         using var connection = Seeded("p decimal(10, 2)", "(1.50), (2.50), (3.00)");
-        var result = connection.CreateCommand("select avg(p) from t").ExecuteScalar();
-        AreEqual(2.333333m, result);
+        AreEqual(2.333333m, connection.CreateCommand("select avg(p) from t").ExecuteScalar());
     }
 
     [TestMethod]
@@ -161,7 +153,6 @@ public sealed class AggregateTests
     [TestMethod]
     public void Max_OnText_RaisesMsg8117()
     {
-        // SQL Server's Msg 8117: LOB types can't participate in MAX/MIN.
         using var connection = Seeded("t text", "('x')");
         var ex = Throws<DbException>(() => connection.CreateCommand("select max(t) from t").ExecuteScalar());
         AreEqual("8117", ex.Data["HelpLink.EvtID"]);
@@ -170,7 +161,7 @@ public sealed class AggregateTests
     [TestMethod]
     public void Stdev_SingleRow_ReturnsNull()
     {
-        // Sample stddev needs n > 1. Single row → divide by zero → NULL.
+        // Sample stddev needs n > 1.
         using var connection = Seeded("a int", "(5)");
         AreEqual(DBNull.Value, connection.CreateCommand("select stdev(a) from t").ExecuteScalar());
     }
@@ -178,7 +169,6 @@ public sealed class AggregateTests
     [TestMethod]
     public void StdevP_SingleRow_ReturnsZero()
     {
-        // Population stddev with n=1 has zero deviation.
         using var connection = Seeded("a int", "(5)");
         AreEqual(0d, connection.CreateCommand("select stdevp(a) from t").ExecuteScalar());
     }
@@ -186,8 +176,7 @@ public sealed class AggregateTests
     [TestMethod]
     public void Var_VarP_OverIntegerColumn()
     {
-        // 10, 20, 30: mean=20, sample var = ((10-20)^2 + 0 + (30-20)^2) / 2 = 100.
-        // Population var = 200/3 ≈ 66.67.
+        // 10, 20, 30: mean=20, sample var = ((10-20)² + 0 + (30-20)²) / 2 = 100. Population var = 200/3 ≈ 66.67.
         using var connection = Seeded("a int", "(10), (20), (30)");
         AreEqual(100d, connection.CreateCommand("select var(a) from t").ExecuteScalar());
         var pop = (double)connection.CreateCommand("select varp(a) from t").ExecuteScalar()!;
@@ -218,10 +207,7 @@ public sealed class AggregateTests
     [TestMethod]
     public void ChecksumAgg_OrderIndependentFold()
     {
-        // CHECKSUM_AGG's semantic guarantee is order-independence; the bit
-        // pattern itself isn't pinned (SQL Server's exact algorithm is
-        // implementation-defined). The simulator's contract: same multiset
-        // of inputs → same checksum.
+        // Semantic guarantee: same multiset → same checksum (exact bit pattern not pinned).
         using var ascending = Seeded("a int", "(1), (2), (3)");
         using var reversed = Seeded("a int", "(3), (2), (1)");
         AreEqual(
@@ -232,8 +218,7 @@ public sealed class AggregateTests
     [TestMethod]
     public void ApproxCountDistinct_BehavesLikeCountDistinct()
     {
-        // Simulator implements APPROX_COUNT_DISTINCT as exact COUNT(DISTINCT)
-        // since memory optimization isn't a goal. Still returns bigint.
+        // Simulator implements as exact COUNT(DISTINCT). Returns bigint.
         using var connection = Seeded("a int", "(1), (2), (1), (null), (3)");
         AreEqual(3L, connection.CreateCommand("select approx_count_distinct(a) from t").ExecuteScalar());
     }
