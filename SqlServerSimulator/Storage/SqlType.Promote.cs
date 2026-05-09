@@ -224,6 +224,28 @@ internal abstract partial class SqlType
         if (op is '&' or '|' or '^')
             return Promote(a, b);
 
+        // String + string is concatenation, not arithmetic. Pure char/nchar
+        // pairs preserve fixed-length-ness with combined lengths capped at
+        // the type's max (8000 for char, 4000 for nchar) — probe-confirmed
+        // against SQL Server 2025 (2026-05-09): `char(5) + char(5)` → char(10),
+        // `char(5) + nchar(5)` → nchar(10), `char(8000) + char(100)` → char(8000).
+        // Mixed fixed/variable pairs (`char + varchar`, `nchar + nvarchar`,
+        // etc.) drop to length-less varchar/nvarchar — the simulator stores
+        // variable-length string length at the column level, not the SqlType,
+        // so result-length metadata for varchar/nvarchar pairs isn't tracked.
+        if (op == '+' && a.Category == SqlTypeCategory.String && b.Category == SqlTypeCategory.String)
+        {
+            return (a, b) switch
+            {
+                (CharSqlType ca, CharSqlType cb) => GetChar(Math.Min(8000, ca.length + cb.length)),
+                (NCharSqlType na, NCharSqlType nb) => GetNChar(Math.Min(4000, na.length + nb.length)),
+                (CharSqlType caMix, NCharSqlType nbMix) => GetNChar(Math.Min(4000, caMix.length + nbMix.length)),
+                (NCharSqlType naMix, CharSqlType cbMix) => GetNChar(Math.Min(4000, naMix.length + cbMix.length)),
+                _ => a == NVarchar || b == NVarchar || a is NCharSqlType || b is NCharSqlType || a == NText || b == NText
+                    ? NVarchar : Varchar,
+            };
+        }
+
         // Float / real win over everything else, same as the joint-envelope
         // path; no decimal-style scale dance needed.
         if (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)

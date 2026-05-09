@@ -240,4 +240,16 @@ public class EFCoreStrings
         using var fresh = new TestDbContext(context.Simulation);
         Assert.AreEqual(6, fresh.People.Select(p => p.Name.IndexOf("world", StringComparison.Ordinal)).Single());
     }
+
+    [TestMethod]
+    public void StringFunction_ConcatViaPlus()
+    {
+        // EF Core 10 emits `[Name] + N'-' + [Code]` for `string.Concat(p.Name, "-", p.Code)`
+        // — the `+` operator, not the CONCAT function. Both sides non-null.
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Alice", Code = "A1" });
+
+        using var fresh = new TestDbContext(context.Simulation);
+        Assert.AreEqual("Alice-A1", fresh.People.Select(p => string.Concat(p.Name, "-", p.Code)).Single());
+    }
+
 }

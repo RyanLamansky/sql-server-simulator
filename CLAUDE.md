@@ -231,6 +231,33 @@ Result types (probe-confirmed 2026-05-09 via `SELECT INTO` + `tempdb.information
 
 `CurrentTimeFunction` (`Parser/Expressions/`) is a single class with a `CurrentTimeKind` discriminator; result-type rules and the SqlValue construction live in one place. The class holds a `Simulation` reference like `LastIdentityExpression` does, and reads `CurrentStatementUtcNow` per `Run` call.
 
+### Variadic string concatenation: `CONCAT` / `CONCAT_WS`
+Both functions stringify each argument via the standard CAST-to-varchar/nvarchar path, **skip NULL arguments** (rather than propagating), and **never return NULL** — an all-NULL input returns `''`, NOT NULL. Result type is `nvarchar` if any argument has a national-string type (`nvarchar` / `nchar` / `ntext`); otherwise `varchar`. Probe-confirmed 2026-05-09.
+
+Argument-count rules raise **Msg 189** with lowercase function name and per-function minimum: `CONCAT` requires 2-254 args (`"The concat function requires 2 to 254 arguments."`); `CONCAT_WS` requires 3-254 args — separator + at least two values (`"The concat_ws function requires 3 to 254 arguments."`).
+
+`CONCAT_WS` quirks worth knowing:
+- **NULL separator silently degrades to empty string** — `concat_ws(NULL, 'a', 'b')` returns `'ab'`, not NULL. Probe-confirmed; doesn't match common documentation that asserts NULL propagation.
+- **NULL values are skipped entirely** — no double separator next to a missing value: `concat_ws(',', 'a', NULL, 'b')` → `'a,b'`, not `'a,,b'`.
+- **Single-value form errors** — `concat_ws(',', 'a')` raises Msg 189; the function refuses to act as a no-op stringifier.
+
+The result type is computed from runtime argument types in `Run` (not just from `GetSqlType`'s static cache) because the function is reachable when its outer wrapper's `GetSqlType` doesn't cascade — e.g. `select datalength(concat(N'a', N'b'))` runs `Concat.Run` without `Concat.GetSqlType` being called, and the inner function still needs to settle on nvarchar based on the actual operand types.
+
+**EF Core 10 doesn't emit `CONCAT` from `string.Concat`** — `string.Concat(a, b, c)` translates to `[a] + N'-' + [b] + N'-' + [c]` (the `+` operator), which is NULL-propagating, distinct from CONCAT's NULL-skipping semantics. The simulator's CONCAT/CONCAT_WS support is reachable from raw SQL (`FromSqlInterpolated` / direct command text); the LINQ-side `string.Concat` path goes through string `+` (covered immediately below).
+
+`StringConcat` (`Parser/Expressions/`) is a single class with a `StringConcatKind` discriminator (`Concat` / `ConcatWs`); both share the same per-arg stringify + NULL-skip + nvarchar-promotion path, with the only branch in `Run` being whether the first argument is consumed as a separator.
+
+### String `+` operator (concatenation)
+String concatenation via `+` is **NULL-propagating** (matches default `CONCAT_NULL_YIELDS_NULL ON`; the simulator doesn't model the OFF setting). Result type is `nvarchar` when either operand is a national-string type (`nvarchar` / `nchar` / `ntext`), otherwise `varchar`. EF Core 10 emits this from `string.Concat(a, b, c)` server-side, from `+`-chains in LINQ, and as the dominant string-concat path for application code.
+
+`text` / `ntext` / `image` / `varbinary` operands raise **Msg 402** (`"The data types {a} and {b} are incompatible in the add operator."`) matching SQL Server's restriction on LOB-string and binary types in arithmetic operators. Trailing-space preservation falls out for free: fixed-length `char(N)` storage carries its padding, so `cast('a' as char(5)) + cast('b' as char(5))` → `'a    b    '`.
+
+**Bare-NULL handling has a minor divergence**: simulator's untyped `NULL` literal carries `SqlType.Int32` (the simulator has no truly untyped NULL sentinel), so `'a' + NULL` and `'a' + cast(NULL as int)` are indistinguishable at runtime. The simulator treats both as string concatenation (returning NULL of the result string type), which matches real SQL Server's behavior on bare NULL but diverges from `cast(NULL as int) + 'a'` (real raises Msg 245 from a string-to-int parse). The bare-NULL case dominates in practice; the typed-null-int edge case is a rare hand-written-SQL shape EF Core never emits.
+
+**Result-type fidelity**: pure char/nchar pairs preserve fixed-length-ness with combined lengths capped at the type's max — `char(5) + char(5)` → `char(10)`, `nchar(5) + nchar(5)` → `nchar(10)`, `char(5) + nchar(5)` → `nchar(10)`, `char(8000) + char(100)` → `char(8000)`. Mixed fixed/variable string pairs (`char + varchar`, `nchar + nvarchar`, etc.) drop to length-less `varchar` / `nvarchar` because the simulator stores variable-length string length at the column level rather than on the SqlType — so length metadata for `varchar(10) + varchar(20)` (real: `varchar(30)`) isn't tracked. `PromoteForArithmetic` short-circuits the joint-envelope `Promote` rule for string-`+` so the static schema and the runtime value type agree.
+
+`Subtract` / `Multiply` / etc. on string operands still raise `NotSupportedException` (real SQL Server: Msg 402 for `-`, Msg 8117 for `*` / `/` / `%`). Not a fidelity priority — apps don't use those shapes intentionally.
+
 ### Constraints
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree.

@@ -359,6 +359,7 @@ internal abstract class Expression
             },
             6 => uppercaseName switch
             {
+                "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
                 "ISNULL" => new IsNullExpression(context),
                 "NULLIF" => new NullIf(context),
                 "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
@@ -384,6 +385,7 @@ internal abstract class Expression
             9 => uppercaseName switch
             {
                 "CHARINDEX" => new CharIndex(context),
+                "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
                 "SUBSTRING" => new Substring(context),
                 _ => null

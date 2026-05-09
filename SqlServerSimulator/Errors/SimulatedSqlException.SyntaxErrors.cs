@@ -23,6 +23,16 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 189: a built-in function received the wrong
+    /// number of arguments. Wording uses the lowercase function name and the
+    /// per-function minimum (e.g. <c>"The concat function requires 2 to 254
+    /// arguments."</c>). Probe-confirmed against SQL Server 2025 (2026-05-09)
+    /// for <c>CONCAT</c> (min 2) and <c>CONCAT_WS</c> (min 3).
+    /// </summary>
+    internal static SimulatedSqlException FunctionArgumentCount(string lowercaseFunctionName, int min) =>
+        new($"The {lowercaseFunctionName} function requires {min} to 254 arguments.", 189, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 3902: a <c>COMMIT</c> was issued with no
     /// active transaction. Probe-confirmed against SQL Server 2025
     /// (2026-05-08): Class 16, State 1, exact wording verbatim.
