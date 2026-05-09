@@ -171,6 +171,14 @@ Bare `*` and qualified `<source>.*` both work. `*` expands to every column of ev
 ### CASE
 Searched (`CASE WHEN cond THEN ... [ELSE ...] END`) and simple (`CASE input WHEN val ...`). Branches evaluate in order; first true predicate wins. UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through. Result type computed via `SqlType.Promote` across all THEN/ELSE, cached on first `GetSqlType`; `Run` coerces matched values to the common type. No-match-no-ELSE → typed NULL.
 
+### Null / conditional shorthand: `ISNULL` / `IIF` / `NULLIF`
+EF Core 10 emission (probe-confirmed 2026-05-09): `ISNULL` is emitted for `?? <fallback>` only when a CAST is involved — e.g. `(decimal?)nullableInt ?? 0m` translates to `ISNULL(CAST([f].[NullableC] AS decimal(18,2)), 0.0)`; bare `nullableInt ?? 0` emits `COALESCE` instead. `IIF` and `NULLIF` aren't emitted by any natural LINQ shape we found — EF Core picks `CASE WHEN ... THEN ... ELSE ... END` for ternary projections and safe-divide. Both reach app code through `FromSqlInterpolated` / `FromSqlRaw` rather than the LINQ translator, so support is still load-bearing for raw-SQL consumers. Probe-confirmed against SQL Server 2025 (2026-05-09):
+- `ISNULL(check, replacement)` — returns `check` if non-NULL, else `replacement` coerced to `check`'s type. **Result type and length are fixed to the first argument** — `ISNULL(varchar(5), 'longerstring')` truncates the fallback to 5 characters; `ISNULL(int_null, 'abc')` raises Msg 245 at runtime through int's CAST path. Distinct from 2-arg `COALESCE` (joint promotion). Wrong arity (1 or 3+ arguments) → **Msg 174** `"The isnull function requires 2 argument(s)."`.
+- `IIF(condition, true_value, false_value)` — equivalent to `CASE WHEN condition THEN true_value ELSE false_value END`. Result type is the joint promotion of the two value arms (matching CASE's branch-unification rule); UNKNOWN condition routes to the false arm.
+- `NULLIF(a, b)` — equivalent to `CASE WHEN a = b THEN NULL ELSE a END`. Result type is fixed to `a`'s type. Equality uses simple-form CASE / `=` semantics (NULL on either side → UNKNOWN → ELSE arm returns `a`, which is itself NULL when the NULL is on the left).
+
+`IsNullExpression`, `Iif`, and `NullIf` (`Parser/Expressions/`) each cache the result type from `GetSqlType` and coerce the matched value at `Run` time, the same pattern as `Coalesce` / `CaseExpression`. `NullIf` reuses `BooleanExpression.CompareValuesPromoted` for its equality check. `NULLIF` is a reserved keyword (per the SQL Server reserved-words list) so it appears alongside `Coalesce` / `Convert` / `Try_Convert` in `Expression.Parse`'s and `Selection.cs`'s function-keyword passthrough lists; `ISNULL` and `IIF` are not reserved and dispatch through the standard `Reference`-name path. The simulator deliberately does *not* raise Msg 8133 for `IIF(c, NULL, NULL)` or Msg 4127 for `NULLIF(NULL, NULL)` — both inherit the existing CASE-deviation that returns typed NULL when SQL Server would reject the bare-NULL form.
+
 ### Subqueries
 - `EXISTS (SELECT ...)` / `NOT EXISTS` — boolean atom in WHERE/HAVING/CHECK. Multi-column inner allowed.
 - `expr [NOT] IN (SELECT ...)` — boolean atom; exactly one inner column (Msg 116). NULL semantics mirror literal-list IN (NULL row → UNKNOWN unless a non-NULL match wins first).
@@ -321,7 +329,7 @@ Type-metadata accessors (`GetDataTypeName` / `GetFieldType`) read from `Simulate
 - `PRIMARY KEY` / `UNIQUE` on a computed column (would need to evaluate the expression against every existing row at insert; `NotSupportedException`).
 - Heap allocation tracking: flat page list, no IAM/PFS.
 - Per-connection session state for some scopes: `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, `DBCC TRACEON(N)` flags all live on `Simulation` rather than the connection. (Transaction state already moved to per-connection in `SimulatedDbConnection.CurrentTransaction`.)
-- `hierarchyid`, `geography`, `geometry`, `rowversion`.
+- `hierarchyid`, `geography`, `geometry`.
 
 ---
 

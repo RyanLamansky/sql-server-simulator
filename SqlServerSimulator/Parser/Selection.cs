@@ -289,11 +289,11 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.From }:
                     break;
 
-                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.Case }:
-                    // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE are reserved
-                    // keywords but valid as function-call heads inside a
-                    // SELECT projection. CASE introduces an inline expression
-                    // (see CaseExpression.ParseCase).
+                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case }:
+                    // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, NULLIF are
+                    // reserved keywords but valid as function-call heads
+                    // inside a SELECT projection. CASE introduces an inline
+                    // expression (see CaseExpression.ParseCase).
                     expressions.Add(Expression.Parse(context));
                     break;
 

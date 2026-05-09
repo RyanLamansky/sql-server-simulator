@@ -70,10 +70,11 @@ internal abstract class Expression
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
             ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
-            // LEFT, RIGHT, CONVERT, and TRY_CONVERT are reserved keywords
-            // but dispatch as function calls when followed by '(' — the
-            // surrounding loop hands the call shape off to ResolveBuiltIn.
-            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce } reserved => new Reference(reserved.ToString()),
+            // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
+            // reserved keywords but dispatch as function calls when followed
+            // by '(' — the surrounding loop hands the call shape off to
+            // ResolveBuiltIn.
+            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => new Reference(reserved.ToString()),
             Name name => new Reference(name),
             Operator { Character: '(' } => ParseGroupedExpression(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -237,6 +238,7 @@ internal abstract class Expression
             {
                 "ABS" => new AbsoluteValue(context),
                 "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
+                "IIF" => new Iif(context),
                 "LEN" => new Length(context),
                 "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
                 "MIN" => AggregateExpression.Parse(context, AggregateKind.Min),
@@ -266,6 +268,8 @@ internal abstract class Expression
             },
             6 => uppercaseName switch
             {
+                "ISNULL" => new IsNullExpression(context),
+                "NULLIF" => new NullIf(context),
                 "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
                 _ => null
             },
