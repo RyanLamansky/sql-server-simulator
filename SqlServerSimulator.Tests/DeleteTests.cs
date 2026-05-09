@@ -211,12 +211,70 @@ public sealed class DeleteTests
     }
 
     [TestMethod]
-    public void Delete_MultiTableSyntax_JoinedFromClause_RaisesNotSupported() =>
-        ThrowsExactly<NotSupportedException>(() =>
-        {
-            var simulation = new Simulation();
-            _ = simulation.ExecuteNonQuery("create table t (id int)");
-            _ = simulation.ExecuteNonQuery("create table u (id int)");
-            _ = simulation.ExecuteNonQuery("delete [a] from t as [a] inner join u as [b] on [a].[id] = [b].[id]");
-        });
+    public void Delete_MultiTableSyntax_JoinedFromClause_DeletesEachTargetOnce()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
+        _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
+        _ = simulation.ExecuteNonQuery("insert customers values (1, 'A'), (2, 'B'), (3, 'C')");
+        _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 50), (11, 1, 200), (12, 2, 150), (13, 2, 250)");
+
+        var rows = simulation.ExecuteNonQuery(
+            "delete c from customers c inner join orders o on o.customerId = c.id where o.total > 100");
+        AreEqual(2, rows);
+
+        var statuses = new List<string>();
+        using (var reader = simulation.CreateCommand("select status from customers order by id").ExecuteReader())
+            while (reader.Read()) statuses.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "C" }, statuses);
+    }
+
+    [TestMethod]
+    public void Delete_JoinedFromClause_DeleteFromAliasSyntax_AlsoWorks()
+    {
+        // DELETE FROM <alias> FROM ... JOIN ... — the form with the extra
+        // FROM keyword. SQL Server accepts both DELETE alias and DELETE FROM
+        // alias; EF Core 10's ExecuteDelete emits the DELETE alias form.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
+        _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
+        _ = simulation.ExecuteNonQuery("insert customers values (1, 'A'), (2, 'B')");
+        _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 200)");
+
+        var rows = simulation.ExecuteNonQuery(
+            "delete from c from customers c inner join orders o on o.customerId = c.id where o.total > 100");
+        AreEqual(1, rows);
+    }
+
+    [TestMethod]
+    public void Delete_JoinedFromClause_AliasNotInFrom_RaisesMsg208()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.ExecuteNonQuery("create table u (id int)");
+        var ex = Throws<DbException>(() =>
+            _ = simulation.ExecuteNonQuery("delete [x] from t as [a] inner join u as [b] on [a].[id] = [b].[id]"));
+        Contains("Invalid object name", ex.Message);
+    }
+
+    [TestMethod]
+    public void Delete_JoinedFromClause_TargetOnRightSide_DeletesFromTarget()
+    {
+        // Target alias on the right side of the join (delete orders, not
+        // customers). Probe O from the design probe.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
+        _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
+        _ = simulation.ExecuteNonQuery("insert customers values (1, 'X')");
+        _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 50), (11, 1, 200)");
+
+        var rows = simulation.ExecuteNonQuery(
+            "delete o from customers c inner join orders o on o.customerId = c.id where o.total > 100");
+        AreEqual(1, rows);
+
+        var totals = new List<decimal>();
+        using var reader = simulation.CreateCommand("select total from orders order by id").ExecuteReader();
+        while (reader.Read()) totals.Add(reader.GetDecimal(0));
+        CollectionAssert.AreEqual(new[] { 50m }, totals);
+    }
 }

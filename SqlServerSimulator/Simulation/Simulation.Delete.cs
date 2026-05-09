@@ -8,17 +8,22 @@ partial class Simulation
 {
     /// <summary>
     /// Parses and executes <c>DELETE [FROM] &lt;table&gt; [WHERE pred]</c>
-    /// (single-table form) and <c>DELETE [FROM] &lt;alias&gt; FROM &lt;table&gt; AS &lt;alias&gt; [WHERE pred]</c>
-    /// (multi-table-syntax form, what EF Core's <c>ExecuteDelete</c> emits).
+    /// (single-table form), <c>DELETE [FROM] &lt;alias&gt; FROM &lt;table&gt; AS &lt;alias&gt; [WHERE]</c>
+    /// (single-source EF7+ <c>ExecuteDelete</c> form), and the joined-source
+    /// form (<c>DELETE [FROM] &lt;alias&gt; FROM t AS &lt;alias&gt; JOIN u AS b ON ... [WHERE]</c>)
+    /// that EF Core emits for <c>ExecuteDelete</c> over collection navigations.
     /// Rows matching the predicate are tombstoned at the page level; their
     /// payload bytes and any LOB chains are not reclaimed (CLAUDE.md flags
-    /// this as a leak quirk pending the LOB-lifecycle bundle). Joined-source
-    /// FROM clauses raise <see cref="NotSupportedException"/> via
-    /// <see cref="ParseSingleSourceFromClause"/>.
+    /// this as a leak quirk pending the LOB-lifecycle bundle).
     /// </summary>
+    /// <remarks>
+    /// In the joined-source form, the same target row may surface in
+    /// multiple join tuples; SQL Server deletes each unique target exactly
+    /// once (probe-confirmed). The simulator dedupes by (page, slot)
+    /// during enumeration to match.
+    /// </remarks>
     private static SimulatedStatementOutcome ParseDelete(ParserContext context)
     {
-        // FROM is optional in T-SQL DELETE; consume if present.
         var next = context.GetNextRequired();
         if (next is ReservedKeyword { Keyword: Keyword.From })
             next = context.GetNextRequired();
@@ -26,27 +31,37 @@ partial class Simulation
         if (next is not StringToken leadingIdentToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Either single-table form (leading identifier IS the table) or
-        // multi-table form (leading identifier is an alias for the FROM
-        // clause that follows). Defer the InvalidObjectName error until
-        // we've seen whether a FROM clause provides the binding.
         _ = context.Simulation.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
         context.MoveNextOptional();
 
-        // OUTPUT requires a known table (and EF doesn't emit OUTPUT alongside
-        // ExecuteDelete's multi-table FROM, so it only applies to the
-        // single-table form). INSERTED isn't a valid qualifier in DELETE
-        // OUTPUT (probe-confirmed Msg 4104).
+        // OUTPUT requires a known target. INSERTED isn't a valid qualifier
+        // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-
+        // source DELETE with OUTPUT isn't modeled — see the matching
+        // limitation in ParseUpdate.
         MutationOutputProjection? output = null;
         if (leadingTable is not null)
             output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true);
+        else if (context.MatchContextual(ContextualKeyword.Output))
+            throw new NotSupportedException("OUTPUT with alias-form multi-source DELETE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
 
-        var table = context.Token is ReservedKeyword { Keyword: Keyword.From }
-            ? ParseSingleSourceFromClause(context)
-            : leadingTable;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+        {
+            return ExecuteJoinedDelete(context, leadingIdentToken, leadingTable, output);
+        }
 
-        table = table ?? throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+        return ExecuteDeleteAgainstTable(context, table, output);
+    }
 
+    /// <summary>
+    /// Single-table no-FROM execution path: iterates the target heap directly,
+    /// tombstones matching rows, and projects OUTPUT.DELETED if requested.
+    /// </summary>
+    private static SimulatedStatementOutcome ExecuteDeleteAgainstTable(
+        ParserContext context,
+        HeapTable table,
+        MutationOutputProjection? output)
+    {
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
@@ -60,20 +75,10 @@ partial class Simulation
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
-            // Decode full row values when we need them — for WHERE evaluation,
-            // for OUTPUT projection, or both. Skip the work entirely when
-            // neither is in play (no-WHERE / no-OUTPUT).
             SqlValue[]? fullValues = null;
             if (where is not null || output is not null)
             {
-                fullValues = new SqlValue[table.Columns.Length];
-                for (var i = 0; i < table.Columns.Length; i++)
-                {
-                    var ord = table.StorageOrdinals[i];
-                    fullValues[i] = ord < 0
-                        ? SqlValue.Null(table.Columns[i].Type)
-                        : RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
-                }
+                fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues);
             }
 
@@ -97,6 +102,86 @@ partial class Simulation
             deleted.Add((pageIndex, slotIndex, output is null ? null : fullValues));
         }
 
+        return CommitDelete(context, table, deleted, output);
+    }
+
+    /// <summary>
+    /// Joined-source DELETE execution. Mirrors
+    /// <see cref="ExecuteJoinedUpdate"/>'s shape: parses multi-source FROM,
+    /// identifies target via <see cref="FindMutationTargetIndex"/>, builds
+    /// the byte[]-to-(page,slot) address map, then iterates join tuples
+    /// applying WHERE per tuple and deduping target deletes by address.
+    /// </summary>
+    private static SimulatedStatementOutcome ExecuteJoinedDelete(
+        ParserContext context,
+        StringToken leadingIdentToken,
+        HeapTable? leadingTable,
+        MutationOutputProjection? output)
+    {
+        var sourcesList = new List<FromSource>();
+        var joinsList = new List<JoinSpec>();
+        Selection.ParseSourcesAndJoins(context, depth: 0, sourcesList, joinsList, outerTypeResolver: null);
+        var sources = sourcesList.ToArray();
+        var joins = joinsList.ToArray();
+
+        var targetIndex = FindMutationTargetIndex(sources, leadingIdentToken.Value, leadingTable);
+        if (targetIndex < 0)
+            throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+
+        var table = sources[targetIndex].BackingTable
+            ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
+
+        BooleanExpression? where = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
+        {
+            context.MoveNextRequired();
+            where = BooleanExpression.Parse(context);
+        }
+
+        var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
+        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses);
+
+        var seen = new HashSet<(int Page, int Slot)>();
+        var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
+
+        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, outerResolver: null))
+        {
+            var localTuple = tuple;
+            SqlValue ResolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, localTuple, name);
+
+            if (where is not null && where.Run(ResolveTuple) != true)
+                continue;
+
+            var targetBytes = tuple[targetIndex];
+            if (targetBytes is null)
+                continue;
+            if (!targetAddresses.TryGetValue(targetBytes, out var addr))
+                continue;
+            if (!seen.Add(addr))
+                continue;
+
+            SqlValue[]? fullValues = null;
+            if (output is not null)
+            {
+                fullValues = DecodeFullRow(table, targetBytes);
+                EvaluateComputedColumns(table, fullValues);
+            }
+            deleted.Add((addr.Page, addr.Slot, fullValues));
+        }
+
+        return CommitDelete(context, table, deleted, output);
+    }
+
+    /// <summary>
+    /// Tombstones the deleted rows and emits OUTPUT.DELETED projection rows
+    /// when requested. Shared between the no-FROM and joined-source paths.
+    /// </summary>
+    private static SimulatedStatementOutcome CommitDelete(
+        ParserContext context,
+        HeapTable table,
+        List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
+        MutationOutputProjection? output)
+    {
         foreach (var (pageIndex, slotIndex, _) in deleted)
             table.Heap.DeleteAt(pageIndex, slotIndex, context.CurrentUndoLog);
 

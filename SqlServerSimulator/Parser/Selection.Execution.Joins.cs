@@ -46,7 +46,7 @@ internal sealed partial class Selection
     /// finish reading each tuple (typically by projecting / encoding the
     /// row) before advancing the enumerator.
     /// </summary>
-    private static IEnumerable<byte[]?[]> EnumerateJoinedRows(
+    internal static IEnumerable<byte[]?[]> EnumerateJoinedRows(
         FromSource[] sources,
         JoinSpec[] joins,
         Func<MultiPartName, SqlValue>? outerResolver)

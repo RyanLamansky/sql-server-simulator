@@ -423,6 +423,29 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlType>? outerTypeResolver,
         bool allowOrderBy)
     {
+        ParseSourcesAndJoins(context, depth, sources, joins, outerTypeResolver);
+
+        // Now register the multi-source type resolver and parse WHERE / etc.
+        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
+    }
+
+    /// <summary>
+    /// Pure source-and-joins parser, separable from WHERE / ORDER BY
+    /// consumption. Used by both <see cref="ParseFromSourceAndJoins"/> (which
+    /// adds WHERE consumption on top) and the UPDATE / DELETE mutation paths
+    /// (which handle WHERE separately because the leading-identifier target
+    /// binding has to happen first). Enters with the cursor on the
+    /// <c>FROM</c> keyword (or, in mutation context, on the FROM keyword
+    /// position); leaves the cursor at the lookahead-after-last-source token
+    /// (typically WHERE, end-of-statement, or set-op chain).
+    /// </summary>
+    internal static void ParseSourcesAndJoins(
+        ParserContext context,
+        uint depth,
+        List<FromSource> sources,
+        List<JoinSpec> joins,
+        Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
         sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
 
         // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
@@ -461,9 +484,6 @@ internal sealed partial class Selection
             }
             joins.Add(new JoinSpec(kind, on));
         }
-
-        // Now register the multi-source type resolver and parse WHERE / etc.
-        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
     }
 
     /// <summary>
@@ -546,7 +566,8 @@ internal sealed partial class Selection
                     storedSchema: heapTable.StoredColumns,
                     storageOrdinals: heapTable.StorageOrdinals,
                     lobStore: heapTable.Heap,
-                    rows: heapTable.Rows);
+                    rows: heapTable.Rows,
+                    backingTable: heapTable);
 
             case Operator { Character: '(' }:
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })

@@ -433,12 +433,72 @@ public sealed class UpdateTests
     }
 
     [TestMethod]
-    public void Update_MultiTableSyntax_JoinedFromClause_RaisesNotSupported() =>
-        ThrowsExactly<NotSupportedException>(() =>
-        {
-            var simulation = new Simulation();
-            _ = simulation.ExecuteNonQuery("create table t (id int)");
-            _ = simulation.ExecuteNonQuery("create table u (id int)");
-            _ = simulation.ExecuteNonQuery("update [a] set [a].[id] = 1 from t as [a] inner join u as [b] on [a].[id] = [b].[id]");
-        });
+    public void Update_MultiTableSyntax_JoinedFromClause_UpdatesEachTargetOnce()
+    {
+        // Joined-source UPDATE: target rows that match the join exactly once
+        // are updated; targets that match multiple join rows are still
+        // updated exactly once (probe-confirmed against SQL Server 2025).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
+        _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
+        _ = simulation.ExecuteNonQuery("insert customers values (1, 'New'), (2, 'New'), (3, 'New')");
+        _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 50), (11, 1, 200), (12, 2, 150), (13, 2, 250)");
+
+        var rows = simulation.ExecuteNonQuery(
+            "update c set c.status = 'Active' from customers c inner join orders o on o.customerId = c.id where o.total > 100");
+        AreEqual(2, rows);
+
+        var statuses = ReadStrings(simulation.CreateCommand("select status from customers order by id"));
+        CollectionAssert.AreEqual(new[] { "Active", "Active", "New" }, statuses);
+    }
+
+    [TestMethod]
+    public void Update_JoinedFromClause_AliasNotInFrom_RaisesMsg208()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.ExecuteNonQuery("create table u (id int)");
+        var ex = Throws<DbException>(() =>
+            _ = simulation.ExecuteNonQuery("update [x] set [x].[id] = 1 from t as [a] inner join u as [b] on [a].[id] = [b].[id]"));
+        Contains("Invalid object name", ex.Message);
+    }
+
+    [TestMethod]
+    public void Update_JoinedFromClause_LeftJoinNullRight_StillUpdatesTarget()
+    {
+        // LEFT JOIN with no right match: target rows still update; SET RHS
+        // sees NULL for the right-side columns (probe D from the design probe).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
+        _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, total decimal(10, 2))");
+        _ = simulation.ExecuteNonQuery("insert customers values (1, 'New'), (2, 'New')");
+        _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 50)");
+
+        var rows = simulation.ExecuteNonQuery(
+            "update c set c.status = 'Touched' from customers c left join orders o on o.customerId = c.id and o.total > 1000");
+        AreEqual(2, rows);
+
+        var statuses = ReadStrings(simulation.CreateCommand("select status from customers order by id"));
+        CollectionAssert.AreEqual(new[] { "Touched", "Touched" }, statuses);
+    }
+
+    [TestMethod]
+    public void Update_JoinedFromClause_SetRhsFromOtherSource_UsesFirstMatch()
+    {
+        // Multi-match SET RHS: when a target row matches multiple join rows,
+        // the SET RHS uses the FIRST matching row's value (heap-scan order —
+        // probe B's nondeterminism, deterministic in heap-scan order).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table customers (id int primary key, status varchar(20))");
+        _ = simulation.ExecuteNonQuery("create table orders (id int primary key, customerId int, code varchar(10))");
+        _ = simulation.ExecuteNonQuery("insert customers values (1, 'New')");
+        _ = simulation.ExecuteNonQuery("insert orders values (10, 1, 'A'), (11, 1, 'B')");
+
+        var rows = simulation.ExecuteNonQuery(
+            "update c set c.status = o.code from customers c inner join orders o on o.customerId = c.id");
+        AreEqual(1, rows);
+
+        var statuses = ReadStrings(simulation.CreateCommand("select status from customers"));
+        CollectionAssert.AreEqual(new[] { "A" }, statuses);
+    }
 }

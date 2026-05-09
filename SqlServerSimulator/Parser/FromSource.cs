@@ -33,7 +33,8 @@ internal sealed class FromSource(
     int[]? storageOrdinals,
     Heap? lobStore,
     IEnumerable<byte[]> rows,
-    Selection? lateralPlan = null)
+    Selection? lateralPlan = null,
+    HeapTable? backingTable = null)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -42,6 +43,15 @@ internal sealed class FromSource(
     public readonly int[]? StorageOrdinals = storageOrdinals;
     public readonly Heap? LobStore = lobStore;
     public readonly IEnumerable<byte[]> Rows = rows;
+
+    /// <summary>
+    /// Back-reference to the <see cref="HeapTable"/> when this source is a
+    /// table (or system table); null for derived-table sources. Used by the
+    /// UPDATE / DELETE mutation paths to reach the table's
+    /// <see cref="HeapTable.KeyConstraints"/> / <see cref="HeapTable.Name"/>
+    /// after FROM parsing has identified which source is the mutation target.
+    /// </summary>
+    public readonly HeapTable? BackingTable = backingTable;
 
     /// <summary>
     /// When non-null, this source is the right side of a <c>CROSS APPLY</c>

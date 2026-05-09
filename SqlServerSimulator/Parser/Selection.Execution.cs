@@ -26,7 +26,7 @@ internal sealed partial class Selection
     /// <c>(-1, -1)</c> when no source resolves the name — the caller then
     /// falls through to the outer scope.
     /// </summary>
-    private static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, MultiPartName name)
+    internal static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, MultiPartName name)
     {
         if (name.ImmediateQualifier is { } qualifier)
         {
