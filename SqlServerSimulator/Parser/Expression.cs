@@ -70,6 +70,13 @@ internal abstract class Expression
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
             ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
+            // CURRENT_TIMESTAMP is a parens-less function in SQL Server's
+            // grammar — it sits in the reserved-keyword space but never takes
+            // an argument list. CURRENT_TIMESTAMP() with parens raises Msg 102
+            // in SQL Server (probe-confirmed 2026-05-09); the simulator
+            // inherits the same Msg-102 path from the surrounding parser
+            // catching the unexpected `(`.
+            ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(context.Simulation, CurrentTimeKind.CurrentTimestamp),
             // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
             // reserved keywords but dispatch as function calls when followed
             // by '(' — the surrounding loop hands the call shape off to
@@ -362,6 +369,7 @@ internal abstract class Expression
                 "CEILING" => new Ceiling(context),
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "DATEADD" => new DateAdd(context),
+                "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
                 _ => null
@@ -383,12 +391,14 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 _ => null
             },
             11 => uppercaseName switch
             {
+                "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
                 _ => null
             },
@@ -406,11 +416,17 @@ internal abstract class Expression
             14 => uppercaseName switch
             {
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
+                "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
                 _ => null
             },
             15 => uppercaseName switch
             {
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
+                _ => null
+            },
+            17 => uppercaseName switch
+            {
+                "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
                 _ => null
             },
             21 => uppercaseName switch

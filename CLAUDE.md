@@ -220,6 +220,17 @@ All four take a bare datepart keyword as the first argument. Result types: `DATE
 
 Unknown keyword → **Msg 155** with the calling function's lowercase name embedded. NULL on any operand → typed NULL. `DatePartKind` (`Parser/Expressions/`) is the shared enum + helpers; `DateDiff` handles both BIG and non-BIG via a single `bool isBig` field.
 
+### Current-time scalar functions: `GETDATE` / `GETUTCDATE` / `SYSDATETIME` / `SYSUTCDATETIME` / `SYSDATETIMEOFFSET` / `CURRENT_TIMESTAMP`
+Result types (probe-confirmed 2026-05-09 via `SELECT INTO` + `tempdb.information_schema.columns`): `GETDATE` / `GETUTCDATE` / `CURRENT_TIMESTAMP` → `datetime`; `SYSDATETIME` / `SYSUTCDATETIME` → `datetime2(7)`; `SYSDATETIMEOFFSET` → `datetimeoffset(7)`. EF Core 10 emits these from `DateTime.UtcNow` / `DateTime.Now` / `DateTimeOffset.UtcNow` in server-side LINQ predicates and from `HasDefaultValueSql("getutcdate()")` column defaults.
+
+**Per-statement freeze** (probe-confirmed 2026-05-09): two `SYSDATETIME()` calls in one SELECT return identical values to the 7th decimal digit; an UPDATE that stamps every row with `SYSDATETIME()` writes the same value into all rows; successive SELECTs in one batch DO advance (per-statement, not per-batch). The simulator captures `DateTime.UtcNow` once at the top of `Simulation.CreateResultSetsForCommand`'s loop body into `Simulation.CurrentStatementUtcNow`; every current-time function call within that statement reads the same snapshot. DEFAULT-clause integration falls out for free — each INSERT runs through a fresh statement-loop iteration, so each insert sees its own captured stamp.
+
+**UTC == Local** (Azure SQL Database default behavior): the simulator does no local-time conversion. All six functions return the same UTC instant (rounded per type — datetime variants quantize to 1/300s tick); `SYSDATETIMEOFFSET` reports a `+00:00` offset. Apps that depend on `GETDATE` returning a different value than `GETUTCDATE` won't behave like a real on-prem SQL Server installed in a non-UTC zone, but match the cloud default.
+
+**`CURRENT_TIMESTAMP` is parens-less**: the only zero-arg function in SQL Server's grammar without `()`. The token surfaces as `ReservedKeyword { Keyword: Keyword.Current_Timestamp }`, dispatched directly from `Expression.Parse`'s expression-start switch (NOT via `ResolveBuiltIn`, which assumes `()`). `CURRENT_TIMESTAMP()` with parens raises **Msg 102** in SQL Server (probe-confirmed); the simulator inherits Msg 102 from the surrounding parser catching the unexpected `(`, though the "near X" snippet differs. `Selection.cs`'s projection-element start switch lists `Current_Timestamp` alongside `LEFT` / `RIGHT` / `CASE` etc. as the reserved-keyword exemption set.
+
+`CurrentTimeFunction` (`Parser/Expressions/`) is a single class with a `CurrentTimeKind` discriminator; result-type rules and the SqlValue construction live in one place. The class holds a `Simulation` reference like `LastIdentityExpression` does, and reads `CurrentStatementUtcNow` per `Run` call.
+
 ### Constraints
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree.

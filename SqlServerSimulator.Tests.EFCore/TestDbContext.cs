@@ -312,6 +312,24 @@ internal class Book
     public int Score { get; set; }
 }
 
+/// <summary>
+/// Exercises EF Core's <c>HasDefaultValueSql("getutcdate()")</c> path: the
+/// <see cref="CreatedAt"/> column is server-defaulted, so EF omits it from
+/// INSERTs and reads the value back via <c>OUTPUT INSERTED.[CreatedAt]</c>.
+/// Used by <c>EFCoreCurrentTime</c> to confirm the simulator emits a
+/// freshly-stamped value per insert.
+/// </summary>
+internal class Heartbeat
+{
+    public int Id { get; set; }
+
+    [Column(TypeName = "nvarchar(50)")]
+    public string Note { get; set; } = "";
+
+    [Column(TypeName = "datetime2(7)")]
+    public DateTime CreatedAt { get; set; }
+}
+
 internal class TestDbContext(Simulation simulation) : DbContext
 {
     public Simulation Simulation { get; set; } = simulation;
@@ -347,6 +365,14 @@ internal class TestDbContext(Simulation simulation) : DbContext
         // Pin Inventory's caller-supplied string PK so EF Core doesn't try
         // to generate values for it.
         _ = modelBuilder.Entity<Inventory>().HasKey(i => i.Sku);
+
+        // Pin Heartbeat.CreatedAt to a server-side GETUTCDATE() default so
+        // EF Core defers the stamp to the database — it omits the column from
+        // INSERTs and reads the simulator-generated value back via
+        // OUTPUT INSERTED.[CreatedAt].
+        _ = modelBuilder.Entity<Heartbeat>()
+            .Property(h => h.CreatedAt)
+            .HasDefaultValueSql("getutcdate()");
     }
 
     public DbSet<TestRow> Rows => Set<TestRow>();
@@ -382,6 +408,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Author> Authors => Set<Author>();
 
     public DbSet<Book> Books => Set<Book>();
+
+    public DbSet<Heartbeat> Heartbeats => Set<Heartbeat>();
 
     public static Simulation CreateDefaultSimulation(params ReadOnlySpan<int> values)
     {
@@ -621,6 +649,22 @@ internal class TestDbContext(Simulation simulation) : DbContext
                 create table Stickers (
                     Id int identity(1, 1) not null,
                     Tag nvarchar(20) not null
+                )
+                """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateHeartbeatsSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("""
+                create table Heartbeats (
+                    Id int identity primary key,
+                    Note nvarchar(50) not null,
+                    CreatedAt datetime2(7) not null default getutcdate()
                 )
                 """)
             .ExecuteNonQuery();

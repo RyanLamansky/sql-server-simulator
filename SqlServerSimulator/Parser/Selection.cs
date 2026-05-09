@@ -289,11 +289,13 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.From }:
                     break;
 
-                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case }:
+                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp }:
                     // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, NULLIF are
                     // reserved keywords but valid as function-call heads
                     // inside a SELECT projection. CASE introduces an inline
-                    // expression (see CaseExpression.ParseCase).
+                    // expression (see CaseExpression.ParseCase). CURRENT_TIMESTAMP
+                    // is uniquely a parens-less reserved-keyword expression
+                    // (see CurrentTimeFunction).
                     expressions.Add(Expression.Parse(context));
                     break;
 

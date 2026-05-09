@@ -61,6 +61,25 @@ public sealed partial class Simulation
     internal readonly HashSet<int> TraceFlags = [];
 
     /// <summary>
+    /// UTC timestamp captured at the top of each top-level statement (in
+    /// <see cref="CreateResultSetsForCommand"/>'s loop body) and consumed by
+    /// the current-time scalar functions (<c>GETDATE</c>, <c>GETUTCDATE</c>,
+    /// <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>, <c>SYSDATETIMEOFFSET</c>,
+    /// <c>CURRENT_TIMESTAMP</c>). Real SQL Server freezes these within a
+    /// statement (probe-confirmed 2026-05-09 — two <c>SYSDATETIME()</c> calls
+    /// in one SELECT return identical values to the 7th decimal digit; an
+    /// UPDATE that stamps every row with <c>SYSDATETIME()</c> writes the same
+    /// value into all rows). The simulator follows by capturing once per
+    /// statement and serving every call within that statement from the same
+    /// snapshot. The simulator does no local-time conversion: per the
+    /// Azure SQL Database default, local-time-returning variants
+    /// (<c>GETDATE</c> / <c>SYSDATETIME</c> / <c>CURRENT_TIMESTAMP</c>) and
+    /// UTC-returning variants share this single UTC instant, and
+    /// <c>SYSDATETIMEOFFSET</c> reports a <c>+00:00</c> offset.
+    /// </summary>
+    internal DateTime CurrentStatementUtcNow;
+
+    /// <summary>
     /// Last identity value produced by an INSERT in this simulation —
     /// the source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>.
     /// SQL Server scopes these per session/scope; the simulator collapses
@@ -188,6 +207,8 @@ public sealed partial class Simulation
 
         while (context.MoveNext())
         {
+            this.CurrentStatementUtcNow = DateTime.UtcNow;
+
             switch (context.Token)
             {
                 case Operator { Character: ';' }:
