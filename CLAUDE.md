@@ -164,6 +164,8 @@ Standard syntax. Quirks worth knowing:
 ### Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`. `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 
+`STRING_AGG(expr, sep) WITHIN GROUP (ORDER BY ... [ASC|DESC] [, ...])` reorders concatenation per group. EF Core 10 emits this from `GroupBy(...).Select(g => string.Join(sep, g.OrderBy(x => key).Select(x => field)))`. The aggregator switches to a buffered path when `OrderBy` is set on the parsed `AggregateExpression`; rows stash their value plus the per-row evaluated ordering tuple, then `Result()` sorts via `SqlValue.CompareTo` (NULLs first under ASC, last under DESC) and concatenates. NULL operand rows skip both the ORDER BY input and the output (matching the no-WITHIN-GROUP path). Non-`STRING_AGG` aggregate with `WITHIN GROUP` → **Msg 10757** (`"The function '<lower>' may not have a WITHIN GROUP clause."`); ORDER BY ordinal in this context → **Msg 5308** (distinct from the projection-level ORDER BY which accepts ordinals); WITHIN is parsed as a contextual keyword (not reserved — `select within from t` still works). Cross-aggregate Msg 8711 (mutually-incompatible orderings) isn't modeled — EF Core 10 doesn't emit shapes that hit it.
+
 ### Window functions
 - `ROW_NUMBER() OVER([PARTITION BY ...] ORDER BY ...)` — bigint, ORDER BY required inside OVER (else Msg 4112). EF Core 10 always wraps ROW_NUMBER in a derived-table subquery (`SELECT ... FROM (SELECT cols, ROW_NUMBER() OVER(...) AS row FROM T) AS sub WHERE sub.row <= N`); the OVER never references outer scope, so the always-defer rule above doesn't bite.
 - Aggregate windows: `SUM`/`AVG`/`COUNT`/`COUNT_BIG`/`MIN`/`MAX`/`STDEV*`/`VAR*`/`CHECKSUM_AGG`/`APPROX_COUNT_DISTINCT(<expr>) OVER ([PARTITION BY ...])`. **Implicit-frame whole-partition default only** (no ORDER BY in OVER for aggregates). Result types and NULL semantics match plain aggregates.
@@ -270,7 +272,6 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - `UNION` / `UNION ALL` inside a subquery body.
 - Row-constructor `IN ((1,2), (3,4))`.
 - Window functions other than `ROW_NUMBER` and the aggregate-OVER family (see "Window functions" above).
-- `STRING_AGG`'s `WITHIN GROUP (ORDER BY ...)`.
 - `LIKE` with `COLLATE` override (default collation only — case-insensitive Latin1_General-shaped).
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string.
 - `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.

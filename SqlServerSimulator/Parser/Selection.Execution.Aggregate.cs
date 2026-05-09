@@ -105,6 +105,15 @@ internal sealed partial class Selection
                 {
                     var separatorValue = aggregate.Separator!.Run(ResolveColumn);
                     stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
+
+                    if (aggregate.OrderBy is { } orderBy)
+                    {
+                        var orderKeys = new SqlValue[orderBy.Count];
+                        for (var k = 0; k < orderBy.Count; k++)
+                            orderKeys[k] = orderBy[k].Expr!.Run(ResolveColumn);
+                        stringAgg.AddOrdered(aggregate.Operand!.Run(ResolveColumn), orderKeys);
+                        continue;
+                    }
                 }
                 var operand = aggregate.Operand;
                 state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(ResolveColumn));

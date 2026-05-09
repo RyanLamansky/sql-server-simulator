@@ -113,6 +113,22 @@ public class EFCoreAggregates
         Assert.AreEqual(0, context.Filters.Where(f => f.A > 999).Sum(f => f.A));
     }
 
+    // EF Core 10's `GroupBy(...).Select(g => string.Join(",", g.OrderBy(x => x.Field).Select(x => x.Field)))`
+    // emits `STRING_AGG(...) WITHIN GROUP (ORDER BY ...)`. Without the WITHIN GROUP support, this
+    // path raised a parse error.
+    [TestMethod]
+    public void StringJoin_OverGroupedOrderedSelect_EmitsStringAggWithinGroup()
+    {
+        using var context = SeededContext();
+        var joined = context.Filters
+            .GroupBy(f => 1)
+            .Select(g => string.Join(",", g.OrderBy(f => f.A).ThenBy(f => f.B).Select(f => f.Status ?? "<null>")))
+            .First();
+
+        // 5 rows ordered by (A, B): (1,1)→active, (1,2)→pending, (2,2)→active, (2,3)→null, (3,1)→archived.
+        Assert.AreEqual("active,pending,active,<null>,archived", joined);
+    }
+
     [TestMethod]
     public void GroupBy_MultipleAggregatesPerGroup()
     {

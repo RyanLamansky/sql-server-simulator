@@ -204,4 +204,22 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException FunctionNotValidForOver(string functionLowerName) =>
         new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, 4);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10757 — a non-ordered-set aggregate (anything
+    /// other than <c>STRING_AGG</c> in this simulator's surface) was given a
+    /// <c>WITHIN GROUP (ORDER BY ...)</c> clause. Function name is
+    /// SQL-lowercase (<c>max</c>, <c>sum</c>, etc.).
+    /// </summary>
+    internal static SimulatedSqlException FunctionMayNotHaveWithinGroup(string functionLowerName) =>
+        new($"The function '{functionLowerName}' may not have a WITHIN GROUP clause.", 10757, 15, 9);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5308 — windowed/aggregate ORDER BY rejects
+    /// integer-ordinal expressions (e.g. <c>STRING_AGG(x, ',') WITHIN GROUP
+    /// (ORDER BY 1)</c>). The projection-level ORDER BY accepts ordinals;
+    /// these inner ORDER BY positions don't.
+    /// </summary>
+    internal static SimulatedSqlException IntegerIndexNotAllowedInOrderedAggregate() =>
+        new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.", 5308, 15, 1);
 }

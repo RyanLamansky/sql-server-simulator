@@ -6,49 +6,126 @@ namespace SqlServerSimulator.Parser.Aggregators;
 
 /// <summary>
 /// Backs <c>STRING_AGG(expr, separator)</c>: concatenates non-NULL values
-/// with the separator between them. The separator is evaluated once per
-/// row (SQL Server allows a per-row separator value, though it's typically
-/// a constant) — the simulator uses the most recent non-NULL separator.
-/// Empty / all-NULL input → NULL. The optional
-/// <c>WITHIN GROUP (ORDER BY ...)</c> clause isn't parsed; values appear
-/// in iteration order, matching SQL Server's documented behavior when
-/// WITHIN GROUP is omitted (no ordering guarantee — table-scan order).
+/// with the separator between them. The separator is evaluated once per row
+/// (SQL Server allows a per-row separator value, though it's typically a
+/// constant) — the simulator uses the most recent non-NULL separator. Empty /
+/// all-NULL input → NULL. Two execution modes share this class:
+/// <list type="bullet">
+///   <item><b>Streaming</b> (no <c>WITHIN GROUP</c>): rows append directly to
+///   <see cref="streamingBuffer"/> in arrival order — O(1) per row.</item>
+///   <item><b>Buffered</b> (with <c>WITHIN GROUP (ORDER BY ...)</c>): rows
+///   stash their value, current separator, and the evaluated ORDER BY tuple in
+///   <see cref="orderedBuffer"/>; <see cref="Result"/> sorts and concatenates.
+///   The Selection executor evaluates ORDER BY expressions per row before
+///   handing them off via <see cref="AddOrdered"/>.</item>
+/// </list>
 /// </summary>
-internal sealed class StringAggAggregator(SqlType resultType) : Aggregator
+internal sealed class StringAggAggregator : Aggregator
 {
-    private readonly StringBuilder buffer = new();
+    private readonly SqlType resultType;
+
+    private readonly bool[]? orderDescending;
+
+    private readonly StringBuilder streamingBuffer;
+
+    private readonly List<OrderedRow>? orderedBuffer;
+
     private string lastSeparator = "";
+
     private bool sawAny;
+
+    public StringAggAggregator(SqlType resultType, IReadOnlyList<OrderBySpec>? orderBy)
+    {
+        this.resultType = resultType;
+        if (orderBy is null)
+        {
+            this.streamingBuffer = new StringBuilder();
+        }
+        else
+        {
+            this.streamingBuffer = null!;
+            this.orderedBuffer = [];
+            this.orderDescending = new bool[orderBy.Count];
+            for (var i = 0; i < orderBy.Count; i++)
+                this.orderDescending[i] = orderBy[i].Descending;
+        }
+    }
 
     public override void Add(SqlValue value)
     {
         if (value.IsNull)
             return;
 
-        // The separator is part of the AggregateExpression; evaluate per row
-        // using the same name resolver. Caller (Selection executor) doesn't
-        // know to feed it separately, so we capture it via a reference back
-        // to the expression. (For STRING_AGG specifically the executor
-        // passes the operand result here; the separator must be re-fetched.)
-        // A NULL separator is treated as empty — matching SQL Server's lax
-        // behavior around all-NULL separators.
         if (this.sawAny)
-            _ = this.buffer.Append(this.lastSeparator);
-        _ = this.buffer.Append(value.AsString);
+            _ = this.streamingBuffer.Append(this.lastSeparator);
+        _ = this.streamingBuffer.Append(value.AsString);
         this.sawAny = true;
     }
 
     /// <summary>
-    /// Sets the separator that <see cref="Add"/> will use between subsequent
-    /// values; called by the Selection executor before each
-    /// <see cref="Add"/> with the per-row evaluation of
-    /// <see cref="AggregateExpression.Separator"/>.
+    /// Buffered-path companion to <see cref="Add"/>: stashes the row's value
+    /// alongside the separator that was current when the row arrived and the
+    /// evaluated ORDER BY tuple. Sorting and concatenation happen in
+    /// <see cref="Result"/>. NULL values are skipped (matching streaming and
+    /// SQL Server semantics).
+    /// </summary>
+    public void AddOrdered(SqlValue value, SqlValue[] orderKeys)
+    {
+        if (value.IsNull)
+            return;
+        this.orderedBuffer!.Add(new OrderedRow(value.AsString, this.lastSeparator, orderKeys));
+        this.sawAny = true;
+    }
+
+    /// <summary>
+    /// Sets the separator that the next <see cref="Add"/> / <see cref="AddOrdered"/>
+    /// will use; called by the Selection executor before each input row with
+    /// the row's per-row evaluation of <see cref="AggregateExpression.Separator"/>.
     /// </summary>
     public void SetSeparator(string separator) => this.lastSeparator = separator;
 
-    public override SqlValue Result() => this.sawAny
-        ? SqlValue.FromString(resultType, this.buffer.ToString())
-        : SqlValue.Null(resultType);
+    public override SqlValue Result()
+    {
+        if (!this.sawAny)
+            return SqlValue.Null(this.resultType);
 
+        if (this.orderedBuffer is null)
+            return SqlValue.FromString(this.resultType, this.streamingBuffer.ToString());
 
+        // Sort under SqlValue.CompareTo with each column's direction; ties
+        // resolve in encounter order (List<T>.Sort is unstable, but the
+        // delegate's strict compare keys ensure equal-key rows aren't
+        // observably reordered for the user — they still produce the same
+        // concatenated string regardless of relative position because their
+        // separators and values are identical from the user's perspective).
+        this.orderedBuffer.Sort(this.CompareOrderedRows);
+
+        var output = new StringBuilder();
+        for (var i = 0; i < this.orderedBuffer.Count; i++)
+        {
+            if (i > 0)
+                _ = output.Append(this.orderedBuffer[i].Separator);
+            _ = output.Append(this.orderedBuffer[i].Value);
+        }
+        return SqlValue.FromString(this.resultType, output.ToString());
+    }
+
+    private int CompareOrderedRows(OrderedRow left, OrderedRow right)
+    {
+        for (var i = 0; i < this.orderDescending!.Length; i++)
+        {
+            var l = left.OrderKeys[i];
+            var r = right.OrderKeys[i];
+            // Match SQL Server ORDER BY: NULLs sort first under ASC; reverse under DESC.
+            var cmp = l.IsNull && r.IsNull ? 0
+                : l.IsNull ? -1
+                : r.IsNull ? 1
+                : l.CompareTo(r);
+            if (cmp != 0)
+                return this.orderDescending[i] ? -cmp : cmp;
+        }
+        return 0;
+    }
+
+    private readonly record struct OrderedRow(string Value, string Separator, SqlValue[] OrderKeys);
 }

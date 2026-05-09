@@ -44,7 +44,7 @@ internal abstract class Aggregator
         AggregateKind.Sum => SumAggregator.Create(resultType, aggregate.Distinct),
         AggregateKind.Avg => AverageAggregator.Create(resultType, aggregate.Distinct),
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => new StatisticalAggregator(aggregate.Kind),
-        AggregateKind.StringAgg => new StringAggAggregator(resultType),
+        AggregateKind.StringAgg => new StringAggAggregator(resultType, aggregate.OrderBy),
         AggregateKind.ChecksumAgg => new ChecksumAggAggregator(),
         _ => throw new NotSupportedException($"Aggregator for {aggregate.Kind} not implemented yet."),
     };

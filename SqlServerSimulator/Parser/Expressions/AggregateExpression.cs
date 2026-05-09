@@ -54,6 +54,16 @@ internal sealed class AggregateExpression : Expression
 
     public readonly bool Distinct;
 
+    /// <summary>
+    /// Items from a postfix <c>WITHIN GROUP (ORDER BY ...)</c> clause; null
+    /// when no ORDER BY was supplied. Set exactly once during parse, after the
+    /// aggregate is constructed and registered (the postfix follows the
+    /// closing <c>)</c> of the function call). Only <c>STRING_AGG</c> accepts
+    /// this clause; <see cref="Expression.Parse"/>'s outer loop raises
+    /// Msg 10757 for any other aggregate kind before reaching the setter.
+    /// </summary>
+    public IReadOnlyList<OrderBySpec>? OrderBy;
+
     private SqlValue cachedResult;
 
     private bool resultBound;
@@ -65,6 +75,28 @@ internal sealed class AggregateExpression : Expression
         this.Distinct = distinct;
         this.Separator = separator;
     }
+
+    /// <summary>
+    /// SQL Server's lowercase function name for this aggregate kind, used in
+    /// error messages that quote the offending function (Msg 10757, etc.).
+    /// </summary>
+    internal string LowerName => this.Kind switch
+    {
+        AggregateKind.Count => "count",
+        AggregateKind.CountBig => "count_big",
+        AggregateKind.Sum => "sum",
+        AggregateKind.Avg => "avg",
+        AggregateKind.Max => "max",
+        AggregateKind.Min => "min",
+        AggregateKind.Stdev => "stdev",
+        AggregateKind.StdevP => "stdevp",
+        AggregateKind.Var => "var",
+        AggregateKind.VarP => "varp",
+        AggregateKind.StringAgg => "string_agg",
+        AggregateKind.ChecksumAgg => "checksum_agg",
+        AggregateKind.ApproxCountDistinct => "approx_count_distinct",
+        _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
+    };
 
     /// <summary>
     /// Convenience overload that auto-registers the new instance with the

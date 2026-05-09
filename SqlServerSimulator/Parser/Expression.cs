@@ -163,10 +163,86 @@ internal abstract class Expression
                         expression = WindowExpression.WrapAggregate(aggregate, context);
                         continue;
                     }
+                // WITHIN GROUP (ORDER BY ...) following an aggregate is the
+                // ordered-set aggregate postfix. STRING_AGG accepts it; every
+                // other aggregate kind raises Msg 10757. WITHIN is contextual
+                // (SQL Server doesn't reserve the identifier).
+                case UnquotedString unquoted when expression is AggregateExpression aggregateForOrderBy
+                    && context.AsContextual() == ContextualKeyword.Within:
+                    {
+                        _ = unquoted;
+                        ParseWithinGroupOrderBy(aggregateForOrderBy, context);
+                        continue;
+                    }
             }
 
             return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;
         }
+    }
+
+    /// <summary>
+    /// Consumes a <c>WITHIN GROUP (ORDER BY expr [ASC|DESC] [, ...])</c>
+    /// postfix and attaches the parsed items to <paramref name="aggregate"/>.
+    /// On entry the cursor is at the contextual <c>WITHIN</c> identifier; on
+    /// return it sits on the closing <c>)</c> of the WITHIN GROUP, matching
+    /// the lookahead contract that <see cref="Parse"/>'s binary loop's next
+    /// <see cref="ParserContext.GetNextOptional"/> expects. Raises Msg 10757
+    /// if the aggregate isn't <c>STRING_AGG</c>; Msg 5308 if any ORDER BY
+    /// item is a bare integer literal (ordinal indices aren't allowed in this
+    /// position, unlike the projection's ORDER BY).
+    /// </summary>
+    private static void ParseWithinGroupOrderBy(AggregateExpression aggregate, ParserContext context)
+    {
+        if (aggregate.Kind != AggregateKind.StringAgg)
+            throw SimulatedSqlException.FunctionMayNotHaveWithinGroup(aggregate.LowerName);
+
+        context.MoveNextRequired();
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Group })
+            throw context.Token is ReservedKeyword rk ? SimulatedSqlException.SyntaxErrorNearKeyword(rk) : SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: '(' })
+            throw context.Token is ReservedKeyword rk2 ? SimulatedSqlException.SyntaxErrorNearKeyword(rk2) : SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.By })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var items = new List<OrderBySpec>();
+        do
+        {
+            context.MoveNextRequired();
+            var expr = Expression.Parse(context);
+            // Reject bare integer ordinals (Msg 5308). A wrapped expression
+            // like `1 + 0` falls through to the per-row path, matching SQL
+            // Server's rejection-by-token-shape rather than constant folding.
+            if (expr is Value valExpr
+                && valExpr.Constant.Type == Storage.SqlType.Int32
+                && !valExpr.Constant.IsNull)
+            {
+                throw SimulatedSqlException.IntegerIndexNotAllowedInOrderedAggregate();
+            }
+
+            var descending = false;
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Asc }:
+                    context.MoveNextOptional();
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Desc }:
+                    descending = true;
+                    context.MoveNextOptional();
+                    break;
+            }
+            items.Add(OrderBySpec.FromExpression(expr, descending));
+        }
+        while (context.Token is Operator { Character: ',' });
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        aggregate.OrderBy = items;
     }
 
     /// <summary>

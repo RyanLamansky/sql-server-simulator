@@ -205,6 +205,142 @@ public sealed class AggregateTests
     }
 
     [TestMethod]
+    public void StringAgg_WithinGroup_OrderByAsc_ReordersConcatenation()
+        => AreEqual("alice,bob,charlie", Seeded("s nvarchar(20)", "('charlie'), ('alice'), ('bob')")
+            .CreateCommand("select string_agg(s, ',') within group (order by s) from t").ExecuteScalar());
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_OrderByDesc_ReverseConcatenation()
+        => AreEqual("charlie,bob,alice", Seeded("s nvarchar(20)", "('charlie'), ('alice'), ('bob')")
+            .CreateCommand("select string_agg(s, ',') within group (order by s desc) from t").ExecuteScalar());
+
+    // ORDER BY a column that's NOT the aggregate operand — sort key and aggregated value differ.
+    [TestMethod]
+    public void StringAgg_WithinGroup_OrderByDifferentColumn()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (name nvarchar(20), score int);
+            insert t values ('charlie', 30), ('alice', 10), ('bob', 20)
+            """).ExecuteNonQuery();
+        AreEqual("alice,bob,charlie",
+            connection.CreateCommand("select string_agg(name, ',') within group (order by score) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_OrderByExpression()
+    {
+        using var connection = Seeded("s nvarchar(20)", "('charlie'), ('alice'), ('bob')");
+        // LEN DESC → 'charlie' (7), 'alice' (5), 'bob' (3).
+        AreEqual("charlie,alice,bob",
+            connection.CreateCommand("select string_agg(s, ',') within group (order by len(s) desc) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_MultiColumnOrderBy()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (name nvarchar(20), score int);
+            insert t values ('alpha', 10), ('beta', 20), ('gamma', 20), ('delta', 10)
+            """).ExecuteNonQuery();
+        // ORDER BY score DESC, name ASC: (beta, gamma) tied at 20 → alphabetical, then (alpha, delta) at 10 → alphabetical.
+        AreEqual("beta,gamma,alpha,delta",
+            connection.CreateCommand("select string_agg(name, ',') within group (order by score desc, name) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_PerGroup_OrdersWithinEachGroup()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (g int, name nvarchar(20));
+            insert t values (1, 'charlie'), (1, 'alice'), (1, 'bob'), (2, 'echo'), (2, 'delta')
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand(
+            "select g, string_agg(name, ',') within group (order by name) from t group by g order by g").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual("alice,bob,charlie", reader.GetString(1));
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        AreEqual("delta,echo", reader.GetString(1));
+        IsFalse(reader.Read());
+    }
+
+    // NULL operand rows are skipped from the input set; ORDER BY runs over the remaining values.
+    [TestMethod]
+    public void StringAgg_WithinGroup_SkipsNulls()
+        => AreEqual("alice,bob,charlie", Seeded("s nvarchar(20)", "('charlie'), (null), ('alice'), ('bob')")
+            .CreateCommand("select string_agg(s, ',') within group (order by s) from t").ExecuteScalar());
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_EmptyInput_ReturnsNull()
+        => AreEqual(DBNull.Value, Seeded("s nvarchar(20)", "")
+            .CreateCommand("select string_agg(s, ',') within group (order by s) from t").ExecuteScalar());
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_SingleRow_ReturnsValue()
+        => AreEqual("only", Seeded("s nvarchar(20)", "('only')")
+            .CreateCommand("select string_agg(s, ',') within group (order by s) from t").ExecuteScalar());
+
+    [TestMethod]
+    public void Max_WithinGroup_RaisesMsg10757()
+        => new Simulation().AssertSqlError("""
+            create table t (s nvarchar(20));
+            insert t values ('a');
+            select max(s) within group (order by s) from t
+            """, 10757,
+            "The function 'max' may not have a WITHIN GROUP clause.");
+
+    [TestMethod]
+    public void Sum_WithinGroup_RaisesMsg10757()
+        => new Simulation().AssertSqlError("""
+            create table t (a int);
+            insert t values (1);
+            select sum(a) within group (order by a) from t
+            """, 10757,
+            "The function 'sum' may not have a WITHIN GROUP clause.");
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_OrderByOrdinal_RaisesMsg5308()
+        => new Simulation().AssertSqlError("""
+            create table t (s nvarchar(20));
+            insert t values ('a');
+            select string_agg(s, ',') within group (order by 1) from t
+            """, 5308,
+            "Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.");
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_NoParens_RaisesSyntaxError()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (s nvarchar(20));
+            select string_agg(s, ',') within group from t
+            """, 156);
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_EmptyParens_RaisesSyntaxError()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (s nvarchar(20));
+            select string_agg(s, ',') within group () from t
+            """, 102);
+
+    // Contextual `within`: the parser must not reserve the identifier — column / alias use must still work.
+    [TestMethod]
+    public void Within_AsColumnName_StillParses()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (within int);
+            insert t values (1), (2)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select within from t order by within").ExecuteReader();
+        IsTrue(reader.Read()); AreEqual(1, reader.GetInt32(0));
+        IsTrue(reader.Read()); AreEqual(2, reader.GetInt32(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
     public void ChecksumAgg_OrderIndependentFold()
     {
         // Semantic guarantee: same multiset → same checksum (exact bit pattern not pinned).

@@ -40,4 +40,5 @@ enum ContextualKeyword
     TraceOn,
     Using,
     Verbose_Truncation_Warnings,
+    Within,
 }
