@@ -118,6 +118,27 @@ partial class SimulatedSqlException
         new($"Line {line}: Specified scale {requested} is invalid.", 1002, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 289: a <c>*FROMPARTS</c> builder received
+    /// argument values outside the legal range for the constructed type
+    /// (e.g. <c>DATEFROMPARTS(2025, 2, 30)</c>, <c>TIMEFROMPARTS(24, ...)</c>).
+    /// State numbers vary by target type: 1=date, 2=time, 3=datetime,
+    /// 5=datetime2, 6=datetimeoffset (probe-confirmed against SQL Server 2025,
+    /// 2026-05-09).
+    /// </summary>
+    internal static SimulatedSqlException CannotConstructFromParts(string typeName, byte state) =>
+        new($"Cannot construct data type {typeName}, some of the arguments have values which are not valid.", 289, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 10760: the scale (precision) argument of a
+    /// <c>*FROMPARTS</c> builder for <c>datetime2</c> / <c>time</c> /
+    /// <c>datetimeoffset</c> isn't a valid integer constant — typically
+    /// triggered by passing <c>NULL</c> in that slot. Probe-confirmed against
+    /// SQL Server 2025 (2026-05-09).
+    /// </summary>
+    internal static SimulatedSqlException ScaleArgumentNotValid(string typeName) =>
+        new($"Scale argument is not valid. Valid expressions for data type {typeName} scale argument are integer constants and integer constant expressions.", 10760, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 241: a string value could not be parsed as a
     /// date or time value (e.g. <c>CAST('not-a-date' AS date)</c>). Covers
     /// the <c>date</c> / <c>datetime</c> / <c>datetime2</c> / <c>time</c> /

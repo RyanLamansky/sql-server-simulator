@@ -258,6 +258,17 @@ String concatenation via `+` is **NULL-propagating** (matches default `CONCAT_NU
 
 `Subtract` / `Multiply` / etc. on string operands still raise `NotSupportedException` (real SQL Server: Msg 402 for `-`, Msg 8117 for `*` / `/` / `%`). Not a fidelity priority — apps don't use those shapes intentionally.
 
+### Date-construction scalar functions: the `*FROMPARTS` family + `EOMONTH`
+All six builders — `DATEFROMPARTS`, `DATETIMEFROMPARTS`, `DATETIME2FROMPARTS`, `DATETIMEOFFSETFROMPARTS`, `SMALLDATETIMEFROMPARTS`, `TIMEFROMPARTS` — share one runtime path: NULL on any non-precision argument propagates to NULL; non-int operands coerce through the existing CAST machinery (decimal / string / bigint inputs all accepted, probe-confirmed against SQL Server 2025 on 2026-05-09); out-of-range values raise **Msg 289** with the type-specific State number (1=date, 2=time, 3=datetime, 5=datetime2, 6=datetimeoffset) and verbatim text `"Cannot construct data type {type}, some of the arguments have values which are not valid."`
+
+The variable-precision builders (`datetime2` / `datetimeoffset` / `time`) accept the precision arg as the last position and require it to be an integer constant or constant expression. The simulator extracts it at parse time by evaluating the parsed sub-expression with a NULL-returning column resolver — so literal `1+2` folds to `3`, but a column reference degrades to NULL and surfaces as **Msg 10760** (`"Scale argument is not valid. Valid expressions for data type {type} scale argument are integer constants and integer constant expressions."`). Out-of-`[0, 7]` precision raises **Msg 1002** with the standard `"Specified scale {N} is invalid."` wording. Result type carries the captured precision: `DATETIME2FROMPARTS(..., 3)` → `datetime2(3)`.
+
+`DATETIMEFROMPARTS` ms 999 with hour 23 / minute 59 / second 59 rolls to the next day via legacy `datetime`'s 1/300s tick rounding (probe-confirmed). `DATETIMEOFFSETFROMPARTS` enforces sign-consistency between `hour_offset` and `minute_offset` (mixed signs raise Msg 289 State 6) and a |offset| ≤ 14:00 cap.
+
+`EOMONTH(start_date [, month_offset])` always returns `date` regardless of input type — `date` / `datetime` / `datetime2` / `datetimeoffset` / `smalldatetime` / string-literal inputs all surface as date in the output. **Quirk** worth knowing: a NULL `month_offset` is silently treated as zero (no shift), unlike NULL `start_date` which propagates. Probe-confirmed against SQL Server 2025.
+
+`DatePartsBuilder` (`Parser/Expressions/`) is a single class with a `DatePartsBuilderKind` discriminator covering all six builders; `EOMonth` lives in its own file because its argument shape (date input + optional int offset) is structurally different from the parts-list pattern.
+
 ### Constraints
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree.

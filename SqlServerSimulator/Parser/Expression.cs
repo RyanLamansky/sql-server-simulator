@@ -370,6 +370,7 @@ internal abstract class Expression
                 "CEILING" => new Ceiling(context),
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "DATEADD" => new DateAdd(context),
+                "EOMONTH" => new EOMonth(context),
                 "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
@@ -412,7 +413,9 @@ internal abstract class Expression
             },
             13 => uppercaseName switch
             {
+                "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "IDENT_CURRENT" => new IdentCurrent(context),
+                "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null
             },
             14 => uppercaseName switch
@@ -428,7 +431,23 @@ internal abstract class Expression
             },
             17 => uppercaseName switch
             {
+                "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
                 "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
+                _ => null
+            },
+            18 => uppercaseName switch
+            {
+                "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
+                _ => null
+            },
+            22 => uppercaseName switch
+            {
+                "SMALLDATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.SmallDateTimeFromParts),
+                _ => null
+            },
+            23 => uppercaseName switch
+            {
+                "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
                 _ => null
             },
             21 => uppercaseName switch
