@@ -232,6 +232,32 @@ Two shapes are modeled:
 
 EF Core 10 always wraps ROW_NUMBER in a derived-table subquery: `SELECT ... FROM (SELECT cols, ROW_NUMBER() OVER(...) AS row FROM T) AS sub WHERE sub.row <= N` (Take) or `WHERE 1 < sub.row AND sub.row <= K` (Skip+Take). The simulator's plain-derived-table-doesn't-see-outer-scope limitation doesn't bite here because the ROW_NUMBER subquery has no outer correlation — its OVER refers only to the inner FROM.
 
+### Math scalar functions
+`ABS`, `ROUND` (2- and 3-arg), `FLOOR`, `CEILING`, `POWER`, `SQRT`, `SIGN`, `LOG` (1- and 2-arg), `EXP`, `LOG10`. EF Core 10 emits all from natural `Math.X` LINQ — `Math.Round(x, n)` → `ROUND(x, n)`, `Math.Truncate(x)` → `ROUND(x, 0, 1)` (the truncate-mode third-arg form), `Math.Pow(a, b)` → `POWER(a, b)`, `Math.Log10(x)` → `LOG10(x)`, `Math.Abs(x)` → `ABS(x)`, etc. Probe-confirmed against SQL Server 2025 (2026-05-09).
+
+**Type-widening rule** (shared across `ABS` / `FLOOR` / `CEILING` / `ROUND` / `SIGN` / `POWER`'s first-arg type — probe-confirmed via `SELECT INTO #t` + `tempdb.information_schema.columns`):
+- `tinyint` / `smallint` → `int`
+- `smallmoney` → `money`
+- `real` / `bit` → `float` (sic — `bit` widens to float, not int, despite being in the integer category)
+- `int` / `bigint` / `decimal(p,s)` / `money` / `float` → preserve input type
+
+**Other type rules**:
+- `POWER` returns the (post-widen) type of the *first* argument regardless of exponent type — `POWER(int, float) → int` with truncation toward zero.
+- `SQRT` / `LOG` / `EXP` / `LOG10` always return `float` regardless of input.
+- The narrow-integer asymmetric range gets absorbed by the widening: `ABS(smallint.MinValue) = 32768` succeeds because the int result type holds it; `ABS(int.MinValue)` and `ABS(bigint.MinValue)` raise Msg 8115.
+
+**Error semantics** (probe-confirmed 2026-05-09):
+- `SQRT(negative)`, `LOG(<= 0)`, `LOG10(<= 0)`, `LOG(x, base = 1)`, `POWER(negative, fractional)` → **Msg 3623** `"An invalid floating point operation occurred."`.
+- `POWER(0, negative)` → **Msg 8134** `"Divide by zero error encountered."`.
+- `EXP(huge)` (overflow to inf) → **Msg 8115** `"Arithmetic overflow error converting expression to data type float."`.
+- `ABS(int.MinValue)` / `ABS(bigint.MinValue)` → **Msg 8115** with the result type's family name in the data-type slot.
+- `POWER` int-result overflow → **Msg 232** `"Arithmetic overflow error for type int, value = X.XXXXXX."` (six-digit fractional in the value slot).
+- `ROUND` non-integer length / function argument → **Msg 8116** (existing factory) `"Argument data type X is invalid for argument N of round function."`.
+
+NULL on any operand → typed NULL of the (post-widen) result type. `MathScalars` (sibling helper in `Parser/Expressions/`) centralizes the widening rule and the `AsLong` / `AsDouble` / `AsDecimalOrMoney` accessors plus the matching `PromoteInteger` / `FromDecimalOrMoney` writers — each function file stays small and dispatches on `resultType.Category`. The `AsDecimal` / `FromDecimal` pair is decimal-only (rejects money); `AsDecimalOrMoney` / `FromDecimalOrMoney` bridge the two storage shapes (decimal stores boxed `decimal`, money stores scaled `int64`).
+
+**`Math.Sign(decimal)` through EF Core 10 doesn't work end-to-end against either real SQL Server or the simulator** (probe-confirmed 2026-05-09): the LINQ method's CLR signature returns `int` but EF emits `SELECT SIGN([col])` and SQL Server's `SIGN(decimal)` returns decimal, so the reader-side cast throws — real SqlClient surfaces `InvalidCastException("Unable to cast object of type 'System.Decimal' to type 'System.Int32'.")`, the simulator surfaces `InvalidOperationException("Value is decimal(p,s), not int.")` from its stricter `GetInt32`. Same failure mode, different exception subtype; not a fidelity bug. Apps using `Math.Sign` over an int column work fine.
+
 ### Date scalar functions: `DATEPART` / `DATEADD` / `DATEDIFF` / `DATEDIFF_BIG`
 All four take a bare datepart keyword as the first argument (parse-time `Name` token, not an expression). Canonical keywords + common aliases: `year`/`yy`/`yyyy`, `quarter`/`qq`/`q`, `month`/`mm`/`m`, `dayofyear`/`dy`/`y`, `day`/`dd`/`d`, `week`/`wk`/`ww`, `iso_week`/`isowk`/`isoww`, `weekday`/`dw`, `hour`/`hh`, `minute`/`mi`/`n`, `second`/`ss`/`s`, `millisecond`/`ms`, `microsecond`/`mcs`, `nanosecond`/`ns`, `tzoffset`/`tz`. Result types: `DATEPART` → `int`; `DATEADD` preserves the input's SQL type (`date` stays `date`, `time(N)` stays `time(N)`, etc.); `DATEDIFF` → `int`; `DATEDIFF_BIG` → `bigint`.
 

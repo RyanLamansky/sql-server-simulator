@@ -193,6 +193,29 @@ partial class SimulatedSqlException
         new("Divide by zero error encountered.", 8134, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 3623: a math function received an input that
+    /// has no real-valued result (negative <c>SQRT</c>, non-positive
+    /// <c>LOG</c> / <c>LOG10</c> input, base-1 <c>LOG</c>, or
+    /// <c>POWER(negative, fractional)</c>). Probe-confirmed against
+    /// SQL Server 2025 (2026-05-09): same message text and class for all
+    /// triggers; no slot for the function name or value.
+    /// </summary>
+    internal static SimulatedSqlException InvalidFloatingPointOperation() =>
+        new("An invalid floating point operation occurred.", 3623, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 232: a numeric result overflowed the target
+    /// integer type — fired by <c>POWER</c> when the float-internal result
+    /// can't be coerced back to the input's integer type. Distinct from
+    /// Msg 8115 (generic arithmetic overflow) by message wording: this one
+    /// embeds the source numeric value, while 8115 embeds only the target
+    /// type. The simulator formats <paramref name="formattedValue"/> as
+    /// SQL Server does — six fractional digits via <c>F6</c>.
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowForType(string typeName, string formattedValue) =>
+        new($"Arithmetic overflow error for type {typeName}, value = {formattedValue}.", 232, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 8170: a non-NULL <c>uniqueidentifier</c> was
     /// cast to a <c>char</c> / <c>varchar</c> destination too short to hold
     /// the 36-character formatted GUID. The <c>nchar</c> / <c>nvarchar</c>

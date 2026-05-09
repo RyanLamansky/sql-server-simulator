@@ -238,8 +238,10 @@ internal abstract class Expression
             {
                 "ABS" => new AbsoluteValue(context),
                 "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
+                "EXP" => new Exp(context),
                 "IIF" => new Iif(context),
                 "LEN" => new Length(context),
+                "LOG" => new Log(context),
                 "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
                 "MIN" => AggregateExpression.Parse(context, AggregateKind.Min),
                 "SUM" => AggregateExpression.Parse(context, AggregateKind.Sum),
@@ -250,6 +252,8 @@ internal abstract class Expression
             {
                 "CAST" => new Cast(context),
                 "LEFT" => new Left(context),
+                "SIGN" => new Sign(context),
+                "SQRT" => new Sqrt(context),
                 "TRIM" => new Trim(context),
                 "VARP" => AggregateExpression.Parse(context, AggregateKind.VarP),
                 _ => null
@@ -257,10 +261,14 @@ internal abstract class Expression
             5 => uppercaseName switch
             {
                 "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
+                "FLOOR" => new Floor(context),
+                "LOG10" => new Log10(context),
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
                 "NEWID" => new NewId(context),
+                "POWER" => new Power(context),
                 "RIGHT" => new Right(context),
+                "ROUND" => new Round(context),
                 "RTRIM" => new RightTrim(context),
                 "STDEV" => AggregateExpression.Parse(context, AggregateKind.Stdev),
                 "UPPER" => new Upper(context),
@@ -275,6 +283,7 @@ internal abstract class Expression
             },
             7 => uppercaseName switch
             {
+                "CEILING" => new Ceiling(context),
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "DATEADD" => new DateAdd(context),
                 "REPLACE" => new Replace(context),

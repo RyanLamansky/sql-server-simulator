@@ -1,36 +1,65 @@
-﻿using SqlServerSimulator.Storage;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
-/// Encapsulates the SQL ABS command: https://learn.microsoft.com/en-us/sql/t-sql/functions/abs-transact-sql
+/// SQL <c>ABS(numeric)</c>: returns the absolute value of the input.
+/// Result type follows the shared math-scalar widening rule
+/// (<see cref="MathScalars.WidenForResult"/>): tinyint / smallint widen to
+/// int; smallmoney widens to money; real and bit widen to float;
+/// everything else preserves the input type.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Probe-confirmed against SQL Server 2025 (2026-05-09): integer overflow
+/// raises Msg 8115 with the result type's family name —
+/// <c>ABS(int.MinValue)</c> → <c>"Arithmetic overflow error converting expression to data type int."</c>
+/// and <c>ABS(bigint.MinValue)</c> → <c>"...data type bigint."</c>. The
+/// smallint case sneaks past overflow because widening to int absorbs the
+/// asymmetric range (32768 fits in int even though it doesn't in smallint).
+/// </para>
+/// <para>
+/// Decimal / money inputs never overflow on ABS — .NET <c>decimal</c>'s
+/// range is symmetric, so <c>Math.Abs(decimal.MinValue) = decimal.MaxValue</c>
+/// works. Float inputs likewise have symmetric range.
+/// </para>
+/// </remarks>
 internal sealed class AbsoluteValue(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
-        var value = source.Run(getColumnValue);
-        if (!SqlType.IsIntegerCategory(value.Type))
-            throw new NotSupportedException($"ABS currently supports only integer operands; got {value.Type}.");
-        if (value.IsNull)
-            return SqlValue.Null(value.Type);
-
-        var asLong = value.Type == SqlType.Bit ? (value.AsBoolean ? 1L : 0L)
-            : value.Type == SqlType.TinyInt ? value.AsByte
-            : value.Type == SqlType.SmallInt ? value.AsInt16
-            : value.Type == SqlType.Int32 ? value.AsInt32
-            : value.AsInt64;
-        var abs = Math.Abs(asLong);
-        return value.Type == SqlType.Bit ? SqlValue.FromBoolean(abs != 0)
-            : value.Type == SqlType.TinyInt ? SqlValue.FromByte((byte)abs)
-            : value.Type == SqlType.SmallInt ? SqlValue.FromInt16((short)abs)
-            : value.Type == SqlType.Int32 ? SqlValue.FromInt32((int)abs)
-            : SqlValue.FromInt64(abs);
+        var v = this.source.Run(getColumnValue);
+        var resultType = MathScalars.WidenForResult(v.Type);
+        return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
+        {
+            SqlTypeCategory.Integer => AbsInteger(MathScalars.AsLong(v), resultType),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, Math.Abs(MathScalars.AsDecimalOrMoney(v))),
+            SqlTypeCategory.Approximate => SqlValue.FromDouble(Math.Abs(MathScalars.AsDouble(v))),
+            _ => throw new NotSupportedException($"ABS doesn't support {v.Type}.")
+        };
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+        => MathScalars.WidenForResult(this.source.GetSqlType(resolveColumnType));
 
-    internal override string DebugDisplay() => $"ABS({source.DebugDisplay()})";
+    /// <remarks>
+    /// .NET's <c>Math.Abs(long)</c> throws <c>OverflowException</c> on
+    /// <c>long.MinValue</c>; for an int-result widening, the long-form
+    /// absolute value can also exceed <c>int.MaxValue</c> (only reachable
+    /// from <c>int.MinValue</c> input post-widen-to-long). Both paths map
+    /// to Msg 8115 with the result type's family name.
+    /// </remarks>
+    private static SqlValue AbsInteger(long value, SqlType resultType)
+    {
+        if (value == long.MinValue)
+            throw SimulatedSqlException.ArithmeticOverflow("bigint");
+        var abs = Math.Abs(value);
+        return resultType == SqlType.Int32 && abs > int.MaxValue
+            ? throw SimulatedSqlException.ArithmeticOverflow("int")
+            : MathScalars.PromoteInteger(resultType, abs);
+    }
+
+    internal override string DebugDisplay() => $"ABS({this.source.DebugDisplay()})";
 }
