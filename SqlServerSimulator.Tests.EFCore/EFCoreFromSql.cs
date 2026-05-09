@@ -39,7 +39,7 @@ public class EFCoreFromSql
         using var context = SeededContext();
         var idAsString = "2";
         var customer = context.Customers
-            .FromSqlInterpolated($"select Id, Name from Customers where Id = {idAsString}")
+            .FromSqlInterpolated($"select * from Customers where Id = {idAsString}")
             .Single();
         Assert.AreEqual(2, customer.Id);
         Assert.AreEqual("beta", customer.Name);

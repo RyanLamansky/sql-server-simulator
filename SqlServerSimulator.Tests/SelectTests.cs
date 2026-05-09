@@ -364,4 +364,97 @@ public class SelectTests
         Assert.AreEqual(-1, reader[0]);
         Assert.AreEqual("n", reader.GetName(0));
     }
+
+    // ─── SELECT * projection ───────────────────────────────────────────────
+
+    [TestMethod]
+    public void SelectStar_SingleSource_ProjectsAllColumnsInDeclaredOrder()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (1, 2, 3)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select * from t").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(3, reader.FieldCount);
+        Assert.AreEqual("a", reader.GetName(0));
+        Assert.AreEqual("b", reader.GetName(1));
+        Assert.AreEqual("c", reader.GetName(2));
+        Assert.AreEqual(1, reader[0]);
+        Assert.AreEqual(2, reader[1]);
+        Assert.AreEqual(3, reader[2]);
+    }
+
+    [TestMethod]
+    public void SelectStar_WithWhereClause_FiltersRows()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (1, 10), (2, 20), (3, 30)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select * from t where a >= 2").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(1));
+        CollectionAssert.AreEqual(new[] { 20, 30 }, values);
+    }
+
+    [TestMethod]
+    public void SelectStar_TwoSourceJoin_IncludesDuplicateColumnNames()
+    {
+        // Multi-source `*` includes same-named columns from each source —
+        // SQL Server keeps the duplicate (no auto-disambiguation), and the
+        // qualified per-source References emitted by star-expansion let
+        // the resolver bind each duplicate without raising Msg 209.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create table u (a int, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (1, 2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert u values (1, 9)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select * from t inner join u on t.a = u.a").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(4, reader.FieldCount);
+        Assert.AreEqual("a", reader.GetName(0));
+        Assert.AreEqual("b", reader.GetName(1));
+        Assert.AreEqual("a", reader.GetName(2));
+        Assert.AreEqual("c", reader.GetName(3));
+    }
+
+    [TestMethod]
+    public void SelectQualifiedStar_RestrictsToNamedSource()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create table u (a int, c int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (1, 2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert u values (1, 9)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select t.* from t inner join u on t.a = u.a").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(2, reader.FieldCount);
+        Assert.AreEqual("a", reader.GetName(0));
+        Assert.AreEqual("b", reader.GetName(1));
+    }
+
+    [TestMethod]
+    public void SelectStar_InsideDerivedTable_OuterReferencesProjectedColumns()
+    {
+        // The inner `select *` expands against the inner FROM's columns,
+        // and the outer query then references those columns through the
+        // derived-table alias — the FromSqlInterpolated wrap shape EF Core
+        // emits.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (1, 2), (3, 4)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select x.a from (select * from t) as x where x.a = 3").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(3, reader[0]);
+        Assert.IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void SelectQualifiedStar_UnboundQualifier_RaisesMsg4104()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        var ex = Assert.Throws<DbException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
+        Assert.AreEqual("The multi-part identifier \"notbound.*\" could not be bound.", ex.Message);
+    }
 }

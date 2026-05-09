@@ -113,7 +113,25 @@ internal abstract class Expression
                         if (expression is not Reference reference)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-                        reference.AddMultiPartComponent(context.GetNextRequired<Name>());
+                        var afterDot = context.GetNextRequired();
+                        if (afterDot is Operator { Character: '*' })
+                        {
+                            // <qualifier>.* — convert the Reference into a
+                            // StarProjection placeholder. Selection.ParseInner
+                            // expands it once the FROM sources are known; if
+                            // it survives into a non-projection context, the
+                            // placeholder's Run / GetSqlType raise the
+                            // surface-not-supported error.
+                            expression = new StarProjection(reference.Name);
+                        }
+                        else if (afterDot is Name name)
+                        {
+                            reference.AddMultiPartComponent(name);
+                        }
+                        else
+                        {
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
                     }
                     continue;
                 case Operator { Character: ')' }:

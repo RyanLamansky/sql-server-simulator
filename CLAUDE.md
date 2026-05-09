@@ -165,6 +165,9 @@ APPLY is the lateral form: the right side is a derived-table SELECT re-executed 
 
 `JoinDriver`'s lateral branch handles both APPLY (CrossApply / OuterApply, no ON predicate) and ordinary derived tables in INNER / LEFT / CROSS join slots — the latter apply their `ON` predicate after the inner row materializes, and LEFT joins null-fill on no-match the same way OUTER APPLY does. Leftmost-source lateral plans run from the surrounding `outerResolver` directly (no per-tuple feedback at level 0).
 
+### `SELECT *` projection
+Bare `*` and qualified `<source>.*` both work. `*` expands to every column of every FROM source in source order; `t.*` filters to one source. Multi-source `*` keeps duplicate column names (e.g. a join on a same-named key emits the key twice). Expansion happens after FROM is parsed via `ExpandStars` in `Selection.cs`, replacing the placeholder `StarProjection` in the projection list with per-column `Reference` expressions qualified by each source's alias / table name — qualifying is what lets duplicates land without tripping Msg 209's ambiguous-column check. Unbound `<qualifier>.*` raises Msg 4104. The `*` *operator* (multiplication) is unchanged: it's only intercepted as star when it appears at projection-element-start position, so `select 5 * 3` still parses as multiplication and `count(*)` continues through its own AggregateExpression path.
+
 ### CASE
 Searched (`CASE WHEN cond THEN ... [ELSE ...] END`) and simple (`CASE input WHEN val ...`). Branches evaluate in order; first true predicate wins. UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through. Result type computed via `SqlType.Promote` across all THEN/ELSE, cached on first `GetSqlType`; `Run` coerces matched values to the common type. No-match-no-ELSE → typed NULL.
 

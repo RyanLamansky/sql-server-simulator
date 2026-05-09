@@ -315,6 +315,15 @@ internal sealed partial class Selection
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     goto ExitWhileTokenLoop;
 
+                // Bare `*` as a projection element (the first thing after
+                // SELECT, or the first thing after a comma). Within a
+                // projected expression, `*` is the multiplication operator and
+                // is handled by Expression.Parse's binary loop instead.
+                case Operator { Character: '*' }:
+                    expressions.Add(new StarProjection(null));
+                    context.MoveNextOptional();
+                    break;
+
                 default:
                     expressions.Add(Expression.Parse(context));
                     break;
@@ -359,6 +368,7 @@ internal sealed partial class Selection
                     ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
                     if (topCount is not null && fromClause.OffsetCount is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
+                    ExpandStars(expressions, sources);
                     return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver);
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
@@ -954,6 +964,59 @@ internal sealed partial class Selection
 
             return [RowEncoder.EncodeRow(schema, values)];
         });
+    }
+
+    /// <summary>
+    /// Expands any <see cref="StarProjection"/> markers in the projection
+    /// list into per-column <see cref="Reference"/> expressions, using each
+    /// FROM source's <see cref="FromSource.Qualifier"/> to disambiguate
+    /// same-named columns across sources (so multi-source <c>SELECT *</c>
+    /// doesn't trip Msg 209). Bare <c>*</c> emits every column from every
+    /// source in source order; <c>&lt;qualifier&gt;.*</c> filters to the
+    /// named source. An unbound qualifier raises Msg 4104.
+    /// </summary>
+    private static void ExpandStars(List<Expression> expressions, List<FromSource> sources)
+    {
+        for (var i = expressions.Count - 1; i >= 0; i--)
+        {
+            if (expressions[i] is not StarProjection star)
+                continue;
+
+            var expanded = new List<Expression>();
+            if (star.Qualifier is null)
+            {
+                foreach (var source in sources)
+                    AppendSourceColumns(expanded, source);
+            }
+            else
+            {
+                FromSource? matched = null;
+                foreach (var source in sources)
+                {
+                    if (source.Qualifier is { } q && Collation.Default.Equals(q, star.Qualifier))
+                    {
+                        matched = source;
+                        break;
+                    }
+                }
+                if (matched is null)
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{star.Qualifier}.*");
+                AppendSourceColumns(expanded, matched);
+            }
+
+            expressions.RemoveAt(i);
+            expressions.InsertRange(i, expanded);
+        }
+
+        static void AppendSourceColumns(List<Expression> destination, FromSource source)
+        {
+            foreach (var col in source.ColumnNames)
+            {
+                destination.Add(source.Qualifier is { } q
+                    ? new Reference(q, col)
+                    : new Reference(col));
+            }
+        }
     }
 }
 

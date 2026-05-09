@@ -22,6 +22,18 @@ internal sealed class Reference : Expression
         this.name = new MultiPartName(name);
     }
 
+    /// <summary>
+    /// Two-part reference (<c>qualifier.column</c>). Used by star-expansion
+    /// in <see cref="Selection"/> to emit per-column references qualified by
+    /// the FROM source's alias / table name, so multi-source <c>SELECT *</c>
+    /// includes same-named columns from different sources without triggering
+    /// Msg 209.
+    /// </summary>
+    public Reference(string qualifier, string column)
+    {
+        this.name = new MultiPartName(qualifier).WithAddedPart(column);
+    }
+
     public override string Name => this.name.Leaf;
 
     public void AddMultiPartComponent(Name next) => this.name = this.name.WithAddedPart(next.Value);
