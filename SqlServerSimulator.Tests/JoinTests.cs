@@ -15,10 +15,12 @@ public sealed class JoinTests
     private static DbConnection SeededAB()
     {
         var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table a (id int, name varchar(20))").ExecuteNonQuery();
-        _ = connection.CreateCommand("create table b (id int, a_id int, val int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into a values (1, 'one'), (2, 'two'), (3, 'three')").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into b values (10, 1, 100), (11, 1, 200), (12, 2, 300)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table a (id int, name varchar(20));
+            create table b (id int, a_id int, val int);
+            insert a values (1, 'one'), (2, 'two'), (3, 'three');
+            insert b values (10, 1, 100), (11, 1, 200), (12, 2, 300)
+            """).ExecuteNonQuery();
         return connection;
     }
 
@@ -61,12 +63,11 @@ public sealed class JoinTests
 
     [TestMethod]
     public void InnerJoin_MissingOn_RaisesSyntaxError()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int)");
-        _ = simulation.ExecuteNonQuery("create table b (id int)");
-        _ = Throws<DbException>(() => _ = simulation.ExecuteScalar("select 1 from a inner join b"));
-    }
+        => _ = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("""
+            create table a (id int);
+            create table b (id int);
+            select 1 from a inner join b
+            """));
 
     [TestMethod]
     public void LeftJoin_NullFillsUnmatchedRight()
@@ -105,23 +106,24 @@ public sealed class JoinTests
 
     [TestMethod]
     public void CrossJoin_WithOn_RaisesSyntaxError()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int)");
-        _ = simulation.ExecuteNonQuery("create table b (id int)");
-        _ = Throws<DbException>(() => _ = simulation.ExecuteScalar("select 1 from a cross join b on 1=1"));
-    }
+        => _ = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("""
+            create table a (id int);
+            create table b (id int);
+            select 1 from a cross join b on 1=1
+            """));
 
     [TestMethod]
     public void Chain_InnerThenLeft_Composes()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int, name varchar(20))");
-        _ = simulation.ExecuteNonQuery("create table b (id int, a_id int, val int)");
-        _ = simulation.ExecuteNonQuery("create table c (id int, b_id int, label varchar(20))");
-        _ = simulation.ExecuteNonQuery("insert into a values (1, 'one'), (2, 'two')");
-        _ = simulation.ExecuteNonQuery("insert into b values (10, 1, 100), (11, 1, 200), (12, 2, 300)");
-        _ = simulation.ExecuteNonQuery("insert into c values (20, 10, 'first'), (21, 12, 'second')");
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int, name varchar(20));
+            create table b (id int, a_id int, val int);
+            create table c (id int, b_id int, label varchar(20));
+            insert a values (1, 'one'), (2, 'two');
+            insert b values (10, 1, 100), (11, 1, 200), (12, 2, 300);
+            insert c values (20, 10, 'first'), (21, 12, 'second')
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand(
@@ -141,8 +143,10 @@ public sealed class JoinTests
     public void SelfJoin_DifferentAliases_DistinguishCopies()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int, name varchar(20))");
-        _ = simulation.ExecuteNonQuery("insert into a values (1, 'one'), (2, 'two')");
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int, name varchar(20));
+            insert a values (1, 'one'), (2, 'two')
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand(
@@ -168,10 +172,12 @@ public sealed class JoinTests
     {
         // ON `x.k = y.k` with NULLs on both sides → UNKNOWN → excluded (3VL).
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table x (k int null)");
-        _ = simulation.ExecuteNonQuery("create table y (k int null)");
-        _ = simulation.ExecuteNonQuery("insert into x values (1), (null)");
-        _ = simulation.ExecuteNonQuery("insert into y values (1), (null)");
+        _ = simulation.ExecuteNonQuery("""
+            create table x (k int null);
+            create table y (k int null);
+            insert x values (1), (null);
+            insert y values (1), (null)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var rows = ReadIntPairs(connection.CreateCommand("select x.k, y.k from x inner join y on x.k = y.k"));
@@ -180,11 +186,9 @@ public sealed class JoinTests
 
     [TestMethod]
     public void RightJoin_NotSupported()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int)");
-        _ = simulation.ExecuteNonQuery("create table b (id int)");
-        _ = Throws<NotSupportedException>(() =>
-            _ = simulation.ExecuteScalar("select 1 from a right join b on a.id = b.id"));
-    }
+        => _ = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar("""
+            create table a (id int);
+            create table b (id int);
+            select 1 from a right join b on a.id = b.id
+            """));
 }

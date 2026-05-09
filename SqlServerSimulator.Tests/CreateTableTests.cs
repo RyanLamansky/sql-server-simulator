@@ -152,7 +152,7 @@ public class CreateTableTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery($"create table t ( {columnName} int )");
-        _ = simulation.ExecuteNonQuery($"insert into t ({columnName}) values (42)");
+        _ = simulation.ExecuteNonQuery($"insert t ({columnName}) values (42)");
 
         using var reader = simulation
             .CreateCommand($"select {columnName} from t where {columnName} = 42")
@@ -164,8 +164,9 @@ public class CreateTableTests
     [TestMethod]
     public void CreateTable_DuplicateName_RaisesMsg2714()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table dup (a int)");
-        simulation.AssertSqlError("create table dup (a int)", 2714, "There is already an object named 'dup' in the database.");
+        new Simulation().AssertSqlError("""
+            create table dup (a int);
+            create table dup (a int)
+            """, 2714, "There is already an object named 'dup' in the database.");
     }
 }

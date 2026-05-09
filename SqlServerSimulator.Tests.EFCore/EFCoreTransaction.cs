@@ -60,7 +60,7 @@ public class EFCoreTransaction
         var simulation = TestDbContext.CreateAuthorsSimulation();
         // Pre-seed via raw SQL so we have a key to collide with.
         _ = simulation.CreateOpenConnection()
-            .CreateCommand("set identity_insert Authors on; insert into Authors (Id, Name) values (1, 'alice'); set identity_insert Authors off;")
+            .CreateCommand("set identity_insert Authors on; insert Authors (Id, Name) values (1, 'alice'); set identity_insert Authors off;")
             .ExecuteNonQuery();
 
         using var context = new TestDbContext(simulation);

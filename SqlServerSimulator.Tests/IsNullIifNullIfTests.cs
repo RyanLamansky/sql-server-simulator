@@ -59,15 +59,14 @@ public sealed class IsNullIifNullIfTests
         AreEqual(5, ExecuteScalar<int>("select isnull(cast(5 as int), cast('invalid' as varchar(20)))"));
     }
 
+    // EF Core emits this shape constantly: SUM over an empty filter returns
+    // NULL; ISNULL substitutes a default.
     [TestMethod]
     public void IsNull_AggregateFallback()
-    {
-        // EF Core emits this shape constantly: SUM over an empty filter
-        // returns NULL; ISNULL substitutes a default.
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (v int)");
-        AreEqual(0, sim.ExecuteScalar<int>("select isnull(sum(v), 0) from t where 1=0"));
-    }
+        => AreEqual(0, new Simulation().ExecuteScalar<int>("""
+            create table t (v int);
+            select isnull(sum(v), 0) from t where 1=0
+            """));
 
     [TestMethod]
     public void IsNull_Nested()
@@ -118,8 +117,10 @@ public sealed class IsNullIifNullIfTests
     public void Iif_FromTableRow()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, name varchar(20))");
-        _ = sim.ExecuteNonQuery("insert into t (id, name) values (1, 'a'), (-1, 'b')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, name varchar(20));
+            insert t (id, name) values (1, 'a'), (-1, 'b')
+            """);
         using var reader = sim.ExecuteReader("select iif(id > 0, name, 'none') from t order by id");
         IsTrue(reader.Read());
         AreEqual("none", reader.GetString(0));
@@ -195,13 +196,15 @@ public sealed class IsNullIifNullIfTests
         _ = Throws<DbException>(() => ExecuteScalar("select nullif(1, 2, 3)"));
     }
 
+    // EF Core emits NULLIF for safe-divide: a / NULLIF(b, 0).
     [TestMethod]
     public void NullIf_FromTableRow_EfCoreSafeDividePattern()
     {
-        // EF Core emits NULLIF for safe-divide: a / NULLIF(b, 0).
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (a int, b int)");
-        _ = sim.ExecuteNonQuery("insert into t (a, b) values (10, 2), (10, 0)");
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, b int);
+            insert t (a, b) values (10, 2), (10, 0)
+            """);
         using var reader = sim.ExecuteReader("select a / nullif(b, 0) from t order by b");
         IsTrue(reader.Read());
         IsTrue(reader.IsDBNull(0));

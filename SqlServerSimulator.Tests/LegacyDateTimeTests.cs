@@ -133,8 +133,10 @@ public sealed class LegacyDateTimeTests
     public void CreateTable_DateTimeColumn_RoundTripsRowsWithRoundedValues()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (d datetime)");
-        _ = sim.ExecuteNonQuery("insert into t values ('1900-01-01'), ('2024-01-15 12:00:00.998')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (d datetime);
+            insert t values ('1900-01-01'), ('2024-01-15 12:00:00.998')
+            """);
         using var reader = sim.ExecuteReader("select d from t");
         var rows = new List<DateTime>();
         while (reader.Read())
@@ -173,8 +175,10 @@ public sealed class LegacyDateTimeTests
     public void Equality_TwoDateTimeValues_AtSameTickAreEqual()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, d datetime)");
-        _ = sim.ExecuteNonQuery("insert into t values (1, '2024-01-15 12:00:00.997'), (2, '2024-01-15 12:00:00.997')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, d datetime);
+            insert t values (1, '2024-01-15 12:00:00.997'), (2, '2024-01-15 12:00:00.997')
+            """);
         using var reader = sim.ExecuteReader("select id from t where d = cast('2024-01-15 12:00:00.997' as datetime)");
         var ids = new List<int>();
         while (reader.Read())
@@ -186,8 +190,10 @@ public sealed class LegacyDateTimeTests
     public void Equality_DifferentTicksAreUnequal()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, d datetime)");
-        _ = sim.ExecuteNonQuery("insert into t values (1, '2024-01-15 12:00:00.000'), (2, '2024-01-15 12:00:00.003')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, d datetime);
+            insert t values (1, '2024-01-15 12:00:00.000'), (2, '2024-01-15 12:00:00.003')
+            """);
         using var reader = sim.ExecuteReader("select id from t where d = cast('2024-01-15 12:00:00.000' as datetime)");
         var ids = new List<int>();
         while (reader.Read())
@@ -335,8 +341,10 @@ public sealed class LegacyDateTimeTests
     public void Ordering_DateTimeValues_CompareByInstant()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, d datetime)");
-        _ = sim.ExecuteNonQuery("insert into t values (1, '2024-01-15'), (2, '2024-01-16')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, d datetime);
+            insert t values (1, '2024-01-15'), (2, '2024-01-16')
+            """);
         using var reader = sim.ExecuteReader("select id from t where d < cast('2024-01-16' as datetime)");
         IsTrue(reader.Read());
         AreEqual(1, reader.GetInt32(0));

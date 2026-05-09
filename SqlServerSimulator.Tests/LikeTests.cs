@@ -144,8 +144,10 @@ public class LikeTests
     public void LikeAgainstColumn_FiltersRows()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( id int, name nvarchar(40) )");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'apple'), (2, 'banana'), (3, 'apricot'), (4, 'cherry')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( id int, name nvarchar(40) );
+            insert t values (1, 'apple'), (2, 'banana'), (3, 'apricot'), (4, 'cherry')
+            """);
 
         using var reader = simulation.CreateCommand("select id from t where name like 'a%' order by id").ExecuteReader();
         var ids = new List<int>();
@@ -158,8 +160,10 @@ public class LikeTests
     public void LikePatternFromParameter_Works()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( id int, name nvarchar(40) )");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'apple'), (2, 'banana')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( id int, name nvarchar(40) );
+            insert t values (1, 'apple'), (2, 'banana')
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var command = connection.CreateCommand("select id from t where name like @p", ("@p", "ban%"));

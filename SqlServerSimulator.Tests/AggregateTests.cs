@@ -16,7 +16,7 @@ public sealed class AggregateTests
         var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand($"create table t ({schema})").ExecuteNonQuery();
         if (!string.IsNullOrEmpty(values))
-            _ = connection.CreateCommand($"insert into t values {values}").ExecuteNonQuery();
+            _ = connection.CreateCommand($"insert t values {values}").ExecuteNonQuery();
         return connection;
     }
 

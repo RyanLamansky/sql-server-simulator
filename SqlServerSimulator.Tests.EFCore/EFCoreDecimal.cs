@@ -39,9 +39,7 @@ public class EFCoreDecimal
     [TestMethod]
     public void Insert_NullableDecimal_AcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreateProductsSimulation());
-        _ = context.Products.Add(new Product { Id = 1, Price = 9.99m });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateProductsSimulation()).WithSaved(new Product { Id = 1, Price = 9.99m });
 
         Assert.IsNull(context.Products.Select(p => p.Discount).First());
     }
@@ -90,9 +88,7 @@ public class EFCoreDecimal
     [TestMethod]
     public void Cast_DecimalToDouble_ProjectsAsFloat()
     {
-        using var context = new TestDbContext(TestDbContext.CreateProductsSimulation());
-        _ = context.Products.Add(new Product { Id = 1, Price = 19.99m });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateProductsSimulation()).WithSaved(new Product { Id = 1, Price = 19.99m });
 
         var asDouble = context.Products.Select(p => (double)p.Price).Single();
         Assert.AreEqual(19.99, asDouble, 0.001);

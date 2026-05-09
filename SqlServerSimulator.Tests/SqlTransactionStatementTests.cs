@@ -29,9 +29,11 @@ public sealed class SqlTransactionStatementTests
     public void BeginCommit_PersistsWrites()
     {
         using var conn = NewSeededConnection();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("insert into t values (1, 10)").ExecuteNonQuery();
-        _ = conn.CreateCommand("commit").ExecuteNonQuery();
+        _ = conn.CreateCommand("""
+            begin transaction;
+            insert t values (1, 10);
+            commit
+            """).ExecuteNonQuery();
         AreEqual(1, CountRows(conn, "t"));
     }
 
@@ -39,9 +41,11 @@ public sealed class SqlTransactionStatementTests
     public void BeginRollback_UndoesWrites()
     {
         using var conn = NewSeededConnection();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("insert into t values (1, 10)").ExecuteNonQuery();
-        _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+        _ = conn.CreateCommand("""
+            begin transaction;
+            insert t values (1, 10);
+            rollback
+            """).ExecuteNonQuery();
         AreEqual(0, CountRows(conn, "t"));
     }
 
@@ -64,19 +68,21 @@ public sealed class SqlTransactionStatementTests
         AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
     }
 
+    // Probe-confirmed: only the outermost COMMIT actually commits. Inner COMMITs
+    // just decrement TRANCOUNT — the writes survive an outer ROLLBACK only if the
+    // OUTER level commits too. Here we inner-COMMIT then outer-ROLLBACK; everything
+    // must rollback.
     [TestMethod]
     public void NestedBeginCommit_InnerCommitDoesNotPersist()
     {
-        // Probe-confirmed: only the outermost COMMIT actually commits.
-        // Inner COMMITs just decrement TRANCOUNT — the writes survive an
-        // outer ROLLBACK only if the OUTER level commits too. Here we
-        // inner-COMMIT then outer-ROLLBACK; everything must rollback.
         using var conn = NewSeededConnection();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("insert into t values (1, 10)").ExecuteNonQuery();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("insert into t values (2, 20)").ExecuteNonQuery();
-        _ = conn.CreateCommand("commit").ExecuteNonQuery();
+        _ = conn.CreateCommand("""
+            begin transaction;
+            insert t values (1, 10);
+            begin transaction;
+            insert t values (2, 20);
+            commit
+            """).ExecuteNonQuery();
         AreEqual(1, conn.CreateCommand("select @@trancount").ExecuteScalar());
         _ = conn.CreateCommand("rollback").ExecuteNonQuery();
         AreEqual(0, CountRows(conn, "t"));
@@ -86,20 +92,22 @@ public sealed class SqlTransactionStatementTests
     public void RollbackWithoutSavepoint_WipesAllNestingLevels()
     {
         using var conn = NewSeededConnection();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("insert into t values (1, 10)").ExecuteNonQuery();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("insert into t values (2, 20)").ExecuteNonQuery();
-        _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+        _ = conn.CreateCommand("""
+            begin transaction;
+            insert t values (1, 10);
+            begin transaction;
+            insert t values (2, 20);
+            rollback
+            """).ExecuteNonQuery();
 
         AreEqual(0, CountRows(conn, "t"));
         AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
     }
 
+    // BEGIN TRANSACTION my_tx — name is cosmetic; matches SQL Server.
     [TestMethod]
     public void BeginTransaction_AcceptsName()
     {
-        // BEGIN TRANSACTION my_tx — name is cosmetic; matches SQL Server.
         using var conn = NewSeededConnection();
         _ = conn.CreateCommand("begin transaction my_tx").ExecuteNonQuery();
         AreEqual(1, conn.CreateCommand("select @@trancount").ExecuteScalar());
@@ -111,12 +119,16 @@ public sealed class SqlTransactionStatementTests
     public void CommitWork_RollbackWork_AcceptedAsAnsiVariants()
     {
         using var conn = NewSeededConnection();
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("commit work").ExecuteNonQuery();
+        _ = conn.CreateCommand("""
+            begin transaction;
+            commit work
+            """).ExecuteNonQuery();
         AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
 
-        _ = conn.CreateCommand("begin transaction").ExecuteNonQuery();
-        _ = conn.CreateCommand("rollback work").ExecuteNonQuery();
+        _ = conn.CreateCommand("""
+            begin transaction;
+            rollback work
+            """).ExecuteNonQuery();
         AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
     }
 
@@ -153,7 +165,7 @@ public sealed class SqlTransactionStatementTests
         _ = cmd.ExecuteNonQuery();
         AreEqual(2, conn.CreateCommand("select @@trancount").ExecuteScalar());
 
-        cmd.CommandText = "insert into t values (1, 10)";
+        cmd.CommandText = "insert t values (1, 10)";
         _ = cmd.ExecuteNonQuery();
 
         cmd.CommandText = "commit";

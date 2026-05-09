@@ -44,10 +44,12 @@ public sealed class SubqueryTests
     public void Exists_Correlated_FiltersByMatch()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t1 (id int, name nvarchar(20))");
-        _ = simulation.ExecuteNonQuery("create table t2 (id int, parent_id int)");
-        _ = simulation.ExecuteNonQuery("insert into t1 values (1, 'one'), (2, 'two'), (3, 'three')");
-        _ = simulation.ExecuteNonQuery("insert into t2 values (1, 1), (1, 2)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t1 (id int, name nvarchar(20));
+            create table t2 (id int, parent_id int);
+            insert t1 values (1, 'one'), (2, 'two'), (3, 'three');
+            insert t2 values (1, 1), (1, 2)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var matched = ReadIntColumn(connection.CreateCommand(
@@ -59,10 +61,12 @@ public sealed class SubqueryTests
     public void NotExists_Correlated_FiltersByNoMatch()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t1 (id int)");
-        _ = simulation.ExecuteNonQuery("create table t2 (id int, parent_id int)");
-        _ = simulation.ExecuteNonQuery("insert into t1 values (1), (2), (3)");
-        _ = simulation.ExecuteNonQuery("insert into t2 values (1, 1), (1, 2)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t1 (id int);
+            create table t2 (id int, parent_id int);
+            insert t1 values (1), (2), (3);
+            insert t2 values (1, 1), (1, 2)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var unmatched = ReadIntColumn(connection.CreateCommand(
@@ -70,15 +74,17 @@ public sealed class SubqueryTests
         CollectionAssert.AreEquivalent(new int?[] { 3 }, unmatched);
     }
 
+    // Both tables have `id`; qualifier `t1.id` inside inner SELECT must resolve to outer scope's id, not inner's.
     [TestMethod]
     public void Exists_QualifierShadow_ResolvesOuterColumn()
     {
-        // Both tables have `id`; qualifier `t1.id` inside inner SELECT must resolve to outer scope's id, not inner's.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t1 (id int)");
-        _ = simulation.ExecuteNonQuery("create table t2 (id int, parent_id int)");
-        _ = simulation.ExecuteNonQuery("insert into t1 values (10)");
-        _ = simulation.ExecuteNonQuery("insert into t2 values (20, 10)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t1 (id int);
+            create table t2 (id int, parent_id int);
+            insert t1 values (10);
+            insert t2 values (20, 10)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var matched = ReadIntColumn(connection.CreateCommand(
@@ -88,101 +94,93 @@ public sealed class SubqueryTests
 
     [TestMethod]
     public void InSelect_Match_ReturnsTrue()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5), (6)");
-        AreEqual(1, simulation.ExecuteScalar("select 1 where 5 in (select v from t)"));
-    }
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (v int);
+            insert t values (5), (6);
+            select 1 where 5 in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_NoMatch_ReturnsFalse()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5), (6)");
-        IsNull(simulation.ExecuteScalar("select 1 where 7 in (select v from t)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("""
+            create table t (v int);
+            insert t values (5), (6);
+            select 1 where 7 in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_NullLhs_ReturnsUnknown()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5)");
-        IsNull(simulation.ExecuteScalar("select 1 where cast(null as int) in (select v from t)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("""
+            create table t (v int);
+            insert t values (5);
+            select 1 where cast(null as int) in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_NullRowOnly_ReturnsUnknown()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int null)");
-        _ = simulation.ExecuteNonQuery("insert into t values (null)");
-        IsNull(simulation.ExecuteScalar("select 1 where 5 in (select v from t)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("""
+            create table t (v int null);
+            insert t values (null);
+            select 1 where 5 in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_MatchPlusNullRow_MatchWins()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int null)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5), (null)");
-        AreEqual(1, simulation.ExecuteScalar("select 1 where 5 in (select v from t)"));
-    }
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (v int null);
+            insert t values (5), (null);
+            select 1 where 5 in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_NoMatchPlusNullRow_ReturnsUnknown()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int null)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5), (null)");
-        IsNull(simulation.ExecuteScalar("select 1 where 6 in (select v from t)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("""
+            create table t (v int null);
+            insert t values (5), (null);
+            select 1 where 6 in (select v from t)
+            """));
 
+    // Classic NOT IN gotcha: NULL in subquery → UNKNOWN even when LHS clearly isn't a non-NULL match.
     [TestMethod]
     public void NotInSelect_NoMatchPlusNullRow_ReturnsUnknown()
-    {
-        // Classic NOT IN gotcha: NULL in subquery → UNKNOWN even when LHS clearly isn't a non-NULL match.
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int null)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5), (null)");
-        IsNull(simulation.ExecuteScalar("select 1 where 6 not in (select v from t)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("""
+            create table t (v int null);
+            insert t values (5), (null);
+            select 1 where 6 not in (select v from t)
+            """));
 
     [TestMethod]
     public void NotInSelect_NoMatchNoNullRow_ReturnsTrue()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5)");
-        AreEqual(1, simulation.ExecuteScalar("select 1 where 6 not in (select v from t)"));
-    }
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (v int);
+            insert t values (5);
+            select 1 where 6 not in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_Empty_ReturnsFalse()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        IsNull(simulation.ExecuteScalar("select 1 where 5 in (select v from t)"));
-    }
+        => IsNull(new Simulation().ExecuteScalar("""
+            create table t (v int);
+            select 1 where 5 in (select v from t)
+            """));
 
     [TestMethod]
     public void NotInSelect_Empty_ReturnsTrue()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        AreEqual(1, simulation.ExecuteScalar("select 1 where 5 not in (select v from t)"));
-    }
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (v int);
+            select 1 where 5 not in (select v from t)
+            """));
 
     [TestMethod]
     public void InSelect_Correlated_FiltersByMatch()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t1 (id int)");
-        _ = simulation.ExecuteNonQuery("create table t2 (id int, parent_id int)");
-        _ = simulation.ExecuteNonQuery("insert into t1 values (1), (2), (3)");
-        _ = simulation.ExecuteNonQuery("insert into t2 values (10, 1), (20, 2)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t1 (id int);
+            create table t2 (id int, parent_id int);
+            insert t1 values (1), (2), (3);
+            insert t2 values (10, 1), (20, 2)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var matched = ReadIntColumn(connection.CreateCommand(
@@ -199,10 +197,12 @@ public sealed class SubqueryTests
     public void InSelect_InHavingClause_FiltersGroups()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table q (k int, v int)");
-        _ = simulation.ExecuteNonQuery("create table allowed (s int)");
-        _ = simulation.ExecuteNonQuery("insert into q values (1, 10), (1, 20), (2, 30)");
-        _ = simulation.ExecuteNonQuery("insert into allowed values (30), (50)");
+        _ = simulation.ExecuteNonQuery("""
+            create table q (k int, v int);
+            create table allowed (s int);
+            insert q values (1, 10), (1, 20), (2, 30);
+            insert allowed values (30), (50)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         // Group sums: k=1 → 30, k=2 → 30. Both match `s in (30)`.
@@ -215,12 +215,14 @@ public sealed class SubqueryTests
     public void Exists_TwoLevelNesting_ResolvesOuterAcrossMiddle()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (x int)");
-        _ = simulation.ExecuteNonQuery("create table b (y int)");
-        _ = simulation.ExecuteNonQuery("create table c (z int)");
-        _ = simulation.ExecuteNonQuery("insert into a values (1), (2)");
-        _ = simulation.ExecuteNonQuery("insert into b values (1)");
-        _ = simulation.ExecuteNonQuery("insert into c values (1)");
+        _ = simulation.ExecuteNonQuery("""
+            create table a (x int);
+            create table b (y int);
+            create table c (z int);
+            insert a values (1), (2);
+            insert b values (1);
+            insert c values (1)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         // Innermost predicate `c.z = a.x` reaches TWO levels up — through b's scope.
@@ -233,10 +235,12 @@ public sealed class SubqueryTests
     public void InSelect_NonCorrelated_ScansSubqueryPerOuterRow()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table outer_t (v int)");
-        _ = simulation.ExecuteNonQuery("create table inner_t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into outer_t values (1), (2), (3), (4)");
-        _ = simulation.ExecuteNonQuery("insert into inner_t values (2), (4)");
+        _ = simulation.ExecuteNonQuery("""
+            create table outer_t (v int);
+            create table inner_t (v int);
+            insert outer_t values (1), (2), (3), (4);
+            insert inner_t values (2), (4)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var matched = ReadIntColumn(connection.CreateCommand(
@@ -263,8 +267,10 @@ public sealed class SubqueryTests
     public void Scalar_InWhereComparison_FiltersByValue()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (x int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (5), (10), (15)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (x int);
+            insert t values (5), (10), (15)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var matched = ReadIntColumn(connection.CreateCommand("select x from t where x = (select max(x) from t)"));
@@ -277,14 +283,12 @@ public sealed class SubqueryTests
 
     [TestMethod]
     public void Scalar_MultiRow_RaisesMsg512()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (x int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1), (2)");
-
-        simulation.AssertSqlError("select (select x from t)", 512,
+        => new Simulation().AssertSqlError("""
+            create table t (x int);
+            insert t values (1), (2);
+            select (select x from t)
+            """, 512,
             "Subquery returned more than 1 value. This is not permitted when the subquery follows =, !=, <, <= , >, >= or when the subquery is used as an expression.");
-    }
 
     [TestMethod]
     public void Scalar_MultiColumn_RaisesMsg116()
@@ -293,13 +297,15 @@ public sealed class SubqueryTests
     [TestMethod]
     public void Scalar_Correlated_ResolvesPerRow()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int)");
-        _ = simulation.ExecuteNonQuery("create table b (id int, val int)");
-        _ = simulation.ExecuteNonQuery("insert into a values (1), (2), (3)");
-        _ = simulation.ExecuteNonQuery("insert into b values (1, 100), (2, 200)");
-
         // For each a.id, look up b.val. id=3 has no match → NULL.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int);
+            create table b (id int, val int);
+            insert a values (1), (2), (3);
+            insert b values (1, 100), (2, 200)
+            """);
+
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand("select a.id, (select b.val from b where b.id = a.id) as v from a").ExecuteReader();
         var ids = new List<int>();
@@ -313,15 +319,17 @@ public sealed class SubqueryTests
         CollectionAssert.AreEqual(new int?[] { 100, 200, null }, vals);
     }
 
+    // Per-outer-row Msg 512: a.id=1 matches two b rows.
     [TestMethod]
     public void Scalar_CorrelatedMultiRow_RaisesMsg512()
     {
-        // Per-outer-row Msg 512: a.id=1 matches two b rows.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int)");
-        _ = simulation.ExecuteNonQuery("create table b (id int, val int)");
-        _ = simulation.ExecuteNonQuery("insert into a values (1)");
-        _ = simulation.ExecuteNonQuery("insert into b values (1, 100), (1, 200)");
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int);
+            create table b (id int, val int);
+            insert a values (1);
+            insert b values (1, 100), (1, 200)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var ex = Throws<DbException>(() =>
@@ -336,10 +344,12 @@ public sealed class SubqueryTests
     public void Scalar_AggregateInner_ReturnsAggregate()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table a (id int)");
-        _ = simulation.ExecuteNonQuery("create table b (id int)");
-        _ = simulation.ExecuteNonQuery("insert into a values (1), (2)");
-        _ = simulation.ExecuteNonQuery("insert into b values (1), (2), (3)");
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int);
+            create table b (id int);
+            insert a values (1), (2);
+            insert b values (1), (2), (3)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand("select a.id, (select count(*) from b) as c from a").ExecuteReader();
@@ -358,10 +368,12 @@ public sealed class SubqueryTests
     public void Exists_TableAlias_QualifiesCorrelatedRef()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table parent (id int)");
-        _ = simulation.ExecuteNonQuery("create table child (parent_id int)");
-        _ = simulation.ExecuteNonQuery("insert into parent values (1), (2)");
-        _ = simulation.ExecuteNonQuery("insert into child values (1)");
+        _ = simulation.ExecuteNonQuery("""
+            create table parent (id int);
+            create table child (parent_id int);
+            insert parent values (1), (2);
+            insert child values (1)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         var matched = ReadIntColumn(connection.CreateCommand(

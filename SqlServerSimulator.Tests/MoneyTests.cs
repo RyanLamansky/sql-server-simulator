@@ -130,8 +130,10 @@ public sealed class MoneyTests
     public void Promote_MoneyAndStringInComparison()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v money)");
-        _ = simulation.ExecuteNonQuery("insert into t (v) values ($5.95)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (v money);
+            insert t (v) values ($5.95)
+            """);
         var match = simulation.ExecuteScalar<decimal>("select v from t where v = '5.95'");
         AreEqual(5.95m, match);
     }
@@ -139,10 +141,11 @@ public sealed class MoneyTests
     [TestMethod]
     public void Insert_StringIntoMoneyColumn_StripsCurrencyAndStores()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v money)");
-        _ = simulation.ExecuteNonQuery("insert into t (v) values ('$1,234.56')");
-        AreEqual(1234.56m, simulation.ExecuteScalar<decimal>("select v from t"));
+        AreEqual(1234.56m, new Simulation().ExecuteScalar<decimal>("""
+            create table t (v money);
+            insert t (v) values ('$1,234.56');
+            select v from t
+            """));
     }
 
     [TestMethod]
@@ -160,7 +163,7 @@ public sealed class MoneyTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (v money)");
         using var connection = simulation.CreateOpenConnection();
-        using var command = connection.CreateCommand("insert into t (v) values (@p)", ("@p", 19.99m));
+        using var command = connection.CreateCommand("insert t (v) values (@p)", ("@p", 19.99m));
         _ = command.ExecuteNonQuery();
         AreEqual(19.99m, simulation.ExecuteScalar<decimal>("select v from t"));
     }

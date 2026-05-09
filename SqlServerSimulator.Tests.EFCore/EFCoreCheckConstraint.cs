@@ -18,9 +18,7 @@ public class EFCoreCheckConstraint
     [TestMethod]
     public void SaveChanges_StockItemPositiveQuantity_RoundTrips()
     {
-        using var context = new TestDbContext(TestDbContext.CreateStockItemsSimulation());
-        _ = context.StockItems.Add(new StockItem { Sku = "BOLT-7", Quantity = 12 });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateStockItemsSimulation()).WithSaved(new StockItem { Sku = "BOLT-7", Quantity = 12 });
 
         var fetched = context.StockItems.AsNoTracking().Single();
         Assert.AreEqual("BOLT-7", fetched.Sku);

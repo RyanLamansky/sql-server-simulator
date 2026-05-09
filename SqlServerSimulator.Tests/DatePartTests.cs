@@ -90,19 +90,21 @@ public sealed class DatePartTests
     [TestMethod]
     public void DateAdd_DayOnDate_PreservesDateType()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (d date)");
-        _ = simulation.ExecuteNonQuery("insert t values ('2024-06-15')");
-        AreEqual(new DateTime(2024, 6, 22), simulation.ExecuteScalar("select dateadd(day, 7, d) from t"));
+        AreEqual(new DateTime(2024, 6, 22), new Simulation().ExecuteScalar("""
+            create table t (d date);
+            insert t values ('2024-06-15');
+            select dateadd(day, 7, d) from t
+            """));
     }
 
     [TestMethod]
     public void DateAdd_HourOnTime_PreservesTimeType()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (h time(0))");
-        _ = simulation.ExecuteNonQuery("insert t values ('13:45')");
-        AreEqual(new TimeSpan(16, 45, 0), simulation.ExecuteScalar("select dateadd(hour, 3, h) from t"));
+        AreEqual(new TimeSpan(16, 45, 0), new Simulation().ExecuteScalar("""
+            create table t (h time(0));
+            insert t values ('13:45');
+            select dateadd(hour, 3, h) from t
+            """));
     }
 
     [TestMethod]

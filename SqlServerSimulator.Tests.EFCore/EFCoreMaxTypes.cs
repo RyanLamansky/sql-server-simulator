@@ -16,9 +16,7 @@ public class EFCoreMaxTypes
     public void Insert_NVarcharMax_DefaultStringMapping_RoundTrips()
     {
         // Body has no [Column] annotation; EF picks nvarchar(max) by default.
-        using var context = new TestDbContext(TestDbContext.CreateArticlesSimulation());
-        _ = context.Articles.Add(new Article { Id = 1, Body = "hello world" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateArticlesSimulation()).WithSaved(new Article { Id = 1, Body = "hello world" });
 
         Assert.AreEqual("hello world", context.Articles.Select(a => a.Body).First());
     }
@@ -78,12 +76,10 @@ public class EFCoreMaxTypes
     [TestMethod]
     public void Where_FiltersByNVarcharMaxEquality()
     {
-        using var context = new TestDbContext(TestDbContext.CreateArticlesSimulation());
-        context.Articles.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreateArticlesSimulation()).WithSaved(
             new Article { Id = 1, Body = "first" },
             new Article { Id = 2, Body = "second" },
             new Article { Id = 3, Body = "third" });
-        _ = context.SaveChanges();
 
         var match = context.Articles.Where(a => a.Body == "second").Select(a => a.Id).Single();
         Assert.AreEqual(2, match);
@@ -92,9 +88,7 @@ public class EFCoreMaxTypes
     [TestMethod]
     public void Insert_NullableVarcharMax_AcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreateArticlesSimulation());
-        _ = context.Articles.Add(new Article { Id = 1, Body = "body" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateArticlesSimulation()).WithSaved(new Article { Id = 1, Body = "body" });
 
         Assert.IsNull(context.Articles.Select(a => a.Summary).First());
     }

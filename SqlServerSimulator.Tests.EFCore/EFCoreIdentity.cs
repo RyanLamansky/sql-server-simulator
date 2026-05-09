@@ -52,10 +52,7 @@ public class EFCoreIdentity
     {
         // Each SaveChanges produces a fresh INSERT/MERGE. Identity continues
         // counting from the table's high-water mark across calls.
-        using var context = new TestDbContext(TestDbContext.CreateWidgetsSimulation());
-
-        _ = context.Widgets.Add(new Widget { Name = "first" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateWidgetsSimulation()).WithSaved(new Widget { Name = "first" });
 
         var pair = new[] { new Widget { Name = "second" }, new Widget { Name = "third" } };
         context.Widgets.AddRange(pair);
@@ -97,7 +94,7 @@ public class EFCoreIdentity
         var simulation = TestDbContext.CreateWidgetsSimulation();
         _ = simulation
             .CreateOpenConnection()
-            .CreateCommand("insert into Widgets (Name) values ('First'),('Second')")
+            .CreateCommand("insert Widgets (Name) values ('First'),('Second')")
             .ExecuteNonQuery();
 
         using var context = new TestDbContext(simulation);

@@ -4,9 +4,8 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for window functions — currently only
-/// <c>ROW_NUMBER() OVER(PARTITION BY ... ORDER BY ...)</c>, the single
-/// shape EF Core 10 emits for <c>Take</c>-per-group / <c>Skip+Take</c>-per-group
+/// Behavioral tests for <c>ROW_NUMBER() OVER(PARTITION BY ... ORDER BY ...)</c>,
+/// the single shape EF Core 10 emits for <c>Take</c>-per-group / <c>Skip+Take</c>-per-group
 /// patterns. The function's value depends on the entire row stream
 /// (sorted within partition), so the executor buffers post-WHERE tuples
 /// before binding per-row results.
@@ -17,9 +16,10 @@ public sealed class WindowFunctionTests
     private static DbConnection SeededPosts()
     {
         var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table posts (id int, blog_id int, score int)").ExecuteNonQuery();
-        _ = connection.CreateCommand(
-            "insert into posts values (1, 1, 10), (2, 1, 30), (3, 1, 20), (4, 2, 5), (5, 2, 50), (6, 2, 5)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table posts (id int, blog_id int, score int);
+            insert posts values (1, 1, 10), (2, 1, 30), (3, 1, 20), (4, 2, 5), (5, 2, 50), (6, 2, 5)
+            """).ExecuteNonQuery();
         return connection;
     }
 

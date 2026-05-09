@@ -28,13 +28,15 @@ public class TypePromotionTests
     public void StringLiteralPromotesToDateTimeColumn(string columnType, string seed, string literal)
         => AssertColumnEquals(columnType, seed, literal, expectMatch: true);
 
+    // Promotion is in Promote, not just equality, so it works for ordering operators.
     [TestMethod]
     public void StringLiteralPromotesToDateColumn_OrderingAlsoPromotes()
     {
-        // Promotion is in Promote, not just equality, so it works for ordering operators.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d date )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values (1, '2024-01-14'), (2, '2024-01-15'), (3, '2024-01-16')").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( id int, d date );
+            insert t values (1, '2024-01-14'), (2, '2024-01-15'), (3, '2024-01-16')
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select id from t where d < '2024-01-16'").ExecuteReader();
         var ids = new List<int>();
@@ -64,8 +66,10 @@ public class TypePromotionTests
     public void IntLiteralPromotesToLegacyDateTimeColumn(string columnType)
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery($"create table t (id int, d {columnType})");
-        _ = sim.ExecuteNonQuery("insert into t values (1, '1900-01-01'), (2, '1900-01-02')");
+        _ = sim.ExecuteNonQuery($"""
+            create table t (id int, d {columnType});
+            insert t values (1, '1900-01-01'), (2, '1900-01-02')
+            """);
         using var reader = sim.ExecuteReader("select id from t where d = 0");
         IsTrue(reader.Read());
         AreEqual(1, reader.GetInt32(0));
@@ -208,15 +212,14 @@ public class TypePromotionTests
     [TestMethod]
     [DataRow("tinyint", "5", "'3'", (byte)8)]
     [DataRow("bigint", "5", "'3'", 8L)]
+    // Encoding the result as a wider int would mismatch the column's declared
+    // schema and the row encoder would reject the write.
     public void Arithmetic_IntegerSpecificTypePreservedThroughInsert(string columnType, string a, string b, object expected)
-    {
-        // Encoding the result as a wider int would mismatch the column's declared schema
-        // and the row encoder would reject the write.
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand($"create table t ( v {columnType} )").ExecuteNonQuery();
-        _ = connection.CreateCommand($"insert t values (cast({a} as {columnType}) + {b})").ExecuteNonQuery();
-        AreEqual(expected, connection.CreateCommand("select v from t").ExecuteScalar());
-    }
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t ( v {columnType} );
+            insert t values (cast({a} as {columnType}) + {b});
+            select v from t
+            """));
 
     [TestMethod]
     [DataRow("+", "add")]
@@ -247,8 +250,10 @@ public class TypePromotionTests
     public void WhereClause_ColumnEqualsStringParameter_ParsesAndMatches()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values (5), (10), (15)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( id int );
+            insert t values (5), (10), (15)
+            """).ExecuteNonQuery();
 
         using var select = connection.CreateCommand();
         select.CommandText = "select id from t where id = @p";
@@ -264,13 +269,15 @@ public class TypePromotionTests
         IsFalse(reader.Read());
     }
 
+    // Per probe: a single unparseable row halts the whole query — failure isn't isolated.
     [TestMethod]
     public void WhereClause_VarcharColumnComparedToInt_RaisesPerRowOnUnparseable()
     {
-        // Per probe: a single unparseable row halts the whole query — failure isn't isolated.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( s varchar(10) )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ('5'), ('abc'), ('15')").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( s varchar(10) );
+            insert t values ('5'), ('abc'), ('15')
+            """).ExecuteNonQuery();
 
         var ex = Throws<DbException>(() =>
         {
@@ -304,8 +311,10 @@ public class TypePromotionTests
     private static void AssertColumnEquals(string columnType, string seedValue, string rhsExpression, bool expectMatch)
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand($"create table t ( id int, d {columnType} )").ExecuteNonQuery();
-        _ = connection.CreateCommand($"insert t values (1, '{seedValue}')").ExecuteNonQuery();
+        _ = connection.CreateCommand($"""
+            create table t ( id int, d {columnType} );
+            insert t values (1, '{seedValue}')
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand($"select id from t where d = {rhsExpression}").ExecuteReader();
         if (expectMatch)
@@ -323,8 +332,10 @@ public class TypePromotionTests
     private static void AssertWhereError(string columnType, string seedValue, string predicate, string expectedMessage)
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand($"create table t ( id int, d {columnType} )").ExecuteNonQuery();
-        _ = connection.CreateCommand($"insert t values (1, '{seedValue}')").ExecuteNonQuery();
+        _ = connection.CreateCommand($"""
+            create table t ( id int, d {columnType} );
+            insert t values (1, '{seedValue}')
+            """).ExecuteNonQuery();
 
         var ex = Throws<DbException>(() => connection.CreateCommand($"select id from t where {predicate}").ExecuteReader().Read());
         AreEqual(expectedMessage, ex.Message);

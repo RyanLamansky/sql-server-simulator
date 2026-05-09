@@ -199,8 +199,10 @@ public sealed class MathScalarTests
     public void Math_FromTableRow()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (price decimal(10,2))");
-        _ = sim.ExecuteNonQuery("insert into t values (12.345), (-5.5), (0)");
+        _ = sim.ExecuteNonQuery("""
+            create table t (price decimal(10,2));
+            insert t values (12.345), (-5.5), (0)
+            """);
         using var reader = sim.ExecuteReader("select floor(price), ceiling(price), round(price, 0), sign(price) from t order by price");
         IsTrue(reader.Read());
         AreEqual(-6m, reader.GetDecimal(0));

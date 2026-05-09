@@ -21,19 +21,21 @@ public sealed class KeyConstraintTests
     [TestMethod]
     public void PrimaryKey_Inline_AcceptsInsert()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int primary key, x int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 10), (2, 20)");
-        Assert.AreEqual(20, simulation.ExecuteScalar("select x from t where id = 2"));
+        Assert.AreEqual(20, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, x int);
+            insert t values (1, 10), (2, 20);
+            select x from t where id = 2
+            """));
     }
 
     [TestMethod]
     public void PrimaryKey_Inline_DefaultNullability_FlipsToNotNull()
     {
         // Declaring `int primary key` without explicit NULL/NOT NULL silently flips to NOT NULL.
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int primary key)");
-        _ = simulation.AssertSqlError("insert into t values (null)", 515);
+        _ = new Simulation().AssertSqlError("""
+            create table t (id int primary key);
+            insert t values (null)
+            """, 515);
     }
 
     [TestMethod]
@@ -44,28 +46,32 @@ public sealed class KeyConstraintTests
     [TestMethod]
     public void PrimaryKey_Inline_ExplicitNotNull_Works()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int not null primary key)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        Assert.AreEqual(1, simulation.ExecuteScalar("select id from t"));
+        Assert.AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key);
+            insert t values (1);
+            select id from t
+            """));
     }
 
     [TestMethod]
     public void PrimaryKey_Identity_Works()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int identity(1, 1) not null primary key, x int)");
-        _ = simulation.ExecuteNonQuery("insert into t (x) values (10), (20)");
-        Assert.AreEqual(2, simulation.ExecuteScalar("select id from t where x = 20"));
+        Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (id int identity(1, 1) not null primary key, x int);
+            insert t (x) values (10), (20);
+            select id from t where x = 20
+            """));
     }
 
     [TestMethod]
     public void PrimaryKey_DuplicateInsert_RaisesMsg2627()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int constraint pk_t primary key)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        simulation.AssertSqlError("insert into t values (1)", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int constraint pk_t primary key);
+            insert t values (1)
+            """);
+        simulation.AssertSqlError("insert t values (1)", 2627,
             "Violation of PRIMARY KEY constraint 'pk_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (1).");
     }
 
@@ -74,27 +80,32 @@ public sealed class KeyConstraintTests
     {
         // SQL Server prints the duplicate string value bare (no surrounding quotes), unlike SqlValue.ToString.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id nvarchar(50) not null constraint pk_t primary key)");
-        _ = simulation.ExecuteNonQuery("insert into t values ('alpha')");
-        simulation.AssertSqlError("insert into t values ('alpha')", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id nvarchar(50) not null constraint pk_t primary key);
+            insert t values ('alpha')
+            """);
+        simulation.AssertSqlError("insert t values ('alpha')", 2627,
             "Violation of PRIMARY KEY constraint 'pk_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (alpha).");
     }
 
     [TestMethod]
     public void PrimaryKey_TableLevel_Composite_Works()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int not null, b int not null, c int, constraint pk_t primary key (a, b))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 2, 100), (1, 3, 200), (2, 2, 300)");
-        Assert.AreEqual(200, simulation.ExecuteScalar("select c from t where a = 1 and b = 3"));
+        Assert.AreEqual(200, new Simulation().ExecuteScalar("""
+            create table t (a int not null, b int not null, c int, constraint pk_t primary key (a, b));
+            insert t values (1, 2, 100), (1, 3, 200), (2, 2, 300);
+            select c from t where a = 1 and b = 3
+            """));
     }
 
     [TestMethod]
     public void PrimaryKey_TableLevel_Composite_DuplicatePartialKeyOk()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int not null, b int not null, constraint pk_t primary key (a, b))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 2), (1, 3)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, b int not null, constraint pk_t primary key (a, b));
+            insert t values (1, 2), (1, 3)
+            """);
         Assert.AreEqual(2, RowCount(simulation, "a", "t"));
     }
 
@@ -102,9 +113,11 @@ public sealed class KeyConstraintTests
     public void PrimaryKey_TableLevel_Composite_DuplicateRaises()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int not null, b int not null, c int, constraint pk_t primary key (a, b))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 2, 100)");
-        simulation.AssertSqlError("insert into t values (1, 2, 999)", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, b int not null, c int, constraint pk_t primary key (a, b));
+            insert t values (1, 2, 100)
+            """);
+        simulation.AssertSqlError("insert t values (1, 2, 999)", 2627,
             "Violation of PRIMARY KEY constraint 'pk_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (1, 2).");
     }
 
@@ -139,8 +152,10 @@ public sealed class KeyConstraintTests
     public void Unique_Inline_AllowsDistinctValues()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int unique)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int unique);
+            insert t values (1), (2), (3)
+            """);
         Assert.AreEqual(3, RowCount(simulation, "a", "t"));
     }
 
@@ -149,9 +164,11 @@ public sealed class KeyConstraintTests
     {
         // SQL Server uses "UNIQUE KEY" (not "UNIQUE") in Msg 2627 wording.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int constraint uq_t unique)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        simulation.AssertSqlError("insert into t values (1)", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int constraint uq_t unique);
+            insert t values (1)
+            """);
+        simulation.AssertSqlError("insert t values (1)", 2627,
             "Violation of UNIQUE KEY constraint 'uq_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (1).");
     }
 
@@ -160,8 +177,10 @@ public sealed class KeyConstraintTests
     {
         // Single NULL through single-column UNIQUE allowed (NULLs treated as equal — distinct from ANSI).
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int unique)");
-        _ = simulation.ExecuteNonQuery("insert into t values (null)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int unique);
+            insert t values (null)
+            """);
         Assert.AreEqual(1, RowCount(simulation, "a", "t"));
     }
 
@@ -169,9 +188,11 @@ public sealed class KeyConstraintTests
     public void Unique_Inline_SecondNull_RaisesMsg2627WithNullDisplay()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int constraint uq_t unique)");
-        _ = simulation.ExecuteNonQuery("insert into t values (null)");
-        simulation.AssertSqlError("insert into t values (null)", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int constraint uq_t unique);
+            insert t values (null)
+            """);
+        simulation.AssertSqlError("insert t values (null)", 2627,
             "Violation of UNIQUE KEY constraint 'uq_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (<NULL>).");
     }
 
@@ -179,9 +200,11 @@ public sealed class KeyConstraintTests
     public void Unique_Composite_NullsTreatedAsEqual()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, constraint uq_t unique (a, b))");
-        _ = simulation.ExecuteNonQuery("insert into t values (null, 1), (1, null), (null, null)");
-        simulation.AssertSqlError("insert into t values (null, 1)", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int, constraint uq_t unique (a, b));
+            insert t values (null, 1), (1, null), (null, null)
+            """);
+        simulation.AssertSqlError("insert t values (null, 1)", 2627,
             "Violation of UNIQUE KEY constraint 'uq_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (<NULL>, 1).");
     }
 
@@ -189,9 +212,11 @@ public sealed class KeyConstraintTests
     public void Unique_Composite_AllNullDuplicate_RaisesWithBothNullDisplay()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, constraint uq_t unique (a, b))");
-        _ = simulation.ExecuteNonQuery("insert into t values (null, null)");
-        simulation.AssertSqlError("insert into t values (null, null)", 2627,
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int, constraint uq_t unique (a, b));
+            insert t values (null, null)
+            """);
+        simulation.AssertSqlError("insert t values (null, null)", 2627,
             "Violation of UNIQUE KEY constraint 'uq_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (<NULL>, <NULL>).");
     }
 
@@ -200,9 +225,11 @@ public sealed class KeyConstraintTests
     {
         // Auto-name shape: UQ__<table truncated>__<16 hex>. Hex is deterministic FNV but cosmetic.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, unique (a))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        var ex = simulation.AssertSqlError("insert into t values (1)", 2627);
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, unique (a));
+            insert t values (1)
+            """);
+        var ex = simulation.AssertSqlError("insert t values (1)", 2627);
         Assert.StartsWith("Violation of UNIQUE KEY constraint 'UQ__t__", ex.Message);
         Assert.Contains("'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (1).", ex.Message);
     }
@@ -211,28 +238,32 @@ public sealed class KeyConstraintTests
     public void PrimaryKey_TableLevelUnnamed_AutoNameStartsWithPK()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int not null, primary key (a))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        var ex = simulation.AssertSqlError("insert into t values (1)", 2627);
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, primary key (a));
+            insert t values (1)
+            """);
+        var ex = simulation.AssertSqlError("insert t values (1)", 2627);
         Assert.StartsWith("Violation of PRIMARY KEY constraint 'PK__t__", ex.Message);
     }
 
     [TestMethod]
     public void PrimaryKey_Clustered_Accepted()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int primary key clustered)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        Assert.AreEqual(1, simulation.ExecuteScalar("select id from t"));
+        Assert.AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int primary key clustered);
+            insert t values (1);
+            select id from t
+            """));
     }
 
     [TestMethod]
     public void Unique_NonClustered_Accepted()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int unique nonclustered)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
-        Assert.AreEqual(1, simulation.ExecuteScalar("select id from t"));
+        Assert.AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int unique nonclustered);
+            insert t values (1);
+            select id from t
+            """));
     }
 
     [TestMethod]
@@ -240,8 +271,10 @@ public sealed class KeyConstraintTests
     {
         // ASC/DESC affects physical-index direction (not modeled); should parse without error.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int not null, b int not null, primary key (a asc, b desc))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 2)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, b int not null, primary key (a asc, b desc));
+            insert t values (1, 2)
+            """);
         Assert.AreEqual(1, RowCount(simulation, "a", "t"));
     }
 
@@ -249,9 +282,11 @@ public sealed class KeyConstraintTests
     public void Unique_PreservesUserNamedConstraint_InMessage()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, constraint my_unique_x unique (a, b))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 2)");
-        var ex = simulation.AssertSqlError("insert into t values (1, 2)", 2627);
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int, constraint my_unique_x unique (a, b));
+            insert t values (1, 2)
+            """);
+        var ex = simulation.AssertSqlError("insert t values (1, 2)", 2627);
         Assert.Contains("constraint 'my_unique_x'", ex.Message);
     }
 
@@ -259,13 +294,15 @@ public sealed class KeyConstraintTests
     public void PrimaryKey_AndUnique_OnSameTable_BothEnforced()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int constraint pk_t primary key, x int constraint uq_t unique)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 100)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int constraint pk_t primary key, x int constraint uq_t unique);
+            insert t values (1, 100)
+            """);
 
-        var pkEx = simulation.AssertSqlError("insert into t values (1, 200)", 2627);
+        var pkEx = simulation.AssertSqlError("insert t values (1, 200)", 2627);
         Assert.Contains("PRIMARY KEY constraint 'pk_t'", pkEx.Message);
 
-        var uqEx = simulation.AssertSqlError("insert into t values (2, 100)", 2627);
+        var uqEx = simulation.AssertSqlError("insert t values (2, 100)", 2627);
         Assert.Contains("UNIQUE KEY constraint 'uq_t'", uqEx.Message);
     }
 
@@ -283,8 +320,10 @@ public sealed class KeyConstraintTests
     {
         // EF Core's batched MERGE-INSERT shape; key enforcement must fire on MERGE write path too.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int not null constraint pk_t primary key, x int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 100)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int not null constraint pk_t primary key, x int);
+            insert t values (1, 100)
+            """);
         var ex = simulation.AssertSqlError(
             "merge into t using (values (1, 200)) as src (id, x) on 1=0 when not matched then insert (id, x) values (src.id, src.x);", 2627);
         Assert.Contains("PRIMARY KEY constraint 'pk_t'", ex.Message);

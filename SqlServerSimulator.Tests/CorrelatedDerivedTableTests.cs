@@ -16,16 +16,16 @@ public sealed class CorrelatedDerivedTableTests
     private static DbConnection SeededSales()
     {
         var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand(
-            "create table sales (region varchar(10), salesperson varchar(20), amount decimal(10,2))").ExecuteNonQuery();
-        _ = connection.CreateCommand(
-            "insert into sales values " +
-            "('east', 'alice',   100), " +
-            "('east', 'alice',   200), " +
-            "('east', 'bob',     150), " +
-            "('west', 'carol',   300), " +
-            "('west', 'carol',   500), " +
-            "('west', 'dan',      50)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table sales (region varchar(10), salesperson varchar(20), amount decimal(10,2));
+            insert sales values
+                ('east', 'alice', 100),
+                ('east', 'alice', 200),
+                ('east', 'bob',   150),
+                ('west', 'carol', 300),
+                ('west', 'carol', 500),
+                ('west', 'dan',    50)
+            """).ExecuteNonQuery();
         return connection;
     }
 
@@ -107,10 +107,10 @@ public sealed class CorrelatedDerivedTableTests
         // LEFT JOIN to a derived table with an ON predicate that fails
         // for some outer rows must null-fill, matching real SQL Server.
         using var connection = SeededSales();
-        _ = connection.CreateCommand(
-            "create table regions (region varchar(10), label varchar(20))").ExecuteNonQuery();
-        _ = connection.CreateCommand(
-            "insert into regions values ('east', 'East'), ('north', 'North')").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table regions (region varchar(10), label varchar(20));
+            insert regions values ('east', 'East'), ('north', 'North')
+            """).ExecuteNonQuery();
         using var reader = connection.CreateCommand(
             "select r.region, r.label, t.total " +
             "from regions as r left join (select region, sum(amount) as total from sales group by region) as t " +

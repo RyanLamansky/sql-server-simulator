@@ -41,9 +41,7 @@ public class EFCoreUniqueIdentifier
     [TestMethod]
     public void Insert_NullableGuid_AcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreateDocumentsSimulation());
-        _ = context.Documents.Add(new Document { Id = 1, ExternalKey = Guid.NewGuid() });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateDocumentsSimulation()).WithSaved(new Document { Id = 1, ExternalKey = Guid.NewGuid() });
 
         Assert.IsNull(context.Documents.Select(d => d.OptionalKey).First());
     }

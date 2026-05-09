@@ -15,9 +15,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_NameRoundTripsViaProjection()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Alice" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Alice" });
 
         Assert.AreEqual("Alice", context.People.Select(p => p.Name).FirstOrDefault());
     }
@@ -36,9 +34,7 @@ public class EFCoreStrings
     public void Insert_VarcharCodeRoundTrips()
     {
         // Code is varchar(10); ASCII fits 1:1 with bytes.
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Bob", Code = "ABC123" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Bob", Code = "ABC123" });
 
         Assert.AreEqual("ABC123", context.People.Select(p => p.Code).FirstOrDefault());
     }
@@ -46,9 +42,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_NullableCodeAcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Carol", Code = null });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Carol", Code = null });
 
         Assert.IsNull(context.People.Select(p => p.Code).FirstOrDefault());
     }
@@ -83,9 +77,7 @@ public class EFCoreStrings
     public void Insert_VarcharCodeOutOfCp1252_RoundTripsAsReplacement()
     {
         // varchar uses Windows-1252; non-CP1252 chars silently round-trip as '?'.
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Eve", Code = "日本" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Eve", Code = "日本" });
 
         Assert.AreEqual("??", context.People.Select(p => p.Code).FirstOrDefault());
     }
@@ -94,9 +86,7 @@ public class EFCoreStrings
     public void Insert_NVarcharAcceptsSupplementaryCharacter()
     {
         // 🎉 is one code point but two UTF-16 code units (surrogate pair); fits nvarchar(50).
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "🎉 party 🎉" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "🎉 party 🎉" });
 
         Assert.AreEqual("🎉 party 🎉", context.People.Select(p => p.Name).FirstOrDefault());
     }
@@ -134,9 +124,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_NullableAvatarAcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Hank", Avatar = null });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Hank", Avatar = null });
 
         Assert.IsNull(context.People.Select(p => p.Avatar).FirstOrDefault());
     }
@@ -145,9 +133,7 @@ public class EFCoreStrings
     public void StringFunction_Length()
     {
         // EF Core translates string.Length to CAST(LEN(x) AS int); LEN excludes trailing spaces.
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Alice   " });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Alice   " });
 
         Assert.AreEqual(5, context.People.Select(p => p.Name.Length).FirstOrDefault());
     }
@@ -155,9 +141,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_ToUpper()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "alice" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "alice" });
 
         Assert.AreEqual("ALICE", context.People.Select(p => p.Name.ToUpper()).FirstOrDefault());
     }
@@ -165,9 +149,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_ToLower()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "ALICE" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "ALICE" });
 
         Assert.AreEqual("alice", context.People.Select(p => p.Name.ToLower()).FirstOrDefault());
     }
@@ -175,9 +157,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_Trim()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "  bob  " });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "  bob  " });
 
         Assert.AreEqual("bob", context.People.Select(p => p.Name.Trim()).FirstOrDefault());
     }
@@ -185,9 +165,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_TrimStart()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "  bob" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "  bob" });
 
         Assert.AreEqual("bob", context.People.Select(p => p.Name.TrimStart()).FirstOrDefault());
     }
@@ -195,9 +173,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_TrimEnd()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "bob  " });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "bob  " });
 
         Assert.AreEqual("bob", context.People.Select(p => p.Name.TrimEnd()).FirstOrDefault());
     }
@@ -206,9 +182,7 @@ public class EFCoreStrings
     public void StringFunction_Substring()
     {
         // C# Substring is 0-indexed; T-SQL SUBSTRING is 1-indexed; EF handles the off-by-one.
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "alphabet" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "alphabet" });
 
         Assert.AreEqual("lpha", context.People.Select(p => p.Name.Substring(1, 4)).FirstOrDefault());
     }
@@ -216,9 +190,7 @@ public class EFCoreStrings
     [TestMethod]
     public void StringFunction_Replace()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "hello" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "hello" });
 
         Assert.AreEqual("heLLo", context.People.Select(p => p.Name.Replace("l", "L")).FirstOrDefault());
     }
@@ -226,9 +198,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_FixedLengthChar_RoundTripsWithPadding()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Iris", Tag = "hi" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Iris", Tag = "hi" });
 
         Assert.AreEqual("hi   ", context.People.Select(p => p.Tag).FirstOrDefault());
     }
@@ -236,9 +206,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_FixedLengthNChar_RoundTripsWithPadding()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Jane", Initials = "JD" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Jane", Initials = "JD" });
 
         Assert.AreEqual("JD ", context.People.Select(p => p.Initials).FirstOrDefault());
     }
@@ -246,9 +214,7 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_FixedLengthBinary_RoundTripsWithZeroPadding()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "Karl", Stamp = [0xCA, 0xFE] });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "Karl", Stamp = [0xCA, 0xFE] });
 
         CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE, 0, 0 }, context.People.Select(p => p.Stamp).FirstOrDefault());
     }
@@ -256,13 +222,10 @@ public class EFCoreStrings
     [TestMethod]
     public void Insert_MultipleRows_RoundTripsBothColumns()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "Alice", Code = "A" },
             new Person { Id = 2, Name = "Bob", Code = "B" },
             new Person { Id = 3, Name = "Carol", Code = null });
-        _ = context.SaveChanges();
 
         CollectionAssert.AreEquivalent(new[] { "Alice", "Bob", "Carol" }, context.People.Select(p => p.Name).ToArray());
         CollectionAssert.AreEquivalent(new[] { "A", "B", null }, context.People.Select(p => p.Code).ToArray());
@@ -272,9 +235,7 @@ public class EFCoreStrings
     public void StringFunction_IndexOf()
     {
         // EF Core translates .IndexOf to CHARINDEX-1 (CHARINDEX is 1-based, IndexOf 0-based).
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        _ = context.People.Add(new Person { Id = 1, Name = "hello world" });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(new Person { Id = 1, Name = "hello world" });
 
         using var fresh = new TestDbContext(context.Simulation);
         Assert.AreEqual(6, fresh.People.Select(p => p.Name.IndexOf("world", StringComparison.Ordinal)).Single());

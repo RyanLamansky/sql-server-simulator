@@ -146,12 +146,10 @@ public class EFCoreUpdateDelete
     [TestMethod]
     public void ExecuteUpdate_BulkUpdate_EmitsMultiTableSyntax()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "alice", Code = "A" },
             new Person { Id = 2, Name = "bob", Code = "B" },
             new Person { Id = 3, Name = "carol", Code = "C" });
-        _ = context.SaveChanges();
 
         var rows = context.People.Where(p => p.Code == "A" || p.Code == "B")
             .ExecuteUpdate(setters => setters.SetProperty(p => p.Name, p => p.Name.ToUpper()));
@@ -165,12 +163,10 @@ public class EFCoreUpdateDelete
     [TestMethod]
     public void ExecuteDelete_BulkDelete_EmitsMultiTableSyntax()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "alice", Code = "A" },
             new Person { Id = 2, Name = "bob", Code = "B" },
             new Person { Id = 3, Name = "carol", Code = "C" });
-        _ = context.SaveChanges();
 
         var rows = context.People.Where(p => p.Code == "B").ExecuteDelete();
 

@@ -16,17 +16,17 @@ public sealed class WindowAggregateTests
     private static DbConnection SeededSales()
     {
         var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand(
-            "create table sales (region varchar(10), salesperson varchar(20), amount decimal(10,2))").ExecuteNonQuery();
-        _ = connection.CreateCommand(
-            "insert into sales values " +
-            "('east', 'alice', 100.00), " +
-            "('east', 'alice', 200.00), " +
-            "('east', 'bob',   150.00), " +
-            "('east', 'bob',   null), " +
-            "('west', 'carol', 300.00), " +
-            "('west', 'carol', 500.00), " +
-            "('west', 'dan',   null)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table sales (region varchar(10), salesperson varchar(20), amount decimal(10,2));
+            insert sales values
+                ('east', 'alice', 100.00),
+                ('east', 'alice', 200.00),
+                ('east', 'bob',   150.00),
+                ('east', 'bob',   null),
+                ('west', 'carol', 300.00),
+                ('west', 'carol', 500.00),
+                ('west', 'dan',   null)
+            """).ExecuteNonQuery();
         return connection;
     }
 
@@ -62,8 +62,10 @@ public sealed class WindowAggregateTests
     public void Sum_Int_StaysInt_OverflowsThrowsMsg8115()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table big (v int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into big values (2000000000), (2000000000)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table big (v int);
+            insert big values (2000000000), (2000000000)
+            """).ExecuteNonQuery();
         var ex = Throws<DbException>(() =>
             _ = connection.CreateCommand("select sum(v) over() from big").ExecuteScalar());
         AreEqual("8115", ex.Data["HelpLink.EvtID"]);
@@ -73,8 +75,10 @@ public sealed class WindowAggregateTests
     public void Avg_DecimalScale_WidensToScale6OrMoreLikePlainAvg()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table d (v decimal(5,2))").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into d values (1.23), (4.56)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table d (v decimal(5,2));
+            insert d values (1.23), (4.56)
+            """).ExecuteNonQuery();
         using var reader = connection.CreateCommand("select avg(v) over() from d").ExecuteReader();
         IsTrue(reader.Read());
         // (1.23+4.56)/2 = 2.895; AVG decimal(5,2) → decimal(38, max(2,6)) = decimal(38,6).
@@ -85,8 +89,10 @@ public sealed class WindowAggregateTests
     public void Avg_Int_TruncatesPerPartition()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (g varchar(1), v int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values ('a', 1), ('a', 2), ('a', 2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (g varchar(1), v int);
+            insert t values ('a', 1), ('a', 2), ('a', 2)
+            """).ExecuteNonQuery();
         using var reader = connection.CreateCommand("select avg(v) over(partition by g) from t").ExecuteReader();
         var values = new List<int>();
         while (reader.Read())
@@ -226,8 +232,10 @@ public sealed class WindowAggregateTests
     public void RowNumberAndAggregateWindow_CoexistInSameSelect()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (g int, v int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1,10), (1,20), (2,30)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (g int, v int);
+            insert t values (1,10), (1,20), (2,30)
+            """).ExecuteNonQuery();
         using var reader = connection.CreateCommand(
             "select g, v, row_number() over(partition by g order by v) rn, sum(v) over(partition by g) sm from t order by g, v").ExecuteReader();
         var rows = new List<(int G, int V, long Rn, int Sm)>();
@@ -268,8 +276,10 @@ public sealed class WindowAggregateTests
     public void Sum_BigInt_StaysBigInt()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table b (g int, v bigint)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into b values (1, 1000000000000), (1, 1000000000000)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table b (g int, v bigint);
+            insert b values (1, 1000000000000), (1, 1000000000000)
+            """).ExecuteNonQuery();
         using var reader = connection.CreateCommand("select sum(v) over() from b").ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(2000000000000L, reader.GetInt64(0));

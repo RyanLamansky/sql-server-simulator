@@ -62,12 +62,10 @@ public class EFCoreOrderingAndDistinct
     [TestMethod]
     public void OrderBy_String_RespectsCollationCaseInsensitive()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "B" },
             new Person { Id = 2, Name = "a" },
             new Person { Id = 3, Name = "C" });
-        _ = context.SaveChanges();
 
         // Default collation case-insensitive: 'a' sorts with 'A', so order is a, B, C.
         var names = context.People.OrderBy(p => p.Name).Select(p => p.Name).ToArray();
@@ -133,13 +131,11 @@ public class EFCoreOrderingAndDistinct
     [TestMethod]
     public void Distinct_OnMultiColumn_DedupesByTuple()
     {
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "Alice", Code = "A" },
             new Person { Id = 2, Name = "Alice", Code = "A" }, // duplicate (Name, Code)
             new Person { Id = 3, Name = "Alice", Code = "B" }, // different Code
             new Person { Id = 4, Name = "Bob", Code = "A" });
-        _ = context.SaveChanges();
 
         var pairs = context.People
             .Select(p => new { p.Name, p.Code })
@@ -165,12 +161,10 @@ public class EFCoreOrderingAndDistinct
     [TestMethod]
     public void OrderBy_DateTime_ReturnsChronologicalOrder()
     {
-        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
-        context.Events.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation()).WithSaved(
             new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4) },
             new Event { Id = 2, CreatedAt = new DateTime(2024, 1, 15) },
             new Event { Id = 3, CreatedAt = new DateTime(2025, 7, 22) });
-        _ = context.SaveChanges();
 
         var times = context.Events
             .OrderByDescending(e => e.CreatedAt)

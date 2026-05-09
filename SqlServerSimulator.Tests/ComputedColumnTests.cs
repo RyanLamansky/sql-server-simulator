@@ -11,29 +11,29 @@ public sealed class ComputedColumnTests
 {
     [TestMethod]
     public void Computed_NonPersisted_EvaluatesAtRead()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, c as a + b)");
-        _ = simulation.ExecuteNonQuery("insert into t (a, b) values (10, 20)");
-        Assert.AreEqual(30, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(30, new Simulation().ExecuteScalar("""
+            create table t (a int, b int, c as a + b);
+            insert t (a, b) values (10, 20);
+            select c from t
+            """));
 
+    // Bare INSERT without column list populates only writable columns; computed cols excluded like identity.
     [TestMethod]
     public void Computed_NonPersisted_OmittedFromAutoColumnList()
-    {
-        // Bare INSERT without column list populates only writable columns; computed cols excluded like identity.
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, c as a + b)");
-        _ = simulation.ExecuteNonQuery("insert into t values (3, 4)");
-        Assert.AreEqual(7, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(7, new Simulation().ExecuteScalar("""
+            create table t (a int, b int, c as a + b);
+            insert t values (3, 4);
+            select c from t
+            """));
 
     [TestMethod]
     public void Computed_NonPersisted_TracksUnderlyingChanges_AcrossRows()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, c as a * 10)");
-        _ = simulation.ExecuteNonQuery("insert into t (a) values (1), (2), (3)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, c as a * 10);
+            insert t (a) values (1), (2), (3)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand("select c from t order by a").ExecuteReader();
@@ -45,49 +45,44 @@ public sealed class ComputedColumnTests
 
     [TestMethod]
     public void Computed_Persisted_StoresAndReadsBack()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, c as a + b persisted)");
-        _ = simulation.ExecuteNonQuery("insert into t (a, b) values (5, 7)");
-        Assert.AreEqual(12, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(12, new Simulation().ExecuteScalar("""
+            create table t (a int, b int, c as a + b persisted);
+            insert t (a, b) values (5, 7);
+            select c from t
+            """));
 
     [TestMethod]
     public void Computed_Persisted_NotNull_AcceptsNonNullSource()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int not null, b int not null, c as a + b persisted not null)");
-        _ = simulation.ExecuteNonQuery("insert into t (a, b) values (1, 2)");
-        Assert.AreEqual(3, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (a int not null, b int not null, c as a + b persisted not null);
+            insert t (a, b) values (1, 2);
+            select c from t
+            """));
 
     [TestMethod]
     public void Computed_ConstantExpression()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, c as 42)");
-        _ = simulation.ExecuteNonQuery("insert into t (a) values (1)");
-        Assert.AreEqual(42, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(42, new Simulation().ExecuteScalar("""
+            create table t (a int, c as 42);
+            insert t (a) values (1);
+            select c from t
+            """));
 
+    // Real SQL Server resolves all column refs after the entire column list is parsed.
     [TestMethod]
     public void Computed_ForwardReference()
-    {
-        // Real SQL Server resolves all column refs after the entire column list is parsed.
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (c as b + 1, b int)");
-        _ = simulation.ExecuteNonQuery("insert into t (b) values (10)");
-        Assert.AreEqual(11, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(11, new Simulation().ExecuteScalar("""
+            create table t (c as b + 1, b int);
+            insert t (b) values (10);
+            select c from t
+            """));
 
     [TestMethod]
     public void Computed_TypeInference_FromArithmetic()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b smallint, c as a + b)");
-        _ = simulation.ExecuteNonQuery("insert into t (a, b) values (40000, 1000)");
-        Assert.AreEqual(41000, simulation.ExecuteScalar("select c from t"));
-    }
+        => Assert.AreEqual(41000, new Simulation().ExecuteScalar("""
+            create table t (a int, b smallint, c as a + b);
+            insert t (a, b) values (40000, 1000);
+            select c from t
+            """));
 
     [TestMethod]
     public void Computed_OutputClause_SeesNonPersistedValue()
@@ -96,7 +91,7 @@ public sealed class ComputedColumnTests
         _ = simulation.ExecuteNonQuery("create table t (a int, c as a * 2)");
 
         using var connection = simulation.CreateOpenConnection();
-        using var reader = connection.CreateCommand("insert into t (a) output inserted.c values (21)").ExecuteReader();
+        using var reader = connection.CreateCommand("insert t (a) output inserted.c values (21)").ExecuteReader();
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(42, reader.GetInt32(0));
     }
@@ -108,19 +103,18 @@ public sealed class ComputedColumnTests
         _ = simulation.ExecuteNonQuery("create table t (a int, c as a * 2 persisted)");
 
         using var connection = simulation.CreateOpenConnection();
-        using var reader = connection.CreateCommand("insert into t (a) output inserted.c values (21)").ExecuteReader();
+        using var reader = connection.CreateCommand("insert t (a) output inserted.c values (21)").ExecuteReader();
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(42, reader.GetInt32(0));
     }
 
     [TestMethod]
     public void Computed_InsertIntoColumn_RaisesMsg271()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, c as a + 1)");
-        simulation.AssertSqlError("insert into t (a, c) values (1, 99)", 271,
+        => new Simulation().AssertSqlError("""
+            create table t (a int, c as a + 1);
+            insert t (a, c) values (1, 99)
+            """, 271,
             "The column \"c\" cannot be modified because it is either a computed column or is the result of a UNION operator.");
-    }
 
     [TestMethod]
     public void Computed_ReferencingComputed_RaisesMsg1759()
@@ -152,19 +146,19 @@ public sealed class ComputedColumnTests
     public void Computed_ExplicitNullWithoutPersisted_RaisesMsg8183()
         => _ = new Simulation().AssertSqlError("create table t (a int, c as a + 1 null)", 8183);
 
+    // Real SQL Server rejects explicit NULL after PERSISTED; only `PERSISTED` alone or `PERSISTED NOT NULL` accepted.
     [TestMethod]
     public void Computed_PersistedNull_RaisesMsg8183()
-    {
-        // Real SQL Server rejects explicit NULL after PERSISTED; only `PERSISTED` alone or `PERSISTED NOT NULL` accepted.
-        _ = new Simulation().AssertSqlError("create table t (a int, c as a + 1 persisted null)", 8183);
-    }
+        => _ = new Simulation().AssertSqlError("create table t (a int, c as a + 1 persisted null)", 8183);
 
     [TestMethod]
     public void Computed_AllColumns_ProjectsAlongsideStored()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, c as a + b)");
-        _ = simulation.ExecuteNonQuery("insert into t (a, b) values (2, 3)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int, c as a + b);
+            insert t (a, b) values (2, 3)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand("select a, b, c from t").ExecuteReader();
@@ -179,8 +173,10 @@ public sealed class ComputedColumnTests
     public void Computed_WhereClauseFiltersOnComputedValue()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int, c as a + b)");
-        _ = simulation.ExecuteNonQuery("insert into t (a, b) values (1, 2), (5, 5), (10, 10)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int, c as a + b);
+            insert t (a, b) values (1, 2), (5, 5), (10, 10)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand("select a from t where c >= 10 order by a").ExecuteReader();

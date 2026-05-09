@@ -38,9 +38,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Insert_NullableDateTime_AcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
-        _ = context.Events.Add(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4) });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation()).WithSaved(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4) });
 
         Assert.IsNull(context.Events.Select(e => e.Updated).First());
     }
@@ -182,9 +180,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Insert_LegacyDateTime_999msRollsToNextSecond()
     {
-        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
-        _ = context.Events.Add(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4), Started = new DateTime(2026, 5, 4, 13, 45, 30, 999) });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation()).WithSaved(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4), Started = new DateTime(2026, 5, 4, 13, 45, 30, 999) });
 
         Assert.AreEqual(new DateTime(2026, 5, 4, 13, 45, 31), context.Events.Select(e => e.Started).First());
     }
@@ -192,9 +188,7 @@ public class EFCoreDateTime
     [TestMethod]
     public void Insert_NullableLegacyDateTime_AcceptsNull()
     {
-        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
-        _ = context.Events.Add(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4) });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateEventsSimulation()).WithSaved(new Event { Id = 1, CreatedAt = new DateTime(2026, 5, 4) });
 
         Assert.IsNull(context.Events.Select(e => e.Started).First());
         Assert.IsNull(context.Events.Select(e => e.Ended).First());

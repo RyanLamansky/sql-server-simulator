@@ -25,8 +25,10 @@ public sealed class PaginationTests
     private static Simulation SeededFiveRows()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1), (2), (3), (4), (5)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int);
+            insert t values (1), (2), (3), (4), (5)
+            """);
         return simulation;
     }
 
@@ -147,22 +149,26 @@ public sealed class PaginationTests
     public void OffsetFetch_OverGroupedAggregate()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table g (k int, v int)");
-        _ = simulation.ExecuteNonQuery("insert into g values (1, 10), (1, 20), (2, 30), (3, 40), (4, 50)");
+        _ = simulation.ExecuteNonQuery("""
+            create table g (k int, v int);
+            insert g values (1, 10), (1, 20), (2, 30), (3, 40), (4, 50)
+            """);
 
         CollectionAssert.AreEqual(new[] { 2, 3 },
             ReadInts(simulation.CreateCommand("select k from g group by k order by k offset 1 rows fetch next 2 rows only")));
     }
 
+    // (1..5) UNION (3..6) deduped → {1..6}; ORDER BY v OFFSET 2 FETCH NEXT 2 → {3,4}.
     [TestMethod]
     public void TopLevelOffsetFetch_AppliesToSetOpResult()
     {
-        // (1..5) UNION (3..6) deduped → {1..6}; ORDER BY v OFFSET 2 FETCH NEXT 2 → {3,4}.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table left_t (v int)");
-        _ = simulation.ExecuteNonQuery("create table right_t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into left_t values (1), (2), (3), (4), (5)");
-        _ = simulation.ExecuteNonQuery("insert into right_t values (3), (4), (5), (6)");
+        _ = simulation.ExecuteNonQuery("""
+            create table left_t (v int);
+            create table right_t (v int);
+            insert left_t values (1), (2), (3), (4), (5);
+            insert right_t values (3), (4), (5), (6)
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         CollectionAssert.AreEqual(new[] { 3, 4 },

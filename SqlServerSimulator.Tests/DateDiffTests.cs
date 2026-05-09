@@ -195,9 +195,10 @@ public sealed class DateDiffTests
     [TestMethod]
     public void DateDiff_OnColumn_PreservesIntType()
     {
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (a datetime2, b datetime2)");
-        _ = sim.ExecuteNonQuery("insert t values ('2024-01-01', '2024-06-15')");
-        AreEqual(166, sim.ExecuteScalar("select datediff(day, a, b) from t"));
+        AreEqual(166, new Simulation().ExecuteScalar("""
+            create table t (a datetime2, b datetime2);
+            insert t values ('2024-01-01', '2024-06-15');
+            select datediff(day, a, b) from t
+            """));
     }
 }

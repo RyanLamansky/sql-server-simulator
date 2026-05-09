@@ -16,10 +16,7 @@ public class EFCorePrimaryKey
     [TestMethod]
     public void SaveChanges_FirstRow_RoundTripsThroughPrimaryKey()
     {
-        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation());
-
-        _ = context.Inventory.Add(new Inventory { Sku = "WIDGET-A", Quantity = 7 });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation()).WithSaved(new Inventory { Sku = "WIDGET-A", Quantity = 7 });
 
         var fetched = context.Inventory.AsNoTracking().Single();
         Assert.AreEqual("WIDGET-A", fetched.Sku);
@@ -29,10 +26,7 @@ public class EFCorePrimaryKey
     [TestMethod]
     public void SaveChanges_DuplicateKey_RaisesDbUpdateException()
     {
-        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation());
-
-        _ = context.Inventory.Add(new Inventory { Sku = "WIDGET-A", Quantity = 1 });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation()).WithSaved(new Inventory { Sku = "WIDGET-A", Quantity = 1 });
 
         using var context2 = new TestDbContext(context.Simulation);
         _ = context2.Inventory.Add(new Inventory { Sku = "WIDGET-A", Quantity = 99 });
@@ -50,9 +44,7 @@ public class EFCorePrimaryKey
         // statement atomicity (Bundle 1) means a mid-batch PK collision rolls
         // back the entire INSERT — neither the valid rows before nor after
         // the collision land in the table.
-        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation());
-        _ = context.Inventory.Add(new Inventory { Sku = "EXISTING", Quantity = 1 });
-        _ = context.SaveChanges();
+        using var context = new TestDbContext(TestDbContext.CreateInventorySimulation()).WithSaved(new Inventory { Sku = "EXISTING", Quantity = 1 });
 
         using var context2 = new TestDbContext(context.Simulation);
         _ = context2.Inventory.Add(new Inventory { Sku = "NEW-1", Quantity = 10 });

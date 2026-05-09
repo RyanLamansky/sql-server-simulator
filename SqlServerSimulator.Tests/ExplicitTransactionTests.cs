@@ -36,8 +36,8 @@ public sealed class ExplicitTransactionTests
     {
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        RunInTx(conn, tx, "insert into t values (1, 10)");
-        RunInTx(conn, tx, "insert into t values (2, 20)");
+        RunInTx(conn, tx, "insert t values (1, 10)");
+        RunInTx(conn, tx, "insert t values (2, 20)");
         tx.Commit();
         AreEqual(2, CountRows(conn, "t"));
     }
@@ -47,8 +47,8 @@ public sealed class ExplicitTransactionTests
     {
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        RunInTx(conn, tx, "insert into t values (1, 10)");
-        RunInTx(conn, tx, "insert into t values (2, 20)");
+        RunInTx(conn, tx, "insert t values (1, 10)");
+        RunInTx(conn, tx, "insert t values (2, 20)");
         tx.Rollback();
         AreEqual(0, CountRows(conn, "t"));
     }
@@ -58,7 +58,7 @@ public sealed class ExplicitTransactionTests
     {
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        RunInTx(conn, tx, "insert into t values (42, 100)");
+        RunInTx(conn, tx, "insert t values (42, 100)");
 
         using var sel = conn.CreateCommand();
         sel.Transaction = tx;
@@ -72,11 +72,11 @@ public sealed class ExplicitTransactionTests
         // Probe-confirmed: a failing statement rolls back ONLY its own writes; subsequent statements still run.
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        RunInTx(conn, tx, "insert into t values (1, 10)");
+        RunInTx(conn, tx, "insert t values (1, 10)");
 
-        _ = Throws<DbException>(() => RunInTx(conn, tx, "insert into t values (1, 99)"));
+        _ = Throws<DbException>(() => RunInTx(conn, tx, "insert t values (1, 99)"));
 
-        RunInTx(conn, tx, "insert into t values (3, 30)");
+        RunInTx(conn, tx, "insert t values (3, 30)");
         tx.Commit();
 
         var rows = new List<(int, int)>();
@@ -92,7 +92,7 @@ public sealed class ExplicitTransactionTests
         using var conn = NewSeededConnection();
         {
             using var tx = conn.BeginTransaction();
-            RunInTx(conn, tx, "insert into t values (1, 10)");
+            RunInTx(conn, tx, "insert t values (1, 10)");
         }
         AreEqual(0, CountRows(conn, "t"));
     }
@@ -128,11 +128,11 @@ public sealed class ExplicitTransactionTests
     {
         using var conn = NewSeededConnection();
         var tx1 = conn.BeginTransaction();
-        RunInTx(conn, tx1, "insert into t values (1, 10)");
+        RunInTx(conn, tx1, "insert t values (1, 10)");
         tx1.Commit();
 
         var tx2 = conn.BeginTransaction();
-        RunInTx(conn, tx2, "insert into t values (2, 20)");
+        RunInTx(conn, tx2, "insert t values (2, 20)");
         tx2.Rollback();
 
         AreEqual(1, CountRows(conn, "t"));
@@ -144,10 +144,10 @@ public sealed class ExplicitTransactionTests
         // EF Core 10 emits SAVE TRAN / ROLLBACK TRAN savepoint per SaveChanges inside Database.BeginTransaction.
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        RunInTx(conn, tx, "insert into t values (1, 10)");
+        RunInTx(conn, tx, "insert t values (1, 10)");
         RunInTx(conn, tx, "save transaction sp1");
-        RunInTx(conn, tx, "insert into t values (2, 20)");
-        RunInTx(conn, tx, "insert into t values (3, 30)");
+        RunInTx(conn, tx, "insert t values (2, 20)");
+        RunInTx(conn, tx, "insert t values (3, 30)");
         RunInTx(conn, tx, "rollback transaction sp1");
         tx.Commit();
 
@@ -163,9 +163,9 @@ public sealed class ExplicitTransactionTests
     {
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        RunInTx(conn, tx, "insert into t values (1, 10)");
+        RunInTx(conn, tx, "insert t values (1, 10)");
         RunInTx(conn, tx, "save tran sp1");
-        RunInTx(conn, tx, "insert into t values (2, 20)");
+        RunInTx(conn, tx, "insert t values (2, 20)");
         RunInTx(conn, tx, "rollback tran sp1");
         tx.Commit();
 
@@ -177,7 +177,7 @@ public sealed class ExplicitTransactionTests
     {
         // UPDATE = delete-old + insert-new (two log entries unwound LIFO); DELETE preserves the old row.
         using var conn = NewSeededConnection();
-        _ = conn.CreateCommand("insert into t values (1, 10), (2, 20), (3, 30)").ExecuteNonQuery();
+        _ = conn.CreateCommand("insert t values (1, 10), (2, 20), (3, 30)").ExecuteNonQuery();
 
         using (var tx = conn.BeginTransaction())
         {

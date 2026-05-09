@@ -19,10 +19,10 @@ public sealed class ApplyTests
         var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table blogs (id int, title varchar(20))").ExecuteNonQuery();
         _ = connection.CreateCommand("create table posts (id int, blog_id int, title varchar(20), score int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into blogs values (1, 'A'), (2, 'B'), (3, 'C')").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert blogs values (1, 'A'), (2, 'B'), (3, 'C')").ExecuteNonQuery();
         // Blog 1: 3 posts. Blog 2: 1 low-score post. Blog 3: no posts.
         _ = connection.CreateCommand(
-            "insert into posts values " +
+            "insert posts values " +
             "(1, 1, 'P1', 10), (2, 1, 'P2', 20), (3, 1, 'P3', 30), " +
             "(4, 2, 'P4', 5)").ExecuteNonQuery();
         return connection;

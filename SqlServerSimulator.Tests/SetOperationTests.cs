@@ -72,17 +72,18 @@ public sealed class SetOperationTests
     public void Except_AllRemoved_Empty()
         => IsEmpty(ReadInts(new Simulation().CreateCommand("select 1 except select 1")));
 
+    // INTERSECT/EXCEPT both dedupe their left side (probe-confirmed).
     [TestMethod]
     public void Except_DedupesLeftBeforeFiltering()
     {
-        // INTERSECT/EXCEPT both dedupe their left side (probe-confirmed).
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1), (1), (2)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (v int);
+            insert t values (1), (1), (2)
+            """);
 
-        using var connection = simulation.CreateOpenConnection();
         CollectionAssert.AreEquivalent(new[] { 1, 2 },
-            ReadInts(connection.CreateCommand("select v from t except select 99")));
+            ReadInts(simulation.CreateCommand("select v from t except select 99")));
     }
 
     [TestMethod]
@@ -138,61 +139,47 @@ public sealed class SetOperationTests
     public void PerBranchOrderBy_RaisesMsg156()
         => _ = new Simulation().AssertSqlError("select 1 order by 1 union select 2", 156);
 
+    // Non-set-op SELECT can ORDER BY a non-projected source column.
     [TestMethod]
     public void SingleSelect_OrderByNonProjectedSource_StillWorks()
     {
-        // Non-set-op SELECT can ORDER BY a non-projected source column.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (a int, b int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (3, 30), (1, 10), (2, 20)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int);
+            insert t values (3, 30), (1, 10), (2, 20)
+            """);
 
-        using var connection = simulation.CreateOpenConnection();
-        using var reader = connection.CreateCommand("select b from t order by a").ExecuteReader();
+        using var reader = simulation.CreateCommand("select b from t order by a").ExecuteReader();
         var values = new List<int>();
         while (reader.Read())
             values.Add(reader.GetInt32(0));
         CollectionAssert.AreEqual(new[] { 10, 20, 30 }, values);
     }
 
-    [TestMethod]
-    public void Union_AcrossTwoTables_Dedupes()
+    private static Simulation SeededTwoTables()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table left_t (v int)");
-        _ = simulation.ExecuteNonQuery("create table right_t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into left_t values (1), (2), (3)");
-        _ = simulation.ExecuteNonQuery("insert into right_t values (3), (4), (5)");
-
-        using var connection = simulation.CreateOpenConnection();
-        CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4, 5 },
-            ReadInts(connection.CreateCommand("select v from left_t union select v from right_t")));
+        _ = simulation.ExecuteNonQuery("""
+            create table left_t (v int);
+            create table right_t (v int);
+            insert left_t values (1), (2), (3);
+            insert right_t values (3), (4), (5)
+            """);
+        return simulation;
     }
+
+    [TestMethod]
+    public void Union_AcrossTwoTables_Dedupes()
+        => CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4, 5 },
+            ReadInts(SeededTwoTables().CreateCommand("select v from left_t union select v from right_t")));
 
     [TestMethod]
     public void Intersect_AcrossTwoTables_Common()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table left_t (v int)");
-        _ = simulation.ExecuteNonQuery("create table right_t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into left_t values (1), (2), (3)");
-        _ = simulation.ExecuteNonQuery("insert into right_t values (3), (4), (5)");
-
-        using var connection = simulation.CreateOpenConnection();
-        CollectionAssert.AreEqual(new[] { 3 },
-            ReadInts(connection.CreateCommand("select v from left_t intersect select v from right_t")));
-    }
+        => CollectionAssert.AreEqual(new[] { 3 },
+            ReadInts(SeededTwoTables().CreateCommand("select v from left_t intersect select v from right_t")));
 
     [TestMethod]
     public void Except_AcrossTwoTables_LeftMinusRight()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table left_t (v int)");
-        _ = simulation.ExecuteNonQuery("create table right_t (v int)");
-        _ = simulation.ExecuteNonQuery("insert into left_t values (1), (2), (3)");
-        _ = simulation.ExecuteNonQuery("insert into right_t values (3), (4), (5)");
-
-        using var connection = simulation.CreateOpenConnection();
-        CollectionAssert.AreEquivalent(new[] { 1, 2 },
-            ReadInts(connection.CreateCommand("select v from left_t except select v from right_t")));
-    }
+        => CollectionAssert.AreEquivalent(new[] { 1, 2 },
+            ReadInts(SeededTwoTables().CreateCommand("select v from left_t except select v from right_t")));
 }

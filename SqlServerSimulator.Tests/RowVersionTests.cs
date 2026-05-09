@@ -30,16 +30,22 @@ public sealed class RowVersionTests
         return values;
     }
 
+    private static Simulation SeededOneRow(string columnType = "rowversion", string columnName = "rv")
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            create table t (id int, {columnName} {columnType});
+            insert t (id) values (1)
+            """);
+        return simulation;
+    }
+
     // === Type declaration ===
 
     [TestMethod]
     public void RowVersion_KeywordAccepted()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
-        var rvs = ReadAllRowVersions(simulation.CreateCommand("select rv from t"));
+        var rvs = ReadAllRowVersions(SeededOneRow().CreateCommand("select rv from t"));
         HasCount(1, rvs);
         HasCount(8, rvs[0]);
     }
@@ -47,11 +53,7 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Timestamp_KeywordAccepted_LegacySynonym()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, ts timestamp)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
-        var rvs = ReadAllRowVersions(simulation.CreateCommand("select ts from t"));
+        var rvs = ReadAllRowVersions(SeededOneRow("timestamp", "ts").CreateCommand("select ts from t"));
         HasCount(1, rvs);
         HasCount(8, rvs[0]);
     }
@@ -70,8 +72,10 @@ public sealed class RowVersionTests
     public void Insert_AutoGeneratesRowVersionWhenColumnOmitted()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1), (2), (3)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int, rv rowversion);
+            insert t (id) values (1), (2), (3)
+            """);
 
         var rvs = ReadAllRowVersions(simulation.CreateCommand("select rv from t"));
         HasCount(3, rvs);
@@ -86,22 +90,23 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Insert_RowVersionListedExplicitly_RaisesMsg273()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-
-        var ex = Throws<DbException>(() =>
-            _ = simulation.ExecuteNonQuery("insert into t (id, rv) values (1, 0x00000000000000FF)"));
+        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteNonQuery("""
+            create table t (id int, rv rowversion);
+            insert t (id, rv) values (1, 0x00000000000000FF)
+            """));
         AreEqual("273", ex.Data["HelpLink.EvtID"]);
     }
 
+    // Insert without column list: the simulator must skip rowversion when
+    // synthesizing the destination list (rowversion is auto-only).
     [TestMethod]
     public void Insert_NoColumnList_AutoGeneratesAndDoesntFail()
     {
-        // Insert without column list: the simulator must skip rowversion when
-        // synthesizing the destination list (rowversion is auto-only).
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int, rv rowversion);
+            insert t values (1)
+            """);
 
         HasCount(1, ReadAllRowVersions(simulation.CreateCommand("select rv from t")));
     }
@@ -112,8 +117,10 @@ public sealed class RowVersionTests
     public void Update_AutoBumpsRowVersionEvenWhenSetIsUnrelated()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, name varchar(20), rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id, name) values (1, 'a')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int, name varchar(20), rv rowversion);
+            insert t (id, name) values (1, 'a')
+            """);
 
         var initialRv = ReadRowVersion(simulation.CreateCommand("select rv from t"));
         _ = simulation.ExecuteNonQuery("update t set name = 'A' where id = 1");
@@ -125,12 +132,11 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Update_SetRowVersion_RaisesMsg272()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
-        var ex = Throws<DbException>(() =>
-            _ = simulation.ExecuteNonQuery("update t set rv = 0x00 where id = 1"));
+        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteNonQuery("""
+            create table t (id int, rv rowversion);
+            insert t (id) values (1);
+            update t set rv = 0x00 where id = 1
+            """));
         AreEqual("272", ex.Data["HelpLink.EvtID"]);
     }
 
@@ -139,12 +145,8 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Cast_RowVersion_To_Varbinary8()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
-        using var connection = simulation.CreateOpenConnection();
-        using var reader = connection.CreateCommand("select cast(rv as varbinary(8)) from t").ExecuteReader();
+        using var reader = SeededOneRow()
+            .CreateCommand("select cast(rv as varbinary(8)) from t").ExecuteReader();
         IsTrue(reader.Read());
         var bytes = (byte[])reader.GetValue(0);
         HasCount(8, bytes);
@@ -153,13 +155,10 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Cast_RowVersion_To_BigInt_BigEndian()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
+        var simulation = SeededOneRow();
         var asBigInt = (long)simulation.ExecuteScalar("select cast(rv as bigint) from t")!;
-        // The exact value depends on the simulation's counter, but it must
-        // match the big-endian interpretation of the same bytes.
+        // The exact value depends on the simulation's counter, but it must match
+        // the big-endian interpretation of the same bytes.
         var rvBytes = ReadRowVersion(simulation.CreateCommand("select rv from t"));
         var expected = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(rvBytes);
         AreEqual(expected, asBigInt);
@@ -170,39 +169,26 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Where_RowVersion_Equals_VarbinaryParameter()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
-        // Capture the current rv, then use it as a varbinary parameter in WHERE.
+        var simulation = SeededOneRow();
         var rvBytes = ReadRowVersion(simulation.CreateCommand("select rv from t"));
 
         using var connection = simulation.CreateOpenConnection();
-        using var update = connection.CreateCommand("update t set id = 99 output 1 where id = 1 and rv = @originalRv");
-        var p = update.CreateParameter();
-        p.ParameterName = "@originalRv";
-        p.Value = rvBytes;
-        _ = update.Parameters.Add(p);
+        using var update = connection.CreateCommand(
+            "update t set id = 99 output 1 where id = 1 and rv = @originalRv",
+            ("@originalRv", rvBytes));
 
         using var reader = update.ExecuteReader();
         IsTrue(reader.Read(), "rowversion = varbinary parameter should match the row");
     }
 
+    // Concurrency-violation case: a stale rowversion doesn't match.
     [TestMethod]
     public void Where_RowVersion_Equals_StaleVarbinary_NoMatch()
     {
-        // Concurrency-violation case: a stale rowversion doesn't match.
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
-        _ = simulation.ExecuteNonQuery("insert into t (id) values (1)");
-
         var staleRv = new byte[8]; // all zeros, never a real rowversion
-        using var connection = simulation.CreateOpenConnection();
-        using var update = connection.CreateCommand("update t set id = 99 output 1 where rv = @stale");
-        var p = update.CreateParameter();
-        p.ParameterName = "@stale";
-        p.Value = staleRv;
-        _ = update.Parameters.Add(p);
+        using var connection = SeededOneRow().CreateOpenConnection();
+        using var update = connection.CreateCommand(
+            "update t set id = 99 output 1 where rv = @stale", ("@stale", staleRv));
 
         using var reader = update.ExecuteReader();
         IsFalse(reader.Read());

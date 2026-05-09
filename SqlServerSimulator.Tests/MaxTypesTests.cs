@@ -34,27 +34,31 @@ public sealed class MaxTypesTests
     [TestMethod]
     public void Insert_VarcharMax_SmallValue_RoundTrips()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v varchar(max) )");
-        _ = simulation.ExecuteNonQuery("insert into t values ('hello')");
-        Assert.AreEqual("hello", simulation.ExecuteScalar("select v from t"));
+        Assert.AreEqual("hello", new Simulation().ExecuteScalar("""
+            create table t ( v varchar(max) );
+            insert t values ('hello');
+            select v from t
+            """));
     }
 
     [TestMethod]
     public void Insert_NVarcharMax_SmallValue_RoundTrips()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v nvarchar(max) )");
-        _ = simulation.ExecuteNonQuery("insert into t values (N'héllo')");
-        Assert.AreEqual("héllo", simulation.ExecuteScalar("select v from t"));
+        Assert.AreEqual("héllo", new Simulation().ExecuteScalar("""
+            create table t ( v nvarchar(max) );
+            insert t values (N'héllo');
+            select v from t
+            """));
     }
 
     [TestMethod]
     public void Insert_VarbinaryMax_SmallValue_RoundTrips()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v varbinary(max) )");
-        _ = simulation.ExecuteNonQuery("insert into t values (0xDEADBEEF)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( v varbinary(max) );
+            insert t values (0xDEADBEEF)
+            """);
 
         CollectionAssert.AreEqual(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF }, (byte[])simulation.ExecuteScalar("select v from t")!);
     }
@@ -68,7 +72,7 @@ public sealed class MaxTypesTests
 
         var big = new string('x', 25_000);
         using var connection = simulation.CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("insert into t values (@v)", ("@v", big)).ExecuteNonQuery());
+        Assert.AreEqual(1, connection.CreateCommand("insert t values (@v)", ("@v", big)).ExecuteNonQuery());
 
         Assert.AreEqual(big, simulation.ExecuteScalar("select v from t"));
     }
@@ -81,7 +85,7 @@ public sealed class MaxTypesTests
 
         var big = new string('ñ', 12_000);
         using var connection = simulation.CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("insert into t values (@v)", ("@v", big)).ExecuteNonQuery());
+        Assert.AreEqual(1, connection.CreateCommand("insert t values (@v)", ("@v", big)).ExecuteNonQuery());
 
         Assert.AreEqual(big, simulation.ExecuteScalar("select v from t"));
     }
@@ -97,7 +101,7 @@ public sealed class MaxTypesTests
             big[i] = (byte)(i & 0xFF);
 
         using var connection = simulation.CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("insert into t values (@v)", ("@v", big)).ExecuteNonQuery());
+        Assert.AreEqual(1, connection.CreateCommand("insert t values (@v)", ("@v", big)).ExecuteNonQuery());
 
         CollectionAssert.AreEqual(big, (byte[])simulation.ExecuteScalar("select v from t")!);
     }
@@ -110,7 +114,7 @@ public sealed class MaxTypesTests
 
         var big = new string('a', 15_000);
         using var connection = simulation.CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("insert into t values (@v)", ("@v", big)).ExecuteNonQuery());
+        Assert.AreEqual(1, connection.CreateCommand("insert t values (@v)", ("@v", big)).ExecuteNonQuery());
 
         Assert.AreEqual(big, simulation.ExecuteScalar("select v from t"));
     }
@@ -122,7 +126,7 @@ public sealed class MaxTypesTests
         _ = simulation.ExecuteNonQuery("create table t ( v ntext )");
 
         using var connection = simulation.CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("insert into t values (@v)", ("@v", "hello world")).ExecuteNonQuery());
+        Assert.AreEqual(1, connection.CreateCommand("insert t values (@v)", ("@v", "hello world")).ExecuteNonQuery());
         Assert.AreEqual("hello world", simulation.ExecuteScalar("select v from t"));
     }
 
@@ -134,7 +138,7 @@ public sealed class MaxTypesTests
 
         var bytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
         using var connection = simulation.CreateOpenConnection();
-        Assert.AreEqual(1, connection.CreateCommand("insert into t values (@v)", ("@v", bytes)).ExecuteNonQuery());
+        Assert.AreEqual(1, connection.CreateCommand("insert t values (@v)", ("@v", bytes)).ExecuteNonQuery());
 
         CollectionAssert.AreEqual(bytes, (byte[])simulation.ExecuteScalar("select v from t")!);
     }
@@ -146,7 +150,7 @@ public sealed class MaxTypesTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
-        _ = simulation.ExecuteNonQuery("insert into t values (NULL)");
+        _ = simulation.ExecuteNonQuery("insert t values (NULL)");
 
         Assert.AreEqual(DBNull.Value, simulation.ExecuteScalar("select v from t"));
     }
@@ -159,8 +163,10 @@ public sealed class MaxTypesTests
     public void VarcharMax_NoTruncationCheck_AcceptsLargeBoundedSource()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v varchar(max) )");
-        _ = simulation.ExecuteNonQuery("insert into t values ('this is well within the inline 8060-byte cap')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( v varchar(max) );
+            insert t values ('this is well within the inline 8060-byte cap')
+            """);
 
         Assert.AreEqual(
             "this is well within the inline 8060-byte cap",
@@ -171,8 +177,10 @@ public sealed class MaxTypesTests
     public void Where_FiltersByVarcharMaxEquality()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( id int, v varchar(max) )");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'one'), (2, 'two'), (3, 'three')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( id int, v varchar(max) );
+            insert t values (1, 'one'), (2, 'two'), (3, 'three')
+            """);
 
         Assert.AreEqual(2, simulation.ExecuteScalar("select id from t where v = 'two'"));
     }
@@ -185,7 +193,7 @@ public sealed class MaxTypesTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
-        _ = simulation.ExecuteNonQuery(columnType == "image" ? "insert into t values (0x01)" : columnType == "ntext" ? "insert into t values (N'hello')" : "insert into t values ('hello')");
+        _ = simulation.ExecuteNonQuery(columnType == "image" ? "insert t values (0x01)" : columnType == "ntext" ? "insert t values (N'hello')" : "insert t values ('hello')");
 
         var ex = simulation.AssertSqlError(sql, 402);
         Assert.Contains(typeName, ex.Message);
@@ -207,8 +215,10 @@ public sealed class MaxTypesTests
     public void Text_Like_Allowed()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( id int, v text )");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'hello world'), (2, 'goodbye world'), (3, 'farewell')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( id int, v text );
+            insert t values (1, 'hello world'), (2, 'goodbye world'), (3, 'farewell')
+            """);
 
         Assert.AreEqual(1, simulation.ExecuteScalar("select id from t where v like 'hello%'"));
     }
@@ -216,40 +226,45 @@ public sealed class MaxTypesTests
     [TestMethod]
     public void Text_CastToVarchar_Allowed()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v text )");
-        _ = simulation.ExecuteNonQuery("insert into t values ('hello')");
-        Assert.AreEqual("hello", simulation.ExecuteScalar("select cast(v as varchar(50)) from t"));
+        Assert.AreEqual("hello", new Simulation().ExecuteScalar("""
+            create table t ( v text );
+            insert t values ('hello');
+            select cast(v as varchar(50)) from t
+            """));
     }
 
     [TestMethod]
     public void NText_CastToNVarcharMax_Allowed()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v ntext )");
-        _ = simulation.ExecuteNonQuery("insert into t values (N'hello')");
-        Assert.AreEqual("hello", simulation.ExecuteScalar("select cast(v as nvarchar(max)) from t"));
+        Assert.AreEqual("hello", new Simulation().ExecuteScalar("""
+            create table t ( v ntext );
+            insert t values (N'hello');
+            select cast(v as nvarchar(max)) from t
+            """));
     }
 
     [TestMethod]
     public void Image_CastToVarbinaryMax_Allowed()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v image )");
-        _ = simulation.ExecuteNonQuery("insert into t values (0xCAFE)");
-        CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE }, (byte[])simulation.ExecuteScalar("select cast(v as varbinary(max)) from t")!);
+        CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE }, (byte[])new Simulation().ExecuteScalar("""
+            create table t ( v image );
+            insert t values (0xCAFE);
+            select cast(v as varbinary(max)) from t
+            """)!);
     }
 
     [TestMethod]
     public void MultiRow_VarcharMax_OffRowAndInline_BothRoundTrip()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( id int, v varchar(max) )");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'small')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( id int, v varchar(max) );
+            insert t values (1, 'small')
+            """);
 
         var big = new string('B', 20_000);
         using var connection = simulation.CreateOpenConnection();
-        _ = connection.CreateCommand("insert into t values (2, @v)", ("@v", big)).ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (2, @v)", ("@v", big)).ExecuteNonQuery();
 
         using var reader = simulation.ExecuteReader("select id, v from t order by id");
         Assert.IsTrue(reader.Read());

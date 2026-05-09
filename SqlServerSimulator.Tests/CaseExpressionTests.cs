@@ -94,8 +94,10 @@ public sealed class CaseExpressionTests
         // simulator's parser doesn't accept `(arith) cmp rhs` (a known
         // limitation). Bare `case ... end = 1` parses fine.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, name nvarchar(20))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'one'), (2, 'two'), (3, 'three')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int, name nvarchar(20));
+            insert t values (1, 'one'), (2, 'two'), (3, 'three')
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand(
@@ -110,8 +112,10 @@ public sealed class CaseExpressionTests
     public void Case_WithColumnReference_ResolvesPerRow()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int, name nvarchar(20))");
-        _ = simulation.ExecuteNonQuery("insert into t values (1, 'one'), (2, 'two'), (3, 'three')");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int, name nvarchar(20));
+            insert t values (1, 'one'), (2, 'two'), (3, 'three')
+            """);
 
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand(
@@ -145,8 +149,10 @@ public sealed class CaseExpressionTests
     public void Case_InScalarSubquery_ProjectsValue()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (id int)");
-        _ = simulation.ExecuteNonQuery("insert into t values (1)");
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int);
+            insert t values (1)
+            """);
 
         AreEqual("hit", simulation.ExecuteScalar(
             "select (select case when t.id = 1 then 'hit' else 'miss' end from t)"));

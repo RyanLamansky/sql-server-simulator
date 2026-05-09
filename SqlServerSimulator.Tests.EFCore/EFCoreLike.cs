@@ -94,11 +94,9 @@ public class EFCoreLike
         // The 3-arg EF.Functions.Like overload threads an ESCAPE clause through
         // to the simulator. Insert a row whose name contains a literal '%' and
         // verify the escaped pattern matches it without treating '%' as wild.
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "100% Pure" },
             new Person { Id = 2, Name = "Mostly Pure" });
-        _ = context.SaveChanges();
 
         var ids = context.People.Where(p => EF.Functions.Like(p.Name, "%!%%", "!")).Select(p => p.Id).ToArray();
         CollectionAssert.AreEqual(new[] { 1 }, ids);
@@ -108,12 +106,10 @@ public class EFCoreLike
     public void StartsWith_OnVarcharColumn_AlsoWorks()
     {
         // Code is varchar(10) — exercises the CP1252 path rather than nvarchar.
-        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
-        context.People.AddRange(
+        using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation()).WithSaved(
             new Person { Id = 1, Name = "x", Code = "ABC-1" },
             new Person { Id = 2, Name = "y", Code = "ABC-2" },
             new Person { Id = 3, Name = "z", Code = "XYZ-1" });
-        _ = context.SaveChanges();
 
         var ids = context.People.Where(p => p.Code!.StartsWith("ABC")).OrderBy(p => p.Id).Select(p => p.Id).ToArray();
         CollectionAssert.AreEqual(new[] { 1, 2 }, ids);

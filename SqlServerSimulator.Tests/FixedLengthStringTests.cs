@@ -26,12 +26,10 @@ public sealed class FixedLengthStringTests
         CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE, 0, 0, 0 }, value);
     }
 
+    // CAST silently truncates without raising — error is reserved for INSERT/UPDATE.
     [TestMethod]
     public void Cast_OversizeString_SilentlyTruncatesInCast()
-    {
-        // CAST silently truncates without raising — error is reserved for INSERT/UPDATE.
-        AreEqual("hello", ExecuteScalar("select cast('hello world' as char(5))"));
-    }
+        => AreEqual("hello", ExecuteScalar("select cast('hello world' as char(5))"));
 
     [TestMethod]
     public void Cast_OversizeBinary_SilentlyTruncatesInCast()
@@ -45,10 +43,10 @@ public sealed class FixedLengthStringTests
     public void Cast_EmptyString_PadsToFullWidth()
         => AreEqual("   ", ExecuteScalar("select cast('' as char(3))"));
 
+    // ANSI trailing-space padding shared by every string-family type.
     [TestMethod]
     public void Comparison_CharWithVarchar_StripsTrailingSpaces()
     {
-        // ANSI trailing-space padding shared by every string-family type.
         AreEqual(1, ExecuteScalar("select 1 where cast('abc' as char(5)) = 'abc'"));
         AreEqual(1, ExecuteScalar("select 1 where cast('abc' as char(5)) = 'abc  '"));
     }
@@ -59,57 +57,55 @@ public sealed class FixedLengthStringTests
 
     [TestMethod]
     public void CreateTable_InsertSelect_RoundTripsPaddedValue()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (c char(5))");
-        _ = simulation.ExecuteNonQuery("insert into t values ('hi')");
-        AreEqual("hi   ", simulation.ExecuteScalar("select c from t"));
-    }
+        => AreEqual("hi   ", new Simulation().ExecuteScalar("""
+            create table t (c char(5));
+            insert t values ('hi');
+            select c from t
+            """));
 
     [TestMethod]
     public void CreateTable_NCharRoundTrip_PadsToDeclaredCodeUnits()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (c nchar(5))");
-        _ = simulation.ExecuteNonQuery("insert into t values (N'hi')");
-        AreEqual("hi   ", simulation.ExecuteScalar("select c from t"));
-    }
+        => AreEqual("hi   ", new Simulation().ExecuteScalar("""
+            create table t (c nchar(5));
+            insert t values (N'hi');
+            select c from t
+            """));
 
     [TestMethod]
     public void CreateTable_BinaryRoundTrip_PadsWithZeros()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (b binary(5))");
-        _ = simulation.ExecuteNonQuery("insert into t values (0xCAFE)");
-        var value = simulation.ExecuteScalar("select b from t") as byte[];
+        var value = new Simulation().ExecuteScalar("""
+            create table t (b binary(5));
+            insert t values (0xCAFE);
+            select b from t
+            """) as byte[];
         IsNotNull(value);
         CollectionAssert.AreEqual(new byte[] { 0xCA, 0xFE, 0, 0, 0 }, value);
     }
 
     [TestMethod]
     public void Insert_OversizeString_RaisesTruncationError()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (c char(5))");
-        simulation.AssertSqlError("insert into t values ('toolong')", 2628,
+        => new Simulation().AssertSqlError("""
+            create table t (c char(5));
+            insert t values ('toolong')
+            """, 2628,
             "String or binary data would be truncated in table 't', column 'c'. Truncated value: 'toolo'.");
-    }
 
     [TestMethod]
     public void Insert_OversizeNChar_RaisesTruncationError()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (c nchar(5))");
-        simulation.AssertSqlError("insert into t values (N'toolong')", 2628,
+        => new Simulation().AssertSqlError("""
+            create table t (c nchar(5));
+            insert t values (N'toolong')
+            """, 2628,
             "String or binary data would be truncated in table 't', column 'c'. Truncated value: 'toolo'.");
-    }
 
     [TestMethod]
     public void Insert_OversizeBinary_RaisesTruncationError()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (b binary(5))");
-        var ex = simulation.AssertSqlError("insert into t values (0x010203040506)", 2628);
+        var ex = new Simulation().AssertSqlError("""
+            create table t (b binary(5));
+            insert t values (0x010203040506)
+            """, 2628);
         Assert.StartsWith("String or binary data would be truncated in table 't', column 'b'.", ex.Message);
     }
 
@@ -142,22 +138,22 @@ public sealed class FixedLengthStringTests
         => new Simulation().AssertSqlError("create table t (c nchar(4001))", 2717,
             "The size (4001) given to the parameter 'c' exceeds the maximum allowed (4000).");
 
+    // CAST without parens defaults to 30 (column declaration default is 1).
     [TestMethod]
     public void Cast_Default_NoParensInCastIs30()
-    {
-        // CAST without parens defaults to 30 (column declaration default is 1).
-        AreEqual(30, ExecuteScalar("select datalength(cast('abc' as char))"));
-    }
+        => AreEqual(30, ExecuteScalar("select datalength(cast('abc' as char))"));
 
+    // Column declaration default is 1.
     [TestMethod]
     public void CreateTable_DefaultIsOne()
     {
-        // Column declaration default is 1.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (c char)");
-        _ = simulation.ExecuteNonQuery("insert into t values ('a')");
-        AreEqual("a", simulation.ExecuteScalar("select c from t"));
-        _ = simulation.AssertSqlError("insert into t values ('hello')", 2628);
+        AreEqual("a", simulation.ExecuteScalar("""
+            create table t (c char);
+            insert t values ('a');
+            select c from t
+            """));
+        _ = simulation.AssertSqlError("insert t values ('hello')", 2628);
     }
 
     [TestMethod]
@@ -165,13 +161,11 @@ public sealed class FixedLengthStringTests
         => AssertSqlMessage("select cast(NEWID() as char(35))",
             "Insufficient result space to convert uniqueidentifier value to char.");
 
+    // nchar's overflow message names "nvarchar" — same shared text path.
     [TestMethod]
     public void Cast_UidToNCharBelow36_RaisesMsg8115WithNvarcharText()
-    {
-        // nchar's overflow message names "nvarchar" — same shared text path.
-        AssertSqlMessage("select cast(NEWID() as nchar(35))",
-        "Arithmetic overflow error converting expression to data type nvarchar.");
-    }
+        => AssertSqlMessage("select cast(NEWID() as nchar(35))",
+            "Arithmetic overflow error converting expression to data type nvarchar.");
 
     [TestMethod]
     public void Cast_VarcharToNvarchar_PreservesValue()
@@ -179,17 +173,14 @@ public sealed class FixedLengthStringTests
 
     [TestMethod]
     public void Insert_WithLegacyCompatibility_RaisesMsg8152NoColumnDetail()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("alter database current set compatibility_level = 150");
-        _ = simulation.ExecuteNonQuery("create table t (c char(5))");
-        simulation.AssertSqlError("insert into t values ('toolong')", 8152, "String or binary data would be truncated.");
-    }
+        => new Simulation().AssertSqlError("""
+            alter database current set compatibility_level = 150;
+            create table t (c char(5));
+            insert t values ('toolong')
+            """, 8152, "String or binary data would be truncated.");
 
+    // Padded form is part of the value; varchar comparison still strips via ANSI padding.
     [TestMethod]
     public void Cast_CharToVarchar_TrailingSpacesPreservedInString()
-    {
-        // Padded form is part of the value; varchar comparison still strips via ANSI padding.
-        AreEqual(1, ExecuteScalar("select 1 where cast(cast('abc' as char(5)) as varchar(10)) = 'abc'"));
-    }
+        => AreEqual(1, ExecuteScalar("select 1 where cast(cast('abc' as char(5)) as varchar(10)) = 'abc'"));
 }

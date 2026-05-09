@@ -58,8 +58,10 @@ public class WhereTests
     public void FromTableWhere_FiltersByEqualityToLiteral()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, v int )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( 1, 100 ), ( 2, 200 ), ( 3, 300 )").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( id int, v int );
+            insert t values ( 1, 100 ), ( 2, 200 ), ( 3, 300 )
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select id, v from t where id = 2").ExecuteReader();
         IsTrue(reader.Read());
@@ -72,8 +74,10 @@ public class WhereTests
     public void FromTableWhere_FiltersByGreaterThan()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( 1 ), ( 2 ), ( 3 ), ( 4 )").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( v int );
+            insert t values ( 1 ), ( 2 ), ( 3 ), ( 4 )
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select v from t where v > 2").ExecuteReader();
         IsTrue(reader.Read()); AreEqual(3, reader[0]);
@@ -85,9 +89,11 @@ public class WhereTests
     public void FromTableWhere_NullColumnNeverMatches()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, v int )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t ( id ) values ( 1 )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( 2, 99 )").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( id int, v int );
+            insert t ( id ) values ( 1 );
+            insert t values ( 2, 99 )
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select id from t where v = 99").ExecuteReader();
         IsTrue(reader.Read());
@@ -99,8 +105,10 @@ public class WhereTests
     public void FromTableWhere_FiltersByParameter()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int )").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert t values ( 1 ), ( 2 ), ( 3 )").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t ( id int );
+            insert t values ( 1 ), ( 2 ), ( 3 )
+            """).ExecuteNonQuery();
 
         using var select = connection.CreateCommand();
         select.CommandText = "select id from t where id = @id";
@@ -116,10 +124,8 @@ public class WhereTests
     public void FromTableWhere_FiltersByDateEquality()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d date )").ExecuteNonQuery();
-
         using var ins = connection.CreateCommand();
-        ins.CommandText = "insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
+        ins.CommandText = "create table t ( id int, d date );insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
         AddTypedParameter(ins, "a", DbType.Date, new DateOnly(2024, 1, 1));
         AddTypedParameter(ins, "b", DbType.Date, new DateOnly(2026, 5, 4));
         AddTypedParameter(ins, "c", DbType.Date, new DateOnly(2099, 12, 31));
@@ -139,10 +145,8 @@ public class WhereTests
     public void FromTableWhere_FiltersByDateOrdering()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d date )").ExecuteNonQuery();
-
         using var ins = connection.CreateCommand();
-        ins.CommandText = "insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
+        ins.CommandText = "create table t ( id int, d date );insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
         AddTypedParameter(ins, "a", DbType.Date, new DateOnly(2024, 1, 1));
         AddTypedParameter(ins, "b", DbType.Date, new DateOnly(2026, 5, 4));
         AddTypedParameter(ins, "c", DbType.Date, new DateOnly(2099, 12, 31));
@@ -162,10 +166,9 @@ public class WhereTests
     public void FromTableWhere_DateColumnReadableViaGetDateTime()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( d date )").ExecuteNonQuery();
-
-        using var ins = connection.CreateCommand("insert t values ( @p )", ("p", new DateOnly(2026, 5, 4)));
-        _ = ins.ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "create table t ( d date );insert t values ( @p )",
+            ("p", new DateOnly(2026, 5, 4))).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select d from t").ExecuteReader();
         IsTrue(reader.Read());
@@ -176,10 +179,8 @@ public class WhereTests
     public void FromTableWhere_FiltersByDateTime2Equality()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d datetime2(7) )").ExecuteNonQuery();
-
         using var ins = connection.CreateCommand();
-        ins.CommandText = "insert t values ( 1, @a ), ( 2, @b )";
+        ins.CommandText = "create table t ( id int, d datetime2(7) );insert t values ( 1, @a ), ( 2, @b )";
         AddTypedParameter(ins, "a", DbType.DateTime2, new DateTime(2026, 5, 4, 13, 45, 30));
         AddTypedParameter(ins, "b", DbType.DateTime2, new DateTime(2026, 5, 4, 13, 45, 31));
         _ = ins.ExecuteNonQuery();
@@ -194,15 +195,14 @@ public class WhereTests
         IsFalse(reader.Read());
     }
 
+    // Stored at precision 3, compared against precision-7 parameter — promotion widens both to p=7.
     [TestMethod]
     public void FromTableWhere_CrossPrecisionDateTime2Comparison()
     {
-        // Stored at precision 3, compared against precision-7 parameter — promotion widens both to p=7.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d datetime2(3) )").ExecuteNonQuery();
-
-        using var ins = connection.CreateCommand("insert t values ( 1, @a )", ("a", new DateTime(2026, 5, 4, 13, 45, 30, 100)));
-        _ = ins.ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "create table t ( id int, d datetime2(3) );insert t values ( 1, @a )",
+            ("a", new DateTime(2026, 5, 4, 13, 45, 30, 100))).ExecuteNonQuery();
 
         using var select = connection.CreateCommand();
         select.CommandText = "select id from t where d = @target";
@@ -218,10 +218,8 @@ public class WhereTests
     public void FromTableWhere_FiltersByTimeOrdering()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, t time(7) )").ExecuteNonQuery();
-
         using var ins = connection.CreateCommand();
-        ins.CommandText = "insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
+        ins.CommandText = "create table t ( id int, t time(7) );insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
         AddTypedParameter(ins, "a", DbType.Time, new TimeSpan(8, 0, 0));
         AddTypedParameter(ins, "b", DbType.Time, new TimeSpan(13, 45, 30));
         AddTypedParameter(ins, "c", DbType.Time, new TimeSpan(23, 0, 0));
@@ -241,10 +239,9 @@ public class WhereTests
     public void FromTableWhere_CrossPrecisionTimeComparison()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, t time(3) )").ExecuteNonQuery();
-
-        using var ins = connection.CreateCommand("insert t values ( 1, @a )", ("a", new TimeSpan(0, 13, 45, 30, 100)));
-        _ = ins.ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "create table t ( id int, t time(3) );insert t values ( 1, @a )",
+            ("a", new TimeSpan(0, 13, 45, 30, 100))).ExecuteNonQuery();
 
         using var select = connection.CreateCommand();
         select.CommandText = "select id from t where t = @target";
@@ -256,15 +253,13 @@ public class WhereTests
         IsFalse(reader.Read());
     }
 
+    // Row and parameter share a UTC instant but carry different offsets; SQL Server compares by UTC.
     [TestMethod]
     public void FromTableWhere_FiltersByDateTimeOffsetEquality_AcrossOffsets()
     {
-        // Row and parameter share a UTC instant but carry different offsets; SQL Server compares by UTC.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d datetimeoffset(7) )").ExecuteNonQuery();
-
         using var ins = connection.CreateCommand();
-        ins.CommandText = "insert t values ( 1, @a ), ( 2, @b )";
+        ins.CommandText = "create table t ( id int, d datetimeoffset(7) );insert t values ( 1, @a ), ( 2, @b )";
         AddTypedParameter(ins, "a", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)));
         AddTypedParameter(ins, "b", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 14, 45, 30, TimeSpan.FromHours(-7)));
         _ = ins.ExecuteNonQuery();
@@ -283,10 +278,8 @@ public class WhereTests
     public void FromTableWhere_FiltersByDateTimeOffsetOrdering()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d datetimeoffset(7) )").ExecuteNonQuery();
-
         using var ins = connection.CreateCommand();
-        ins.CommandText = "insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
+        ins.CommandText = "create table t ( id int, d datetimeoffset(7) );insert t values ( 1, @a ), ( 2, @b ), ( 3, @c )";
         AddTypedParameter(ins, "a", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 8, 0, 0, TimeSpan.Zero));
         AddTypedParameter(ins, "b", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 13, 0, 0, TimeSpan.Zero));
         AddTypedParameter(ins, "c", DbType.DateTimeOffset, new DateTimeOffset(2026, 5, 4, 23, 0, 0, TimeSpan.Zero));
@@ -306,10 +299,9 @@ public class WhereTests
     public void FromTableWhere_CrossPrecisionDateTimeOffsetComparison()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t ( id int, d datetimeoffset(0) )").ExecuteNonQuery();
-
-        using var ins = connection.CreateCommand("insert t values ( 1, @a )", ("a", new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7))));
-        _ = ins.ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "create table t ( id int, d datetimeoffset(0) );insert t values ( 1, @a )",
+            ("a", new DateTimeOffset(2026, 5, 4, 13, 45, 30, TimeSpan.FromHours(-7)))).ExecuteNonQuery();
 
         using var select = connection.CreateCommand();
         select.CommandText = "select id from t where d = @target";
@@ -321,13 +313,15 @@ public class WhereTests
         IsFalse(reader.Read());
     }
 
+    // Regression: pre-fix, `where a=X and b=Y` parsed only `a=X` and dropped `and b=Y`.
     [TestMethod]
     public void Where_AndChain_TwoPredicates_BothMustHold()
     {
-        // Regression: pre-fix, `where a=X and b=Y` parsed only `a=X` and dropped `and b=Y`.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int not null, b int not null, c int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 2, 100), (1, 3, 200), (2, 2, 300)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int not null, b int not null, c int);
+            insert t values (1, 2, 100), (1, 3, 200), (2, 2, 300)
+            """).ExecuteNonQuery();
 
         AreEqual(200, connection.CreateCommand("select c from t where a = 1 and b = 3").ExecuteScalar());
         AreEqual(100, connection.CreateCommand("select c from t where a = 1 and b = 2").ExecuteScalar());
@@ -338,8 +332,10 @@ public class WhereTests
     public void Where_AndChain_ThreePredicates_AllMustHold()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 2, 100), (1, 2, 200)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int, b int, c int);
+            insert t values (1, 2, 100), (1, 2, 200)
+            """).ExecuteNonQuery();
 
         AreEqual(100, connection.CreateCommand("select c from t where a = 1 and b = 2 and c = 100").ExecuteScalar());
         IsNull(connection.CreateCommand("select c from t where a = 1 and b = 2 and c = 999").ExecuteScalar());
@@ -349,8 +345,10 @@ public class WhereTests
     public void Where_AndChain_NullOperand_ExcludesRow()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, null), (1, 2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int, b int);
+            insert t values (1, null), (1, 2)
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select b from t where a = 1 and b = 2").ExecuteReader();
         IsTrue(reader.Read());
@@ -362,8 +360,10 @@ public class WhereTests
     public void Where_OrChain_TwoPredicates_EitherMustHold()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, b int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 2), (3, 4), (5, 6)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int, b int);
+            insert t values (1, 2), (3, 4), (5, 6)
+            """).ExecuteNonQuery();
 
         using var reader = connection.CreateCommand("select a from t where a = 1 or b = 4").ExecuteReader();
         var matched = new List<int>();
@@ -378,8 +378,10 @@ public class WhereTests
     public void Where_AndOrPrecedence(string predicate, int expected)
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, b int, c int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 2, 3), (1, 3, 2), (2, 2, 2), (0, 0, 5)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int, b int, c int);
+            insert t values (1, 2, 3), (1, 3, 2), (2, 2, 2), (0, 0, 5)
+            """).ExecuteNonQuery();
 
         AreEqual(expected, CountWhere(connection, predicate));
     }
@@ -395,8 +397,10 @@ public class WhereTests
     public void Where_TriStateAndIsNull_OnNullableIntColumn(string predicate, int expected)
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (null), (1), (2)
+            """).ExecuteNonQuery();
 
         AreEqual(expected, CountWhere(connection, predicate));
     }
@@ -407,30 +411,36 @@ public class WhereTests
     public void Where_InNotIn_BasicMembership(string predicate, int expected)
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1), (2), (3), (4)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (1), (2), (3), (4)
+            """).ExecuteNonQuery();
 
         AreEqual(expected, CountWhere(connection, predicate));
     }
 
+    // `NULL IN (1, 2)` is UNKNOWN; UNKNOWN excludes from WHERE.
     [TestMethod]
     public void Where_InList_NullLeftSideIsExcluded()
     {
-        // `NULL IN (1, 2)` is UNKNOWN; UNKNOWN excludes from WHERE.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (null), (1), (2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (null), (1), (2)
+            """).ExecuteNonQuery();
 
         AreEqual(2, CountWhere(connection, "a in (1, 2)"));
     }
 
+    // `1 NOT IN (1, NULL)` = false (1 matches 1). `2 NOT IN (1, NULL)` = UNKNOWN → excluded.
     [TestMethod]
     public void Where_NotInList_WithNullElementExcludesEverythingViaUnknown()
     {
-        // `1 NOT IN (1, NULL)` = false (1 matches 1). `2 NOT IN (1, NULL)` = UNKNOWN → excluded.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1), (2), (3)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (1), (2), (3)
+            """).ExecuteNonQuery();
 
         AreEqual(0, CountWhere(connection, "a not in (1, null)"));
     }
@@ -439,19 +449,23 @@ public class WhereTests
     public void Where_InList_WithStringValues()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int, status nvarchar(20))").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1, 'active'), (2, 'pending'), (3, 'archived')").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a int, status nvarchar(20));
+            insert t values (1, 'active'), (2, 'pending'), (3, 'archived')
+            """).ExecuteNonQuery();
 
         AreEqual(2, CountWhere(connection, "status in ('active', 'archived')"));
     }
 
+    // Member-list values are int literals; column is bigint. SQL Server promotes to a common numeric type.
     [TestMethod]
     public void Where_InList_PromotesAcrossNumericTypes()
     {
-        // Member-list values are int literals; column is bigint. SQL Server promotes to a common numeric type.
         using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a bigint)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert into t values (1), (2), (3)").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create table t (a bigint);
+            insert t values (1), (2), (3)
+            """).ExecuteNonQuery();
 
         AreEqual(2, CountWhere(connection, "a in (1, 3)"));
     }

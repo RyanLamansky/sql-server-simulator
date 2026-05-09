@@ -127,7 +127,7 @@ public sealed class DecimalTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table sales (region varchar(10), amount decimal(10,2))");
         _ = simulation.ExecuteNonQuery(
-            "insert into sales values ('east', 100), ('east', 200), ('east', 150), ('west', 300), ('west', 500), ('west', 50)");
+            "insert sales values ('east', 100), ('east', 200), ('east', 150), ('west', 300), ('west', 500), ('west', 50)");
         using var connection = simulation.CreateOpenConnection();
         using var reader = connection.CreateCommand(
             "select s.region, s.amount, s.amount * 100.0 / (select sum(s0.amount) from sales as s0 where s0.region = s.region) from sales as s")
@@ -164,37 +164,41 @@ public sealed class DecimalTests
     [TestMethod]
     public void Promote_DecimalAndStringInComparison()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v decimal(10, 2))");
-        _ = simulation.ExecuteNonQuery("insert into t (v) values (cast(1.5 as decimal(10, 2)))");
-        AreEqual(1.5m, simulation.ExecuteScalar<decimal>("select v from t where v = '1.5'"));
+        AreEqual(1.5m, new Simulation().ExecuteScalar<decimal>("""
+            create table t (v decimal(10, 2));
+            insert t (v) values (cast(1.5 as decimal(10, 2)));
+            select v from t where v = '1.5'
+            """));
     }
 
     [TestMethod]
     public void Promote_DecimalAndIntegerInComparison()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v decimal(10, 2))");
-        _ = simulation.ExecuteNonQuery("insert into t (v) values (cast(1 as decimal(10, 2)))");
-        AreEqual(1m, simulation.ExecuteScalar<decimal>("select v from t where v = 1"));
+        AreEqual(1m, new Simulation().ExecuteScalar<decimal>("""
+            create table t (v decimal(10, 2));
+            insert t (v) values (cast(1 as decimal(10, 2)));
+            select v from t where v = 1
+            """));
     }
 
     [TestMethod]
     public void Insert_DecimalLiteralIntoDecimalColumn_RoundsToColumnScale()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v decimal(10, 2))");
-        _ = simulation.ExecuteNonQuery("insert into t (v) values (1.234)");
-        AreEqual(1.23m, simulation.ExecuteScalar<decimal>("select v from t"));
+        AreEqual(1.23m, new Simulation().ExecuteScalar<decimal>("""
+            create table t (v decimal(10, 2));
+            insert t (v) values (1.234);
+            select v from t
+            """));
     }
 
     [TestMethod]
     public void Insert_StringIntoDecimalColumn_ParsesAndStores()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t (v decimal(10, 2))");
-        _ = simulation.ExecuteNonQuery("insert into t (v) values ('5.95')");
-        AreEqual(5.95m, simulation.ExecuteScalar<decimal>("select v from t"));
+        AreEqual(5.95m, new Simulation().ExecuteScalar<decimal>("""
+            create table t (v decimal(10, 2));
+            insert t (v) values ('5.95');
+            select v from t
+            """));
     }
 
     [TestMethod]

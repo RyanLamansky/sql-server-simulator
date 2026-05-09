@@ -141,8 +141,10 @@ public sealed class SmallDateTimeTests
     public void CreateTable_SmallDateTimeColumn_RoundTripsRowsWithRoundedValues()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (d smalldatetime)");
-        _ = sim.ExecuteNonQuery("insert into t values ('1900-01-01'), ('2024-01-15 12:30:30'), ('2079-06-06 23:59')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (d smalldatetime);
+            insert t values ('1900-01-01'), ('2024-01-15 12:30:30'), ('2079-06-06 23:59')
+            """);
         using var reader = sim.ExecuteReader("select d from t");
         var rows = new List<DateTime>();
         while (reader.Read())
@@ -167,10 +169,9 @@ public sealed class SmallDateTimeTests
     public void Parameter_SmallDateTime_AcceptsDateTimeValue()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (d smalldatetime)");
         using var connection = sim.CreateOpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "insert into t values (@x)";
+        command.CommandText = "create table t (d smalldatetime);insert t values (@x)";
         var p = command.CreateParameter();
         p.ParameterName = "@x";
         p.DbType = DbType.DateTime;
@@ -185,10 +186,9 @@ public sealed class SmallDateTimeTests
     public void Parameter_SmallDateTime_AcceptsDateOnlyValue()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (d smalldatetime)");
         using var connection = sim.CreateOpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "insert into t values (@x)";
+        command.CommandText = "create table t (d smalldatetime);insert t values (@x)";
         var p = command.CreateParameter();
         p.ParameterName = "@x";
         p.DbType = DbType.DateTime;
@@ -198,13 +198,15 @@ public sealed class SmallDateTimeTests
         AreEqual(new DateTime(2024, 1, 15, 0, 0, 0), sim.ExecuteScalar("select d from t"));
     }
 
+    // Both inputs round to 12:30:00.
     [TestMethod]
     public void Equality_TwoSmallDateTimeValuesAtSameMinute_AreEqual()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, d smalldatetime)");
-        // Both inputs round to 12:30:00.
-        _ = sim.ExecuteNonQuery("insert into t values (1, '2024-01-15 12:30:00'), (2, '2024-01-15 12:30:15')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, d smalldatetime);
+            insert t values (1, '2024-01-15 12:30:00'), (2, '2024-01-15 12:30:15')
+            """);
         using var reader = sim.ExecuteReader("select id from t where d = cast('2024-01-15 12:30:00' as smalldatetime)");
         var ids = new List<int>();
         while (reader.Read())
@@ -271,8 +273,10 @@ public sealed class SmallDateTimeTests
     public void Ordering_SmallDateTimeValues_CompareByInstant()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, d smalldatetime)");
-        _ = sim.ExecuteNonQuery("insert into t values (1, '2024-01-15'), (2, '2024-01-16')");
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, d smalldatetime);
+            insert t values (1, '2024-01-15'), (2, '2024-01-16')
+            """);
         using var reader = sim.ExecuteReader("select id from t where d < cast('2024-01-16' as smalldatetime)");
         IsTrue(reader.Read());
         AreEqual(1, reader.GetInt32(0));
