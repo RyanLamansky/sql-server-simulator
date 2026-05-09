@@ -283,6 +283,35 @@ Zone-name resolution routes through .NET 6+'s `TimeZoneInfo.FindSystemTimeZoneBy
 
 `AT`, `TIME`, and `ZONE` are contextual keywords (added to `ContextualKeyword`) — they remain valid identifiers everywhere else, so existing `create table t (Time int, Zone int)` shapes still work.
 
+### CAST/CONVERT to narrow `varchar` / `nvarchar` / `varbinary`
+The simulator's variable-length string types are stateless singletons (no length on the SqlType — that lives separately on `HeapColumn.MaxLength` for storage and on the parsed `targetMaxLength` for CAST). `Cast.EnforceTargetMaxLength` runs after `SqlValue.CoerceTo` and applies the per-source-category rule (probe-confirmed against SQL Server 2025 on 2026-05-09):
+
+- **String / varbinary / date-time-family source** → silent truncation. `CAST('hello world' AS varchar(5))` → `'hello'`; `CAST(date AS varchar(9))` → `'2026-05-0'`; `CAST(0x0102030405 AS varbinary(3))` → `0x010203`.
+- **`tinyint` / `smallint` / `int` source → `varchar`** too narrow → asterisk fallback (`'*'`). Legacy SQL Server quirk specific to the `varchar` target; the `nvarchar` path raises Msg 8115 instead. `bigint` doesn't get the fallback either — also Msg 8115.
+- **`decimal` / `numeric` source** → Msg 8115 with the "numeric" wording (`Cast.ArithmeticOverflowToTarget`), distinct from the integer/bigint variant's "expression" wording.
+- **`money` / `smallmoney` source** → Msg 234 with its dedicated `"There is insufficient result space to convert a money value to <target>."` wording (the message says "money" regardless of source variant).
+- **`float` / `real` source** → Msg 232 with the formatted source value embedded (`F6` formatting; matches the `POWER`-overflow path's existing factory).
+- **`uniqueidentifier`** has its own pre-CoerceTo branch (Msg 8170 for char/varchar, Msg 8115 for nchar/nvarchar) — unchanged.
+
+`datetimeoffset → varchar` too narrow raises **Msg 241** in real SQL Server but isn't modeled — the simulator silently truncates the rendered string. Niche enough that no app I know of relies on it.
+
+CAST/CONVERT context **defaults missing length to 30** for `varchar` / `nvarchar` / `varbinary` (column-context default is 1) — same two-context rule already in place for `char(N)` / `nchar(N)` / `binary(N)`. So `CAST('hello' AS varchar)` returns the full 5 characters, not `'h'`.
+
+Fixed-length char(N) / nchar(N) / binary(N) targets carry their length on the SqlType and normalize through `FromChar` / `FromNChar` / `FromBinary` (right-pad-or-truncate); their `targetMaxLength` arrives as `null` and short-circuits `EnforceTargetMaxLength`.
+
+The remaining length-tracking compromise (`SqlType.PromoteForArithmetic` line 232 — `varchar(10) + varchar(20)` should be `varchar(30)` but drops to length-less `varchar`) is a separate problem from CAST truncation: it requires per-length `VarcharSqlType` singletons like `CharSqlType` has, a much bigger refactor that no probed EF Core 10 shape requires.
+
+### `TRY_CAST` / `TRY_CONVERT`
+Both wrap the regular CAST / CONVERT runtime path in a try/catch that swallows the documented "conversion failed" error numbers (returning `SqlValue.Null(targetType)`) while letting structural errors propagate. Probe-confirmed against SQL Server 2025 on 2026-05-09.
+
+`Cast.IsConversionFailure` is the shared swallow-set (single source of truth, reused by `ConvertExpression` for the TRY_CONVERT path): **241** (datetime-from-string parse), **242** (datetime out-of-range), **244** (tinyint/smallint INT1/INT2 overflow), **245** (string→numeric parse), **248** (int overflow), **295** (smalldatetime parse), **8114** (decimal/etc. conversion), **8115** (generic arithmetic overflow), **8169** (uniqueidentifier-from-string parse), **8170** (uniqueidentifier→too-narrow-string).
+
+Errors NOT swallowed (structural / programming errors): **Msg 529** (explicit-cast disallowed pair like `int → date`, `text → int`), **Msg 243** (unknown target type), and any source-evaluation error that fires before the cast itself runs (e.g. an inner `CAST('abc' AS INT)` that raises Msg 245 — the wrapping `TRY_CAST(... AS BIGINT)` does NOT swallow it because the failure isn't at the outer cast level). Probe-confirmed: `TRY_CAST(1/0 AS INT)` raises Msg 8134 in real SQL Server (the simulator surfaces a raw `DivideByZeroException` here — pre-existing fidelity gap orthogonal to TRY_CAST).
+
+String-source truncation isn't a "conversion failure" path either way — `TRY_CAST('hello' AS varchar(3))` returns `'hel'`, mirroring CAST's silent truncation rule (see the section above).
+
+EF Core 10 doesn't emit `TRY_CAST` / `TRY_CONVERT` from idiomatic LINQ — these are reachable from raw SQL only (`FromSqlInterpolated` / `FromSqlRaw` / direct command text), like `CONCAT` / `CONCAT_WS`.
+
 ### Constraints
 - `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree.
@@ -355,7 +384,6 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - `APPROX_COUNT_DISTINCT`: implemented as exact `COUNT(DISTINCT)`.
 - `decimal` / `numeric`: backed by .NET `decimal`. Values requiring more than 28 significant digits aren't modeled (declarations up through `decimal(38, *)` accepted so storage byte-width matches).
 - `float` text formatting: .NET `G15` / `G7` rather than SQL Server's `1e+015`-style scientific.
-- CAST to a smaller `varchar` / `nvarchar` than the value renders: SQL Server silently truncates; simulator returns the full string.
 - Auto-generated PK / UNIQUE / CHECK constraint names: structurally `PK__<table>__<hex>` / `UQ__...` / `CK__<table>__[col__]<hex>`; the 16-hex suffix is a deterministic FNV-1a hash, not SQL Server's object-id-derived hex (stable across runs but won't byte-match a real-server reproduction).
 - **DELETE / UPDATE leak page space**: deleted (or UPDATE-relocated) row payload bytes stay in their original page until process exit; only the slot is tombstoned. Slot directory entries also never reused. SQL Server has ghost-cleanup background work; simulator doesn't.
 - **DELETE / UPDATE leak LOB chains**: orphaned LOB chains stay in `Heap.LobPages`. Other rows reference LOB pages by stable index, so list compaction would corrupt them.

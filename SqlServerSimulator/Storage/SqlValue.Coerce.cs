@@ -55,11 +55,12 @@ internal readonly partial struct SqlValue
             return FromString(target, FormatIntegerToString(this));
 
         // String ↔ string crossings: same content, target's encoding and
-        // padding rules. char(N) / nchar(N) targets pad with U+0020 if shorter
-        // and silently truncate if longer (matching CAST). The INSERT/UPDATE
-        // pipeline pre-checks source length against char/nchar/varchar/nvarchar
-        // column maxes so the truncation case raises Msg 2628 / 8152 before
-        // reaching this point.
+        // padding rules. char(N) / nchar(N) targets carry length on the
+        // SqlType and pad-or-truncate inside FromString. varchar / nvarchar
+        // targets are stateless singletons here; their declared CAST length
+        // is enforced separately by Cast.EnforceTargetMaxLength after this
+        // method returns. INSERT/UPDATE truncation (Msg 2628 / 8152) is
+        // pre-checked at the column-write boundary before this method runs.
         if (SqlType.IsStringCategory(this.Type) && SqlType.IsStringCategory(target))
             return FromString(target, this.AsString);
 

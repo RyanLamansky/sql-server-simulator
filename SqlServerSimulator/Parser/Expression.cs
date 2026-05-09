@@ -392,6 +392,7 @@ internal abstract class Expression
                 "COALESCE" => new Coalesce(context),
                 "DATEDIFF" => new DateDiff.Standard(context),
                 "DATEPART" => new DatePart(context),
+                "TRY_CAST" => new Cast(context, tryMode: true),
                 _ => null
             },
             9 => uppercaseName switch

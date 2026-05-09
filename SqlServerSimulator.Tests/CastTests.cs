@@ -374,4 +374,128 @@ public sealed class CastTests
         var seed = sourceType == "time" ? "12:00:00" : "2024-01-15";
         AssertSqlMessage($"select cast(cast('{seed}' as {sourceType}) as int)", $"Explicit conversion from data type {sourceType} to int is not allowed.");
     }
+
+    [TestMethod]
+    [DataRow("cast('hello world' as varchar(5))", "hello")]
+    [DataRow("cast(N'hello world' as nvarchar(5))", "hello")]
+    [DataRow("cast('hello world' as varchar(1))", "h")]
+    [DataRow("cast(cast('2026-05-09' as date) as varchar(9))", "2026-05-0")]
+    [DataRow("cast(cast('12:00:00' as time(0)) as varchar(7))", "12:00:0")]
+    [DataRow("cast(cast('2026-05-09 12:00:00' as datetime) as varchar(10))", "May  9 202")]
+    public void Cast_NarrowVarchar_StringAndDateSources_SilentlyTruncate(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void Cast_NarrowVarbinary_SilentlyTruncates()
+    {
+        var result = ExecuteScalar("select cast(0x0102030405 as varbinary(3))") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, result);
+    }
+
+    [TestMethod]
+    [DataRow("cast(123456 as varchar(3))", "*")]
+    [DataRow("cast(123456 as varchar(5))", "*")]
+    [DataRow("cast(-123 as varchar(3))", "*")]
+    [DataRow("cast(cast(255 as tinyint) as varchar(2))", "*")]
+    [DataRow("cast(cast(32767 as smallint) as varchar(4))", "*")]
+    public void Cast_IntToNarrowVarchar_ReturnsAsteriskFallback(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void Cast_IntToNarrowNVarchar_RaisesMsg8115() =>
+        AssertSqlMessage("select cast(123456 as nvarchar(3))", "Arithmetic overflow error converting expression to data type nvarchar.");
+
+    /// <summary>bigint doesn't get the asterisk fallback that smaller integers do.</summary>
+    [TestMethod]
+    public void Cast_BigIntToNarrowVarchar_RaisesMsg8115() =>
+        AssertSqlMessage("select cast(cast(123 as bigint) as varchar(2))", "Arithmetic overflow error converting expression to data type varchar.");
+
+    /// <summary>
+    /// Decimal/numeric source picks the "numeric"-worded variant of Msg 8115,
+    /// distinct from the "expression"-worded integer variant.
+    /// </summary>
+    [TestMethod]
+    public void Cast_DecimalToNarrowVarchar_RaisesMsg8115WithNumericWording() =>
+        AssertSqlMessage("select cast(cast(123.45 as decimal(5,2)) as varchar(5))", "Arithmetic overflow error converting numeric to data type varchar.");
+
+    [TestMethod]
+    public void Cast_MoneyToNarrowVarchar_RaisesMsg234() =>
+        AssertSqlMessage("select cast(cast(99.99 as money) as varchar(4))", "There is insufficient result space to convert a money value to varchar.");
+
+    [TestMethod]
+    public void Cast_FloatToNarrowVarchar_RaisesMsg232()
+    {
+        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar("select cast(cast(1.5e30 as float) as varchar(5))"));
+        Contains("Arithmetic overflow error for type varchar", ex.Message);
+    }
+
+    /// <summary>
+    /// CAST/CONVERT context defaults to length 30 (vs column-context 1). 'hello'
+    /// fits in 30 so it round-trips; would truncate to 'h' if width were 1.
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar")]
+    [DataRow("nvarchar")]
+    public void Cast_NoParensVarcharFamily_DefaultsToWidth30(string typeName) =>
+        AreEqual("hello", ExecuteScalar($"select cast('hello' as {typeName})"));
+
+    [TestMethod]
+    public void Cast_NoParensVarbinary_DefaultsToWidth30()
+    {
+        // 5 bytes fits in 30; would truncate to 1 byte if width were the column-context default.
+        var result = ExecuteScalar("select cast(0x0102030405 as varbinary)") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4, 5 }, result);
+    }
+
+    [TestMethod]
+    [DataRow("try_cast('42' as int)", 42)]
+    [DataRow("try_cast(42 as int)", 42)]
+    [DataRow("try_cast(42 as bigint)", 42L)]
+    [DataRow("try_cast('  42  ' as int)", 42)]
+    [DataRow("try_cast('' as int)", 0)]
+    public void TryCast_GoodValue_ReturnsValue(string expression, object expected) =>
+        AreEqual(expected, ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void TryCast_NullSource_ReturnsNull() =>
+        IsInstanceOfType<DBNull>(ExecuteScalar("select try_cast(null as int)"));
+
+    [TestMethod]
+    [DataRow("try_cast('abc' as int)")]                       // Msg 245
+    [DataRow("try_cast('1.5' as int)")]                       // Msg 245
+    [DataRow("try_cast('0x05' as int)")]                      // Msg 245
+    [DataRow("try_cast('not a date' as date)")]               // Msg 241
+    [DataRow("try_cast('2026-13-01' as date)")]               // Msg 241
+    [DataRow("try_cast('not a guid' as uniqueidentifier)")]   // Msg 8169
+    [DataRow("try_cast('99999' as tinyint)")]                 // Msg 244
+    [DataRow("try_cast('99999' as smallint)")]                // Msg 244
+    [DataRow("try_cast(99999 as tinyint)")]                   // Msg 244
+    [DataRow("try_cast(2147483648 as int)")]                  // Msg 8115
+    [DataRow("try_cast(123.456 as decimal(3,1))")]            // Msg 8115
+    [DataRow("try_cast('9999-12-31 23:59:59.999' as datetime)")] // Msg 242
+    public void TryCast_ConversionFailure_ReturnsNull(string expression) =>
+        IsInstanceOfType<DBNull>(ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// Mirrors CAST: silent truncation for string sources is not a
+    /// conversion failure, so TRY_CAST returns the truncated string, not NULL.
+    /// </summary>
+    [TestMethod]
+    public void TryCast_OversizeStringTruncates() =>
+        AreEqual("hel", ExecuteScalar("select try_cast('hello' as varchar(3))"));
+
+    [TestMethod]
+    public void TryCast_ExplicitConversionNotAllowed_StillThrowsMsg529() =>
+        AssertSqlMessage("select try_cast(0 as date)", "Explicit conversion from data type int to date is not allowed.");
+
+    [TestMethod]
+    public void TryCast_InnerCastFailure_StillPropagates()
+    {
+        // TRY_CAST swallows only the cast-level failure, not source-evaluation
+        // errors. The inner CAST raises Msg 245 before the outer wrapper sees a value.
+        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar("select try_cast(cast('abc' as int) as bigint)"));
+        Contains("Conversion failed", ex.Message);
+    }
 }

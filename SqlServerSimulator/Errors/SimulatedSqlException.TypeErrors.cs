@@ -266,6 +266,18 @@ partial class SimulatedSqlException
         new("Insufficient result space to convert uniqueidentifier value to char.", 8170, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 234: a <c>money</c> / <c>smallmoney</c> source
+    /// was cast to a <c>varchar</c> / <c>nvarchar</c> destination too narrow
+    /// to hold the formatted value. Distinct from the generic Msg 8115 path —
+    /// money picks its own dedicated message rather than reusing the
+    /// arithmetic-overflow surface. Probe-confirmed against SQL Server 2025
+    /// (2026-05-09); the message says "money" regardless of whether the
+    /// source was money or smallmoney.
+    /// </summary>
+    internal static SimulatedSqlException InsufficientResultSpaceForMoney(string targetType) =>
+        new($"There is insufficient result space to convert a money value to {targetType}.", 234, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 281: a non-zero, non-120/121 style number
     /// passed to <c>CONVERT</c> when targeting a character string from a
     /// date-like type. The <paramref name="sourceTypeWord"/> is the bare

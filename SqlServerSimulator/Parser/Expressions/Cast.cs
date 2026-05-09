@@ -4,9 +4,9 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
-/// SQL <c>CAST(expr AS type)</c>: routes the source value through
-/// <see cref="SqlValue.CoerceTo"/>. The target type is resolved by
-/// <see cref="SqlType.GetByName"/>; a length specifier (e.g.
+/// SQL <c>CAST(expr AS type)</c> and <c>TRY_CAST(expr AS type)</c>: routes
+/// the source value through <see cref="SqlValue.CoerceTo"/>. The target type
+/// is resolved by <see cref="SqlType.GetByName"/>; a length specifier (e.g.
 /// <c>varchar(10)</c>) is parsed and validated but generally not enforced as
 /// a value-level cap — see the broader cast-length limitation in CLAUDE.md.
 /// The one place the simulator does enforce it is the
@@ -15,9 +15,15 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// than silently truncating.
 /// </summary>
 /// <remarks>
-/// Cross-category coercions (string ↔ numeric) propagate
+/// <para>Cross-category coercions (string ↔ numeric) propagate
 /// <see cref="NotSupportedException"/> from <c>SqlValue.CoerceTo</c>;
-/// the simulator hasn't modeled them yet.
+/// the simulator hasn't modeled them yet.</para>
+/// <para>The <c>TRY_CAST</c> form wraps the outer coercion in a catch that
+/// converts the documented "conversion failed" error numbers (see
+/// <see cref="IsConversionFailure"/>) into <c>NULL</c> of the target type.
+/// Errors raised while evaluating the source expression itself (e.g.
+/// divide-by-zero, an inner CAST that fails) propagate — only the cast-level
+/// failure is swallowed, matching SQL Server.</para>
 /// Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql
 /// </remarks>
 internal sealed class Cast : Expression
@@ -25,9 +31,11 @@ internal sealed class Cast : Expression
     private readonly Expression source;
     private readonly SqlType targetType;
     private readonly int? targetMaxLength;
+    private readonly bool tryMode;
 
-    public Cast(ParserContext context)
+    public Cast(ParserContext context, bool tryMode = false)
     {
+        this.tryMode = tryMode;
         this.source = Parse(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -39,12 +47,23 @@ internal sealed class Cast : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
-        ApplyCoercion(source.Run(getColumnValue), this.targetType, this.targetMaxLength);
+    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    {
+        var sourceValue = this.source.Run(getColumnValue);
+        try
+        {
+            return ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
+        }
+        catch (SimulatedSqlException ex) when (this.tryMode && IsConversionFailure(ex.Number))
+        {
+            return SqlValue.Null(this.targetType);
+        }
+    }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => targetType;
 
-    internal override string DebugDisplay() => $"CAST({source.DebugDisplay()} AS {targetType})";
+    internal override string DebugDisplay() =>
+        $"{(this.tryMode ? "TRY_CAST" : "CAST")}({source.DebugDisplay()} AS {targetType})";
 
     /// <summary>
     /// Parses the optional <c>(length)</c> or <c>(precision, scale)</c> spec
@@ -93,8 +112,10 @@ internal sealed class Cast : Expression
     /// <summary>
     /// Runs the value-level coercion shared by CAST and CONVERT: rejects
     /// uniqueidentifier-to-too-narrow-string with the target-specific Msg
-    /// 8170 / 8115, then delegates to <see cref="SqlValue.CoerceTo"/> and
-    /// rewraps <see cref="OverflowException"/> as the generic Msg 8115.
+    /// 8170 / 8115, then delegates to <see cref="SqlValue.CoerceTo"/>,
+    /// rewraps <see cref="OverflowException"/> as the generic Msg 8115, and
+    /// finally enforces the narrow-string rules described in
+    /// <see cref="EnforceTargetMaxLength"/>.
     /// </summary>
     internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength)
     {
@@ -115,13 +136,111 @@ internal sealed class Cast : Expression
                 throw SimulatedSqlException.ArithmeticOverflow("nvarchar");
         }
 
+        var sourceType = value.Type;
+        SqlValue coerced;
         try
         {
-            return value.CoerceTo(targetType);
+            coerced = value.CoerceTo(targetType);
         }
         catch (OverflowException)
         {
             throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
+
+        return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType);
     }
+
+    /// <summary>
+    /// Enforces the bounded-target-length rules for variable-length string
+    /// (<c>varchar</c> / <c>nvarchar</c>) and binary (<c>varbinary</c>) CAST
+    /// targets. The simulator's variable-length string types are stateless
+    /// singletons that don't carry their declared length on the SqlType, so
+    /// the length check happens here rather than in <see cref="SqlValue.CoerceTo"/>.
+    /// Probe-confirmed rules against SQL Server 2025 (2026-05-09):
+    /// <list type="bullet">
+    /// <item>Strings, <c>varbinary</c>, and date/time-family sources →
+    /// silent truncation.</item>
+    /// <item><c>tinyint</c> / <c>smallint</c> / <c>int</c> source with a
+    /// <c>varchar</c> target whose width can't hold the rendered value →
+    /// asterisk fallback (<c>'*'</c>) — a legacy SQL Server quirk specific
+    /// to <c>varchar</c>; the <c>nvarchar</c> path raises Msg 8115 instead.</item>
+    /// <item><c>bigint</c> / <c>decimal</c> / <c>numeric</c> source → Msg 8115
+    /// (with "expression" wording for integer sources, "numeric" wording for
+    /// decimal/numeric).</item>
+    /// <item><c>money</c> / <c>smallmoney</c> source → Msg 234 with its
+    /// dedicated "insufficient result space" wording.</item>
+    /// <item><c>float</c> / <c>real</c> source → Msg 232 embedding the
+    /// formatted source value.</item>
+    /// </list>
+    /// Fixed-length <c>char(N)</c> / <c>nchar(N)</c> / <c>binary(N)</c>
+    /// targets carry the declared length on the SqlType and are normalized
+    /// inside <see cref="SqlValue.FromChar"/> / <see cref="SqlValue.FromNChar"/>
+    /// / <see cref="SqlValue.FromBinary"/>; their <paramref name="targetMaxLength"/>
+    /// arrives as <c>null</c> from <see cref="SqlType.GetByName"/> and they
+    /// short-circuit this method.
+    /// </summary>
+    private static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlType sourceType)
+    {
+        if (coerced.IsNull || targetMaxLength is not int max || max <= 0)
+            return coerced;
+
+        if (targetType == SqlType.Varchar || targetType == SqlType.NVarchar)
+        {
+            var text = coerced.AsString;
+            return text.Length <= max ? coerced : sourceType.Category switch
+            {
+                SqlTypeCategory.String or SqlTypeCategory.DateTime
+                    => SqlValue.FromString(targetType, text[..max]),
+                SqlTypeCategory.Other when sourceType is VarbinarySqlType or BinarySqlType or ImageSqlType
+                    => SqlValue.FromString(targetType, text[..max]),
+                SqlTypeCategory.Integer when sourceType != SqlType.BigInt && targetType == SqlType.Varchar
+                    => SqlValue.FromVarchar("*"),
+                SqlTypeCategory.Integer
+                    => throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!),
+                SqlTypeCategory.Decimal
+                    => throw SimulatedSqlException.ArithmeticOverflowToTarget(targetType.ToString()!),
+                SqlTypeCategory.Money
+                    => throw SimulatedSqlException.InsufficientResultSpaceForMoney(targetType.ToString()!),
+                SqlTypeCategory.Approximate
+                    => throw SimulatedSqlException.ArithmeticOverflowForType(targetType.ToString()!, FormatApproximateForOverflow(text)),
+                _ => coerced,
+            };
+        }
+
+        return targetType == SqlType.Varbinary && coerced.AsBytes.Length > max
+            ? SqlValue.FromVarbinary(coerced.AsBytes[..max])
+            : coerced;
+    }
+
+    /// <summary>
+    /// Formats a float / real value for a Msg 232 message slot. SQL Server
+    /// embeds the value as a fixed-point string with six fractional digits;
+    /// the runtime value here is already a coerced <c>varchar</c> string
+    /// from <see cref="SqlValue.CoerceTo"/>, so we re-parse it as a double
+    /// and re-format with <c>F6</c>. Bare-fail formatting falls back to the
+    /// raw string so the error stays informative either way.
+    /// </summary>
+    private static string FormatApproximateForOverflow(string raw) =>
+        double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d)
+            ? d.ToString("F6", System.Globalization.CultureInfo.InvariantCulture)
+            : raw;
+
+    /// <summary>
+    /// Set of <see cref="SimulatedSqlException.Number"/> values that
+    /// <c>TRY_CAST</c> / <c>TRY_CONVERT</c> swallow into <c>NULL</c> — the
+    /// documented "conversion failed" surface. Anything else (Msg 529
+    /// explicit-cast rejection, Msg 243 unknown type, etc.) propagates so
+    /// the caller still sees genuine programming errors.
+    /// </summary>
+    internal static bool IsConversionFailure(int number) => number is
+        241    // ConversionFailedDateTimeFromString
+        or 242 // ConversionToDateTimeOutOfRange
+        or 244 // OverflowConvertingNarrowInt (INT1/INT2)
+        or 245 // ConversionFailedFromString
+        or 248 // OverflowConvertingToInt
+        or 295 // ConversionFailedSmallDateTimeFromString
+        or 8114 // ConvertingDataTypeError
+        or 8115 // ArithmeticOverflow
+        or 8169 // ConversionFailedFromStringToUniqueIdentifier
+        or 8170; // InsufficientResultSpaceForUniqueIdentifier
 }

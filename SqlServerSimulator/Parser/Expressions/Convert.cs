@@ -92,7 +92,7 @@ internal sealed class ConvertExpression : Expression
                     ? sourceValue.CoerceDateTimeToStringWithStyle(this.targetType, sc)
                     : Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
         }
-        catch (SimulatedSqlException ex) when (this.tryMode && IsConversionFailure(ex.Number))
+        catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
         {
             return SqlValue.Null(this.targetType);
         }
@@ -104,22 +104,4 @@ internal sealed class ConvertExpression : Expression
         this.style is null
             ? $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()})"
             : $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()}, {this.style.DebugDisplay()})";
-
-    /// <summary>
-    /// Set of <see cref="SimulatedSqlException.Number"/> values that
-    /// <c>TRY_CONVERT</c> swallows into <c>NULL</c> — the documented
-    /// "conversion failed" surface. Anything else (Msg 529 explicit-cast
-    /// rejection, Msg 243 unknown type, etc.) propagates so the caller
-    /// still sees genuine programming errors.
-    /// </summary>
-    private static bool IsConversionFailure(int number) => number is
-        241    // ConversionFailedDateTimeFromString
-        or 244 // OverflowConvertingNarrowInt (INT1/INT2)
-        or 245 // ConversionFailedFromString
-        or 248 // OverflowConvertingToInt
-        or 295 // ConversionFailedSmallDateTimeFromString
-        or 8114 // ConvertingDataTypeError
-        or 8115 // ArithmeticOverflow
-        or 8169 // ConversionFailedFromStringToUniqueIdentifier
-        or 8170; // InsufficientResultSpaceForUniqueIdentifier
 }

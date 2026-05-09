@@ -632,10 +632,15 @@ internal abstract partial class SqlType
         if (declaredMaxLength == MaxLengthSentinel)
             return (resolved, MaxLengthSentinel);
 
-        // Variable-length string types are bounded per type; SQL Server defaults
-        // a missing length to 1 (with a warning the simulator does not raise).
+        // Variable-length string types are bounded per type. SQL Server has the
+        // same two-context rule as fixed-length char/nchar/binary: missing
+        // length defaults to 1 in a column declaration but 30 in a CAST/CONVERT
+        // expression — the columnName parameter (null in CAST context) selects
+        // between them. Probe-confirmed against SQL Server 2025: `CAST('hello'
+        // AS varchar)` returns the full string, which would truncate to 'h' if
+        // the CAST default were 1.
         var max = resolved == NVarchar ? 4000 : 8000;
-        var declared = declaredMaxLength ?? 1;
+        var declared = declaredMaxLength ?? (columnName is null ? 30 : 1);
         if (declared < 1 || declared > max)
         {
             throw (columnName, resolved == NVarchar) switch
