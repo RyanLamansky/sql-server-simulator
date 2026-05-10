@@ -57,6 +57,15 @@ Readonly struct, up to 4 inline slots (SQL Server's grammar limit). API: `Leaf`,
 ### Expression evaluation
 `Expression.Run(columnResolver)` (runtime) and `Expression.GetSqlType(...)` (static, for projection schema) must agree on result type — drift breaks union/CASE/coalesce schema. `BooleanExpression.Run` returns `bool?` (three-valued); WHERE/MERGE-ON exclude UNKNOWN, CHECK passes UNKNOWN. Aggregates: subclass `Aggregator` (`Add(SqlValue)` / `Result()`), register in `AggregateExpression`'s dispatch.
 
+### Known architectural debt — context layering
+Real SQL Server has five concentric scopes — **server / database / session / batch / statement** — and each piece of state has exactly one home. The simulator collapses these to three buckets and several pieces of state squat in the closest neighbor:
+
+- **`Simulation`** = server *and* database. Server-scoped (system tables, `NEWSEQUENTIALID` anchor, rowversion counter) and database-scoped (`HeapTables`, `CompatibilityLevel`, `VerboseTruncationWarnings`) share one class.
+- **`SimulatedDbConnection`** = session. Cleanly mapped (`LastIdentity`, `LastStatementRowCount`, `IdentityInsertTable`, `TraceFlags`, `CurrentTransaction`) — *plus* `CurrentStatementUtcNow`, which is semantically statement-scoped but lives here because statement scope has no home.
+- **`ParserContext`** = parse-time scratch *and* per-batch runtime context. Pure parse state (`Token`, `AggregateCollector`, `WindowCollector`, `OuterTypeResolver`, `CteBindings`) shares the class with batch-lifetime runtime state (`Variables`, `CurrentUndoLog`).
+
+This is a known smell, not an active task. Refactor trigger: the next feature that genuinely needs a boundary the current shape can't express — `USE <db>` / cross-database queries, true session-vs-global trace-flag scope, stored procedures (which introduce a real per-call statement frame), or two or three consecutive "I had to add it to `Simulation` because no better home exists" moments. Until then, splitting layers churns code without changing user-observable behavior. **Don't stack more state into these buckets unthinkingly** — when adding fields, ask which of the five scopes it actually belongs to and note the mismatch if there is one.
+
 ## Conventions that fail builds
 
 - **SSS001**: non-public types may not have auto-properties or trivial wrappers over same-type fields. Expose the field directly: `public readonly T Foo = expr;`. Overrides, abstracts, statics, and interface implementations exempt.
