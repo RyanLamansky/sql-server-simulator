@@ -82,6 +82,13 @@ Readonly struct, up to 4 inline slots (SQL Server's grammar limit). API: `Leaf`,
 
 The `*.Tests` and `*.Tests.EFCore` suites are the authoritative behavior contract. Notes below cover only probe-confirmed quirks, deviations from SQL Server, and non-obvious implementation rules.
 
+### Batch grammar: statement separators
+Statements are separated by an optional `;`. Real SQL Server's relaxed grammar lets most statement pairs sit adjacent (`declare @v int = 7 select @v`, `set @v = 1 set @w = 2`, `insert t values (1) select * from t`, `begin tran ... commit`); the simulator follows. Two enforced exceptions match SQL Server's specific rules:
+- A CTE (`WITH`) directly following another statement raises **Msg 319 St 1** (verbatim wording: `Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.`). A `WITH` at batch start (or right after a `;`) is fine. The check fires both at `Simulation.CreateResultSetsForCommand`'s top-level dispatch (`requireSemicolonBeforeCte` flag) and inside `Selection.Parse`'s projection-element switches — the latter is where `select 0 with cte ...` surfaces it before the SELECT can complete.
+- A `MERGE` not terminated by `;` raises **Msg 10713 St 1** (`A MERGE statement must be terminated by a semi-colon (;).`) regardless of whether another statement follows or the batch ends. The check sits at the dispatch site immediately after `ParseMerge` returns, before any cursor normalization.
+
+The dispatch loop drains optional `;`s at the top of each iteration and trusts each parser to leave `Token` at its first un-consumed token (the `ParserContext` lookahead-position contract). Parsers that historically ended on the last token they consumed (DBCC's closing `)`, SET-session-state's `ON`/`OFF`) get a one-token advance via `IsStatementBoundary` after dispatch — Token already at `;`, end-of-batch, or a recognized statement-starting keyword is left alone.
+
 ### Boolean / set ops / projection / CASE
 - Boolean combinators (WHERE / MERGE-ON / CHECK): `AND` / `OR` / `NOT`, parens, `IS [NOT] NULL`, `[NOT] IN (literal,...)`. Tri-valued.
 - Set ops (UNION / UNION ALL / INTERSECT / EXCEPT): standard precedence (INTERSECT > UNION/EXCEPT). **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state). Per-branch ORDER BY in non-final branch → Msg 156. Top-level ORDER BY references first-branch column names only.
@@ -267,7 +274,7 @@ Variable references resolve at runtime via a captured `VariableSlot` — require
 
 **`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `Simulation.LastStatementRowCount`. SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
 
-**Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle. Statements within a batch require `;` separators (existing simulator-wide convention; real SQL Server accepts implicit separation in many cases).
+**Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle.
 
 ### Common table expressions
 `WITH name [(col, …)] AS (SELECT …) [, …] {SELECT|INSERT|UPDATE|DELETE|MERGE} …`. WITH prefix scopes to exactly one immediately-following statement. Both non-recursive and recursive forms modeled.
@@ -352,7 +359,6 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - Table variables (`DECLARE @t TABLE (...)`) — separate feature with its own storage / scope / lifecycle.
 - T-SQL control flow (`IF` / `WHILE` / `BEGIN ... END` / `BREAK` / `CONTINUE`) — Bundle 2 of scripting.
 - `TRY ... CATCH`, `THROW`, `RAISERROR`, `@@ERROR`, `RETURN`, `PRINT`, stored procs / UDFs.
-- Implicit statement separation: real SQL Server accepts `declare @v int = 7 select @v` without `;`; simulator requires explicit semicolons between statements when one ends with an expression.
 - `hierarchyid`, `geography`, `geometry`.
 
 ## Quirks (modeled, not byte-identical to SQL Server)

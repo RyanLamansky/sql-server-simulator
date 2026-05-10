@@ -373,6 +373,31 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except }:
                     goto ExitWhileTokenLoop;
 
+                // At the top level (depth 0), the start of another statement
+                // terminates this SELECT and lets the dispatch loop pick up
+                // where it left off. Real SQL Server allows back-to-back
+                // statements without `;` between them; we mirror by stopping
+                // the projection-list parse here. Inside a subquery (depth > 0)
+                // these keywords are still invalid — fall through to the
+                // generic Msg 156 catch-all below.
+                case Operator { Character: ';' } when depth == 0:
+                case ReservedKeyword
+                {
+                    Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
+                        or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
+                        or Keyword.Save or Keyword.Create or Keyword.Alter or Keyword.Dbcc
+                        or Keyword.Set or Keyword.Declare
+                } when depth == 0:
+                    goto ExitWhileTokenLoop;
+
+                // WITH at the start of a projection element is unambiguous:
+                // it can only mean a CTE-prefixed follow-up statement. Real
+                // SQL Server raises Msg 319 here rather than the generic
+                // Msg 156 from the catch-all below — telling the user to
+                // separate statements with `;`.
+                case ReservedKeyword { Keyword: Keyword.With } when depth == 0:
+                    throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
+
                 case ReservedKeyword { Keyword: not Keyword.Null } keyword:
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
 
@@ -481,6 +506,25 @@ internal sealed partial class Selection
                 // driver (ParseQueryExpression) can chain branches.
                 case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except }:
                     goto ExitWhileTokenLoop;
+
+                // At the top level (depth 0), the start of another statement
+                // terminates this SELECT — the dispatch loop picks up there.
+                // Inside a subquery these keywords stay invalid (fall through
+                // to the generic Msg 102 below).
+                case ReservedKeyword
+                {
+                    Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
+                        or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
+                        or Keyword.Save or Keyword.Create or Keyword.Alter or Keyword.Dbcc
+                        or Keyword.Set or Keyword.Declare
+                } when depth == 0:
+                    goto ExitWhileTokenLoop;
+
+                // WITH at the projection-element-end position can only mean a
+                // CTE-prefixed follow-up statement; raise Msg 319 to mirror
+                // SQL Server's specific error here.
+                case ReservedKeyword { Keyword: Keyword.With } when depth == 0:
+                    throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);

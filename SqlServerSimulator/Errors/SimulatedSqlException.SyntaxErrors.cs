@@ -47,4 +47,29 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NoCorrespondingBeginRollback() =>
         new("The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3903, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 319: a CTE-prefixed statement (a <c>WITH</c>
+    /// clause introducing a common table expression) followed another
+    /// statement with no <c>;</c> separator. Probe-confirmed verbatim text /
+    /// Class 15 / State 1. The wording is structural: real SQL Server lists
+    /// every grammar slot where <c>WITH</c> appears (CTE, xmlnamespaces,
+    /// change-tracking context) since the parser can't distinguish at this
+    /// point. A <c>WITH</c> at batch start, or immediately after a <c>;</c>,
+    /// is fine — only a back-to-back <c>statement WITH cte</c> sequence
+    /// triggers this.
+    /// </summary>
+    internal static SimulatedSqlException CteRequiresPrecedingSemicolon() =>
+        new("Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.", 319, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10713: a <c>MERGE</c> statement was not
+    /// followed by a <c>;</c>. Probe-confirmed verbatim text (note the
+    /// hyphenated <c>"semi-colon"</c>) / Class 15 / State 1. <c>MERGE</c> is
+    /// the only statement family the server requires to be terminated with a
+    /// semicolon, regardless of whether another statement follows or the
+    /// batch ends.
+    /// </summary>
+    internal static SimulatedSqlException MergeMustBeTerminated() =>
+        new("A MERGE statement must be terminated by a semi-colon (;).", 10713, 15, 1);
 }

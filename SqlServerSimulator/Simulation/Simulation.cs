@@ -213,12 +213,35 @@ public sealed partial class Simulation
     /// DBCC). The shape mirrors <c>Expression.ResolveBuiltIn</c>: a single
     /// switch with one case per keyword, each delegating to a focused method.
     /// </summary>
+    /// <remarks>
+    /// Statement separators (<c>;</c>) are <i>optional</i> between most
+    /// statements, mirroring real SQL Server's relaxed batch grammar. Two
+    /// exceptions: a CTE (<c>WITH</c>) directly following another statement
+    /// raises Msg 319, and a <c>MERGE</c> not terminated by <c>;</c> raises
+    /// Msg 10713. The loop drains explicit separators at the top of each
+    /// iteration; statement parsers are expected to leave <see cref="ParserContext.Token"/>
+    /// at their first un-consumed token (the lookahead-position contract on
+    /// <see cref="ParserContext"/>). For parsers that historically left
+    /// <c>Token</c> on the last token they consumed (DBCC's closing <c>)</c>,
+    /// SET-session-state's <c>ON</c>/<c>OFF</c>, etc.) the bottom of the loop
+    /// normalizes by advancing one token when <c>Token</c> isn't already at a
+    /// recognizable statement boundary.
+    /// </remarks>
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
         var context = new ParserContext(command);
+        var requireSemicolonBeforeCte = false;
+        context.MoveNextOptional();
 
-        while (context.MoveNext())
+        while (context.Token is not null)
         {
+            if (context.Token is Operator { Character: ';' })
+            {
+                requireSemicolonBeforeCte = false;
+                context.MoveNextOptional();
+                continue;
+            }
+
             // CTE bindings live for exactly one statement. Clear at the
             // top of every iteration; a WITH prefix below repopulates.
             context.CteBindings = null;
@@ -229,14 +252,15 @@ public sealed partial class Simulation
             // context.CteBindings and advances the cursor to the dispatched
             // statement's leading keyword; the switch below runs unchanged.
             if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            {
+                if (requireSemicolonBeforeCte)
+                    throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
                 ParseCteBindings(context);
+            }
 
             SimulatedStatementOutcome? outcome;
             switch (context.Token)
             {
-                case Operator { Character: ';' }:
-                    continue;
-
                 case ReservedKeyword { Keyword: Keyword.Select }:
                     {
                         var selection = Selection.Parse(context, 0);
@@ -252,31 +276,37 @@ public sealed partial class Simulation
                             : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
                     }
                     yield return outcome;
-                    continue;
+                    break;
 
                 case ReservedKeyword { Keyword: Keyword.Insert }:
                     outcome = RunMutation(context, ParseInsert);
                     this.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
-                    continue;
+                    break;
 
                 case ReservedKeyword { Keyword: Keyword.Merge }:
                     outcome = RunMutation(context, ParseMerge);
                     this.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
-                    continue;
+                    // Real SQL Server requires `;` after MERGE (Msg 10713) —
+                    // the only statement family with a mandatory terminator.
+                    // Check before normalization so the cursor is still on the
+                    // parser's lookahead position.
+                    if (context.Token is not Operator { Character: ';' })
+                        throw SimulatedSqlException.MergeMustBeTerminated();
+                    break;
 
                 case ReservedKeyword { Keyword: Keyword.Update }:
                     outcome = RunMutation(context, ParseUpdate);
                     this.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
-                    continue;
+                    break;
 
                 case ReservedKeyword { Keyword: Keyword.Delete }:
                     outcome = RunMutation(context, ParseDelete);
                     this.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
-                    continue;
+                    break;
 
                 case ReservedKeyword { Keyword: Keyword.Begin } when TryParseBeginTransaction(context):
                 case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
@@ -286,7 +316,7 @@ public sealed partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
                 case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
                     this.LastStatementRowCount = 0;
-                    continue;
+                    break;
                 case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
                     // SET @v = expr (probe-confirmed to set @@ROWCOUNT to 1).
                     // Other SET shapes (SET NOCOUNT etc.) reach here too; the
@@ -294,7 +324,7 @@ public sealed partial class Simulation
                     // session-state SET shapes are rare and the rowcount they
                     // leave isn't asserted-on in practice.
                     this.LastStatementRowCount = 1;
-                    continue;
+                    break;
                 case ReservedKeyword { Keyword: Keyword.Declare }:
                     {
                         var initRowCount = TryParseDeclare(context);
@@ -302,14 +332,40 @@ public sealed partial class Simulation
                             this.LastStatementRowCount = n;
                         // No initializer → @@ROWCOUNT preserved (probe-confirmed).
                     }
-                    continue;
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
             }
 
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            // Normalize cursor to a lookahead position. Well-behaved parsers
+            // already left Token at their first un-consumed token (`;`, the
+            // next statement's leading keyword, or null at EOF); for parsers
+            // that ended on the last consumed token, advance once.
+            if (!IsStatementBoundary(context.Token))
+                context.MoveNextOptional();
+
+            requireSemicolonBeforeCte = true;
         }
 
         WriteBackOutputParameters(context);
     }
+
+    /// <summary>
+    /// Returns true when <paramref name="token"/> is at a place the
+    /// dispatch loop can resume from without advancing: a <c>;</c>, end of
+    /// batch, or a recognized statement-starting keyword. Used to decide
+    /// whether to re-normalize a parser's leftover cursor position.
+    /// </summary>
+    private static bool IsStatementBoundary(Token? token) =>
+        token is null
+        or Operator { Character: ';' }
+        or ReservedKeyword
+        {
+            Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
+                or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
+                or Keyword.Save or Keyword.Create or Keyword.Alter or Keyword.Dbcc
+                or Keyword.Set or Keyword.Declare or Keyword.With
+        };
 
     /// <summary>
     /// At end-of-batch, copies the final values of every InputOutput /
