@@ -1,0 +1,141 @@
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
+
+namespace SqlServerSimulator;
+
+/// <summary>
+/// Behavioral tests for the <c>JSON_VALUE</c> and <c>JSON_MODIFY</c>
+/// scalar functions. These cover the EF Core 10 owned-types-as-JSON
+/// read + partial-update emissions and a few raw-SQL shapes documented
+/// against SQL Server 2025.
+/// </summary>
+[TestClass]
+public sealed class JsonScalarTests
+{
+    [TestMethod]
+    public void JsonValue_PropertyAccess()
+        => AreEqual("Springfield", ExecuteScalar("select json_value('{\"city\":\"Springfield\",\"zip\":\"12345\"}', '$.city')"));
+
+    [TestMethod]
+    public void JsonValue_MissingPath_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"city\":\"X\"}', '$.missing')"));
+
+    [TestMethod]
+    public void JsonValue_NullJson_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value(null, '$.x')"));
+
+    [TestMethod]
+    public void JsonValue_NullPath_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"x\":1}', null)"));
+
+    [TestMethod]
+    public void JsonValue_BooleanValue_ReturnsLowercaseLiteral()
+        => AreEqual("true", ExecuteScalar("select json_value('{\"flag\":true}', '$.flag')"));
+
+    [TestMethod]
+    public void JsonValue_NumberValue_ReturnsRawText()
+        => AreEqual("42", ExecuteScalar("select json_value('{\"n\":42}', '$.n')"));
+
+    [TestMethod]
+    public void JsonValue_NullJsonValue_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"n\":null}', '$.n')"));
+
+    /// <summary>Lax mode: scalar-only — non-scalar match yields NULL, not the JSON text.</summary>
+    [TestMethod]
+    public void JsonValue_ObjectMatch_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"obj\":{\"a\":1}}', '$.obj')"));
+
+    [TestMethod]
+    public void JsonValue_ArrayMatch_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"arr\":[1,2,3]}', '$.arr')"));
+
+    [TestMethod]
+    public void JsonValue_NestedPropertyAccess()
+        => AreEqual("inner", ExecuteScalar("select json_value('{\"a\":{\"b\":{\"c\":\"inner\"}}}', '$.a.b.c')"));
+
+    [TestMethod]
+    public void JsonValue_ArrayIndex()
+        => AreEqual("middle", ExecuteScalar("select json_value('{\"items\":[\"first\",\"middle\",\"last\"]}', '$.items[1]')"));
+
+    /// <summary>
+    /// EF Core 10 emits this exact shape when transferring a value through a
+    /// parameter wrapped as <c>{"":"&lt;value&gt;"}</c> so JSON_VALUE handles
+    /// parameter type detection without needing per-type SqlParameter typing.
+    /// </summary>
+    [TestMethod]
+    public void JsonValue_QuotedPropertyEmpty_EfWrapShape()
+        => AreEqual("Shelbyville", ExecuteScalar("select json_value('{\"\":\"Shelbyville\"}', '$.\"\"')"));
+
+    [TestMethod]
+    public void JsonValue_InvalidJson_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{not valid}', '$.x')"));
+
+    [TestMethod]
+    public void JsonValue_StrictPrefix_OnMissingPathRaises()
+        => AssertSqlError("select json_value('{\"a\":1}', 'strict $.missing')", 13608,
+            "Property cannot be found on the specified JSON path.");
+
+    [TestMethod]
+    public void JsonValue_LaxPrefix_ExplicitParses()
+        => AreEqual("v", ExecuteScalar("select json_value('{\"a\":\"v\"}', 'lax $.a')"));
+
+    [TestMethod]
+    public void JsonValue_InvalidPath_RaisesMsg13607()
+        => AssertSqlError("select json_value('{}', 'no-leading-dollar')", 13607);
+
+    [TestMethod]
+    public void JsonModify_ReplaceExistingProperty()
+        => AreEqual("{\"city\":\"New\"}", ExecuteScalar("select json_modify('{\"city\":\"Old\"}', '$.city', 'New')"));
+
+    [TestMethod]
+    public void JsonModify_ReplaceNestedProperty()
+        => AreEqual("{\"a\":{\"b\":\"Y\"}}", ExecuteScalar("select json_modify('{\"a\":{\"b\":\"X\"}}', '$.a.b', 'Y')"));
+
+    [TestMethod]
+    public void JsonModify_AppendToArray()
+        => AreEqual("[1,2,3,4]", ExecuteScalar("select json_modify('[1,2,3]', '$[3]', 4)"));
+
+    [TestMethod]
+    public void JsonModify_ReplaceArrayElement()
+        => AreEqual("[1,99,3]", ExecuteScalar("select json_modify('[1,2,3]', '$[1]', 99)"));
+
+    [TestMethod]
+    public void JsonModify_LaxMissing_AddsProperty()
+        => AreEqual("{\"a\":1,\"b\":2}", ExecuteScalar("select json_modify('{\"a\":1}', '$.b', 2)"));
+
+    [TestMethod]
+    public void JsonModify_LaxNullValue_RemovesExistingProperty()
+        => AreEqual("{\"a\":1}", ExecuteScalar("select json_modify('{\"a\":1,\"b\":2}', '$.b', null)"));
+
+    [TestMethod]
+    public void JsonModify_StrictMissing_RaisesMsg13608()
+        => AssertSqlError("select json_modify('{\"a\":1}', 'strict $.b', 'x')", 13608,
+            "Property cannot be found on the specified JSON path.");
+
+    [TestMethod]
+    public void JsonModify_StrictArrayOob_RaisesMsg13608()
+        => AssertSqlError("select json_modify('[1,2]', 'strict $[5]', 99)", 13608);
+
+    [TestMethod]
+    public void JsonModify_NullJson_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_modify(null, '$.x', 1)"));
+
+    [TestMethod]
+    public void JsonModify_NumericValue_StaysJsonNumber()
+        => AreEqual("{\"n\":42}", ExecuteScalar("select json_modify('{\"n\":0}', '$.n', 42)"));
+
+    [TestMethod]
+    public void JsonModify_BooleanValue_StaysJsonBoolean()
+        => AreEqual("{\"flag\":true}", ExecuteScalar("select json_modify('{\"flag\":false}', '$.flag', cast(1 as bit))"));
+
+    // The EF Core 10 SaveChanges shape for partial-update of an owned-as-JSON
+    // scalar property: JSON_MODIFY with strict path + JSON_VALUE-from-parameter.
+    [TestMethod]
+    public void JsonModify_EfPartialUpdateShape()
+    {
+        var simulation = new Simulation();
+        AreEqual(
+            "{\"City\":\"Shelbyville\",\"Street\":\"1 Main\"}",
+            simulation.ExecuteScalar("select json_modify('{\"City\":\"Springfield\",\"Street\":\"1 Main\"}', 'strict $.City', json_value('{\"\":\"Shelbyville\"}', '$.\"\"'))"));
+    }
+}

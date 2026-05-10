@@ -407,12 +407,14 @@ internal abstract class Expression
             {
                 "DATALENGTH" => new DataLength(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
+                "JSON_VALUE" => new JsonValue(context),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 _ => null
             },
             11 => uppercaseName switch
             {
+                "JSON_MODIFY" => new JsonModify(context),
                 "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
                 _ => null

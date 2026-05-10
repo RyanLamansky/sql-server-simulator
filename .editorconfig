@@ -19,6 +19,8 @@ dotnet_diagnostic.IDE0040.severity = none # Add accessibility modifiers
 dotnet_diagnostic.IDE0061.severity = none # Use block body for local function
 dotnet_diagnostic.IDE0072.severity = none # Add missing cases
 
+dotnet_diagnostic.JSON002.severity = none # Probable JSON string detected
+
 dotnet_diagnostic.MSTEST0017.severity = error # Assertion arguments should be passed in the correct order (expected then actual)
 dotnet_diagnostic.MSTEST0024.severity = error # Do not store TestContext in a static or readonly field
 dotnet_diagnostic.MSTEST0025.severity = error # Use 'Assert.Fail' instead of always-failing constructs

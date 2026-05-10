@@ -365,6 +365,28 @@ Projection-count vs insert-list mismatch fires at parse time via `selection.Sche
 
 EF Core 10 doesn't emit `INSERT … SELECT` from SaveChanges (which uses INSERT…OUTPUT VALUES for single-row and MERGE for batched-multi-row); this is reachable from raw SQL (`FromSqlInterpolated` / direct command text) and from application-side bulk-copy patterns. CTE-prefix INSERTs (`WITH … INSERT t SELECT …`) aren't modeled — orthogonal to this bundle since the simulator has no CTE support.
 
+### JSON support: `JSON_VALUE` / `JSON_MODIFY` / `OPENJSON`
+Three pieces unlock EF Core 10's owned-types-as-JSON (`OwnsOne(...).ToJson()`) and primitive-collection (`List<int>` / `List<string>` etc.) emissions. JSON columns are plain `nvarchar(max)` — no special storage type. Probe-confirmed against SQL Server 2025 on 2026-05-10.
+
+`JSON_VALUE(json, path)` — scalar function returning `nvarchar`. Lax mode (default and EF Core's only emitted form): missing path / non-scalar match → SQL NULL. `strict $.foo` raises **Msg 13608** on miss. NULL `json` or NULL path → NULL. JSON booleans render as lowercase `'true'` / `'false'`; JSON numbers return raw text via `JsonElement.GetRawText` (e.g. `'42'`, `'1.5'`). Object / array matches return NULL in lax (the documented scalar-only restriction); strict raises but EF Core never depends on it.
+
+`JSON_MODIFY(json, path, newValue)` — scalar function returning `nvarchar`. Replaces the value at `path` with `newValue`. EF Core 10 emits `'strict $.City'`-shape paths from owned-as-JSON partial updates; the strict prefix is honored (missing leaf → Msg 13608). Bare `'$'` replaces the entire document. Lax-mode existing-key + NULL value removes the key; lax-mode missing key + non-NULL value adds it. Numeric / boolean `newValue` arguments stay JSON-typed (`{"n":42}` not `{"n":"42"}`); System.Text.Json `JsonValue.Create` handles primitive→JSON-text dispatch.
+
+`OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning function, structurally a new FromSource kind. Implemented via a `Selection.FromOpenJson(...)` factory (parallel to derived tables / CTEs / VALUES) so the existing alias / qualifier / lateral re-execution machinery transparently covers it. Without WITH: default schema `(key nvarchar, value nvarchar, type int)` — type codes 0=null / 1=string / 2=number / 3=true-or-false / 4=array / 5=object. With WITH: each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primitive collections use the `'$'` self-reference shape. `AS JSON` modifier raises `NotSupportedException` (EF Core 10 doesn't emit it). NULL JSON / invalid JSON → zero rows under lax mode (matches EF's tolerance). For arrays: one row per element with `key` = decimal index. For objects: one row per property with `key` = property name.
+
+Dispatch: `JSON_VALUE` / `JSON_MODIFY` route through `Expression.cs:ResolveBuiltIn`'s length-keyed switch (10 / 11). `OPENJSON` is dispatched at `ParseSingleFromSource`'s `case Name tableName:` head — case-insensitive name match on `"OPENJSON"` wins over CTE / table lookup, parallel to how SQL Server reserves the function name. The path-string parser (`Parser/JsonPath.cs`) is shared between the three: a tiny grammar (`['lax'|'strict']? '$' (segment)*`) backing both runtime walks (via `JsonElement` for read paths, `JsonNode` for modify paths) and parse-time per-column path resolution in OPENJSON's WITH clause. Quoted-property escape `""` → literal `"` matches SQL Server (this is what EF Core's `'{"":"X"}'` + `$.""` parameter-wrap shape relies on).
+
+OPENJSON WITH-clause type subset: `int` / `bigint` / `decimal(p,s)` / `float` / `bit` / `nvarchar(N|max)` / `varchar(N)` / `date` / `datetime2(N)` / `datetimeoffset(N)` / `uniqueidentifier`. Coercion from JSON scalar text routes through `SqlValue.CoerceTo` (the existing CAST machinery). JSON `null` element → SQL NULL of the column's type. Backed by `System.Text.Json` (runtime-shipped, no NuGet dependency added).
+
+EF Core 10 emissions covered:
+- `Where(c => c.Address.City == "X")` → `JSON_VALUE([c].[Address], '$.City')`
+- `Where(c => c.Tags.Contains("x"))` → `OPENJSON(...) WITH ([value] nvarchar(max) '$')` inside `IN(SELECT)`
+- `c.Scores.Count` → `(SELECT COUNT(*) FROM OPENJSON(...))`
+- `c.Scores.Any(s => s > 15)` → `EXISTS (SELECT 1 FROM OPENJSON(...) WITH ([value] int '$') WHERE …)`
+- Owned-as-JSON partial UPDATE → `SET [Address] = JSON_MODIFY([Address], 'strict $.City', JSON_VALUE(@p0, '$.""'))`
+
+Not emitted by EF Core 10 (and not modeled): `JSON_QUERY` (object/array extraction; whole-owned-object reads use raw column + client-side deserialization), `ISJSON`, `FOR JSON PATH`/`AUTO`. Reachable from raw SQL only via `FromSqlInterpolated` / direct command text.
+
 ### MERGE / OUTPUT (EF Core SaveChanges shape only)
 - `INSERT ... OUTPUT INSERTED.<col>` (single-row).
 - `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch).

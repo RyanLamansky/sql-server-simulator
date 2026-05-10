@@ -557,6 +557,30 @@ internal sealed partial class Selection
         switch (token)
         {
             case Name tableName:
+                // OPENJSON dispatch wins over CTE / table lookup. Case-
+                // insensitive match on the function name; ParseOpenJson
+                // enforces the trailing `(`. SQL Server reserves OPENJSON
+                // as a built-in rowset function, so unconditional name-
+                // dispatch matches real-server behavior — a CTE / table
+                // named OPENJSON would already conflict on a real server.
+                if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
+                {
+                    var openJsonPlan = ParseOpenJson(context, outerTypeResolver);
+                    var openJsonColumns = new HeapColumn[openJsonPlan.Schema.Length];
+                    for (var ci = 0; ci < openJsonColumns.Length; ci++)
+                        openJsonColumns[ci] = new HeapColumn(string.Empty, openJsonPlan.Schema[ci], maxLength: null, nullable: true);
+                    var openJsonAlias = ConsumeOptionalAliasInPlace(context);
+                    return new FromSource(
+                        qualifier: openJsonAlias,
+                        columnNames: openJsonPlan.ColumnNames,
+                        columns: openJsonColumns,
+                        storedSchema: openJsonColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: openJsonPlan);
+                }
+
                 // CTE binding wins over a real table of the same name —
                 // `WITH name AS (...)` shadows for the prefixed statement
                 // (probe-confirmed against SQL Server 2025).
