@@ -192,6 +192,37 @@ partial class SimulatedSqlException
         new("The select list for the INSERT statement contains more items than the insert list. The number of SELECT values must match the number of INSERT columns.", 121, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 239: a <c>WITH</c> prefix declares two or more
+    /// CTEs with the same name in one statement.
+    /// </summary>
+    internal static SimulatedSqlException DuplicateCteName(string name) =>
+        new($"Duplicate common table expression name '{name}' was specified.", 239, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8158: a CTE's column-rename list has fewer
+    /// names than the body's projection produces. Counterpart to Msg 8159.
+    /// </summary>
+    internal static SimulatedSqlException CteHasMoreColumnsThanList(string name) =>
+        new($"'{name}' has more columns than were specified in the column list.", 8158, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8159: a CTE's column-rename list has more
+    /// names than the body's projection produces. Counterpart to Msg 8158.
+    /// </summary>
+    internal static SimulatedSqlException CteHasFewerColumnsThanList(string name) =>
+        new($"'{name}' has fewer columns than were specified in the column list.", 8159, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1033: <c>ORDER BY</c> appears inside a CTE
+    /// body without an accompanying <c>TOP</c> / <c>OFFSET</c> / <c>FOR XML</c>.
+    /// Real SQL Server's wording lists the broader set of contexts (views,
+    /// inline functions, derived tables, subqueries, common table expressions);
+    /// the simulator enforces the rule for CTE bodies only.
+    /// </summary>
+    internal static SimulatedSqlException OrderByInvalidInCte() =>
+        new("The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.", 1033, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 108: a positional <c>ORDER BY</c> ordinal
     /// (e.g. <c>order by 0</c>, <c>order by 5</c> with only 3 columns) is
     /// outside the projection's column count. The validation is 1-based.

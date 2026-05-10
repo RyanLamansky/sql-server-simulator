@@ -43,7 +43,10 @@ internal sealed partial class Selection
         // Result column names come from the first (leftmost) branch.
         var combinedNames = left.ColumnNames;
 
-        return new Selection(combinedSchema, combinedNames, hasOrderBy: false, outerResolver => kind switch
+        return new Selection(combinedSchema, combinedNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
+            outerResolver => kind switch
         {
             SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, outerResolver),
             SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, outerResolver),
@@ -163,7 +166,10 @@ internal sealed partial class Selection
         var schema = inner.Schema;
         var columnNames = inner.ColumnNames;
 
-        return new Selection(schema, columnNames, hasOrderBy: true, outerResolver =>
+        return new Selection(schema, columnNames,
+            hasOrderBy: true,
+            hasTopOrOffsetOrFetch: inner.HasTopOrOffsetOrFetch || offsetCount.HasValue || fetchCount.HasValue,
+            outerResolver =>
         {
             var allRows = inner.Execute(outerResolver).RowBytes.ToList();
 

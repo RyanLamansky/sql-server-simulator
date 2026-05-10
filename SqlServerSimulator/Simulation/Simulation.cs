@@ -207,7 +207,17 @@ public sealed partial class Simulation
 
         while (context.MoveNext())
         {
+            // CTE bindings live for exactly one statement. Clear at the
+            // top of every iteration; a WITH prefix below repopulates.
+            context.CteBindings = null;
             this.CurrentStatementUtcNow = DateTime.UtcNow;
+
+            // WITH prefix applies to the immediately-following SELECT /
+            // INSERT / UPDATE / DELETE / MERGE. ParseCteBindings sets
+            // context.CteBindings and advances the cursor to the dispatched
+            // statement's leading keyword; the switch below runs unchanged.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                ParseCteBindings(context);
 
             switch (context.Token)
             {

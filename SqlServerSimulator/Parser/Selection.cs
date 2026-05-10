@@ -60,13 +60,22 @@ internal sealed partial class Selection
     /// </summary>
     public readonly bool HasOrderBy;
 
+    /// <summary>
+    /// True when this plan baked in a <c>TOP</c> count, an <c>OFFSET</c>,
+    /// or a <c>FETCH</c> at any layer. The CTE body parser pairs this with
+    /// <see cref="HasOrderBy"/> to enforce SQL Server's Msg 1033 — a CTE
+    /// body's <c>ORDER BY</c> requires a companion <c>TOP</c> / <c>OFFSET</c>.
+    /// </summary>
+    public readonly bool HasTopOrOffsetOrFetch;
+
     private readonly Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
         this.HasOrderBy = hasOrderBy;
+        this.HasTopOrOffsetOrFetch = hasTopOrOffsetOrFetch;
         this.rowSource = rowSource;
     }
 
@@ -548,6 +557,32 @@ internal sealed partial class Selection
         switch (token)
         {
             case Name tableName:
+                // CTE binding wins over a real table of the same name —
+                // `WITH name AS (...)` shadows for the prefixed statement
+                // (probe-confirmed against SQL Server 2025).
+                if (context.CteBindings is { } cteBindings
+                    && cteBindings.TryGetValue(tableName.Value, out var cteBinding))
+                {
+                    if (cteBinding.Plan is null)
+                        throw new NotSupportedException("Recursive common table expressions are not modeled.");
+
+                    var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
+                    for (var ci = 0; ci < cteColumns.Length; ci++)
+                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true);
+
+                    var cteAlias = ConsumeOptionalAlias(context);
+
+                    return new FromSource(
+                        qualifier: cteAlias ?? cteBinding.Name,
+                        columnNames: cteBinding.ColumnNames,
+                        columns: cteColumns,
+                        storedSchema: cteColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: cteBinding.Plan);
+                }
+
                 if (!context.Simulation.HeapTables.TryGetValue(tableName.Value, out var heapTable)
                     && !Simulation.SystemHeapTables.TryGetValue(tableName.Value, out heapTable))
                 {
@@ -965,7 +1000,10 @@ internal sealed partial class Selection
             values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
         }
 
-        return new Selection(schema, columnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
+        return new Selection(schema, columnNames,
+            hasOrderBy: orderBy.Count > 0,
+            hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
+            outerResolver =>
         {
             if (topCount == 0)
                 return [];

@@ -167,7 +167,10 @@ internal sealed partial class Selection
             }
         }
 
-        return new Selection(outputSchema, outputColumnNames, hasOrderBy: orderBy.Count > 0, outerResolver =>
+        return new Selection(outputSchema, outputColumnNames,
+            hasOrderBy: orderBy.Count > 0,
+            hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
+            outerResolver =>
             aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
                 ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, outerResolver)
                 : windows.Count > 0

@@ -117,6 +117,19 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// </summary>
     public Func<MultiPartName, SqlType>? OuterTypeResolver;
 
+    /// <summary>
+    /// Common-table-expression bindings registered by a <c>WITH</c> prefix
+    /// that scope to the immediately-following statement. Populated by
+    /// <c>Simulation.ParseCteBindings</c> before the SELECT / INSERT /
+    /// UPDATE / DELETE / MERGE dispatch and cleared at the top of the next
+    /// statement iteration. Consulted by <c>Selection.ParseSingleFromSource</c>
+    /// before falling through to <see cref="Simulation.HeapTables"/>; matching
+    /// names build a deferred-plan <see cref="FromSource"/> (re-runs per
+    /// reference, parallel to derived tables in FROM). Null when no WITH
+    /// prefix is in scope.
+    /// </summary>
+    public Dictionary<string, CteBinding>? CteBindings;
+
     private readonly FrozenDictionary<string, SqlValue> variables = command
         .Parameters
         .Cast<DbParameter>()

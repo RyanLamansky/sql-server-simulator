@@ -339,6 +339,21 @@ Three entry points share one per-connection undo log: implicit (statement-level 
 ### `rowversion` (legacy synonym `timestamp`)
 8-byte big-endian database-scoped monotonic counter; `Simulation.AllocateRowVersion` advances on every INSERT into a rowversion-bearing table and every UPDATE that affects a row in one. Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration keyword. Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738. Outbound CAST: `varbinary(N)` / `binary(N)` copy the 8 bytes; `bigint` reads big-endian. `Promote(RowVersion, Varbinary)` → `Varbinary` so EF Core's `WHERE [rv] = @originalRv` optimistic-concurrency parameter works directly. `EF Core [Timestamp]` SaveChanges round-trips end-to-end via `UPDATE ... OUTPUT INSERTED.[RowVersion] WHERE [Id] = @p AND [RowVersion] = @originalRv`.
 
+### Common table expressions (non-recursive)
+`WITH name [(col, …)] AS (SELECT …) [, …] {SELECT|INSERT|UPDATE|DELETE|MERGE} …`. The WITH prefix scopes to exactly one immediately-following statement; the binding is gone after that statement runs. Probe-confirmed against SQL Server 2025 on 2026-05-10.
+
+`Simulation.ParseCteBindings` runs at the statement-loop top before dispatch, populating `ParserContext.CteBindings` (a `Dictionary<string, CteBinding>`). Each binding's body parses at `depth: 1` because the `(SELECT …)` brackets it; cleared at the top of the next iteration. `ParseSingleFromSource` consults the bindings before falling through to `Simulation.HeapTables` — a CTE name shadows a real table for the prefixed statement (probe-confirmed). Resolution builds a `FromSource` with `lateralPlan: cteBinding.Plan`, so each FROM-side reference re-runs the inner Selection (parallel to derived tables in FROM). Multiple comma-separated CTEs cascade: later ones see earlier ones because the prior bindings are already in the dictionary when the later body is parsed.
+
+**Recursive CTEs aren't modeled.** Self-reference is detected via a sentinel: `ParseCteBindings` registers a `CteBinding` with `Plan = null` *before* parsing the body, so a body's `FROM cte_name` resolves to the sentinel and `ParseSingleFromSource` raises `NotSupportedException("Recursive common table expressions are not modeled.")`. The non-recursive sibling replaces the sentinel with the resolved plan once the body finishes parsing.
+
+**Errors modeled:** **Msg 239** duplicate CTE name (`"Duplicate common table expression name 'a' was specified."`); **Msg 8158** rename list has fewer columns than body projection (`"'name' has more columns than were specified in the column list."`); **Msg 8159** rename list has more columns than body projection (`"'name' has fewer columns than were specified in the column list."`); **Msg 1033** ORDER BY in CTE body without TOP / OFFSET / FETCH (`"The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified."`).
+
+The Msg 1033 enforcement requires knowing whether the body's plan has a TOP / OFFSET / FETCH at any layer — added a new `Selection.HasTopOrOffsetOrFetch` field threaded through all four `new Selection(...)` call sites (`BuildSynthesizedSqlRow` / `BuildSqlProjection` / `CombineSetOps` / `ApplyTopLevelOrderBy`). The set-op combiner inherits from its branches; the top-level ORDER-BY wrapper inherits from the inner plan plus its own OFFSET / FETCH counts. Derived tables face the same SQL Server rule but the simulator currently allows ORDER BY without TOP / OFFSET there — pre-existing divergence orthogonal to this bundle.
+
+**Msg 319** (WITH after a non-terminated previous statement) isn't enforced. The simulator's statement loop consumes one statement per iteration and naturally treats WITH at iteration top as a fresh prefix regardless of prior `;` — more permissive than real SQL Server. Apps that idiomatically terminate statements (or use a single statement) won't notice.
+
+EF Core 10 emits non-recursive CTEs in some shapes (TPC inheritance, certain `Distinct/OrderBy/Skip` patterns); also reachable from raw SQL (`FromSqlInterpolated` / direct command text) including the `WITH … INSERT … SELECT` shape.
+
 ### INSERT … SELECT
 `INSERT [INTO] target [(cols)] SELECT …` accepts the same Selection grammar as a top-level SELECT — WHERE / JOIN / GROUP BY / aggregates / ORDER BY / TOP / OFFSET-FETCH / UNION / INTERSECT / EXCEPT all work on the source side. Probe-confirmed against SQL Server 2025 on 2026-05-10.
 
@@ -375,6 +390,7 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - `UNION` / `UNION ALL` inside a subquery body.
 - Row-constructor `IN ((1,2), (3,4))`.
 - Window functions other than `ROW_NUMBER` and the aggregate-OVER family (see "Window functions" above).
+- Recursive CTEs (`WITH name AS (… UNION ALL … FROM name …)`); self-reference detected and raises `NotSupportedException`. Non-recursive CTEs are modeled.
 - `LIKE` with `COLLATE` override (default collation only — case-insensitive Latin1_General-shaped).
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121` for date-like → string.
 - `LEN(ntext)` raising Msg 8116 (function-level text/ntext/image restrictions); legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
