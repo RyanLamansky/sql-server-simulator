@@ -46,12 +46,12 @@ internal sealed partial class Selection
         return new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
-            outerResolver => kind switch
+            (batch, outerResolver) => kind switch
         {
-            SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, outerResolver),
-            SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, outerResolver),
-            SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, outerResolver),
-            SetOpKind.Except => ExceptRows(left, right, combinedSchema, outerResolver),
+            SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
+            SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
+            SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, batch, outerResolver),
+            SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
             _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
         });
     }
@@ -62,9 +62,9 @@ internal sealed partial class Selection
     /// the branch's schema already matches; otherwise decode, coerce,
     /// re-encode each row.
     /// </summary>
-    private static IEnumerable<byte[]> CoerceBranchRows(Selection branch, SqlType[] targetSchema, Func<MultiPartName, SqlValue>? outerResolver)
+    private static IEnumerable<byte[]> CoerceBranchRows(Selection branch, SqlType[] targetSchema, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
-        var resultSet = branch.Execute(outerResolver);
+        var resultSet = branch.Execute(batch, outerResolver);
         var sourceSchema = resultSet.Schema;
 
         var sameTypes = true;
@@ -92,10 +92,10 @@ internal sealed partial class Selection
         }
     }
 
-    private static IEnumerable<byte[]> ConcatBranchRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
+    private static IEnumerable<byte[]> ConcatBranchRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
-        foreach (var r in CoerceBranchRows(left, schema, outer)) yield return r;
-        foreach (var r in CoerceBranchRows(right, schema, outer)) yield return r;
+        foreach (var r in CoerceBranchRows(left, schema, batch, outer)) yield return r;
+        foreach (var r in CoerceBranchRows(right, schema, batch, outer)) yield return r;
     }
 
     /// <summary>
@@ -112,24 +112,24 @@ internal sealed partial class Selection
         return values;
     }
 
-    private static IEnumerable<byte[]> DedupeUnionRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
+    private static IEnumerable<byte[]> DedupeUnionRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
         var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rowBytes in CoerceBranchRows(left, schema, outer).Concat(CoerceBranchRows(right, schema, outer)))
+        foreach (var rowBytes in CoerceBranchRows(left, schema, batch, outer).Concat(CoerceBranchRows(right, schema, batch, outer)))
         {
             if (seen.Add(DecodeRowToValues(rowBytes, schema)))
                 yield return rowBytes;
         }
     }
 
-    private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
+    private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
         var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rb in CoerceBranchRows(right, schema, outer))
+        foreach (var rb in CoerceBranchRows(right, schema, batch, outer))
             _ = rightSet.Add(DecodeRowToValues(rb, schema));
 
         var emitted = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rowBytes in CoerceBranchRows(left, schema, outer))
+        foreach (var rowBytes in CoerceBranchRows(left, schema, batch, outer))
         {
             var values = DecodeRowToValues(rowBytes, schema);
             if (rightSet.Contains(values) && emitted.Add(values))
@@ -137,14 +137,14 @@ internal sealed partial class Selection
         }
     }
 
-    private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, Func<MultiPartName, SqlValue>? outer)
+    private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
         var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rb in CoerceBranchRows(right, schema, outer))
+        foreach (var rb in CoerceBranchRows(right, schema, batch, outer))
             _ = rightSet.Add(DecodeRowToValues(rb, schema));
 
         var emitted = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rowBytes in CoerceBranchRows(left, schema, outer))
+        foreach (var rowBytes in CoerceBranchRows(left, schema, batch, outer))
         {
             var values = DecodeRowToValues(rowBytes, schema);
             if (!rightSet.Contains(values) && emitted.Add(values))
@@ -169,9 +169,9 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames,
             hasOrderBy: true,
             hasTopOrOffsetOrFetch: inner.HasTopOrOffsetOrFetch || offsetCount.HasValue || fetchCount.HasValue,
-            outerResolver =>
+            (batch, outerResolver) =>
         {
-            var allRows = inner.Execute(outerResolver).RowBytes.ToList();
+            var allRows = inner.Execute(batch, outerResolver).RowBytes.ToList();
 
             IEnumerable<byte[]> ordered;
             if (orderBy.Count == 0 || allRows.Count <= 1)
@@ -194,7 +194,7 @@ internal sealed partial class Selection
                         throw SimulatedSqlException.InvalidColumnName(name);
                     }
 
-                    var keys = ComputeOrderKeys(orderBy, values, columnNames, distinct: false, ResolveByOutputName);
+                    var keys = ComputeOrderKeys(orderBy, values, columnNames, distinct: false, batch, ResolveByOutputName);
                     keyed.Add((rowBytes, keys));
                 }
 

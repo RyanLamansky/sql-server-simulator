@@ -11,9 +11,9 @@ internal sealed class Exp(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.source.Run(getColumnValue);
+        var v = this.source.Run(runtime);
         if (v.IsNull) return SqlValue.Null(SqlType.Float);
         var result = Math.Exp(MathScalars.AsDouble(v));
         return double.IsInfinity(result) ? throw SimulatedSqlException.ArithmeticOverflow("float") : SqlValue.FromDouble(result);

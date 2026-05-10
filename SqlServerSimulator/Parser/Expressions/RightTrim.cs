@@ -10,9 +10,9 @@ internal sealed class RightTrim(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(getColumnValue);
+        var value = source.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(value.Type);
         if (!SqlType.IsStringCategory(value.Type))

@@ -25,9 +25,9 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
 
     public readonly Expression Source = source;
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = this.Source.Run(getColumnValue);
+        var value = this.Source.Run(runtime);
         var coerced = Cast.ApplyCoercion(value, this.Slot.DeclaredType, this.Slot.DeclaredMaxLength);
         this.Slot.Value = coerced;
         return coerced;

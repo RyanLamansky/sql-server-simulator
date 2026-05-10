@@ -15,7 +15,7 @@ internal sealed class VariableReference(AtPrefixedString atPrefixed, ParserConte
     private readonly VariableSlot slot = context.Batch.GetVariableSlot(atPrefixed.Value);
     private readonly string debugName = atPrefixed.Value;
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => this.slot.Value;
+    public override SqlValue Run(RuntimeContext runtime) => this.slot.Value;
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.slot.DeclaredType;
 

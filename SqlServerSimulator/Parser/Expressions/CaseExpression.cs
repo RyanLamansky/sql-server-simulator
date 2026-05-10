@@ -56,32 +56,32 @@ internal sealed class CaseExpression : Expression
         this.elseBranch = elseBranch;
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var raw = this.input is null ? FindSearchedMatch(getColumnValue) : FindSimpleMatch(getColumnValue);
+        var raw = this.input is null ? FindSearchedMatch(runtime) : FindSimpleMatch(runtime);
         return this.cachedResultType is { } target && !raw.IsNull ? raw.CoerceTo(target) : raw;
     }
 
-    private SqlValue FindSearchedMatch(Func<MultiPartName, SqlValue> getColumnValue)
+    private SqlValue FindSearchedMatch(RuntimeContext runtime)
     {
         for (var i = 0; i < this.searchedWhens!.Length; i++)
         {
-            if (this.searchedWhens[i].Run(getColumnValue) == true)
-                return this.thens[i].Run(getColumnValue);
+            if (this.searchedWhens[i].Run(runtime) == true)
+                return this.thens[i].Run(runtime);
         }
-        return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(getColumnValue);
+        return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(runtime);
     }
 
-    private SqlValue FindSimpleMatch(Func<MultiPartName, SqlValue> getColumnValue)
+    private SqlValue FindSimpleMatch(RuntimeContext runtime)
     {
-        var inputValue = this.input!.Run(getColumnValue);
+        var inputValue = this.input!.Run(runtime);
         for (var i = 0; i < this.compareValues!.Length; i++)
         {
-            var compareValue = this.compareValues[i].Run(getColumnValue);
+            var compareValue = this.compareValues[i].Run(runtime);
             if (BooleanExpression.CompareValuesPromoted(inputValue, compareValue, "equal to", static (l, r) => l.Equals(r)) == true)
-                return this.thens[i].Run(getColumnValue);
+                return this.thens[i].Run(runtime);
         }
-        return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(getColumnValue);
+        return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(runtime);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)

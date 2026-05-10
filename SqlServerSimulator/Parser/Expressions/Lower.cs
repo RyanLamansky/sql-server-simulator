@@ -15,9 +15,9 @@ internal sealed class Lower(ParserContext context) : Expression
 
     [SuppressMessage("Globalization", "CA1308:Normalize strings to uppercase",
         Justification = "SQL LOWER lowercases user-facing data; the rule's normalization concern doesn't apply here.")]
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(getColumnValue);
+        var value = source.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(value.Type);
         if (!SqlType.IsStringCategory(value.Type))

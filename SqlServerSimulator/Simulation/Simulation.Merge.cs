@@ -202,8 +202,9 @@ partial class Simulation
         {
             // Evaluate the source tuple to concrete values.
             var sourceRowValues = new SqlValue[sourceColumnNames.Count];
+            var sourceRuntime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch);
             for (var i = 0; i < sourceTuple.Length; i++)
-                sourceRowValues[i] = sourceTuple[i].Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                sourceRowValues[i] = sourceTuple[i].Run(sourceRuntime);
 
             // Resolver for the ON predicate and the INSERT value expressions:
             // matches references to the source alias and falls back to error
@@ -222,7 +223,7 @@ partial class Simulation
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             }
 
-            if (onPredicate.Run(_ => SqlValue.Null(SqlType.Int32)) == true)
+            if (onPredicate.Run(new RuntimeContext(_ => SqlValue.Null(SqlType.Int32), context.Batch)) == true)
             {
                 // Predicate matched — would route to WHEN MATCHED.
                 if (whenMatchedSeen)
@@ -251,7 +252,7 @@ partial class Simulation
                     }
                 }
                 if (listed) continue;
-                var defaultValue = column.Default.Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
                 rowValues[i] = CoerceForInsert(defaultValue, column.Type);
             }
 
@@ -268,7 +269,7 @@ partial class Simulation
                     }
                 }
 
-                var source = insertValueExprs[i].Run(ResolveSource);
+                var source = insertValueExprs[i].Run(new RuntimeContext(ResolveSource, context.Batch));
                 EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
                 var coerced = CoerceForInsert(source, targetColumn.Type);
                 rowValues[ordinal] = coerced;
@@ -305,9 +306,9 @@ partial class Simulation
                     rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
             }
 
-            EvaluateComputedColumns(destinationTable, rowValues);
+            EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
             EnforceNotNull(destinationTable, rowValues);
-            EnforceCheckConstraints(destinationTable, rowValues);
+            EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
 
             var storedValues = ProjectStoredValues(destinationTable, rowValues);
             EnforceKeyConstraints(destinationTable, storedValues);

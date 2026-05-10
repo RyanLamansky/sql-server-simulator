@@ -17,7 +17,7 @@ internal sealed class Pi : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("pi", 0);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => SqlValue.FromDouble(Math.PI);
+    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromDouble(Math.PI);
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 

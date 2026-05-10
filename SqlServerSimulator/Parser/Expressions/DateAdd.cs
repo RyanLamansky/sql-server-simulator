@@ -30,10 +30,10 @@ internal sealed class DateAdd : Expression
         this.source = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(getColumnValue);
-        var n = number.Run(getColumnValue);
+        var value = source.Run(runtime);
+        var n = number.Run(runtime);
         if (value.IsNull || n.IsNull)
             return SqlValue.Null(value.Type);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "dateadd");

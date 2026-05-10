@@ -26,10 +26,10 @@ internal sealed class NullIf : Expression
         this.b = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var av = this.a.Run(getColumnValue);
-        var bv = this.b.Run(getColumnValue);
+        var av = this.a.Run(runtime);
+        var bv = this.b.Run(runtime);
         var equal = BooleanExpression.CompareValuesPromoted(av, bv, "equal to", static (l, r) => l.Equals(r));
         return equal == true ? SqlValue.Null(this.cachedResultType ?? av.Type) : av;
     }

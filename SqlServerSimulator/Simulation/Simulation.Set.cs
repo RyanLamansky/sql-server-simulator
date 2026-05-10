@@ -54,7 +54,7 @@ partial class Simulation
             return false;
 
         context.MoveNextRequired();
-        var rhsValue = Expression.Parse(context).Run(NoColumnResolver);
+        var rhsValue = Expression.Parse(context).Run(new RuntimeContext(NoColumnResolver, context.Batch));
         slot.Value = Parser.Expressions.Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
         return true;
     }

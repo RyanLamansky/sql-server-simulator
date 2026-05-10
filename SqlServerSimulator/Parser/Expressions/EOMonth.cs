@@ -31,9 +31,9 @@ internal sealed class EOMonth : Expression
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Date;
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var input = this.startDate.Run(getColumnValue);
+        var input = this.startDate.Run(runtime);
         if (input.IsNull)
             return SqlValue.Null(SqlType.Date);
 
@@ -45,7 +45,7 @@ internal sealed class EOMonth : Expression
         var offset = 0;
         if (this.monthOffset is { } offsetExpr)
         {
-            var offsetValue = offsetExpr.Run(getColumnValue);
+            var offsetValue = offsetExpr.Run(runtime);
             // Probe-confirmed quirk: NULL month offset is silently treated as
             // zero (no shift), unlike start_date's NULL which propagates.
             if (!offsetValue.IsNull)

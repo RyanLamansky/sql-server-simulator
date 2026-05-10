@@ -47,9 +47,9 @@ internal sealed class Cast : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var sourceValue = this.source.Run(getColumnValue);
+        var sourceValue = this.source.Run(runtime);
         try
         {
             return ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);

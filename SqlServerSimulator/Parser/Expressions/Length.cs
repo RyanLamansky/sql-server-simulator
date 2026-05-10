@@ -17,9 +17,9 @@ internal sealed class Length(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(getColumnValue);
+        var value = source.Run(runtime);
         // NULL passes through any string function regardless of its underlying
         // type tag; the simulator's untyped NULL literal carries Type=Int32 so
         // the IsNull check has to come before the IsStringCategory check.

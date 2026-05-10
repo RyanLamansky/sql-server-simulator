@@ -123,7 +123,7 @@ internal sealed class AggregateExpression : Expression
         this.resultBound = true;
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
+    public override SqlValue Run(RuntimeContext runtime) =>
         this.resultBound ? this.cachedResult : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch

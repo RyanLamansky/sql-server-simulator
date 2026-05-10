@@ -80,9 +80,9 @@ internal sealed partial class Selection
     /// </summary>
     public readonly bool IsAssignmentOnly;
 
-    private readonly Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
+    private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
@@ -97,10 +97,14 @@ internal sealed partial class Selection
     /// (null for top-level / non-correlated scopes). Each call produces a
     /// fresh <see cref="SimulatedSqlResultSet"/>; the underlying row sequence
     /// is itself lazy or eager depending on whether DISTINCT / ORDER BY /
-    /// aggregation force buffering.
+    /// aggregation force buffering. <paramref name="batch"/> is the
+    /// executing <see cref="BatchContext"/> — threaded through so
+    /// <see cref="Expression.Run(RuntimeContext)"/> calls inside the row
+    /// generation can build a <see cref="RuntimeContext"/> with explicit
+    /// per-batch / per-session / per-database access.
     /// </summary>
-    public SimulatedSqlResultSet Execute(Func<MultiPartName, SqlValue>? outerResolver = null) =>
-        new(this.Schema, this.ColumnNames, this.rowSource(outerResolver));
+    public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
+        new(this.Schema, this.ColumnNames, this.rowSource(batch, outerResolver));
 
     /// <summary>
     /// Creates a <see cref="Selection"/> from a series of tokens. Follows the
@@ -341,7 +345,7 @@ internal sealed partial class Selection
         {
             var resolved = Expression
                 .Parse(context.MoveNextRequiredReturnSelf())
-                .Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+                .Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), context.Batch));
             topCount = !resolved.IsNull && resolved.Type == SqlType.Int32
                 ? resolved.AsInt32
                 : throw SimulatedSqlException.TopFetchRequiresInteger();
@@ -533,7 +537,7 @@ internal sealed partial class Selection
 
         if (topCount is not null && fromClause.OffsetCount is not null)
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount, ResolveAssignmentMode(expressions));
+        return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount, ResolveAssignmentMode(expressions));
     }
 
     /// <summary>
@@ -1094,7 +1098,7 @@ internal sealed partial class Selection
         context.MoveNextRequired();
         var offsetValue = Expression
             .Parse(context)
-            .Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+            .Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), context.Batch));
         var offsetCount = !offsetValue.IsNull && offsetValue.Type == SqlType.Int32
             ? offsetValue.AsInt32
             : throw SimulatedSqlException.TopFetchRequiresInteger();
@@ -1116,7 +1120,7 @@ internal sealed partial class Selection
 
         var fetchValue = Expression
             .Parse(context)
-            .Run(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+            .Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), context.Batch));
         var fetchCount = !fetchValue.IsNull && fetchValue.Type == SqlType.Int32
             ? fetchValue.AsInt32
             : throw SimulatedSqlException.TopFetchRequiresInteger();
@@ -1192,7 +1196,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly)
     {
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
@@ -1205,9 +1209,10 @@ internal sealed partial class Selection
         // wording. For successful runs, GetSqlType then bridges the matched
         // branch's runtime type to the joint-promoted schema (CASE / Coalesce
         // with mixed-type branches in a FROM-less SELECT).
+        var parseRuntime = new RuntimeContext(column => throw SimulatedSqlException.InvalidColumnName(column), parseBatch);
         for (var i = 0; i < expressions.Count; i++)
         {
-            var raw = expressions[i].Run(column => throw SimulatedSqlException.InvalidColumnName(column));
+            var raw = expressions[i].Run(parseRuntime);
             schema[i] = expressions[i].GetSqlType(column => throw SimulatedSqlException.InvalidColumnName(column));
             columnNames[i] = expressions[i].Name;
             values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
@@ -1216,7 +1221,7 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
-            outerResolver =>
+            (batch, outerResolver) =>
         {
             if (topCount == 0)
                 return [];
@@ -1232,7 +1237,7 @@ internal sealed partial class Selection
 
             foreach (var excluder in excluders)
             {
-                if (excluder.Run(Resolve) != true)
+                if (excluder.Run(new RuntimeContext(Resolve, batch)) != true)
                     return [];
             }
 

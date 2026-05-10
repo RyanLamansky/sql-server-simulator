@@ -58,9 +58,9 @@ internal sealed class TrigFunction : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments(LowercaseName(kind), 1);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.source.Run(getColumnValue);
+        var v = this.source.Run(runtime);
         if (v.IsNull) return SqlValue.Null(SqlType.Float);
         var d = MathScalars.AsDouble(v);
         return this.kind switch

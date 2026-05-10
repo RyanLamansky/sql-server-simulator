@@ -15,7 +15,7 @@ internal sealed class NewId : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => SqlValue.FromGuid(Guid.NewGuid());
+    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromGuid(Guid.NewGuid());
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 

@@ -86,7 +86,7 @@ internal sealed class DatePartsBuilder : Expression
             SqlValue precisionConstant;
             try
             {
-                precisionConstant = this.arguments[slotIndex].Run(_ => SqlValue.Null(SqlType.Int32));
+                precisionConstant = this.arguments[slotIndex].Run(new RuntimeContext(_ => SqlValue.Null(SqlType.Int32), context.Batch));
             }
             catch
             {
@@ -121,7 +121,7 @@ internal sealed class DatePartsBuilder : Expression
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.resultType;
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
         var values = new SqlValue[this.arguments.Length];
         var precisionSlot = TryGetPrecisionSlot(this.kind, out var slot) ? slot : -1;
@@ -131,7 +131,7 @@ internal sealed class DatePartsBuilder : Expression
             // its NULL-handling rules diverge from the value-NULL rules.
             if (i == precisionSlot)
                 continue;
-            values[i] = this.arguments[i].Run(getColumnValue);
+            values[i] = this.arguments[i].Run(runtime);
             if (values[i].IsNull)
                 return SqlValue.Null(this.resultType);
         }

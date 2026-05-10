@@ -16,10 +16,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item>Most other statements (PRINT, BEGIN, COMMIT, etc.) reset to 0.</item>
 /// </list>
 /// </summary>
-internal sealed class RowCountExpression(Simulation simulation) : Expression
+internal sealed class RowCountExpression : Expression
 {
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
-        SqlValue.FromInt32(simulation.ActiveBatch!.Connection.LastStatementRowCount);
+    public override SqlValue Run(RuntimeContext runtime) =>
+        SqlValue.FromInt32(runtime.Batch.Connection.LastStatementRowCount);
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

@@ -316,11 +316,11 @@ partial class Simulation
         if (afterIdentity is Operator { Character: '(' })
         {
             context.MoveNextRequired();
-            seed = EvaluateLiteralBigInt(Expression.Parse(context));
+            seed = EvaluateLiteralBigInt(Expression.Parse(context), context.Batch);
             if (context.Token is not Operator { Character: ',' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            increment = EvaluateLiteralBigInt(Expression.Parse(context));
+            increment = EvaluateLiteralBigInt(Expression.Parse(context), context.Batch);
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
@@ -330,8 +330,8 @@ partial class Simulation
             : new IdentityState(seed, increment);
     }
 
-    private static long EvaluateLiteralBigInt(Expression expression) =>
-        expression.Run(name => throw SimulatedSqlException.InvalidColumnName(name)).CoerceTo(SqlType.BigInt).AsInt64;
+    private static long EvaluateLiteralBigInt(Expression expression, BatchContext batch) =>
+        expression.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch)).CoerceTo(SqlType.BigInt).AsInt64;
 
     /// <summary>
     /// Parses a CHECK constraint's parenthesized predicate body. Entered with

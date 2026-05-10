@@ -22,6 +22,7 @@ internal sealed partial class Selection
         SqlValue[] projected,
         string[] outputColumnNames,
         bool distinct,
+        BatchContext batch,
         Func<MultiPartName, SqlValue> resolveSource)
     {
         var keys = new SqlValue[orderBy.Count];
@@ -34,7 +35,7 @@ internal sealed partial class Selection
                 continue;
             }
 
-            keys[i] = spec.Expr!.Run(name =>
+            keys[i] = spec.Expr!.Run(new RuntimeContext(name =>
             {
                 for (var j = 0; j < outputColumnNames.Length; j++)
                 {
@@ -44,7 +45,7 @@ internal sealed partial class Selection
                 return distinct
                     ? throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()
                     : resolveSource(name);
-            });
+            }, batch));
         }
         return keys;
     }

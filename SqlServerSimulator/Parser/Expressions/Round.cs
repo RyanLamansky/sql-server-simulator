@@ -30,13 +30,13 @@ internal sealed class Round : Expression
             this.function = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.value.Run(getColumnValue);
+        var v = this.value.Run(runtime);
         var resultType = MathScalars.WidenForResult(v.Type);
         if (v.IsNull) return SqlValue.Null(resultType);
 
-        var lenValue = this.length.Run(getColumnValue);
+        var lenValue = this.length.Run(runtime);
         if (lenValue.IsNull) return SqlValue.Null(resultType);
         if (lenValue.Type.Category != SqlTypeCategory.Integer)
             throw SimulatedSqlException.InvalidArgumentDataType(SqlTypeFamilyName(lenValue.Type), 2, "round");
@@ -45,7 +45,7 @@ internal sealed class Round : Expression
         var truncate = false;
         if (this.function is not null)
         {
-            var fv = this.function.Run(getColumnValue);
+            var fv = this.function.Run(runtime);
             if (fv.IsNull) return SqlValue.Null(resultType);
             if (fv.Type.Category != SqlTypeCategory.Integer)
                 throw SimulatedSqlException.InvalidArgumentDataType(SqlTypeFamilyName(fv.Type), 3, "round");

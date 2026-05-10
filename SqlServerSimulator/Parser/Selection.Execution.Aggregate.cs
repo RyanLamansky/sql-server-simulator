@@ -34,7 +34,7 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         if (topCount == 0)
             return [];
@@ -62,15 +62,15 @@ internal sealed partial class Selection
         if (groupByCount == 0)
             groups[SqlValueKey.Empty] = NewGroup();
 
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
+        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
+            SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn);
 
             var include = true;
             foreach (var excluder in fromClause.Excluders)
             {
-                if (excluder.Run(ResolveColumn) != true)
+                if (excluder.Run(new RuntimeContext(ResolveColumn, batch)) != true)
                 {
                     include = false;
                     break;
@@ -88,7 +88,7 @@ internal sealed partial class Selection
             {
                 var keyValues = new SqlValue[groupByCount];
                 for (var i = 0; i < groupByCount; i++)
-                    keyValues[i] = groupByExpressions[i].Run(ResolveColumn);
+                    keyValues[i] = groupByExpressions[i].Run(new RuntimeContext(ResolveColumn, batch));
                 var key = new SqlValueKey(keyValues);
                 if (!groups.TryGetValue(key, out state!))
                 {
@@ -103,20 +103,20 @@ internal sealed partial class Selection
                 var aggregate = aggregates[i];
                 if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
                 {
-                    var separatorValue = aggregate.Separator!.Run(ResolveColumn);
+                    var separatorValue = aggregate.Separator!.Run(new RuntimeContext(ResolveColumn, batch));
                     stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
 
                     if (aggregate.OrderBy is { } orderBy)
                     {
                         var orderKeys = new SqlValue[orderBy.Count];
                         for (var k = 0; k < orderBy.Count; k++)
-                            orderKeys[k] = orderBy[k].Expr!.Run(ResolveColumn);
-                        stringAgg.AddOrdered(aggregate.Operand!.Run(ResolveColumn), orderKeys);
+                            orderKeys[k] = orderBy[k].Expr!.Run(new RuntimeContext(ResolveColumn, batch));
+                        stringAgg.AddOrdered(aggregate.Operand!.Run(new RuntimeContext(ResolveColumn, batch)), orderKeys);
                         continue;
                     }
                 }
                 var operand = aggregate.Operand;
-                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(ResolveColumn));
+                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(new RuntimeContext(ResolveColumn, batch)));
             }
         }
 
@@ -141,12 +141,12 @@ internal sealed partial class Selection
                     : throw SimulatedSqlException.InvalidColumnName(name);
             }
 
-            if (fromClause.Having is { } having && having.Run(ResolveByGroupKey) != true)
+            if (fromClause.Having is { } having && having.Run(new RuntimeContext(ResolveByGroupKey, batch)) != true)
                 continue;
 
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveByGroupKey);
+                projected[i] = expressions[i].Run(new RuntimeContext(ResolveByGroupKey, batch));
 
             output.Add(RowEncoder.EncodeRow(outputSchema, projected));
         }

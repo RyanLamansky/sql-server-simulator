@@ -12,9 +12,9 @@ internal sealed class Sign(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.source.Run(getColumnValue);
+        var v = this.source.Run(runtime);
         var resultType = MathScalars.WidenForResult(v.Type);
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {

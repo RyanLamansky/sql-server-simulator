@@ -20,6 +20,7 @@ internal sealed partial class Selection
         FromSource[] sources,
         byte[]?[] tuple,
         MultiPartName name,
+        BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         Func<MultiPartName, SqlValue> selfRecursive)
     {
@@ -34,7 +35,7 @@ internal sealed partial class Selection
         var bytes = tuple[s];
         return bytes is null
             ? SqlValue.Null(sources[s].Columns[c].Type)
-            : DecodeOrCompute(sources[s], c, bytes, selfRecursive);
+            : DecodeOrCompute(sources[s], c, bytes, batch, selfRecursive);
     }
 
     /// <summary>
@@ -49,7 +50,7 @@ internal sealed partial class Selection
     internal static IEnumerable<byte[]?[]> EnumerateJoinedRows(
         FromSource[] sources,
         JoinSpec[] joins,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var tuple = new byte[]?[sources.Length];
 
@@ -62,7 +63,7 @@ internal sealed partial class Selection
             // and stream its rows; eager (non-correlated) sources iterate
             // their pre-evaluated row bytes the same way as before.
             var rows = sources[0].LateralPlan is { } leftmostLateralPlan
-                ? leftmostLateralPlan.Execute(outerResolver).RowBytes
+                ? leftmostLateralPlan.Execute(batch, outerResolver).RowBytes
                 : sources[0].Rows;
             foreach (var row in rows)
             {
@@ -73,7 +74,7 @@ internal sealed partial class Selection
         }
 
         SqlValue Resolve(byte[]?[] currentTuple, MultiPartName name) =>
-            ResolveAcrossTuple(sources, currentTuple, name, outerResolver, n => Resolve(currentTuple, n));
+            ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, n => Resolve(currentTuple, n));
 
         // Leftmost-source lateral plan in a multi-source FROM: same as the
         // joins.Length==0 case — drive it from the outer resolver, then let
@@ -82,16 +83,16 @@ internal sealed partial class Selection
         // pre-feed the lateral row stream via a temporary FromSource swap.
         if (sources[0].LateralPlan is { } leadLateralPlan)
         {
-            foreach (var row in leadLateralPlan.Execute(outerResolver).RowBytes)
+            foreach (var row in leadLateralPlan.Execute(batch, outerResolver).RowBytes)
             {
                 tuple[0] = row;
-                foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 1))
+                foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 1, batch))
                     yield return t;
             }
             yield break;
         }
 
-        foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 0))
+        foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 0, batch))
             yield return t;
     }
 
@@ -108,7 +109,8 @@ internal sealed partial class Selection
         JoinSpec[] joins,
         byte[]?[] tuple,
         Func<byte[]?[], MultiPartName, SqlValue> resolve,
-        int level)
+        int level,
+        BatchContext batch)
     {
         if (level == sources.Length)
         {
@@ -124,7 +126,7 @@ internal sealed partial class Selection
             foreach (var row in sources[0].Rows)
             {
                 tuple[0] = row;
-                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
                     yield return t;
             }
             yield break;
@@ -143,19 +145,19 @@ internal sealed partial class Selection
         // matched.
         if (sources[level].LateralPlan is { } lateralPlan)
         {
-            foreach (var row in lateralPlan.Execute(name => resolve(tuple, name)).RowBytes)
+            foreach (var row in lateralPlan.Execute(batch, name => resolve(tuple, name)).RowBytes)
             {
                 tuple[level] = row;
-                if (join.OnPredicate is not null && join.OnPredicate.Run(name => resolve(tuple, name)) != true)
+                if (join.OnPredicate is not null && join.OnPredicate.Run(new RuntimeContext(name => resolve(tuple, name), batch)) != true)
                     continue;
                 matched = true;
-                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
                     yield return t;
             }
             tuple[level] = null;
             if (!matched && join.Kind is JoinKind.OuterApply or JoinKind.Left)
             {
-                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
                     yield return t;
             }
             yield break;
@@ -164,17 +166,17 @@ internal sealed partial class Selection
         foreach (var row in sources[level].Rows)
         {
             tuple[level] = row;
-            var passes = join.OnPredicate is null || join.OnPredicate.Run(name => resolve(tuple, name)) == true;
+            var passes = join.OnPredicate is null || join.OnPredicate.Run(new RuntimeContext(name => resolve(tuple, name), batch)) == true;
             if (!passes)
                 continue;
             matched = true;
-            foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+            foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
                 yield return t;
         }
         tuple[level] = null;
         if (!matched && join.Kind == JoinKind.Left)
         {
-            foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1))
+            foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
                 yield return t;
         }
     }
@@ -194,10 +196,11 @@ internal sealed partial class Selection
         FromSource source,
         int columnIndex,
         byte[] bytes,
+        BatchContext batch,
         Func<MultiPartName, SqlValue> resolveByName) =>
         source.StorageOrdinals is null
             ? RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore)
             : source.Columns[columnIndex].Computed is { } computedExpr && !source.Columns[columnIndex].IsPersisted
-                ? computedExpr.Run(resolveByName)
+                ? computedExpr.Run(new RuntimeContext(resolveByName, batch))
                 : RowDecoder.DecodeColumn(source.StoredSchema, bytes, source.StorageOrdinals[columnIndex], source.LobStore);
 }

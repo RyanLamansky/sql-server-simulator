@@ -137,7 +137,7 @@ partial class Simulation
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             var fullValues = DecodeFullRow(table, rowBytes);
-            EvaluateComputedColumns(table, fullValues);
+            EvaluateComputedColumns(table, fullValues, context.Batch);
 
             SqlValue ResolveOriginal(MultiPartName name)
             {
@@ -149,7 +149,7 @@ partial class Simulation
                 throw SimulatedSqlException.InvalidColumnName(name);
             }
 
-            if (where is not null && where.Run(ResolveOriginal) != true)
+            if (where is not null && where.Run(new RuntimeContext(ResolveOriginal, context.Batch)) != true)
                 continue;
 
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal);
@@ -208,12 +208,12 @@ partial class Simulation
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
 
-        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, outerResolver: null))
+        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
             var localTuple = tuple;
             SqlValue ResolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, localTuple, name);
 
-            if (where is not null && where.Run(ResolveTuple) != true)
+            if (where is not null && where.Run(new RuntimeContext(ResolveTuple, context.Batch)) != true)
                 continue;
 
             var targetBytes = tuple[targetIndex];
@@ -225,7 +225,7 @@ partial class Simulation
                 continue;
 
             var fullValues = DecodeFullRow(table, targetBytes);
-            EvaluateComputedColumns(table, fullValues);
+            EvaluateComputedColumns(table, fullValues, context.Batch);
 
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple);
             var oldSnapshot = output is null ? null : fullValues;
@@ -343,7 +343,7 @@ partial class Simulation
 
         foreach (var (ordinal, expr) in assignments)
         {
-            var raw = expr.Run(resolver);
+            var raw = expr.Run(new RuntimeContext(resolver, context.Batch));
             EnforceMaxLength(raw, table.Columns[ordinal], table.Name, context.Connection);
             newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal].Type);
         }
@@ -354,9 +354,9 @@ partial class Simulation
                 newValues[ci] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
         }
 
-        EvaluateComputedColumns(table, newValues);
+        EvaluateComputedColumns(table, newValues, context.Batch);
         EnforceNotNull(table, newValues, "UPDATE");
-        EnforceCheckConstraints(table, newValues, "UPDATE");
+        EnforceCheckConstraints(table, newValues, context.Batch, "UPDATE");
 
         return newValues;
     }

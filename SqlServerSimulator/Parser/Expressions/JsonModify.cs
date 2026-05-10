@@ -38,11 +38,11 @@ internal sealed class JsonModify : Expression
         this.newValueInput = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var jsonInputValue = this.jsonInput.Run(getColumnValue);
-        var pathValue = this.pathInput.Run(getColumnValue);
-        var newSqlValue = this.newValueInput.Run(getColumnValue);
+        var jsonInputValue = this.jsonInput.Run(runtime);
+        var pathValue = this.pathInput.Run(runtime);
+        var newSqlValue = this.newValueInput.Run(runtime);
         if (jsonInputValue.IsNull || pathValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 

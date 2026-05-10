@@ -54,12 +54,12 @@ internal sealed class ConvertExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
         int? styleCode = null;
         if (this.style is { } styleExpr)
         {
-            var styleValue = styleExpr.Run(getColumnValue);
+            var styleValue = styleExpr.Run(runtime);
             if (styleValue.IsNull)
                 return SqlValue.Null(this.targetType);
             // SQL Server requires the style argument to be an integer
@@ -79,7 +79,7 @@ internal sealed class ConvertExpression : Expression
             }
         }
 
-        var sourceValue = this.source.Run(getColumnValue);
+        var sourceValue = this.source.Run(runtime);
 
         try
         {

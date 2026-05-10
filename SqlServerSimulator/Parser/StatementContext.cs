@@ -6,7 +6,7 @@ namespace SqlServerSimulator.Parser;
 /// and overwritten in place by the dispatch loop at the top of each
 /// statement iteration. Late-bound expressions
 /// (<see cref="Expressions.CurrentTimeFunction"/>) read through
-/// <see cref="Simulation.ActiveBatch"/> + <see cref="BatchContext.CurrentStatement"/>
+/// <see cref="RuntimeContext.Batch"/>'s <see cref="BatchContext.CurrentStatement"/>
 /// at runtime so a parsed expression reused across batches (e.g. a column
 /// default's <c>getutcdate()</c>) resolves against the *executing*
 /// statement's frame rather than a long-frozen capture.

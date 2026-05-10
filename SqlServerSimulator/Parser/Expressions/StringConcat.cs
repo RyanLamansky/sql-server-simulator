@@ -82,7 +82,7 @@ internal sealed class StringConcat : Expression
         return SqlType.Varchar;
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
         // Resolve result type from runtime argument types: any national-string
         // input promotes to nvarchar. Computed inline (not from a GetSqlType
@@ -93,7 +93,7 @@ internal sealed class StringConcat : Expression
         var anyNational = false;
         for (var i = 0; i < this.arguments.Length; i++)
         {
-            values[i] = this.arguments[i].Run(getColumnValue);
+            values[i] = this.arguments[i].Run(runtime);
             if (IsNationalString(values[i].Type))
                 anyNational = true;
         }

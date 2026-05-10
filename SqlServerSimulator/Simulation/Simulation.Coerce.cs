@@ -109,7 +109,7 @@ partial class Simulation
     /// for encoding, non-persisted slots feed any <c>OUTPUT INSERTED.&lt;col&gt;</c>
     /// projection.
     /// </summary>
-    private static void EvaluateComputedColumns(HeapTable destinationTable, SqlValue[] rowValues)
+    private static void EvaluateComputedColumns(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch)
     {
         for (var i = 0; i < destinationTable.Columns.Length; i++)
         {
@@ -127,7 +127,7 @@ partial class Simulation
                 throw SimulatedSqlException.InvalidColumnName(reference);
             }
 
-            rowValues[i] = CoerceForInsert(column.Computed.Run(ResolveByName), column.Type);
+            rowValues[i] = CoerceForInsert(column.Computed.Run(new RuntimeContext(ResolveByName, batch)), column.Type);
         }
     }
 
@@ -183,7 +183,7 @@ partial class Simulation
     /// matches the row's column ordinals via case-insensitive name compare,
     /// the same shape <see cref="EvaluateComputedColumns"/> uses.
     /// </summary>
-    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, string verb = "INSERT")
+    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT")
     {
         if (destinationTable.CheckConstraints.Length == 0)
             return;
@@ -198,9 +198,10 @@ partial class Simulation
             throw SimulatedSqlException.InvalidColumnName(reference);
         }
 
+        var runtime = new RuntimeContext(ResolveByName, batch);
         foreach (var check in destinationTable.CheckConstraints)
         {
-            if (check.Predicate.Run(ResolveByName) == false)
+            if (check.Predicate.Run(runtime) == false)
                 throw SimulatedSqlException.CheckConstraintViolation(check.Name, destinationTable.Name, check.InlineColumn, verb);
         }
     }

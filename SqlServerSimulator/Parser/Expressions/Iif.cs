@@ -28,11 +28,11 @@ internal sealed class Iif : Expression
         this.falseValue = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var picked = this.condition.Run(getColumnValue) == true
-            ? this.trueValue.Run(getColumnValue)
-            : this.falseValue.Run(getColumnValue);
+        var picked = this.condition.Run(runtime) == true
+            ? this.trueValue.Run(runtime)
+            : this.falseValue.Run(runtime);
         return this.cachedResultType is { } target && !picked.IsNull && picked.Type != target ? picked.CoerceTo(target) : picked;
     }
 

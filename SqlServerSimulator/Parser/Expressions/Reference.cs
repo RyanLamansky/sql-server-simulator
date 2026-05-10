@@ -38,7 +38,7 @@ internal sealed class Reference : Expression
 
     public void AddMultiPartComponent(Name next) => this.name = this.name.WithAddedPart(next.Value);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => getColumnValue(this.name);
+    public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.name);
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.name);
 

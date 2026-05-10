@@ -79,7 +79,7 @@ partial class Simulation
             if (where is not null || output is not null)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
-                EvaluateComputedColumns(table, fullValues);
+                EvaluateComputedColumns(table, fullValues, context.Batch);
             }
 
             if (where is not null)
@@ -95,7 +95,7 @@ partial class Simulation
                     throw SimulatedSqlException.InvalidColumnName(name);
                 }
 
-                if (where.Run(Resolve) != true)
+                if (where.Run(new RuntimeContext(Resolve, context.Batch)) != true)
                     continue;
             }
 
@@ -144,12 +144,12 @@ partial class Simulation
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
 
-        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, outerResolver: null))
+        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
             var localTuple = tuple;
             SqlValue ResolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, localTuple, name);
 
-            if (where is not null && where.Run(ResolveTuple) != true)
+            if (where is not null && where.Run(new RuntimeContext(ResolveTuple, context.Batch)) != true)
                 continue;
 
             var targetBytes = tuple[targetIndex];
@@ -164,7 +164,7 @@ partial class Simulation
             if (output is not null)
             {
                 fullValues = DecodeFullRow(table, targetBytes);
-                EvaluateComputedColumns(table, fullValues);
+                EvaluateComputedColumns(table, fullValues, context.Batch);
             }
             deleted.Add((addr.Page, addr.Slot, fullValues));
         }

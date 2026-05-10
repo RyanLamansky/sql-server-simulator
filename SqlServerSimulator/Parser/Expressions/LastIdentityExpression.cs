@@ -11,29 +11,27 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// simulator collapses both to <see cref="SimulatedDbConnection.LastIdentity"/>.
 /// </summary>
 /// <remarks>
-/// Captures the <see cref="Simulation"/> at parse time and looks up the
-/// runtime-active batch via <see cref="Simulation.ActiveBatch"/>
-/// when <see cref="Run"/> fires. Late-binding matters when this expression
-/// is parsed once and reused across many statements (e.g. baked into a
-/// column default) on possibly-different connections.
+/// Reads <see cref="RuntimeContext.Batch"/>'s connection at evaluation
+/// time — nothing captured at parse time. Required for parsed-once-run-many
+/// expressions (e.g. baked into a column default) that may execute on a
+/// different connection from the one that parsed them.
 /// </remarks>
 internal sealed class LastIdentityExpression : Expression
 {
     private static readonly SqlType ResultType = SqlType.GetDecimal(38, 0);
 
-    private readonly Simulation simulation;
-
-    public LastIdentityExpression(Simulation simulation) => this.simulation = simulation;
+    public LastIdentityExpression()
+    {
+    }
 
     public LastIdentityExpression(ParserContext context)
     {
-        this.simulation = context.Simulation;
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
-        this.simulation.ActiveBatch!.Connection.LastIdentity is decimal v
+    public override SqlValue Run(RuntimeContext runtime) =>
+        runtime.Batch.Connection.LastIdentity is decimal v
             ? SqlValue.FromDecimal(ResultType, v)
             : SqlValue.Null(ResultType);
 

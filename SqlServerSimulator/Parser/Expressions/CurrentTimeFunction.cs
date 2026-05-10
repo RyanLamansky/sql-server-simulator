@@ -30,13 +30,12 @@ internal enum CurrentTimeKind
 /// </summary>
 /// <remarks>
 /// <para>
-/// Captures the <see cref="Simulation"/> at parse time and looks up the
-/// runtime-active batch via <see cref="Simulation.ActiveBatch"/> when
-/// <see cref="Run"/> fires. Critical for column-default reuse:
-/// <c>HasDefaultValueSql("getutcdate()")</c> parses once at CREATE TABLE
-/// time, but every subsequent INSERT runs in a different batch, and the
-/// default has to read that runtime batch's per-statement freeze, not the
-/// long-gone CREATE-time batch's.
+/// Reads <see cref="RuntimeContext.Batch"/>'s
+/// <see cref="BatchContext.CurrentStatement"/> directly at evaluation time —
+/// nothing captured at parse time. Critical for column-default reuse:
+/// <c>HasDefaultValueSql("getutcdate()")</c> parses once at CREATE TABLE,
+/// but every subsequent INSERT runs in a different batch, and the default
+/// has to read that runtime batch's per-statement freeze.
 /// </para>
 /// <para>
 /// <c>CURRENT_TIMESTAMP</c> is unique in being a parens-less identifier in
@@ -50,15 +49,13 @@ internal enum CurrentTimeKind
 /// "near X" snippet in the error text differs.
 /// </para>
 /// </remarks>
-internal sealed class CurrentTimeFunction(Simulation simulation, CurrentTimeKind kind) : Expression
+internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
 {
     private static readonly SqlType DateTime2_7 = SqlType.GetDateTime2(7);
 
     private static readonly SqlType DateTimeOffset_7 = SqlType.GetDateTimeOffset(7);
 
     public readonly CurrentTimeKind Kind = kind;
-
-    private readonly Simulation simulation = simulation;
 
     /// <summary>
     /// Constructs the parens-required variants. The caller (<c>ResolveBuiltIn</c>)
@@ -69,15 +66,15 @@ internal sealed class CurrentTimeFunction(Simulation simulation, CurrentTimeKind
     /// isn't observable through SqlClient unless the caller reads the text).
     /// </summary>
     public CurrentTimeFunction(ParserContext context, CurrentTimeKind kind)
-        : this(context.Simulation, kind)
+        : this(kind)
     {
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var utcNow = this.simulation.ActiveBatch!.CurrentStatement.UtcNow;
+        var utcNow = runtime.Batch.CurrentStatement.UtcNow;
         return this.Kind switch
         {
             CurrentTimeKind.GetDate or CurrentTimeKind.GetUtcDate or CurrentTimeKind.CurrentTimestamp =>

@@ -29,10 +29,10 @@ internal sealed class JsonValue : Expression
         this.pathInput = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var jsonValue = this.jsonInput.Run(getColumnValue);
-        var pathValue = this.pathInput.Run(getColumnValue);
+        var jsonValue = this.jsonInput.Run(runtime);
+        var pathValue = this.pathInput.Run(runtime);
         if (jsonValue.IsNull || pathValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 

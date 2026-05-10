@@ -31,11 +31,11 @@ internal sealed class Substring : Expression
         this.length = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var s = source.Run(getColumnValue);
-        var startValue = start.Run(getColumnValue);
-        var lengthValue = length.Run(getColumnValue);
+        var s = source.Run(runtime);
+        var startValue = start.Run(runtime);
+        var lengthValue = length.Run(runtime);
         if (s.IsNull || startValue.IsNull || lengthValue.IsNull)
             return SqlValue.Null(s.Type);
         if (!SqlType.IsStringCategory(s.Type))

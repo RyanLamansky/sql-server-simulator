@@ -32,11 +32,11 @@ internal sealed class Atn2 : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("atn2", 2);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var y = this.first.Run(getColumnValue);
+        var y = this.first.Run(runtime);
         if (y.IsNull) return SqlValue.Null(SqlType.Float);
-        var x = this.second.Run(getColumnValue);
+        var x = this.second.Run(runtime);
         if (x.IsNull) return SqlValue.Null(SqlType.Float);
         var yd = MathScalars.AsDouble(y);
         var xd = MathScalars.AsDouble(x);

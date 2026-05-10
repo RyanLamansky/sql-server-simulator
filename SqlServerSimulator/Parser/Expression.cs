@@ -64,9 +64,9 @@ internal abstract class Expression
             AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
             DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
             {
-                AtAtKeyword.Identity => new LastIdentityExpression(context.Simulation),
+                AtAtKeyword.Identity => new LastIdentityExpression(),
                 AtAtKeyword.TranCount => new TranCountExpression(context),
-                AtAtKeyword.RowCount => new RowCountExpression(context.Simulation),
+                AtAtKeyword.RowCount => new RowCountExpression(),
                 _ => new Value(doubleAtPrefixedString),
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
@@ -77,7 +77,7 @@ internal abstract class Expression
             // in SQL Server (probe-confirmed 2026-05-09); the simulator
             // inherits the same Msg-102 path from the surrounding parser
             // catching the unexpected `(`.
-            ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(context.Simulation, CurrentTimeKind.CurrentTimestamp),
+            ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp),
             // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
             // reserved keywords but dispatch as function calls when followed
             // by '(' — the surrounding loop hands the call shape off to
@@ -273,10 +273,11 @@ internal abstract class Expression
     public static Expression AssignName(Expression expression, Name name) => new NamedExpression(expression, name.Value);
 
     /// <summary>
-    /// Evaluates the expression against a row's column values and returns its result.
+    /// Evaluates the expression with explicit access to both per-row column
+    /// values (<see cref="RuntimeContext.ResolveColumn"/>) and per-batch /
+    /// per-session / per-database state (<see cref="RuntimeContext.Batch"/>).
     /// </summary>
-    /// <param name="getColumnValue">Provides the value for a column.</param>
-    public abstract Storage.SqlValue Run(Func<MultiPartName, Storage.SqlValue> getColumnValue);
+    public abstract Storage.SqlValue Run(RuntimeContext runtime);
 
     /// <summary>
     /// Static type-of resolver for projection planning: returns the

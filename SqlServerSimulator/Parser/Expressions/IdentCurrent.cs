@@ -14,25 +14,22 @@ internal sealed class IdentCurrent : Expression
 {
     private static readonly SqlType ResultType = SqlType.GetDecimal(38, 0);
 
-    private readonly Simulation simulation;
-
     private readonly string tableName;
 
     public IdentCurrent(ParserContext context)
     {
-        this.simulation = context.Simulation;
         var argument = Parse(context);
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.tableName = argument
-            .Run(name => throw SimulatedSqlException.InvalidColumnName(name))
+            .Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch))
             .CoerceTo(SqlType.NVarchar)
             .AsString;
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        if (!this.simulation.ActiveBatch!.CurrentDatabase.HeapTables.TryGetValue(this.tableName, out var table))
+        if (!runtime.Batch.CurrentDatabase.HeapTables.TryGetValue(this.tableName, out var table))
             return SqlValue.Null(ResultType);
         var identityOrdinal = table.IdentityOrdinal;
         return identityOrdinal < 0

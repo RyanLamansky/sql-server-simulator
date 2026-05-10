@@ -30,20 +30,20 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            outerResolver => RunRecursiveCte(anchorBranches, recursiveBranches, binding, outerResolver));
+            (batch, outerResolver) => RunRecursiveCte(anchorBranches, recursiveBranches, binding, batch, outerResolver));
     }
 
     private static IEnumerable<byte[]> RunRecursiveCte(
         Selection[] anchorBranches,
         Selection[] recursiveBranches,
         CteBinding binding,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         // Phase 1: union all anchor branches into the seed rowset.
         var seed = new List<byte[]>();
         foreach (var anchor in anchorBranches)
         {
-            foreach (var rowBytes in anchor.Execute(outerResolver).RowBytes)
+            foreach (var rowBytes in anchor.Execute(batch, outerResolver).RowBytes)
                 seed.Add(rowBytes);
         }
         foreach (var rowBytes in seed)
@@ -68,7 +68,7 @@ internal sealed partial class Selection
             {
                 foreach (var rec in recursiveBranches)
                 {
-                    foreach (var rowBytes in rec.Execute(outerResolver).RowBytes)
+                    foreach (var rowBytes in rec.Execute(batch, outerResolver).RowBytes)
                         next.Add(rowBytes);
                 }
             }

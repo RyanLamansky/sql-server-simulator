@@ -29,7 +29,7 @@ internal sealed class NewSequentialId : Expression
         this.simulation = context.Simulation;
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
+    public override SqlValue Run(RuntimeContext runtime) =>
         SqlValue.FromGuid(this.simulation.GenerateNewSequentialId());
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;

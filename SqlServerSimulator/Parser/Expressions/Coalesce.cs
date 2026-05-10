@@ -28,12 +28,12 @@ internal sealed class Coalesce : Expression
         this.arguments = [.. args];
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
         SqlValue value = default;
         for (var i = 0; i < this.arguments.Length; i++)
         {
-            value = this.arguments[i].Run(getColumnValue);
+            value = this.arguments[i].Run(runtime);
             if (!value.IsNull)
                 return this.cachedResultType is { } target && value.Type != target ? value.CoerceTo(target) : value;
         }

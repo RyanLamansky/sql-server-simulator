@@ -94,7 +94,7 @@ internal sealed partial class Selection
     /// accepting the outer-row resolver and dispatching to the aggregate or
     /// simple projection path; each row tuple (one byte[] per source, null
     /// in unmatched LEFT-JOIN slots) is decoded column-by-column on demand
-    /// and projected through <see cref="Expression.Run"/>.
+    /// and projected through <see cref="Expression.Run(RuntimeContext)"/>.
     /// </summary>
     private static Selection BuildSqlProjection(
         FromSource[] sources,
@@ -171,12 +171,12 @@ internal sealed partial class Selection
         return new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
-            outerResolver =>
+            (batch, outerResolver) =>
             aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
-                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, outerResolver)
+                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
                 : windows.Count > 0
-                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, outerResolver)
-                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver),
+                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),
             isAssignmentOnly);
     }
 
@@ -192,10 +192,10 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<MultiPartName, SqlValue>? outerResolver) =>
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) =>
         !distinct && orderBy.Count == 0
-            ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, outerResolver)
-            : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver);
+            ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, batch, outerResolver)
+            : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
 
     /// <summary>
     /// Applies OFFSET (skip) and the row cap (take) to a row sequence in
@@ -221,21 +221,21 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         return ApplyOffsetTake(InnerStream(), offsetCount, topCount ?? fetchCount);
 
         IEnumerable<byte[]> InnerStream()
         {
-            foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
+            foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
                 var localTuple = tuple;
-                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveColumn);
+                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn);
 
                 var include = true;
                 foreach (var excluder in excluders)
                 {
-                    if (excluder.Run(ResolveColumn) != true)
+                    if (excluder.Run(new RuntimeContext(ResolveColumn, batch)) != true)
                     {
                         include = false;
                         break;
@@ -246,7 +246,7 @@ internal sealed partial class Selection
 
                 var projected = new SqlValue[expressions.Count];
                 for (var i = 0; i < expressions.Count; i++)
-                    projected[i] = expressions[i].Run(ResolveColumn);
+                    projected[i] = expressions[i].Run(new RuntimeContext(ResolveColumn, batch));
 
                 yield return RowEncoder.EncodeRow(outputSchema, projected);
             }
@@ -265,19 +265,19 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
 
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
+        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
 
             var include = true;
             foreach (var excluder in excluders)
             {
-                if (excluder.Run(ResolveSource) != true)
+                if (excluder.Run(new RuntimeContext(ResolveSource, batch)) != true)
                 {
                     include = false;
                     break;
@@ -288,9 +288,9 @@ internal sealed partial class Selection
 
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(ResolveSource);
+                projected[i] = expressions[i].Run(new RuntimeContext(ResolveSource, batch));
 
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, ResolveSource);
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, ResolveSource);
             buffer.Add((projected, keys));
         }
 

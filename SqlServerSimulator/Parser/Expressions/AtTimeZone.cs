@@ -48,11 +48,11 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
         ResolveResultType(this.source.GetSqlType(resolveColumnType));
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var input = this.source.Run(getColumnValue);
+        var input = this.source.Run(runtime);
         var resultType = ResolveResultType(input.Type);
-        var zoneName = this.zoneNameExpression.Run(getColumnValue);
+        var zoneName = this.zoneNameExpression.Run(runtime);
 
         // NULL on either side → NULL datetimeoffset (probe-confirmed).
         if (input.IsNull || zoneName.IsNull)

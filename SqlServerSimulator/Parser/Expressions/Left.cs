@@ -20,10 +20,10 @@ internal sealed class Left : Expression
         this.count = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var s = source.Run(getColumnValue);
-        var n = count.Run(getColumnValue);
+        var s = source.Run(runtime);
+        var n = count.Run(runtime);
         if (s.IsNull || n.IsNull)
             return SqlValue.Null(s.Type);
         if (!SqlType.IsStringCategory(s.Type))

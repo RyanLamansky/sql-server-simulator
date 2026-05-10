@@ -38,7 +38,7 @@ internal sealed partial class Selection
         List<WindowExpression> windows,
         SqlType[] windowOperandTypes,
         SqlType[] windowResultTypes,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         // Step 1: buffer post-WHERE tuples. The same byte[]?[] instance is
         // reused across yields by EnumerateJoinedRows, so each entry is
@@ -47,15 +47,15 @@ internal sealed partial class Selection
         // be re-bound during window evaluation.
         var buffered = new List<byte[]?[]>();
         var perWindowKeys = new List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]>();
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, outerResolver))
+        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
 
             var include = true;
             foreach (var excluder in excluders)
             {
-                if (excluder.Run(ResolveSource) != true)
+                if (excluder.Run(new RuntimeContext(ResolveSource, batch)) != true)
                 {
                     include = false;
                     break;
@@ -70,10 +70,10 @@ internal sealed partial class Selection
                 var win = windows[w];
                 var partitionKeys = new SqlValue[win.PartitionBy.Length];
                 for (var p = 0; p < win.PartitionBy.Length; p++)
-                    partitionKeys[p] = win.PartitionBy[p].Run(ResolveSource);
+                    partitionKeys[p] = win.PartitionBy[p].Run(new RuntimeContext(ResolveSource, batch));
                 var orderKeys = new SqlValue[win.OrderBy.Length];
                 for (var o = 0; o < win.OrderBy.Length; o++)
-                    orderKeys[o] = win.OrderBy[o].Expr!.Run(ResolveSource);
+                    orderKeys[o] = win.OrderBy[o].Expr!.Run(new RuntimeContext(ResolveSource, batch));
                 keys[w] = (partitionKeys, orderKeys);
             }
 
@@ -131,10 +131,10 @@ internal sealed partial class Selection
                     foreach (var i in indices)
                     {
                         var localTuple = buffered[i];
-                        SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
+                        SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
                         var operandValue = aggregate.Operand is null
                             ? SqlValue.Null(SqlType.Int32)
-                            : aggregate.Operand.Run(ResolveSource);
+                            : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
                         aggregator.Add(operandValue);
                     }
                     var result = aggregator.Result();
@@ -157,13 +157,13 @@ internal sealed partial class Selection
                 windows[w].BindResult(perWindowResults[w][i]);
 
             var localTuple = buffered[i];
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
 
             var projected = new SqlValue[expressions.Count];
             for (var j = 0; j < expressions.Count; j++)
-                projected[j] = expressions[j].Run(ResolveSource);
+                projected[j] = expressions[j].Run(new RuntimeContext(ResolveSource, batch));
 
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, ResolveSource);
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, ResolveSource);
             projectedBuffer.Add((projected, keys));
         }
 

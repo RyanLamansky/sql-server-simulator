@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class TranCountExpression(ParserContext context) : Expression
 {
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
+    public override SqlValue Run(RuntimeContext runtime) =>
         SqlValue.FromInt32(context.Connection.CurrentTransaction?.TranCount ?? 0);
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

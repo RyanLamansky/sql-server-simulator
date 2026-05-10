@@ -33,9 +33,9 @@ internal sealed class DatePart : Expression
         this.source = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(getColumnValue);
+        var value = source.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(SqlType.Int32);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "datepart");

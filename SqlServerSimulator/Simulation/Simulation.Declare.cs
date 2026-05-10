@@ -44,7 +44,7 @@ partial class Simulation
             {
                 context.MoveNextRequired();
                 var initExpression = Expression.Parse(context);
-                initialValue = Parser.Expressions.Cast.ApplyCoercion(initExpression.Run(NoColumnResolver), declaredType, declaredMaxLength);
+                initialValue = Parser.Expressions.Cast.ApplyCoercion(initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch)), declaredType, declaredMaxLength);
                 rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
             }
 

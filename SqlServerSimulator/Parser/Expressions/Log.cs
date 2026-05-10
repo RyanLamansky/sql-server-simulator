@@ -20,9 +20,9 @@ internal sealed class Log : Expression
             this.logBase = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.value.Run(getColumnValue);
+        var v = this.value.Run(runtime);
         if (v.IsNull) return SqlValue.Null(SqlType.Float);
         var d = MathScalars.AsDouble(v);
         if (d <= 0) throw SimulatedSqlException.InvalidFloatingPointOperation();
@@ -30,7 +30,7 @@ internal sealed class Log : Expression
         if (this.logBase is null)
             return SqlValue.FromDouble(Math.Log(d));
 
-        var b = this.logBase.Run(getColumnValue);
+        var b = this.logBase.Run(runtime);
         if (b.IsNull) return SqlValue.Null(SqlType.Float);
         var bd = MathScalars.AsDouble(b);
         return bd is <= 0 or 1 ? throw SimulatedSqlException.InvalidFloatingPointOperation() : SqlValue.FromDouble(Math.Log(d, bd));

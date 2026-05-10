@@ -48,10 +48,10 @@ internal abstract class DateDiff : Expression
     /// </summary>
     protected abstract SqlValue WrapResult(long diff);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var startVal = CoerceStringToDateTime2(this.start.Run(getColumnValue));
-        var endVal = CoerceStringToDateTime2(this.end.Run(getColumnValue));
+        var startVal = CoerceStringToDateTime2(this.start.Run(runtime));
+        var endVal = CoerceStringToDateTime2(this.end.Run(runtime));
         if (startVal.IsNull || endVal.IsNull)
             return SqlValue.Null(this.resultType);
         DatePartKinds.RequireCompatibleForDiff(this.kind, this.keywordText, this.functionLowerName);

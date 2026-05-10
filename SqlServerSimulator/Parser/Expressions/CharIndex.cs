@@ -25,10 +25,10 @@ internal sealed class CharIndex : Expression
             this.start = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var n = needle.Run(getColumnValue);
-        var h = haystack.Run(getColumnValue);
+        var n = needle.Run(runtime);
+        var h = haystack.Run(runtime);
         if (n.IsNull || h.IsNull)
             return SqlValue.Null(SqlType.Int32);
         if (!SqlType.IsStringCategory(n.Type) || !SqlType.IsStringCategory(h.Type))
@@ -37,7 +37,7 @@ internal sealed class CharIndex : Expression
         var startIndex = 0;
         if (start is not null)
         {
-            var startValue = start.Run(getColumnValue);
+            var startValue = start.Run(runtime);
             if (startValue.IsNull)
                 return SqlValue.Null(SqlType.Int32);
             startIndex = Math.Max(0, startValue.CoerceTo(SqlType.Int32).AsInt32 - 1);

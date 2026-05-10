@@ -128,7 +128,7 @@ partial class Simulation
                     }
                 }
                 if (listed) continue;
-                var defaultValue = column.Default.Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
                 rowValues[i] = CoerceForInsert(defaultValue, column.Type);
             }
 
@@ -186,9 +186,9 @@ partial class Simulation
             // and which the row's full SqlValue array needs filled). Refs in
             // the expression bind only to stored columns thanks to Msg 1759
             // at CREATE TABLE.
-            EvaluateComputedColumns(destinationTable, rowValues);
+            EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
             EnforceNotNull(destinationTable, rowValues);
-            EnforceCheckConstraints(destinationTable, rowValues);
+            EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
 
             var storedValues = ProjectStoredValues(destinationTable, rowValues);
             EnforceKeyConstraints(destinationTable, storedValues);
@@ -218,12 +218,13 @@ partial class Simulation
     private static List<SqlValue[]> EvaluateValuesTuples(ParserContext context)
     {
         var tuples = ParseValuesTuples(context);
+        var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch);
         var rows = new List<SqlValue[]>(tuples.Count);
         foreach (var tuple in tuples)
         {
             var values = new SqlValue[tuple.Length];
             for (var i = 0; i < tuple.Length; i++)
-                values[i] = tuple[i].Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                values[i] = tuple[i].Run(runtime);
             rows.Add(values);
         }
         return rows;
@@ -247,7 +248,7 @@ partial class Simulation
         if (selection.Schema.Length > expectedColumnCount)
             throw SimulatedSqlException.InsertSelectListMoreThanInsertList();
 
-        var resultSet = selection.Execute();
+        var resultSet = selection.Execute(context.Batch);
         var rows = new List<SqlValue[]>();
         foreach (var rowBytes in resultSet.RowBytes)
             rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));

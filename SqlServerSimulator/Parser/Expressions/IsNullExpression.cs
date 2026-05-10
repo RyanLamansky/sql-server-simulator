@@ -31,12 +31,12 @@ internal sealed class IsNullExpression : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var primary = this.check.Run(getColumnValue);
+        var primary = this.check.Run(runtime);
         if (!primary.IsNull)
             return primary;
-        var fallback = this.replacement.Run(getColumnValue);
+        var fallback = this.replacement.Run(runtime);
         return this.cachedResultType is { } target && fallback.Type != target ? fallback.CoerceTo(target) : fallback;
     }
 

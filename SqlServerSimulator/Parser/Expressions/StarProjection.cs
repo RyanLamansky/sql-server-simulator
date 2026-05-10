@@ -15,7 +15,7 @@ internal sealed class StarProjection(string? qualifier) : Expression
 {
     public readonly string? Qualifier = qualifier;
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
+    public override SqlValue Run(RuntimeContext runtime) =>
         throw new NotSupportedException("'*' is only valid as a top-level SELECT projection element.");
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>

@@ -87,7 +87,7 @@ partial class Simulation
         for (var i = 0; i < expressions.Count; i++)
             schema[i] = expressions[i].GetSqlType(ResolveOutputType);
 
-        return new MutationOutputProjection(table, [.. expressions], [.. names], schema);
+        return new MutationOutputProjection(table, [.. expressions], [.. names], schema, context.Batch);
     }
 
     /// <summary>
@@ -101,8 +101,11 @@ partial class Simulation
         HeapTable table,
         Expression[] expressions,
         string[] columnNames,
-        SqlType[] schema)
+        SqlType[] schema,
+        BatchContext batch)
     {
+        private readonly BatchContext batch = batch;
+
         public readonly SqlType[] Schema = schema;
 
         public readonly string[] ColumnNames = columnNames;
@@ -134,7 +137,7 @@ partial class Simulation
 
             var projected = new SqlValue[expressions.Length];
             for (var i = 0; i < expressions.Length; i++)
-                projected[i] = expressions[i].Run(Resolve);
+                projected[i] = expressions[i].Run(new RuntimeContext(Resolve, this.batch));
             return RowEncoder.EncodeRow(this.Schema, projected);
         }
     }
@@ -202,7 +205,7 @@ partial class Simulation
         for (var i = 0; i < expressions.Count; i++)
             schema[i] = expressions[i].GetSqlType(ResolveOutputType);
 
-        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames);
+        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch);
     }
 
     /// <summary>
@@ -216,10 +219,12 @@ partial class Simulation
         string[] columnNames,
         SqlType[] schema,
         HeapTable destinationTable,
-        (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source)
+        (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source,
+        BatchContext batch)
     {
         public readonly SqlType[] Schema = schema;
         public readonly string[] ColumnNames = columnNames;
+        private readonly BatchContext batch = batch;
 
         /// <summary>
         /// Evaluates each projection expression against the just-inserted row
@@ -252,7 +257,7 @@ partial class Simulation
 
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(Resolve);
+                projected[i] = expressions[i].Run(new RuntimeContext(Resolve, this.batch));
             return RowEncoder.EncodeRow(this.Schema, projected);
         }
     }

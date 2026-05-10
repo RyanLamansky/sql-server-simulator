@@ -24,12 +24,12 @@ internal sealed class Power : Expression
         this.exponent = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var b = this.baseExpr.Run(getColumnValue);
+        var b = this.baseExpr.Run(runtime);
         var resultType = MathScalars.WidenForResult(b.Type);
         if (b.IsNull) return SqlValue.Null(resultType);
-        var e = this.exponent.Run(getColumnValue);
+        var e = this.exponent.Run(runtime);
         if (e.IsNull) return SqlValue.Null(resultType);
 
         var bd = MathScalars.AsDouble(b);

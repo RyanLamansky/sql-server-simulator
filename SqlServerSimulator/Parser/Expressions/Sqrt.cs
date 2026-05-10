@@ -13,9 +13,9 @@ internal sealed class Sqrt(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.source.Run(getColumnValue);
+        var v = this.source.Run(runtime);
         if (v.IsNull) return SqlValue.Null(SqlType.Float);
         var d = MathScalars.AsDouble(v);
         return d < 0 ? throw SimulatedSqlException.InvalidFloatingPointOperation() : SqlValue.FromDouble(Math.Sqrt(d));

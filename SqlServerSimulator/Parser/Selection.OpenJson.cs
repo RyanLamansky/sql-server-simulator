@@ -63,7 +63,7 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            outerResolver => EnumerateOpenJsonRows(jsonInput, docPath, withColumns, schema, outerResolver));
+            (batch, outerResolver) => EnumerateOpenJsonRows(jsonInput, docPath, withColumns, schema, batch, outerResolver));
     }
 
     private static IEnumerable<byte[]> EnumerateOpenJsonRows(
@@ -71,10 +71,11 @@ internal sealed partial class Selection
         Expression? docPath,
         OpenJsonColumn[]? withColumns,
         SqlType[] schema,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var resolver = outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n));
-        var jsonValue = jsonInput.Run(resolver);
+        var runtime = new RuntimeContext(resolver, batch);
+        var jsonValue = jsonInput.Run(runtime);
         if (jsonValue.IsNull)
             yield break;
 
@@ -93,7 +94,7 @@ internal sealed partial class Selection
             var root = doc.RootElement;
             if (docPath is not null)
             {
-                var pathValue = docPath.Run(resolver);
+                var pathValue = docPath.Run(runtime);
                 if (pathValue.IsNull)
                     yield break;
                 var path = JsonPath.Parse(pathValue.AsString);

@@ -26,11 +26,11 @@ internal sealed class Replace : Expression
         this.newValue = Parse(context.MoveNextRequiredReturnSelf());
     }
 
-    public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
+    public override SqlValue Run(RuntimeContext runtime)
     {
-        var i = input.Run(getColumnValue);
-        var o = oldValue.Run(getColumnValue);
-        var n = newValue.Run(getColumnValue);
+        var i = input.Run(runtime);
+        var o = oldValue.Run(runtime);
+        var n = newValue.Run(runtime);
         if (i.IsNull || o.IsNull || n.IsNull)
             return SqlValue.Null(i.Type);
         if (!SqlType.IsStringCategory(i.Type))

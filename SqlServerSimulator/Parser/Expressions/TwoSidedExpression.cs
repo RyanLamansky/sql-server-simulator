@@ -15,8 +15,8 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
         return rightTwo;
     }
 
-    public sealed override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
-        => Run(left.Run(getColumnValue), right.Run(getColumnValue));
+    public sealed override SqlValue Run(RuntimeContext runtime)
+        => Run(left.Run(runtime), right.Run(runtime));
 
     protected abstract SqlValue Run(SqlValue left, SqlValue right);
 
