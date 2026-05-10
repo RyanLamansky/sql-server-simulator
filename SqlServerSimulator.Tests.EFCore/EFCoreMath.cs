@@ -144,6 +144,56 @@ public class EFCoreMath
         AreClose(1.0915m, (decimal)values[0], 0.001m);
     }
 
+    [TestMethod]
+    public void Trig_SinCosTan_FloatProjection()
+    {
+        // Math.Sin / Cos / Tan emit SIN / COS / TAN with float operands.
+        using var context = SeededProductsContext();
+        var values = context.Products
+            .OrderBy(p => p.Id)
+            .Select(p => new
+            {
+                Sin = Math.Sin((double)p.Price),
+                Cos = Math.Cos((double)p.Price),
+                Tan = Math.Tan((double)p.Price),
+            })
+            .ToArray();
+        AreClose((decimal)Math.Sin(12.35), (decimal)values[0].Sin, 0.001m);
+        AreClose((decimal)Math.Cos(12.35), (decimal)values[0].Cos, 0.001m);
+        AreClose((decimal)Math.Tan(12.35), (decimal)values[0].Tan, 0.001m);
+    }
+
+    [TestMethod]
+    public void Trig_AsinAcosAtan_FloatProjection()
+    {
+        // Math.Asin / Acos / Atan emit ASIN / ACOS / ATAN. Inputs constrained
+        // to [-1, 1] for ASIN / ACOS to avoid Msg 3623.
+        using var context = SeededProductsContext();
+        var values = context.Products
+            .Where(p => p.Id == 2)
+            .Select(p => new
+            {
+                Asin = Math.Asin((double)p.Price),
+                Acos = Math.Acos((double)p.Price),
+                Atan = Math.Atan((double)p.Price),
+            })
+            .ToArray();
+        AreClose((decimal)Math.Asin(0.5), (decimal)values[0].Asin, 0.001m);
+        AreClose((decimal)Math.Acos(0.5), (decimal)values[0].Acos, 0.001m);
+        AreClose((decimal)Math.Atan(0.5), (decimal)values[0].Atan, 0.001m);
+    }
+
+    [TestMethod]
+    public void Atan2_FloatProjection_EmitsAtn2()
+    {
+        using var context = SeededProductsContext();
+        var values = context.Products
+            .Where(p => p.Id == 1)
+            .Select(p => Math.Atan2((double)p.Price, 1.0))
+            .ToArray();
+        AreClose((decimal)Math.Atan2(12.35, 1.0), (decimal)values[0], 0.001m);
+    }
+
     private static void AreClose(decimal expected, decimal actual, decimal tolerance)
         => Assert.IsLessThanOrEqualTo(tolerance, Math.Abs(expected - actual), $"Expected {expected} ± {tolerance}, got {actual}");
 }

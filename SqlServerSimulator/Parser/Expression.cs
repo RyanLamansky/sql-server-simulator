@@ -328,22 +328,35 @@ internal abstract class Expression
         Span<char> uppercaseName = stackalloc char[name.Length];
         return name.ToUpperInvariant(uppercaseName) switch
         {
+            2 => uppercaseName switch
+            {
+                "PI" => new Pi(context),
+                _ => null
+            },
             3 => uppercaseName switch
             {
                 "ABS" => new AbsoluteValue(context),
                 "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
+                "COS" => new TrigFunction(context, TrigKind.Cos),
+                "COT" => new TrigFunction(context, TrigKind.Cot),
                 "EXP" => new Exp(context),
                 "IIF" => new Iif(context),
                 "LEN" => new Length(context),
                 "LOG" => new Log(context),
                 "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
                 "MIN" => AggregateExpression.Parse(context, AggregateKind.Min),
+                "SIN" => new TrigFunction(context, TrigKind.Sin),
                 "SUM" => AggregateExpression.Parse(context, AggregateKind.Sum),
+                "TAN" => new TrigFunction(context, TrigKind.Tan),
                 "VAR" => AggregateExpression.Parse(context, AggregateKind.Var),
                 _ => null
             },
             4 => uppercaseName switch
             {
+                "ACOS" => new TrigFunction(context, TrigKind.Acos),
+                "ASIN" => new TrigFunction(context, TrigKind.Asin),
+                "ATAN" => new TrigFunction(context, TrigKind.Atan),
+                "ATN2" => new Atn2(context),
                 "CAST" => new Cast(context),
                 "LEFT" => new Left(context),
                 "SIGN" => new Sign(context),
@@ -373,6 +386,7 @@ internal abstract class Expression
                 "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
                 "ISNULL" => new IsNullExpression(context),
                 "NULLIF" => new NullIf(context),
+                "SQUARE" => new TrigFunction(context, TrigKind.Square),
                 "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
                 _ => null
             },
@@ -381,8 +395,10 @@ internal abstract class Expression
                 "CEILING" => new Ceiling(context),
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "DATEADD" => new DateAdd(context),
+                "DEGREES" => new Degrees(context),
                 "EOMONTH" => new EOMonth(context),
                 "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
+                "RADIANS" => new Radians(context),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
                 _ => null
