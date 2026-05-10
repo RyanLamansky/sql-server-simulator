@@ -339,6 +339,17 @@ Three entry points share one per-connection undo log: implicit (statement-level 
 ### `rowversion` (legacy synonym `timestamp`)
 8-byte big-endian database-scoped monotonic counter; `Simulation.AllocateRowVersion` advances on every INSERT into a rowversion-bearing table and every UPDATE that affects a row in one. Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration keyword. Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738. Outbound CAST: `varbinary(N)` / `binary(N)` copy the 8 bytes; `bigint` reads big-endian. `Promote(RowVersion, Varbinary)` → `Varbinary` so EF Core's `WHERE [rv] = @originalRv` optimistic-concurrency parameter works directly. `EF Core [Timestamp]` SaveChanges round-trips end-to-end via `UPDATE ... OUTPUT INSERTED.[RowVersion] WHERE [Id] = @p AND [RowVersion] = @originalRv`.
 
+### INSERT … SELECT
+`INSERT [INTO] target [(cols)] SELECT …` accepts the same Selection grammar as a top-level SELECT — WHERE / JOIN / GROUP BY / aggregates / ORDER BY / TOP / OFFSET-FETCH / UNION / INTERSECT / EXCEPT all work on the source side. Probe-confirmed against SQL Server 2025 on 2026-05-10.
+
+Source-kind dispatch happens after the OUTPUT-clause parse: a `Values`-keyword token routes to the existing tuple-parsing path; a `Select`-keyword token routes to `Selection.Parse(…).Execute()`. Both paths funnel into one shared per-row encode loop that handles defaults / identity / rowversion / computed / constraints / OUTPUT — VALUES eagerly evaluates each cell expression to a `SqlValue` upstream, SELECT-source rows arrive pre-decoded via `RowDecoder` from the executed `SimulatedSqlResultSet`'s row bytes.
+
+Buffering is full: `ExecuteSelectSource` materializes the entire source result-set into `List<SqlValue[]>` before any destination write. This makes self-insert (`INSERT t SELECT … FROM t`) safe — without it, scanning the source's heap while inserting into it would yield undefined behavior.
+
+Projection-count vs insert-list mismatch fires at parse time via `selection.Schema.Length`: too few SELECT columns → **Msg 120 St 1 Cls 15** (`"The select list for the INSERT statement contains fewer items than the insert list. The number of SELECT values must match the number of INSERT columns."`); too many → **Msg 121 St 1 Cls 15** with `"more items"` wording. Empty source → silent success with rows-affected 0. CHECK / NOT NULL / PK / UNIQUE violations mid-source still trigger statement-level rollback (every row from the SELECT is unwound, matching the VALUES path's atomicity).
+
+EF Core 10 doesn't emit `INSERT … SELECT` from SaveChanges (which uses INSERT…OUTPUT VALUES for single-row and MERGE for batched-multi-row); this is reachable from raw SQL (`FromSqlInterpolated` / direct command text) and from application-side bulk-copy patterns. CTE-prefix INSERTs (`WITH … INSERT t SELECT …`) aren't modeled — orthogonal to this bundle since the simulator has no CTE support.
+
 ### MERGE / OUTPUT (EF Core SaveChanges shape only)
 - `INSERT ... OUTPUT INSERTED.<col>` (single-row).
 - `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch).

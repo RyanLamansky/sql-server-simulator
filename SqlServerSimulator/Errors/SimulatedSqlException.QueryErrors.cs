@@ -176,6 +176,22 @@ partial class SimulatedSqlException
         new("The text, ntext, and image data types cannot be compared or sorted, except when using IS NULL or LIKE operator.", 306, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 120: <c>INSERT … SELECT</c> whose source
+    /// projects fewer columns than the destination's column list (explicit
+    /// or implied). Distinct from Msg 121 (the "more items" variant).
+    /// </summary>
+    internal static SimulatedSqlException InsertSelectListFewerThanInsertList() =>
+        new("The select list for the INSERT statement contains fewer items than the insert list. The number of SELECT values must match the number of INSERT columns.", 120, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 121: <c>INSERT … SELECT</c> whose source
+    /// projects more columns than the destination's column list (explicit
+    /// or implied). Distinct from Msg 120 (the "fewer items" variant).
+    /// </summary>
+    internal static SimulatedSqlException InsertSelectListMoreThanInsertList() =>
+        new("The select list for the INSERT statement contains more items than the insert list. The number of SELECT values must match the number of INSERT columns.", 121, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 108: a positional <c>ORDER BY</c> ordinal
     /// (e.g. <c>order by 0</c>, <c>order by 5</c> with only 3 columns) is
     /// outside the projection's column count. The validation is 1-based.

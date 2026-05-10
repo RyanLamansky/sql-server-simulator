@@ -94,37 +94,12 @@ partial class Simulation
 
         var output = TryParseOutputClause(context, destinationTable, sourceColumnNames: null);
 
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        var sourceRows = new List<Expression[]>();
-
-        do
+        var sourceRows = context.Token switch
         {
-            if (context.GetNextRequired<Operator>() is not { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-
-            var sourceValues = new List<Expression>();
-            while (true)
-            {
-                // Position context.Token at the start of the value expression
-                // (just past the '(' or the previous ','), then let
-                // Expression.Parse consume it. Parse leaves context.Token at
-                // the first un-consumed token, which must be ',' or ')' here.
-                context.MoveNextRequired();
-                if (context.Token is Operator { Character: ',' or ')' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                sourceValues.Add(Expression.Parse(context));
-
-                if (context.Token is Operator { Character: ')' })
-                    break;
-                if (context.Token is not Operator { Character: ',' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-
-            sourceRows.Add([.. sourceValues]);
-
-        } while (context.GetNextOptional() is Operator { Character: ',' });
+            ReservedKeyword { Keyword: Keyword.Values } => EvaluateValuesTuples(context),
+            ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
 
         decimal? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
@@ -170,7 +145,7 @@ partial class Simulation
                     }
                 }
 
-                var source = sourceRow[i].Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+                var source = sourceRow[i];
                 EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Simulation);
                 var coerced = CoerceForInsert(source, targetColumn.Type);
                 rowValues[ordinal] = coerced;
@@ -231,5 +206,51 @@ partial class Simulation
         return output is { } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)
             : new SimulatedNonQuery(sourceRows.Count);
+    }
+
+    /// <summary>
+    /// Parses INSERT's <c>VALUES (…), (…)</c> source via the shared
+    /// <c>ParseValuesTuples</c> helper, then eagerly evaluates each cell
+    /// expression to a <see cref="SqlValue"/>. VALUES expressions can't
+    /// reference columns; the column-resolver hook always raises
+    /// <see cref="SimulatedSqlException.InvalidColumnName(string)"/>.
+    /// </summary>
+    private static List<SqlValue[]> EvaluateValuesTuples(ParserContext context)
+    {
+        var tuples = ParseValuesTuples(context);
+        var rows = new List<SqlValue[]>(tuples.Count);
+        foreach (var tuple in tuples)
+        {
+            var values = new SqlValue[tuple.Length];
+            for (var i = 0; i < tuple.Length; i++)
+                values[i] = tuple[i].Run(name => throw SimulatedSqlException.InvalidColumnName(name));
+            rows.Add(values);
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Parses and executes the <c>SELECT</c>-source side of <c>INSERT … SELECT</c>.
+    /// Validates the projection-count vs insert-list count at parse time
+    /// (Msg 120 / Msg 121, matching SQL Server's pre-execution diagnostic),
+    /// then buffers the result into a list of rows so the existing per-row
+    /// encode loop can run unchanged. Buffering also makes self-insert
+    /// (<c>INSERT t SELECT … FROM t</c>) safe — the source materializes
+    /// before any destination write.
+    /// </summary>
+    private static List<SqlValue[]> ExecuteSelectSource(ParserContext context, int expectedColumnCount)
+    {
+        var selection = Selection.Parse(context, depth: 0);
+
+        if (selection.Schema.Length < expectedColumnCount)
+            throw SimulatedSqlException.InsertSelectListFewerThanInsertList();
+        if (selection.Schema.Length > expectedColumnCount)
+            throw SimulatedSqlException.InsertSelectListMoreThanInsertList();
+
+        var resultSet = selection.Execute();
+        var rows = new List<SqlValue[]>();
+        foreach (var rowBytes in resultSet.RowBytes)
+            rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
+        return rows;
     }
 }

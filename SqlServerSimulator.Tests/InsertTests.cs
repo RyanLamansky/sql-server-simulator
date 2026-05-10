@@ -472,6 +472,237 @@ public class InsertTests
             insert t (a) values (null)
             """, 515);
 
+    [TestMethod]
+    public void InsertSelect_VanillaWithColumnList_CopiesAllRows()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (id int, name varchar(50));
+            create table dst (id int, name varchar(50));
+            insert src (id, name) values (1, 'alpha'), (2, 'beta'), (3, 'gamma')
+            """);
+        AreEqual(3, simulation.ExecuteNonQuery("insert dst (id, name) select id, name from src"));
+        AreEqual(3, simulation.ExecuteScalar("select count(*) from dst"));
+        AreEqual("beta", simulation.ExecuteScalar("select name from dst where id = 2"));
+    }
+
+    // No column list — INSERT skips IDENTITY and computed columns from the destination,
+    // and the SELECT projection must match the remaining writable columns.
+    [TestMethod]
+    public void InsertSelect_NoColumnList_TargetsWritableColumns()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (v varchar(20));
+            create table dst (id int identity, v varchar(20));
+            insert src (v) values ('alpha')
+            """);
+        AreEqual(1, simulation.ExecuteNonQuery("insert dst select v from src"));
+        AreEqual("alpha", simulation.ExecuteScalar("select v from dst where id = 1"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_TooManyColumns_RaisesMsg121()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int, b int, c int);
+            create table dst (a int, b int);
+            insert src (a, b, c) values (1, 2, 3)
+            """);
+        simulation.AssertSqlError("insert dst (a, b) select a, b, c from src", 121,
+            "The select list for the INSERT statement contains more items than the insert list. The number of SELECT values must match the number of INSERT columns.");
+    }
+
+    [TestMethod]
+    public void InsertSelect_TooFewColumns_RaisesMsg120()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int);
+            create table dst (a int, b int);
+            insert src (a) values (1)
+            """);
+        simulation.AssertSqlError("insert dst (a, b) select a from src", 120,
+            "The select list for the INSERT statement contains fewer items than the insert list. The number of SELECT values must match the number of INSERT columns.");
+    }
+
+    [TestMethod]
+    public void InsertSelect_EmptySource_SilentSuccess()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int);
+            create table dst (a int)
+            """);
+        AreEqual(0, simulation.ExecuteNonQuery("insert dst (a) select a from src where a > 0"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from dst"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_WhereJoinAggregateOffset_AllSelectionFeaturesWorkInSource()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (id int, score int);
+            create table aux (id int, label varchar(20));
+            create table dst (a int, b varchar(20));
+            insert src (id, score) values (1, 10), (2, 20), (3, 30);
+            insert aux (id, label) values (1, 'one'), (2, 'two'), (3, 'three')
+            """);
+        AreEqual(2, simulation.ExecuteNonQuery("""
+            insert dst (a, b)
+                select s.id, a.label
+                from src s inner join aux a on a.id = s.id
+                where s.score >= 20
+                order by s.id
+                offset 0 rows fetch next 5 rows only
+            """));
+        AreEqual("two", simulation.ExecuteScalar("select b from dst where a = 2"));
+        AreEqual("three", simulation.ExecuteScalar("select b from dst where a = 3"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_UnionAllSource_BothBranchesInserted()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (id int, score int);
+            create table dst (v int);
+            insert src (id, score) values (1, 10), (2, 20), (3, 30)
+            """);
+        AreEqual(6, simulation.ExecuteNonQuery("insert dst (v) select id from src union all select score from src"));
+        AreEqual(6, simulation.ExecuteScalar("select count(*) from dst"));
+        AreEqual(66, simulation.ExecuteScalar("select sum(v) from dst"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_SelfInsertBuffersSourceBeforeWrite()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int);
+            insert t (a) values (1), (2)
+            """);
+        AreEqual(2, simulation.ExecuteNonQuery("insert t (a) select a + 100 from t"));
+        AreEqual(4, simulation.ExecuteScalar("select count(*) from t"));
+        AreEqual(206, simulation.ExecuteScalar("select sum(a) from t"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_IdentityColumnSkippedFromAutoColumnList()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (v varchar(20));
+            create table dst (id int identity primary key, v varchar(20));
+            insert src (v) values ('alpha'), ('beta'), ('gamma')
+            """);
+        AreEqual(3, simulation.ExecuteNonQuery("insert dst select v from src"));
+        AreEqual(1, simulation.ExecuteScalar("select id from dst where v = 'alpha'"));
+        AreEqual(3, simulation.ExecuteScalar("select id from dst where v = 'gamma'"));
+    }
+
+    // Explicit IDENTITY column without SET IDENTITY_INSERT ON — same Msg 544 path
+    // as the VALUES-side; SELECT-source uses the existing pre-source identity check.
+    [TestMethod]
+    public void InsertSelect_ExplicitIdentityWithoutInsertOn_RaisesMsg544()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (id int, v varchar(20));
+            create table dst (id int identity, v varchar(20));
+            insert src (id, v) values (5, 'x')
+            """);
+        _ = simulation.AssertSqlError("insert dst (id, v) select id, v from src", 544);
+    }
+
+    [TestMethod]
+    public void InsertSelect_DefaultAppliesForOmittedColumn()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int);
+            create table dst (a int, b int default 99);
+            insert src (a) values (1), (2)
+            """);
+        AreEqual(2, simulation.ExecuteNonQuery("insert dst (a) select a from src"));
+        AreEqual(99, simulation.ExecuteScalar("select b from dst where a = 1"));
+        AreEqual(99, simulation.ExecuteScalar("select b from dst where a = 2"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_TypeCoercion_IntToBigInt()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int);
+            create table dst (a bigint);
+            insert src (a) values (12345)
+            """);
+        AreEqual(1, simulation.ExecuteNonQuery("insert dst (a) select a from src"));
+        AreEqual(12345L, simulation.ExecuteScalar("select a from dst"));
+    }
+
+    // CHECK violation in mid-SELECT-source rolls back the whole statement
+    // — same statement-level atomicity the VALUES path enjoys. The earlier
+    // rows from the same INSERT must not survive.
+    [TestMethod]
+    public void InsertSelect_CheckViolation_RollsBackEntireStatement()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int);
+            create table dst (a int check (a > 0));
+            insert src (a) values (10), (20), (-1)
+            """);
+        _ = simulation.AssertSqlError("insert dst (a) select a from src", 547);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from dst"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_OutputClause_ProjectsInsertedRows()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (v varchar(20));
+            create table dst (id int identity, v varchar(20));
+            insert src (v) values ('alpha'), ('beta')
+            """);
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand("insert dst (v) output inserted.id, inserted.v select v from src order by v").ExecuteReader();
+        var rows = new List<(int id, string v)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetString(1)));
+        CollectionAssert.AreEqual(new[] { (1, "alpha"), (2, "beta") }, rows);
+    }
+
+    [TestMethod]
+    public void InsertSelect_BareWithoutInto_Works()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (a int, b varchar(20));
+            create table dst (a int, b varchar(20));
+            insert src (a, b) values (1, 'x'), (2, 'y')
+            """);
+        AreEqual(2, simulation.ExecuteNonQuery("insert dst select a, b from src"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_AggregateSource_SingleRow()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table src (score int);
+            create table dst (total int);
+            insert src (score) values (10), (20), (30)
+            """);
+        AreEqual(1, simulation.ExecuteNonQuery("insert dst (total) select sum(score) from src"));
+        AreEqual(60, simulation.ExecuteScalar("select total from dst"));
+    }
+
     private static void AddTypedParameter(DbCommand command, string name, DbType dbType, object value)
     {
         var parameter = command.CreateParameter();
