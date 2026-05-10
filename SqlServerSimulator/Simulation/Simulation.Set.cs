@@ -38,7 +38,7 @@ partial class Simulation
 
     /// <summary>
     /// Parses <c>SET @v = expr</c>. Resolves the slot via
-    /// <see cref="ParserContext.GetVariableSlot"/> (Msg 137 if undeclared),
+    /// <see cref="BatchContext.GetVariableSlot"/> (Msg 137 if undeclared),
     /// evaluates the RHS with no FROM context, then coerces the result
     /// through the slot's declared type via
     /// <see cref="Parser.Expressions.Cast.ApplyCoercion"/> — preserves
@@ -48,7 +48,7 @@ partial class Simulation
     /// </summary>
     private static bool TryParseSetVariable(ParserContext context, AtPrefixedString variableToken)
     {
-        var slot = context.GetVariableSlot(variableToken.Value);
+        var slot = context.Batch.GetVariableSlot(variableToken.Value);
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
             return false;
@@ -73,7 +73,7 @@ partial class Simulation
             return false;
 
         var tableName = tableNameToken.Value;
-        if (!context.Simulation.HeapTables.TryGetValue(tableName, out var heapTable))
+        if (!context.CurrentDatabase.HeapTables.TryGetValue(tableName, out var heapTable))
             throw SimulatedSqlException.InvalidObjectName(tableNameToken);
 
         if (onOff == Keyword.On)

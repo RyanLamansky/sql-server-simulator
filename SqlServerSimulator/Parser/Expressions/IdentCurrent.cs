@@ -32,7 +32,7 @@ internal sealed class IdentCurrent : Expression
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
-        if (!this.simulation.HeapTables.TryGetValue(this.tableName, out var table))
+        if (!this.simulation.ActiveBatch!.CurrentDatabase.HeapTables.TryGetValue(this.tableName, out var table))
             return SqlValue.Null(ResultType);
         var identityOrdinal = table.IdentityOrdinal;
         return identityOrdinal < 0

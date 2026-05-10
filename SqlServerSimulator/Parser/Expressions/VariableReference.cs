@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class VariableReference(AtPrefixedString atPrefixed, ParserContext context) : Expression
 {
-    private readonly VariableSlot slot = context.GetVariableSlot(atPrefixed.Value);
+    private readonly VariableSlot slot = context.Batch.GetVariableSlot(atPrefixed.Value);
     private readonly string debugName = atPrefixed.Value;
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) => this.slot.Value;

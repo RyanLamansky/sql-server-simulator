@@ -20,7 +20,7 @@ internal enum CurrentTimeKind
 /// Backs the six current-time scalar functions (<c>GETDATE</c>,
 /// <c>GETUTCDATE</c>, <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>,
 /// <c>SYSDATETIMEOFFSET</c>, <c>CURRENT_TIMESTAMP</c>). All six read from
-/// the executing connection's <see cref="SimulatedDbConnection.CurrentStatementUtcNow"/>
+/// the executing statement's <see cref="StatementContext.UtcNow"/>
 /// — captured once per top-level statement — so multiple calls within one
 /// statement return identical values (matching SQL Server's per-statement
 /// freeze, probe-confirmed 2026-05-09). The simulator collapses local time
@@ -31,13 +31,12 @@ internal enum CurrentTimeKind
 /// <remarks>
 /// <para>
 /// Captures the <see cref="Simulation"/> at parse time and looks up the
-/// runtime-active connection via <see cref="Simulation.ActiveConnection"/>
-/// when <see cref="Run"/> fires. Critical for column-default reuse:
+/// runtime-active batch via <see cref="Simulation.ActiveBatch"/> when
+/// <see cref="Run"/> fires. Critical for column-default reuse:
 /// <c>HasDefaultValueSql("getutcdate()")</c> parses once at CREATE TABLE
-/// time on the connection that ran the CREATE, but every subsequent
-/// INSERT runs on whichever connection's batch is dispatching, and the
-/// default has to read that runtime connection's per-statement freeze, not
-/// the long-gone CREATE-time connection's.
+/// time, but every subsequent INSERT runs in a different batch, and the
+/// default has to read that runtime batch's per-statement freeze, not the
+/// long-gone CREATE-time batch's.
 /// </para>
 /// <para>
 /// <c>CURRENT_TIMESTAMP</c> is unique in being a parens-less identifier in
@@ -78,7 +77,7 @@ internal sealed class CurrentTimeFunction(Simulation simulation, CurrentTimeKind
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
-        var utcNow = this.simulation.ActiveConnection!.CurrentStatementUtcNow;
+        var utcNow = this.simulation.ActiveBatch!.CurrentStatement.UtcNow;
         return this.Kind switch
         {
             CurrentTimeKind.GetDate or CurrentTimeKind.GetUtcDate or CurrentTimeKind.CurrentTimestamp =>

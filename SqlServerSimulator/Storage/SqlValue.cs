@@ -148,7 +148,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// value. Stored in the primitive slot — no <c>byte[]</c> allocation —
     /// so encode / decode / equality / compare run alloc-free in the hot
     /// path. Auto-generated values flow in through
-    /// <see cref="Simulation.AllocateRowVersion"/>; the bytes form
+    /// <see cref="Database.AllocateRowVersion"/>; the bytes form
     /// (big-endian, 8 bytes) materializes on demand via
     /// <see cref="AsBytes"/> for CAST to varbinary, the wire-typed
     /// accessor, and debug rendering.

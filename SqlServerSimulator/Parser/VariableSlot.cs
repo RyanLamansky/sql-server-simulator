@@ -4,7 +4,7 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
-/// One entry in <see cref="ParserContext.Variables"/>: a declared variable
+/// One entry in <see cref="BatchContext.Variables"/>: a declared variable
 /// or a SqlClient-parameter-seeded variable. Holds the declared SqlType
 /// (so <c>SET @v = expr</c> can coerce the RHS through the existing CAST
 /// machinery before storing) plus the current value (mutable as the batch

@@ -18,7 +18,7 @@ namespace SqlServerSimulator.Storage;
 /// path; the bytes only materialize when a caller actually needs them
 /// (CAST to <c>varbinary</c>, <c>ToObject</c> at the wire boundary,
 /// debug-display rendering). The shared counter behind the values is
-/// <see cref="Simulation.AllocateRowVersion"/>: monotonic per-simulation,
+/// <see cref="Database.AllocateRowVersion"/>: monotonic per-database,
 /// mirroring SQL Server's database-scoped <c>@@DBTS</c>.
 /// </remarks>
 internal sealed class RowVersionSqlType() : SqlType(SqlTypeCategory.Other)

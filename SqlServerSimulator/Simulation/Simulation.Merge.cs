@@ -29,7 +29,7 @@ partial class Simulation
         var destinationTableToken = context.Token as StringToken
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var destinationTable = context.Simulation.HeapTables.TryGetValue(destinationTableToken.Value, out var table)
+        var destinationTable = context.CurrentDatabase.HeapTables.TryGetValue(destinationTableToken.Value, out var table)
             ? table
             : throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
 
@@ -302,7 +302,7 @@ partial class Simulation
             for (var i = 0; i < destinationTable.Columns.Length; i++)
             {
                 if (destinationTable.Columns[i].Type == SqlType.RowVersion)
-                    rowValues[i] = SqlValue.FromRowVersion(context.Simulation.AllocateRowVersion());
+                    rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
             }
 
             EvaluateComputedColumns(destinationTable, rowValues);
@@ -311,7 +311,7 @@ partial class Simulation
 
             var storedValues = ProjectStoredValues(destinationTable, rowValues);
             EnforceKeyConstraints(destinationTable, storedValues);
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.CurrentUndoLog);
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.Batch.CurrentUndoLog);
             insertedCount++;
 
             if (output is { } o)

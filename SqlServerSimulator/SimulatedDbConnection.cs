@@ -9,6 +9,16 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal readonly Simulation Simulation = simulation;
 
     /// <summary>
+    /// The database this session is pointed at. Defaults to the entry named
+    /// <see cref="Simulation.DefaultDatabaseName"/> at connection construction;
+    /// future <c>USE &lt;db&gt;</c> support will switch the pointer to a
+    /// different entry of <see cref="Simulation.Databases"/>. Per-database
+    /// state (heap tables, compatibility level, rowversion counter) reads
+    /// through this pointer.
+    /// </summary>
+    internal Database CurrentDatabase = simulation.Databases[Simulation.DefaultDatabaseName];
+
+    /// <summary>
     /// The single active explicit transaction on this connection, or null if
     /// none. SqlClient rejects parallel transactions on the same connection
     /// (probe-confirmed: <c>InvalidOperationException: SqlConnection does
@@ -19,33 +29,6 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     /// <see cref="SimulatedDbTransaction.Rollback"/> can unwind them.
     /// </summary>
     internal SimulatedDbTransaction? CurrentTransaction;
-
-    /// <summary>
-    /// UTC timestamp captured at the top of each top-level statement (in
-    /// <see cref="Simulation.CreateResultSetsForCommand"/>'s loop body) and
-    /// consumed by the current-time scalar functions (<c>GETDATE</c>,
-    /// <c>GETUTCDATE</c>, <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>,
-    /// <c>SYSDATETIMEOFFSET</c>, <c>CURRENT_TIMESTAMP</c>). Real SQL Server
-    /// freezes these within a statement (probe-confirmed 2026-05-09 — two
-    /// <c>SYSDATETIME()</c> calls in one SELECT return identical values to
-    /// the 7th decimal digit; an UPDATE that stamps every row with
-    /// <c>SYSDATETIME()</c> writes the same value into all rows). The
-    /// simulator follows by capturing once per statement and serving every
-    /// call within that statement from the same snapshot. The simulator does
-    /// no local-time conversion: per the Azure SQL Database default,
-    /// local-time-returning variants (<c>GETDATE</c> / <c>SYSDATETIME</c> /
-    /// <c>CURRENT_TIMESTAMP</c>) and UTC-returning variants share this single
-    /// UTC instant, and <c>SYSDATETIMEOFFSET</c> reports a <c>+00:00</c>
-    /// offset.
-    /// </summary>
-    /// <remarks>
-    /// Lives on the connection (not the <see cref="Simulation"/>) because
-    /// <see cref="DbConnection"/> isn't thread-safe and statements execute
-    /// serially through one connection — the field's safe-by-construction
-    /// against the multi-connection-on-shared-Simulation race that broader
-    /// session state (<see cref="LastStatementRowCount"/> etc.) faces.
-    /// </remarks>
-    internal DateTime CurrentStatementUtcNow;
 
     /// <summary>
     /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
@@ -93,16 +76,16 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     /// Decides whether string truncation should raise the verbose Msg 2628
     /// (with table, column, and truncated value) or the legacy Msg 8152
     /// (single line, no detail). Precedence: an explicit
-    /// <see cref="Simulation.VerboseTruncationWarnings"/> setting wins;
-    /// otherwise this connection's trace flag 460 forces verbose; otherwise
-    /// the database compatibility level decides (verbose iff &gt;=
-    /// <see cref="CompatibilityLevel.Sql160"/>, the level at which it became
-    /// default in SQL Server 2022).
+    /// <see cref="Database.VerboseTruncationWarnings"/> setting on the
+    /// current database wins; otherwise this connection's trace flag 460
+    /// forces verbose; otherwise the database's compatibility level decides
+    /// (verbose iff &gt;= <see cref="CompatibilityLevel.Sql160"/>, the level
+    /// at which it became default in SQL Server 2022).
     /// </summary>
     internal bool IsVerboseTruncationActive() =>
-        this.Simulation.VerboseTruncationWarnings
+        this.CurrentDatabase.VerboseTruncationWarnings
         ?? (this.TraceFlags.Contains(460)
-            || this.Simulation.CompatibilityLevel >= CompatibilityLevel.Sql160);
+            || this.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql160);
 
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }

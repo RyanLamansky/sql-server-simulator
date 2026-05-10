@@ -1,7 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
-using System.Collections.Concurrent;
 using System.Data.Common;
 using System.Security.Cryptography;
 
@@ -34,44 +33,45 @@ public sealed partial class Simulation
     /// <returns>A new simulated database connection instance.</returns>
     public DbConnection CreateDbConnection() => new SimulatedDbConnection(this);
 
-    /// <summary>User tables, keyed by name.</summary>
-    internal readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
-
     /// <summary>
     /// The database name woven into error messages that include a fully
     /// qualified table reference (e.g. Msg 515's <c>"&lt;db&gt;.dbo.&lt;t&gt;"</c>,
-    /// Msg 547's <c>database "&lt;db&gt;"</c> wording). The simulator has no
-    /// real per-database namespacing; this is a fixed placeholder so the
-    /// emitted text stays well-formed and recognizable.
+    /// Msg 547's <c>database "&lt;db&gt;"</c> wording). Also the key of the
+    /// single <see cref="Database"/> entry in <see cref="Databases"/> that
+    /// every freshly-constructed <see cref="Simulation"/> ships with.
     /// </summary>
     internal const string DefaultDatabaseName = "simulated";
 
     /// <summary>
-    /// Database compatibility level. New simulations default to the most recent
-    /// supported level; user code switches via
-    /// <c>ALTER DATABASE … SET COMPATIBILITY_LEVEL = N</c>.
+    /// Per-database state hosted by this server instance, keyed by name.
+    /// Constructor seeds one entry (<see cref="DefaultDatabaseName"/>);
+    /// <c>USE &lt;db&gt;</c> / multi-database support graft onto the dictionary
+    /// when needed. <see cref="SimulatedDbConnection.CurrentDatabase"/>
+    /// tracks which entry the session is pointed at.
     /// </summary>
-    internal CompatibilityLevel CompatibilityLevel = CompatibilityLevel.Sql170;
+    internal readonly Dictionary<string, Database> Databases = new(Collation.Default)
+    {
+        [DefaultDatabaseName] = new Database(DefaultDatabaseName),
+    };
 
-    private long rowVersionCounter;
-
-    private readonly AsyncLocal<SimulatedDbConnection?> activeConnection = new();
+    private readonly AsyncLocal<BatchContext?> activeBatch = new();
 
     /// <summary>
-    /// The connection currently executing a command on this thread/flow,
-    /// published by <see cref="CreateResultSetsForCommand"/> for the lifetime
-    /// of one command's iteration. Per-session state lives on
-    /// <see cref="SimulatedDbConnection"/>; expressions whose runtime values
-    /// depend on session state (<see cref="Parser.Expressions.CurrentTimeFunction"/>,
+    /// The batch currently executing on this thread/flow, published by
+    /// <see cref="CreateResultSetsForCommand"/> for the lifetime of one
+    /// command's iteration. Expressions whose runtime values depend on
+    /// per-batch / per-session / per-database state
+    /// (<see cref="Parser.Expressions.CurrentTimeFunction"/>,
     /// <see cref="Parser.Expressions.LastIdentityExpression"/>,
-    /// <see cref="Parser.Expressions.RowCountExpression"/>) read through this
-    /// pointer rather than capturing a connection at parse time. Parse-time
-    /// capture is wrong for any expression embedded in a CREATE TABLE column
-    /// default — <c>HasDefaultValueSql("getutcdate()")</c> parses once on the
-    /// connection that ran the CREATE, but every subsequent INSERT runs on
-    /// whichever connection's batch is dispatching, and the column default's
-    /// <c>getutcdate()</c> must read that runtime connection's per-statement
-    /// time, not the long-gone CREATE-time connection's.
+    /// <see cref="Parser.Expressions.RowCountExpression"/>,
+    /// <see cref="Parser.Expressions.IdentCurrent"/>) read through this
+    /// pointer rather than capturing a connection / batch at parse time.
+    /// Parse-time capture is wrong for any expression reused across batches
+    /// — <c>HasDefaultValueSql("getutcdate()")</c> parses once on the
+    /// connection that ran the CREATE TABLE, but every subsequent INSERT
+    /// runs on whichever connection's batch is dispatching, and the column
+    /// default's <c>getutcdate()</c> must read that runtime batch's
+    /// per-statement time.
     /// </summary>
     /// <remarks>
     /// Backed by <see cref="AsyncLocal{T}"/> rather than a plain field because
@@ -80,31 +80,11 @@ public sealed partial class Simulation
     /// pointer. <see cref="AsyncLocal{T}"/> also threads through Task
     /// continuations, in case the simulator ever hosts async dispatch.
     /// </remarks>
-    internal SimulatedDbConnection? ActiveConnection
+    internal BatchContext? ActiveBatch
     {
-        get => this.activeConnection.Value;
-        private set => this.activeConnection.Value = value;
+        get => this.activeBatch.Value;
+        private set => this.activeBatch.Value = value;
     }
-
-    /// <summary>
-    /// Allocates the next <c>rowversion</c> counter value (also surfaced as
-    /// <c>@@DBTS</c> in real SQL Server). Database-scoped, monotonic,
-    /// shared across every <c>rowversion</c> column in every table — INSERT
-    /// and UPDATE on a rowversion-bearing table both advance it. The
-    /// counter is the in-memory representation; the 8-byte big-endian wire
-    /// form materializes on demand via <see cref="SqlValue.AsBytes"/> /
-    /// <see cref="RowVersionSqlType.Encode"/>, never per-row in the hot
-    /// path.
-    /// </summary>
-    internal long AllocateRowVersion() => Interlocked.Increment(ref this.rowVersionCounter);
-
-    /// <summary>
-    /// Explicit override of the per-database <c>VERBOSE_TRUNCATION_WARNINGS</c>
-    /// scoped configuration; <c>null</c> means follow the compatibility-level
-    /// default. Set via
-    /// <c>ALTER DATABASE SCOPED CONFIGURATION SET VERBOSE_TRUNCATION_WARNINGS = ON|OFF</c>.
-    /// </summary>
-    internal bool? VerboseTruncationWarnings;
 
     /// <summary>
     /// System tables (e.g. <c>systypes</c>). Materialized once per process and
@@ -186,10 +166,11 @@ public sealed partial class Simulation
     /// </remarks>
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
-        var context = new ParserContext(command);
+        var batch = new BatchContext(command);
+        var context = batch.Parser;
         var connection = context.Connection;
-        var priorActive = this.ActiveConnection;
-        this.ActiveConnection = connection;
+        var priorActive = this.ActiveBatch;
+        this.ActiveBatch = batch;
         var requireSemicolonBeforeCte = false;
         try
         {
@@ -207,7 +188,7 @@ public sealed partial class Simulation
                 // CTE bindings live for exactly one statement. Clear at the
                 // top of every iteration; a WITH prefix below repopulates.
                 context.CteBindings = null;
-                connection.CurrentStatementUtcNow = DateTime.UtcNow;
+                batch.CurrentStatement.UtcNow = DateTime.UtcNow;
 
                 // WITH prefix applies to the immediately-following SELECT /
                 // INSERT / UPDATE / DELETE / MERGE. ParseCteBindings sets
@@ -309,11 +290,11 @@ public sealed partial class Simulation
                 requireSemicolonBeforeCte = true;
             }
 
-            WriteBackOutputParameters(context);
+            WriteBackOutputParameters(batch);
         }
         finally
         {
-            this.ActiveConnection = priorActive;
+            this.ActiveBatch = priorActive;
         }
     }
 
@@ -343,9 +324,9 @@ public sealed partial class Simulation
     /// mutated by `SET @x = 999`, reads 999 from the caller's
     /// <c>param.Value</c> after <c>ExecuteNonQuery</c>).
     /// </summary>
-    private static void WriteBackOutputParameters(ParserContext context)
+    private static void WriteBackOutputParameters(BatchContext batch)
     {
-        foreach (var slot in context.Variables.Values)
+        foreach (var slot in batch.Variables.Values)
         {
             if (slot.Parameter is { } parameter
                 && parameter.Direction is System.Data.ParameterDirection.InputOutput or System.Data.ParameterDirection.Output)
@@ -505,8 +486,8 @@ public sealed partial class Simulation
         var log = context.Connection.CurrentTransaction?.UndoLog ?? new UndoLog();
         var marker = log.Position;
 
-        var savedLog = context.CurrentUndoLog;
-        context.CurrentUndoLog = log;
+        var savedLog = context.Batch.CurrentUndoLog;
+        context.Batch.CurrentUndoLog = log;
         try
         {
             return body(context);
@@ -518,7 +499,7 @@ public sealed partial class Simulation
         }
         finally
         {
-            context.CurrentUndoLog = savedLog;
+            context.Batch.CurrentUndoLog = savedLog;
         }
     }
 }

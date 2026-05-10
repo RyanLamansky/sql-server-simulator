@@ -13,7 +13,7 @@ partial class Simulation
     /// The simulator has a single database, so any database name (including
     /// <c>CURRENT</c>) is accepted and ignored.
     /// </summary>
-    private bool TryParseAlter(ParserContext context)
+    private static bool TryParseAlter(ParserContext context)
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Database })
             return false;
@@ -28,7 +28,7 @@ partial class Simulation
             && TryParseAlterDatabaseSet(context);
     }
 
-    private bool TryParseAlterDatabaseSet(ParserContext context)
+    private static bool TryParseAlterDatabaseSet(ParserContext context)
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             return false;
@@ -47,11 +47,11 @@ partial class Simulation
         if (!Enum.IsDefined((CompatibilityLevel)requested))
             throw SimulatedSqlException.InvalidCompatibilityLevel();
 
-        this.CompatibilityLevel = (CompatibilityLevel)requested;
+        context.CurrentDatabase.CompatibilityLevel = (CompatibilityLevel)requested;
         return true;
     }
 
-    private bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
+    private static bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
     {
         context.MoveNextRequired();
         if (!context.MatchContextual(ContextualKeyword.Configuration))
@@ -70,7 +70,7 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
             return false;
 
-        this.VerboseTruncationWarnings = on == Keyword.On;
+        context.CurrentDatabase.VerboseTruncationWarnings = on == Keyword.On;
         return true;
     }
 }

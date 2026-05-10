@@ -31,7 +31,7 @@ partial class Simulation
         if (next is not StringToken leadingIdentToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        _ = context.Simulation.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
+        _ = context.CurrentDatabase.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
         context.MoveNextOptional();
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
@@ -183,7 +183,7 @@ partial class Simulation
         MutationOutputProjection? output)
     {
         foreach (var (pageIndex, slotIndex, _) in deleted)
-            table.Heap.DeleteAt(pageIndex, slotIndex, context.CurrentUndoLog);
+            table.Heap.DeleteAt(pageIndex, slotIndex, context.Batch.CurrentUndoLog);
 
         if (output is not null)
         {

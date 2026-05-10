@@ -1,0 +1,101 @@
+using SqlServerSimulator.Storage;
+using System.Data.Common;
+
+namespace SqlServerSimulator.Parser;
+
+/// <summary>
+/// Per-batch runtime state. One <see cref="BatchContext"/> is constructed
+/// per command execution by <see cref="Simulation.CreateResultSetsForCommand"/>;
+/// it owns the <see cref="ParserContext"/> that walks the command's tokens
+/// and the runtime state both parsing and execution mutate (variable slots,
+/// undo log). Parsers see the parser context and reach runtime state via
+/// <see cref="ParserContext.Batch"/>; the dispatch loop and writeback
+/// helpers operate on the batch context directly.
+/// </summary>
+internal sealed class BatchContext
+{
+    /// <summary>The parser-side cursor / scratch state for this batch.</summary>
+    public readonly ParserContext Parser;
+
+    /// <summary>
+    /// Heap-mutation undo log scoped to the current top-level statement. Set
+    /// by <see cref="Simulation.CreateResultSetsForCommand"/>'s mutation
+    /// dispatch around each INSERT / UPDATE / DELETE / MERGE; the
+    /// <see cref="Heap.Insert"/> / <see cref="Heap.DeleteAt"/>
+    /// call sites read it from here and append entries on success. A
+    /// statement that throws mid-execution (e.g. a multi-row INSERT whose
+    /// fourth row violates a constraint) walks the log backwards before the
+    /// exception propagates, restoring the heap to its pre-statement state.
+    /// Explicit transactions reuse the same log shape, lifetime extended
+    /// across statements until COMMIT / ROLLBACK.
+    /// </summary>
+    public UndoLog? CurrentUndoLog;
+
+    /// <summary>
+    /// Per-statement scratch frame, allocated once per batch and overwritten
+    /// in place by the dispatch loop at the top of each statement iteration.
+    /// See <see cref="StatementContext"/> for the fields it carries.
+    /// </summary>
+    public readonly StatementContext CurrentStatement = new();
+
+    /// <summary>The connection executing this batch.</summary>
+    public SimulatedDbConnection Connection => this.Parser.Connection;
+
+    /// <summary>The database this batch is executing against.</summary>
+    public Database CurrentDatabase => this.Parser.CurrentDatabase;
+
+    /// <summary>
+    /// Per-batch variable store. Seeded with SqlClient parameters at
+    /// construction; <c>DECLARE</c> adds entries; <c>SET</c> /
+    /// <c>SELECT @v = expr</c> mutate them. Parameters and declared variables
+    /// share a namespace — a <c>DECLARE</c> whose name collides with a
+    /// parameter raises Msg 134 (probe-confirmed: real SQL Server treats
+    /// SqlClient parameters as if they were already declared). End-of-batch
+    /// write-back to <c>InputOutput</c> / <c>Output</c> direction parameters
+    /// reads from this store.
+    /// </summary>
+    public readonly Dictionary<string, VariableSlot> Variables;
+
+    public BatchContext(SimulatedDbCommand command)
+    {
+        this.Variables = SeedVariables(command);
+        this.Parser = new ParserContext(command, this);
+    }
+
+    private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
+    {
+        var dict = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        foreach (DbParameter parameter in command.Parameters)
+        {
+            var name = parameter.ParameterName;
+            if (name.StartsWith('@'))
+                name = name[1..];
+            var dbType = SqlType.GetByDbType(parameter.DbType);
+            var seed = parameter.Value is null or DBNull
+                ? SqlValue.Null(dbType)
+                : dbType.ConvertParameter(parameter.Value);
+            // For decimal / numeric parameters, ConvertParameter widens the
+            // declared type to fit the value's natural scale (e.g. caller sends
+            // 123.45m without an explicit scale → widens to decimal(28, 2)).
+            // Track the post-widen type so VariableReference.GetSqlType returns
+            // the right schema and downstream readers don't truncate.
+            var declaredType = seed.IsNull ? dbType : seed.Type;
+            dict[name] = new VariableSlot(declaredType, declaredMaxLength: null, seed, parameter);
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to a live <see cref="VariableSlot"/>
+    /// reference. Captured at parse time by <see cref="Expressions.VariableReference"/>
+    /// so subsequent <c>SET</c> / <c>SELECT @v = expr</c> mutations are
+    /// observable when the expression evaluates at runtime — the dictionary
+    /// is append-only within a batch (re-DECLARE raises Msg 134), so a slot
+    /// reference captured during parse stays valid.
+    /// </summary>
+    /// <exception cref="SimulatedSqlException">Must declare the scalar variable \"@{value of <paramref name="name"/>}\".</exception>
+    public VariableSlot GetVariableSlot(string name) =>
+        Variables.TryGetValue(name, out var slot)
+        ? slot
+        : throw SimulatedSqlException.MustDeclareScalarVariable(name);
+}

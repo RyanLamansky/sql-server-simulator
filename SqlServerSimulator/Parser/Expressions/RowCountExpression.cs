@@ -19,7 +19,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal sealed class RowCountExpression(Simulation simulation) : Expression
 {
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
-        SqlValue.FromInt32(simulation.ActiveConnection!.LastStatementRowCount);
+        SqlValue.FromInt32(simulation.ActiveBatch!.Connection.LastStatementRowCount);
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

@@ -49,7 +49,7 @@ partial class Simulation
         // alias for the FROM clause that follows (multi-table form). Try
         // table-resolution now; if it fails, the FROM clause must provide
         // the binding via alias-matching.
-        _ = context.Simulation.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
+        _ = context.CurrentDatabase.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -252,9 +252,9 @@ partial class Simulation
         EnforceKeyConstraintsForUpdate(table, affected);
 
         foreach (var (pageIndex, slotIndex, _, _) in affected)
-            table.Heap.DeleteAt(pageIndex, slotIndex, context.CurrentUndoLog);
+            table.Heap.DeleteAt(pageIndex, slotIndex, context.Batch.CurrentUndoLog);
         foreach (var (_, _, fullNew, _) in affected)
-            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), context.CurrentUndoLog);
+            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), context.Batch.CurrentUndoLog);
 
         if (output is not null)
         {
@@ -351,7 +351,7 @@ partial class Simulation
         for (var ci = 0; ci < table.Columns.Length; ci++)
         {
             if (table.Columns[ci].Type == SqlType.RowVersion)
-                newValues[ci] = SqlValue.FromRowVersion(context.Simulation.AllocateRowVersion());
+                newValues[ci] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
         }
 
         EvaluateComputedColumns(table, newValues);

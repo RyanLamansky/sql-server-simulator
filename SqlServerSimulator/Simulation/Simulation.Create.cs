@@ -261,7 +261,7 @@ partial class Simulation
         var keyConstraints = ResolveKeyConstraints(tableName.Value, heapColumns!, pendingKeys);
         var checkConstraints = ResolveCheckConstraints(tableName.Value, pendingChecks);
         var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints, checkConstraints);
-        return this.HeapTables.TryAdd(heapTable.Name, heapTable)
+        return context.CurrentDatabase.HeapTables.TryAdd(heapTable.Name, heapTable)
             ? true
             : throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
     }

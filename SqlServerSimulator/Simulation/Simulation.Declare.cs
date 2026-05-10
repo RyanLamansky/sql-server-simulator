@@ -8,7 +8,7 @@ partial class Simulation
 {
     /// <summary>
     /// Parses <c>DECLARE @v TYPE [= expr] [, @w TYPE [= expr] ...]</c>.
-    /// Variables register on <see cref="ParserContext.Variables"/> with their
+    /// Variables register on <see cref="BatchContext.Variables"/> with their
     /// declared type and (optional) initializer-evaluated value, defaulting
     /// to typed NULL. Re-declaring an existing name (including a name
     /// occupied by a SqlClient parameter) raises Msg 134.
@@ -28,7 +28,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             var variableName = variableToken.Value;
-            if (context.Variables.ContainsKey(variableName))
+            if (context.Batch.Variables.ContainsKey(variableName))
                 throw SimulatedSqlException.VariableAlreadyDeclared(variableName);
 
             // Optional AS keyword between name and type spec — `DECLARE @v AS INT`.
@@ -48,7 +48,7 @@ partial class Simulation
                 rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
             }
 
-            context.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
+            context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
         } while (context.Token is Operator { Character: ',' });
 
         return rowsAffected;

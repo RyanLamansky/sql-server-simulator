@@ -1,6 +1,5 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
-using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator.Parser;
@@ -28,11 +27,19 @@ namespace SqlServerSimulator.Parser;
 /// cursor "before" or "after" something the contract didn't promise.
 /// </para>
 /// </remarks>
-internal sealed class ParserContext(SimulatedDbCommand command)
+internal sealed class ParserContext(SimulatedDbCommand command, BatchContext batch)
 {
 #pragma warning disable CA2213 // Disposable fields should be disposed
     public readonly SimulatedDbCommand Command = command;
 #pragma warning restore CA2213 // Suppressed because ParserContext doesn't own the command object.
+
+    /// <summary>
+    /// The owning batch's runtime state (variable slots, undo log). Parsers
+    /// route runtime concerns through this backreference; the parser context
+    /// itself holds only parse-time scratch (tokenizer cursor, collectors,
+    /// outer-type resolver).
+    /// </summary>
+    public readonly BatchContext Batch = batch;
 
     private readonly string commandText = string.IsNullOrEmpty(command.CommandText) ?
         throw new InvalidOperationException("ExecuteReader: CommandText property has not been initialized") :
@@ -49,20 +56,6 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// The most recently identified token in the command string.
     /// </summary>
     public Token? Token;
-
-    /// <summary>
-    /// Heap-mutation undo log scoped to the current top-level statement. Set
-    /// by <see cref="Simulation.CreateResultSetsForCommand"/>'s mutation
-    /// dispatch around each INSERT / UPDATE / DELETE / MERGE; the
-    /// <see cref="Heap.Insert"/> / <see cref="Heap.DeleteAt"/>
-    /// call sites read it from here and append entries on success. A
-    /// statement that throws mid-execution (e.g. a multi-row INSERT whose
-    /// fourth row violates a constraint) walks the log backwards before
-    /// the exception propagates, restoring the heap to its pre-statement
-    /// state. Bundle 2 will reuse the same log shape, lifetime extended
-    /// across statements when an explicit <c>BeginTransaction</c> is open.
-    /// </summary>
-    public UndoLog? CurrentUndoLog;
 
     /// <summary>
     /// True while an <c>Expression.Parse</c> call is running for a
@@ -121,47 +114,12 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// <c>Simulation.ParseCteBindings</c> before the SELECT / INSERT /
     /// UPDATE / DELETE / MERGE dispatch and cleared at the top of the next
     /// statement iteration. Consulted by <c>Selection.ParseSingleFromSource</c>
-    /// before falling through to <see cref="Simulation.HeapTables"/>; matching
+    /// before falling through to <see cref="Database.HeapTables"/>; matching
     /// names build a deferred-plan <see cref="FromSource"/> (re-runs per
     /// reference, parallel to derived tables in FROM). Null when no WITH
     /// prefix is in scope.
     /// </summary>
     public Dictionary<string, CteBinding>? CteBindings;
-
-    /// <summary>
-    /// Per-batch variable store. Seeded with SqlClient parameters at
-    /// construction; <c>DECLARE</c> adds entries; <c>SET</c> /
-    /// <c>SELECT @v = expr</c> mutate them. Parameters and declared variables
-    /// share a namespace — a <c>DECLARE</c> whose name collides with a
-    /// parameter raises Msg 134 (probe-confirmed: real SQL Server treats
-    /// SqlClient parameters as if they were already declared). End-of-batch
-    /// write-back to <c>InputOutput</c> / <c>Output</c> direction parameters
-    /// reads from this store.
-    /// </summary>
-    public readonly Dictionary<string, VariableSlot> Variables = SeedVariables(command);
-
-    private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
-    {
-        var dict = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
-        foreach (DbParameter parameter in command.Parameters)
-        {
-            var name = parameter.ParameterName;
-            if (name.StartsWith('@'))
-                name = name[1..];
-            var dbType = SqlType.GetByDbType(parameter.DbType);
-            var seed = parameter.Value is null or DBNull
-                ? SqlValue.Null(dbType)
-                : dbType.ConvertParameter(parameter.Value);
-            // For decimal / numeric parameters, ConvertParameter widens the
-            // declared type to fit the value's natural scale (e.g. caller sends
-            // 123.45m without an explicit scale → widens to decimal(28, 2)).
-            // Track the post-widen type so VariableReference.GetSqlType returns
-            // the right schema and downstream readers don't truncate.
-            var declaredType = seed.IsNull ? dbType : seed.Type;
-            dict[name] = new VariableSlot(declaredType, declaredMaxLength: null, seed, parameter);
-        }
-        return dict;
-    }
 
     public Simulation Simulation => Command.simulation;
 
@@ -176,18 +134,13 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public SimulatedDbConnection Connection => (SimulatedDbConnection)Command.Connection!;
 
     /// <summary>
-    /// Resolves <paramref name="name"/> to a live <see cref="VariableSlot"/>
-    /// reference. Captured at parse time by <see cref="Expressions.VariableReference"/>
-    /// so subsequent <c>SET</c> / <c>SELECT @v = expr</c> mutations are
-    /// observable when the expression evaluates at runtime — the dictionary
-    /// is append-only within a batch (re-DECLARE raises Msg 134), so a slot
-    /// reference captured during parse stays valid.
+    /// The database this batch is executing against. Threads through
+    /// <see cref="SimulatedDbConnection.CurrentDatabase"/>; once
+    /// <c>USE &lt;db&gt;</c> support lands, switching mid-batch flips this
+    /// for subsequent statements without parsers having to thread a separate
+    /// pointer.
     /// </summary>
-    /// <exception cref="SimulatedSqlException">Must declare the scalar variable \"@{value of <paramref name="name"/>}\".</exception>
-    public VariableSlot GetVariableSlot(string name) =>
-        Variables.TryGetValue(name, out var slot)
-        ? slot
-        : throw SimulatedSqlException.MustDeclareScalarVariable(name);
+    public Database CurrentDatabase => Connection.CurrentDatabase;
 
     /// <summary>
     /// Snapshots the current tokenizer position and current token so a

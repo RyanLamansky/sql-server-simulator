@@ -429,7 +429,7 @@ internal sealed partial class Selection
                         _ = context.MoveNext();
                         if (context.Token is Operator { Character: '=' })
                         {
-                            var slot = context.GetVariableSlot(atPrefixed.Value);
+                            var slot = context.Batch.GetVariableSlot(atPrefixed.Value);
                             context.MoveNextRequired();
                             var rhs = Expression.Parse(context);
                             expressions.Add(new AssignmentExpression(slot, rhs));
@@ -779,7 +779,7 @@ internal sealed partial class Selection
                         lateralPlan: cteBinding.Plan);
                 }
 
-                if (!context.Simulation.HeapTables.TryGetValue(tableName.Value, out var heapTable)
+                if (!context.CurrentDatabase.HeapTables.TryGetValue(tableName.Value, out var heapTable)
                     && !Simulation.SystemHeapTables.TryGetValue(tableName.Value, out heapTable))
                 {
                     throw SimulatedSqlException.InvalidObjectName(tableName);

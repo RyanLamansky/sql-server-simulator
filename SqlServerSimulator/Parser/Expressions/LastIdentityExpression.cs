@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// Captures the <see cref="Simulation"/> at parse time and looks up the
-/// runtime-active connection via <see cref="Simulation.ActiveConnection"/>
+/// runtime-active batch via <see cref="Simulation.ActiveBatch"/>
 /// when <see cref="Run"/> fires. Late-binding matters when this expression
 /// is parsed once and reused across many statements (e.g. baked into a
 /// column default) on possibly-different connections.
@@ -33,7 +33,7 @@ internal sealed class LastIdentityExpression : Expression
     }
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
-        this.simulation.ActiveConnection!.LastIdentity is decimal v
+        this.simulation.ActiveBatch!.Connection.LastIdentity is decimal v
             ? SqlValue.FromDecimal(ResultType, v)
             : SqlValue.Null(ResultType);
 
