@@ -20,14 +20,25 @@ internal enum CurrentTimeKind
 /// Backs the six current-time scalar functions (<c>GETDATE</c>,
 /// <c>GETUTCDATE</c>, <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>,
 /// <c>SYSDATETIMEOFFSET</c>, <c>CURRENT_TIMESTAMP</c>). All six read from
-/// <see cref="Simulation.CurrentStatementUtcNow"/> — captured once per
-/// top-level statement — so multiple calls within one statement return
-/// identical values (matching SQL Server's per-statement freeze, probe-
-/// confirmed 2026-05-09). The simulator collapses local time onto UTC the
-/// way Azure SQL Database does by default: every variant returns the same
-/// instant; the offset-returning variant reports <c>+00:00</c>.
+/// the executing connection's <see cref="SimulatedDbConnection.CurrentStatementUtcNow"/>
+/// — captured once per top-level statement — so multiple calls within one
+/// statement return identical values (matching SQL Server's per-statement
+/// freeze, probe-confirmed 2026-05-09). The simulator collapses local time
+/// onto UTC the way Azure SQL Database does by default: every variant
+/// returns the same instant; the offset-returning variant reports
+/// <c>+00:00</c>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Captures the <see cref="Simulation"/> at parse time and looks up the
+/// runtime-active connection via <see cref="Simulation.ActiveConnection"/>
+/// when <see cref="Run"/> fires. Critical for column-default reuse:
+/// <c>HasDefaultValueSql("getutcdate()")</c> parses once at CREATE TABLE
+/// time on the connection that ran the CREATE, but every subsequent
+/// INSERT runs on whichever connection's batch is dispatching, and the
+/// default has to read that runtime connection's per-statement freeze, not
+/// the long-gone CREATE-time connection's.
+/// </para>
 /// <para>
 /// <c>CURRENT_TIMESTAMP</c> is unique in being a parens-less identifier in
 /// SQL Server's grammar. The parser recognizes it as
@@ -67,7 +78,7 @@ internal sealed class CurrentTimeFunction(Simulation simulation, CurrentTimeKind
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue)
     {
-        var utcNow = this.simulation.CurrentStatementUtcNow;
+        var utcNow = this.simulation.ActiveConnection!.CurrentStatementUtcNow;
         return this.Kind switch
         {
             CurrentTimeKind.GetDate or CurrentTimeKind.GetUtcDate or CurrentTimeKind.CurrentTimestamp =>

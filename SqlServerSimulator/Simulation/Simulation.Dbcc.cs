@@ -8,10 +8,10 @@ partial class Simulation
     /// <summary>
     /// Parses <c>DBCC TRACEON(N)</c> / <c>DBCC TRACEOFF(N)</c>. The optional
     /// <c>, -1</c> suffix that promotes the flag to global scope isn't modeled
-    /// — the simulator has a single connection so session vs global doesn't
-    /// matter today.
+    /// — flags scope to <see cref="SimulatedDbConnection.TraceFlags"/> on the
+    /// executing connection, so concurrent connections don't share state.
     /// </summary>
-    private bool TryParseDbcc(ParserContext context)
+    private static bool TryParseDbcc(ParserContext context)
     {
         context.MoveNextRequired();
         bool turningOn;
@@ -32,7 +32,8 @@ partial class Simulation
             return false;
 
         var flag = numericValue.AsInt32;
-        _ = turningOn ? this.TraceFlags.Add(flag) : this.TraceFlags.Remove(flag);
+        var flags = context.Connection.TraceFlags;
+        _ = turningOn ? flags.Add(flag) : flags.Remove(flag);
         return true;
     }
 }

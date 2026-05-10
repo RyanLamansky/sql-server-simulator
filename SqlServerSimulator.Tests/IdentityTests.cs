@@ -55,13 +55,15 @@ public sealed class IdentityTests
     [TestMethod]
     public void ScopeIdentity_AfterMultiRowInsert_ReturnsLastValue()
     {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
+        // SCOPE_IDENTITY/@@IDENTITY are per-session (per-connection) so the
+        // setup INSERT and the read have to share a connection.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
             create table t (id int identity(1,1), x int);
             insert t (x) values (1),(2),(3)
-            """);
-        AreEqual(3m, simulation.ExecuteScalar("select SCOPE_IDENTITY()"));
-        AreEqual(3m, simulation.ExecuteScalar("select @@IDENTITY"));
+            """).ExecuteNonQuery();
+        AreEqual(3m, connection.CreateCommand("select SCOPE_IDENTITY()").ExecuteScalar());
+        AreEqual(3m, connection.CreateCommand("select @@IDENTITY").ExecuteScalar());
     }
 
     // Verified: insert a table without identity clears SCOPE_IDENTITY/@@IDENTITY back to NULL.

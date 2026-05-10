@@ -14,7 +14,7 @@ partial class SimulatedSqlException
     /// became the default in SQL Server 2022+ (compatibility level 160+),
     /// superseding the legacy <see cref="StringOrBinaryWouldBeTruncatedLegacy"/>
     /// (Msg 8152). The simulator selects between the two via
-    /// <see cref="Simulation.IsVerboseTruncationActive"/>.
+    /// <see cref="SimulatedDbConnection.IsVerboseTruncationActive"/>.
     /// </remarks>
     internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, string value, int max)
     {

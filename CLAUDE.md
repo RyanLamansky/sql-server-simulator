@@ -272,7 +272,11 @@ Variable references resolve at runtime via a captured `VariableSlot` — require
 
 **Output-parameter write-back**: at end of batch, the dispatch walks the parameter list and copies each `InputOutput` / `Output` direction parameter's final slot value back to `DbParameter.Value`. Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate parameters.
 
-**`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `Simulation.LastStatementRowCount`. SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
+**`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `SimulatedDbConnection.LastStatementRowCount` (per-session state, not shared across connections that fan out from one `Simulation`). SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
+
+**Per-session state lives on `SimulatedDbConnection`**: alongside `@@ROWCOUNT`, the connection carries `LastIdentity` (`SCOPE_IDENTITY()` / `@@IDENTITY`), `IdentityInsertTable` (active `SET IDENTITY_INSERT` table), `TraceFlags` (`DBCC TRACEON(N)`), `CurrentStatementUtcNow` (per-statement-freeze for the time scalars), and `IsVerboseTruncationActive()` (which reads its own `TraceFlags` plus the simulation's compatibility level / scoped config). Two connections fanned from one `Simulation` are isolated — matches SQL Server's session = ADO.NET connection scoping.
+
+**Late-binding the executing connection**: `CurrentTimeFunction`, `LastIdentityExpression`, and `RowCountExpression` capture the **`Simulation`** at parse time and look up the runtime-active connection via `Simulation.ActiveConnection` (an `AsyncLocal<SimulatedDbConnection?>` published by the dispatch loop with try/finally save-restore). Parse-time-capture-the-connection is wrong for any expression embedded in a column default: `HasDefaultValueSql("getutcdate()")` parses once during CREATE TABLE on the connection that ran the CREATE, then every later INSERT runs on whichever connection's batch is dispatching, and the default has to read *that* connection's per-statement freeze, not the long-gone CREATE-time connection's.
 
 **Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle.
 
@@ -354,7 +358,6 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - Msg 8133 (CASE where every branch is bare `NULL`; simulator returns NULL of `int`).
 - `PRIMARY KEY` / `UNIQUE` on a computed column (`NotSupportedException`).
 - Heap allocation tracking (flat page list, no IAM/PFS).
-- Per-connection session state for `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, `DBCC TRACEON(N)` flags — all live on `Simulation` rather than connection. (Tx state is already per-connection.)
 - Compound assignment (`SET @v += expr` / `-=` / `*=` etc.) — rewrite as `SET @v = @v + expr`. The arithmetic-operator runtime is locked behind `protected` instance methods on `TwoSidedExpression`; exposing them as static helpers is the prerequisite refactor.
 - Table variables (`DECLARE @t TABLE (...)`) — separate feature with its own storage / scope / lifecycle.
 - T-SQL control flow (`IF` / `WHILE` / `BEGIN ... END` / `BREAK` / `CONTINUE`) — Bundle 2 of scripting.

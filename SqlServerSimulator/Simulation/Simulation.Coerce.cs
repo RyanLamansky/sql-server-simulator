@@ -32,7 +32,7 @@ partial class Simulation
     /// semantics — still raise the bind-time truncation error. NULL values
     /// and columns without a declared max are no-ops. Selects between the
     /// verbose Msg 2628 (with table/column/value) and the legacy Msg 8152 via
-    /// <see cref="IsVerboseTruncationActive"/>.
+    /// <see cref="SimulatedDbConnection.IsVerboseTruncationActive"/>.
     /// </summary>
     /// <remarks>
     /// Length unit follows the column's storage encoding: CP1252 byte count
@@ -44,7 +44,7 @@ partial class Simulation
     /// the column can hold for the common cases, and any genuine overflow
     /// surfaces as a coercion error instead.
     /// </remarks>
-    private static void EnforceMaxLength(SqlValue source, HeapColumn column, string tableName, Simulation simulation)
+    private static void EnforceMaxLength(SqlValue source, HeapColumn column, string tableName, SimulatedDbConnection connection)
     {
         if (source.IsNull || column.MaxLength is not int max || max == SqlType.MaxLengthSentinel)
             return;
@@ -72,7 +72,7 @@ partial class Simulation
         if (actual <= max)
             return;
 
-        if (!simulation.IsVerboseTruncationActive())
+        if (!connection.IsVerboseTruncationActive())
             throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy();
 
         throw column.Type is VarbinarySqlType or BinarySqlType

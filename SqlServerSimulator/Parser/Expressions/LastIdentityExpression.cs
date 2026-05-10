@@ -4,13 +4,19 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// Backs both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>: returns the
-/// simulation's last-inserted identity value as <c>numeric(38, 0)</c>, or
-/// NULL when the most recent INSERT didn't touch an identity column. The
-/// two T-SQL surfaces differ in scope on real SQL Server (SCOPE_IDENTITY
-/// is per scope, @@IDENTITY is per session); the simulator collapses both
-/// to <see cref="Simulation.LastIdentity"/> until session-scoped state is
-/// modeled — see the same simplification on <see cref="Simulation.TraceFlags"/>.
+/// executing connection's last-inserted identity value as
+/// <c>numeric(38, 0)</c>, or NULL when the most recent INSERT didn't touch
+/// an identity column. The two T-SQL surfaces differ in scope on real SQL
+/// Server (SCOPE_IDENTITY is per scope, @@IDENTITY is per session); the
+/// simulator collapses both to <see cref="SimulatedDbConnection.LastIdentity"/>.
 /// </summary>
+/// <remarks>
+/// Captures the <see cref="Simulation"/> at parse time and looks up the
+/// runtime-active connection via <see cref="Simulation.ActiveConnection"/>
+/// when <see cref="Run"/> fires. Late-binding matters when this expression
+/// is parsed once and reused across many statements (e.g. baked into a
+/// column default) on possibly-different connections.
+/// </remarks>
 internal sealed class LastIdentityExpression : Expression
 {
     private static readonly SqlType ResultType = SqlType.GetDecimal(38, 0);
@@ -27,7 +33,7 @@ internal sealed class LastIdentityExpression : Expression
     }
 
     public override SqlValue Run(Func<MultiPartName, SqlValue> getColumnValue) =>
-        this.simulation.LastIdentity is decimal v
+        this.simulation.ActiveConnection!.LastIdentity is decimal v
             ? SqlValue.FromDecimal(ResultType, v)
             : SqlValue.Null(ResultType);
 

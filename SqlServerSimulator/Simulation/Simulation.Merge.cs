@@ -184,7 +184,7 @@ partial class Simulation
         var identityOrdinal = destinationTable.IdentityOrdinal;
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
         var identityInsertOn = identityColumn is not null
-            && context.Simulation.IdentityInsertTable is string activeTable
+            && context.Connection.IdentityInsertTable is string activeTable
             && Collation.Default.Equals(activeTable, destinationTable.Name);
         if (identityColumn is not null)
         {
@@ -269,7 +269,7 @@ partial class Simulation
                 }
 
                 var source = insertValueExprs[i].Run(ResolveSource);
-                EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Simulation);
+                EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
                 var coerced = CoerceForInsert(source, targetColumn.Type);
                 rowValues[ordinal] = coerced;
 
@@ -318,7 +318,7 @@ partial class Simulation
                 outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues));
         }
 
-        context.Simulation.LastIdentity = lastIdentityValue;
+        context.Connection.LastIdentity = lastIdentityValue;
 
         return output is { } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)

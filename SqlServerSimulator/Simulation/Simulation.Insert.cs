@@ -40,7 +40,7 @@ partial class Simulation
         var identityOrdinal = destinationTable.IdentityOrdinal;
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
         var identityInsertOn = identityColumn is not null
-            && context.Simulation.IdentityInsertTable is string activeTable
+            && context.Connection.IdentityInsertTable is string activeTable
             && Collation.Default.Equals(activeTable, destinationTable.Name);
 
         HeapColumn[] destinationColumns;
@@ -146,7 +146,7 @@ partial class Simulation
                 }
 
                 var source = sourceRow[i];
-                EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Simulation);
+                EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
                 var coerced = CoerceForInsert(source, targetColumn.Type);
                 rowValues[ordinal] = coerced;
 
@@ -201,7 +201,7 @@ partial class Simulation
         // Per SQL Server: any INSERT updates SCOPE_IDENTITY/@@IDENTITY —
         // to the generated/explicit identity if the table has one, or to
         // NULL otherwise (resetting state from a prior identity insert).
-        context.Simulation.LastIdentity = lastIdentityValue;
+        context.Connection.LastIdentity = lastIdentityValue;
 
         return output is { } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)

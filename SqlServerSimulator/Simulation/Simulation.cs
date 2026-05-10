@@ -53,67 +53,38 @@ public sealed partial class Simulation
     /// </summary>
     internal CompatibilityLevel CompatibilityLevel = CompatibilityLevel.Sql170;
 
-    /// <summary>
-    /// Active session-scoped trace flags (the simulator doesn't model separate
-    /// global vs session scope yet — flags set here apply simulation-wide).
-    /// Toggled via <c>DBCC TRACEON(N)</c> / <c>DBCC TRACEOFF(N)</c>.
-    /// </summary>
-    internal readonly HashSet<int> TraceFlags = [];
+    private long rowVersionCounter;
+
+    private readonly AsyncLocal<SimulatedDbConnection?> activeConnection = new();
 
     /// <summary>
-    /// UTC timestamp captured at the top of each top-level statement (in
-    /// <see cref="CreateResultSetsForCommand"/>'s loop body) and consumed by
-    /// the current-time scalar functions (<c>GETDATE</c>, <c>GETUTCDATE</c>,
-    /// <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>, <c>SYSDATETIMEOFFSET</c>,
-    /// <c>CURRENT_TIMESTAMP</c>). Real SQL Server freezes these within a
-    /// statement (probe-confirmed 2026-05-09 — two <c>SYSDATETIME()</c> calls
-    /// in one SELECT return identical values to the 7th decimal digit; an
-    /// UPDATE that stamps every row with <c>SYSDATETIME()</c> writes the same
-    /// value into all rows). The simulator follows by capturing once per
-    /// statement and serving every call within that statement from the same
-    /// snapshot. The simulator does no local-time conversion: per the
-    /// Azure SQL Database default, local-time-returning variants
-    /// (<c>GETDATE</c> / <c>SYSDATETIME</c> / <c>CURRENT_TIMESTAMP</c>) and
-    /// UTC-returning variants share this single UTC instant, and
-    /// <c>SYSDATETIMEOFFSET</c> reports a <c>+00:00</c> offset.
-    /// </summary>
-    internal DateTime CurrentStatementUtcNow;
-
-    /// <summary>
-    /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
-    /// <see cref="CreateResultSetsForCommand"/>: DML mutations write their
-    /// affected-row count; SELECT writes its produced-row count after the
-    /// reader fully iterates; SELECT-assign writes the rows-scanned count;
-    /// <c>SET</c> and <c>DECLARE @v T = init</c> write 1; bare <c>DECLARE
-    /// @v T</c> (no initializer) leaves it unchanged; most other
-    /// statement kinds reset to 0. Probe-confirmed against SQL Server 2025
-    /// (2026-05-12).
-    /// </summary>
-    internal int LastStatementRowCount;
-
-    /// <summary>
-    /// Last identity value produced by an INSERT in this simulation —
-    /// the source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>.
-    /// SQL Server scopes these per session/scope; the simulator collapses
-    /// both to a single simulation-wide slot for the same reason
-    /// <see cref="TraceFlags"/> does.
+    /// The connection currently executing a command on this thread/flow,
+    /// published by <see cref="CreateResultSetsForCommand"/> for the lifetime
+    /// of one command's iteration. Per-session state lives on
+    /// <see cref="SimulatedDbConnection"/>; expressions whose runtime values
+    /// depend on session state (<see cref="Parser.Expressions.CurrentTimeFunction"/>,
+    /// <see cref="Parser.Expressions.LastIdentityExpression"/>,
+    /// <see cref="Parser.Expressions.RowCountExpression"/>) read through this
+    /// pointer rather than capturing a connection at parse time. Parse-time
+    /// capture is wrong for any expression embedded in a CREATE TABLE column
+    /// default — <c>HasDefaultValueSql("getutcdate()")</c> parses once on the
+    /// connection that ran the CREATE, but every subsequent INSERT runs on
+    /// whichever connection's batch is dispatching, and the column default's
+    /// <c>getutcdate()</c> must read that runtime connection's per-statement
+    /// time, not the long-gone CREATE-time connection's.
     /// </summary>
     /// <remarks>
-    /// Cleared (set to <c>null</c>) by every INSERT that doesn't generate
-    /// or accept an identity value — matching SQL Server's behavior of
-    /// resetting <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c> when the
-    /// most recent statement didn't touch an identity column.
+    /// Backed by <see cref="AsyncLocal{T}"/> rather than a plain field because
+    /// two connections fanned from one <see cref="Simulation"/> can dispatch
+    /// concurrently on different threads/flows; each flow needs its own active
+    /// pointer. <see cref="AsyncLocal{T}"/> also threads through Task
+    /// continuations, in case the simulator ever hosts async dispatch.
     /// </remarks>
-    internal decimal? LastIdentity;
-
-    /// <summary>
-    /// Name of the table currently under <c>SET IDENTITY_INSERT ... ON</c>,
-    /// or <c>null</c> when no table is in that mode. SQL Server allows only
-    /// one table at a time per session; the simulator enforces the same.
-    /// </summary>
-    internal string? IdentityInsertTable;
-
-    private long rowVersionCounter;
+    internal SimulatedDbConnection? ActiveConnection
+    {
+        get => this.activeConnection.Value;
+        private set => this.activeConnection.Value = value;
+    }
 
     /// <summary>
     /// Allocates the next <c>rowversion</c> counter value (also surfaced as
@@ -134,20 +105,6 @@ public sealed partial class Simulation
     /// <c>ALTER DATABASE SCOPED CONFIGURATION SET VERBOSE_TRUNCATION_WARNINGS = ON|OFF</c>.
     /// </summary>
     internal bool? VerboseTruncationWarnings;
-
-    /// <summary>
-    /// Decides whether string truncation should raise the verbose Msg 2628
-    /// (with table, column, and truncated value) or the legacy Msg 8152
-    /// (single line, no detail). Precedence: an explicit
-    /// <see cref="VerboseTruncationWarnings"/> setting wins; otherwise trace
-    /// flag 460 forces verbose; otherwise the compatibility level decides
-    /// (verbose iff &gt;= <see cref="CompatibilityLevel.Sql160"/>, the level
-    /// at which it became default in SQL Server 2022).
-    /// </summary>
-    internal bool IsVerboseTruncationActive() =>
-        this.VerboseTruncationWarnings
-        ?? (this.TraceFlags.Contains(460)
-            || this.CompatibilityLevel >= CompatibilityLevel.Sql160);
 
     /// <summary>
     /// System tables (e.g. <c>systypes</c>). Materialized once per process and
@@ -230,124 +187,134 @@ public sealed partial class Simulation
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
         var context = new ParserContext(command);
+        var connection = context.Connection;
+        var priorActive = this.ActiveConnection;
+        this.ActiveConnection = connection;
         var requireSemicolonBeforeCte = false;
-        context.MoveNextOptional();
-
-        while (context.Token is not null)
+        try
         {
-            if (context.Token is Operator { Character: ';' })
+            context.MoveNextOptional();
+
+            while (context.Token is not null)
             {
-                requireSemicolonBeforeCte = false;
-                context.MoveNextOptional();
-                continue;
+                if (context.Token is Operator { Character: ';' })
+                {
+                    requireSemicolonBeforeCte = false;
+                    context.MoveNextOptional();
+                    continue;
+                }
+
+                // CTE bindings live for exactly one statement. Clear at the
+                // top of every iteration; a WITH prefix below repopulates.
+                context.CteBindings = null;
+                connection.CurrentStatementUtcNow = DateTime.UtcNow;
+
+                // WITH prefix applies to the immediately-following SELECT /
+                // INSERT / UPDATE / DELETE / MERGE. ParseCteBindings sets
+                // context.CteBindings and advances the cursor to the dispatched
+                // statement's leading keyword; the switch below runs unchanged.
+                if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                {
+                    if (requireSemicolonBeforeCte)
+                        throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
+                    ParseCteBindings(context);
+                }
+
+                SimulatedStatementOutcome? outcome;
+                switch (context.Token)
+                {
+                    case ReservedKeyword { Keyword: Keyword.Select }:
+                        {
+                            var selection = Selection.Parse(context, 0);
+                            // Materialize rows up-front so @@ROWCOUNT reflects the
+                            // statement's full row count for the next statement in
+                            // the same batch (real SQL Server runs server-side and
+                            // sets @@ROWCOUNT on completion; the simulator
+                            // materializes to mirror that).
+                            var rows = selection.Execute().RowBytes.ToList();
+                            connection.LastStatementRowCount = rows.Count;
+                            outcome = selection.IsAssignmentOnly
+                                ? new SimulatedNonQuery(rows.Count)
+                                : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
+                        }
+                        yield return outcome;
+                        break;
+
+                    case ReservedKeyword { Keyword: Keyword.Insert }:
+                        outcome = RunMutation(context, ParseInsert);
+                        connection.LastStatementRowCount = outcome.RecordsAffected;
+                        yield return outcome;
+                        break;
+
+                    case ReservedKeyword { Keyword: Keyword.Merge }:
+                        outcome = RunMutation(context, ParseMerge);
+                        connection.LastStatementRowCount = outcome.RecordsAffected;
+                        yield return outcome;
+                        // Real SQL Server requires `;` after MERGE (Msg 10713) —
+                        // the only statement family with a mandatory terminator.
+                        // Check before normalization so the cursor is still on the
+                        // parser's lookahead position.
+                        if (context.Token is not Operator { Character: ';' })
+                            throw SimulatedSqlException.MergeMustBeTerminated();
+                        break;
+
+                    case ReservedKeyword { Keyword: Keyword.Update }:
+                        outcome = RunMutation(context, ParseUpdate);
+                        connection.LastStatementRowCount = outcome.RecordsAffected;
+                        yield return outcome;
+                        break;
+
+                    case ReservedKeyword { Keyword: Keyword.Delete }:
+                        outcome = RunMutation(context, ParseDelete);
+                        connection.LastStatementRowCount = outcome.RecordsAffected;
+                        yield return outcome;
+                        break;
+
+                    case ReservedKeyword { Keyword: Keyword.Begin } when TryParseBeginTransaction(context):
+                    case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
+                    case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
+                    case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
+                    case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
+                    case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
+                    case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
+                        connection.LastStatementRowCount = 0;
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
+                        // SET @v = expr (probe-confirmed to set @@ROWCOUNT to 1).
+                        // Other SET shapes (SET NOCOUNT etc.) reach here too; the
+                        // simulator can't distinguish without re-parsing, but the
+                        // session-state SET shapes are rare and the rowcount they
+                        // leave isn't asserted-on in practice.
+                        connection.LastStatementRowCount = 1;
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.Declare }:
+                        {
+                            var initRowCount = TryParseDeclare(context);
+                            if (initRowCount is int n)
+                                connection.LastStatementRowCount = n;
+                            // No initializer → @@ROWCOUNT preserved (probe-confirmed).
+                        }
+                        break;
+                    default:
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+
+                // Normalize cursor to a lookahead position. Well-behaved parsers
+                // already left Token at their first un-consumed token (`;`, the
+                // next statement's leading keyword, or null at EOF); for parsers
+                // that ended on the last consumed token, advance once.
+                if (!IsStatementBoundary(context.Token))
+                    context.MoveNextOptional();
+
+                requireSemicolonBeforeCte = true;
             }
 
-            // CTE bindings live for exactly one statement. Clear at the
-            // top of every iteration; a WITH prefix below repopulates.
-            context.CteBindings = null;
-            this.CurrentStatementUtcNow = DateTime.UtcNow;
-
-            // WITH prefix applies to the immediately-following SELECT /
-            // INSERT / UPDATE / DELETE / MERGE. ParseCteBindings sets
-            // context.CteBindings and advances the cursor to the dispatched
-            // statement's leading keyword; the switch below runs unchanged.
-            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            {
-                if (requireSemicolonBeforeCte)
-                    throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
-                ParseCteBindings(context);
-            }
-
-            SimulatedStatementOutcome? outcome;
-            switch (context.Token)
-            {
-                case ReservedKeyword { Keyword: Keyword.Select }:
-                    {
-                        var selection = Selection.Parse(context, 0);
-                        // Materialize rows up-front so @@ROWCOUNT reflects the
-                        // statement's full row count for the next statement in
-                        // the same batch (real SQL Server runs server-side and
-                        // sets @@ROWCOUNT on completion; the simulator
-                        // materializes to mirror that).
-                        var rows = selection.Execute().RowBytes.ToList();
-                        this.LastStatementRowCount = rows.Count;
-                        outcome = selection.IsAssignmentOnly
-                            ? new SimulatedNonQuery(rows.Count)
-                            : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
-                    }
-                    yield return outcome;
-                    break;
-
-                case ReservedKeyword { Keyword: Keyword.Insert }:
-                    outcome = RunMutation(context, ParseInsert);
-                    this.LastStatementRowCount = outcome.RecordsAffected;
-                    yield return outcome;
-                    break;
-
-                case ReservedKeyword { Keyword: Keyword.Merge }:
-                    outcome = RunMutation(context, ParseMerge);
-                    this.LastStatementRowCount = outcome.RecordsAffected;
-                    yield return outcome;
-                    // Real SQL Server requires `;` after MERGE (Msg 10713) —
-                    // the only statement family with a mandatory terminator.
-                    // Check before normalization so the cursor is still on the
-                    // parser's lookahead position.
-                    if (context.Token is not Operator { Character: ';' })
-                        throw SimulatedSqlException.MergeMustBeTerminated();
-                    break;
-
-                case ReservedKeyword { Keyword: Keyword.Update }:
-                    outcome = RunMutation(context, ParseUpdate);
-                    this.LastStatementRowCount = outcome.RecordsAffected;
-                    yield return outcome;
-                    break;
-
-                case ReservedKeyword { Keyword: Keyword.Delete }:
-                    outcome = RunMutation(context, ParseDelete);
-                    this.LastStatementRowCount = outcome.RecordsAffected;
-                    yield return outcome;
-                    break;
-
-                case ReservedKeyword { Keyword: Keyword.Begin } when TryParseBeginTransaction(context):
-                case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
-                case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
-                case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
-                case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
-                case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
-                case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
-                    this.LastStatementRowCount = 0;
-                    break;
-                case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
-                    // SET @v = expr (probe-confirmed to set @@ROWCOUNT to 1).
-                    // Other SET shapes (SET NOCOUNT etc.) reach here too; the
-                    // simulator can't distinguish without re-parsing, but the
-                    // session-state SET shapes are rare and the rowcount they
-                    // leave isn't asserted-on in practice.
-                    this.LastStatementRowCount = 1;
-                    break;
-                case ReservedKeyword { Keyword: Keyword.Declare }:
-                    {
-                        var initRowCount = TryParseDeclare(context);
-                        if (initRowCount is int n)
-                            this.LastStatementRowCount = n;
-                        // No initializer → @@ROWCOUNT preserved (probe-confirmed).
-                    }
-                    break;
-                default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-
-            // Normalize cursor to a lookahead position. Well-behaved parsers
-            // already left Token at their first un-consumed token (`;`, the
-            // next statement's leading keyword, or null at EOF); for parsers
-            // that ended on the last consumed token, advance once.
-            if (!IsStatementBoundary(context.Token))
-                context.MoveNextOptional();
-
-            requireSemicolonBeforeCte = true;
+            WriteBackOutputParameters(context);
         }
-
-        WriteBackOutputParameters(context);
+        finally
+        {
+            this.ActiveConnection = priorActive;
+        }
     }
 
     /// <summary>

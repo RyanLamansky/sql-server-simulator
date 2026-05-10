@@ -88,16 +88,16 @@ public class EFCoreIdentity
     [TestMethod]
     public void SqlQueryRaw_ScopeIdentity_ReturnsLastInsertedValue()
     {
-        // SCOPE_IDENTITY/@@IDENTITY are simulation-wide here (not per-session) —
-        // see CLAUDE.md's "session-scoped state" gap. That collapse means the
-        // raw INSERT on a separate connection still updates the value EF reads.
-        var simulation = TestDbContext.CreateWidgetsSimulation();
-        _ = simulation
-            .CreateOpenConnection()
-            .CreateCommand("insert Widgets (Name) values ('First'),('Second')")
-            .ExecuteNonQuery();
+        // SCOPE_IDENTITY/@@IDENTITY are per-session — the priming INSERT and
+        // the read have to share the EF context's connection.
+        using var context = new TestDbContext(TestDbContext.CreateWidgetsSimulation());
+        context.Database.OpenConnection();
+        using (var cmd = context.Database.GetDbConnection().CreateCommand())
+        {
+            cmd.CommandText = "insert Widgets (Name) values ('First'),('Second')";
+            _ = cmd.ExecuteNonQuery();
+        }
 
-        using var context = new TestDbContext(simulation);
         var sid = context.Database.SqlQueryRaw<decimal>("select SCOPE_IDENTITY() as Value").AsEnumerable().Single();
         var atid = context.Database.SqlQueryRaw<decimal>("select @@IDENTITY as Value").AsEnumerable().Single();
 
@@ -128,13 +128,12 @@ public class EFCoreIdentity
     [TestMethod]
     public void SaveChanges_WithIdentityInsertOn_PersistsExplicitId()
     {
-        var simulation = TestDbContext.CreateStickersSimulation();
-        _ = simulation
-            .CreateOpenConnection()
-            .CreateCommand("set identity_insert Stickers on")
-            .ExecuteNonQuery();
+        // SET IDENTITY_INSERT scopes to the connection — issue it on the EF
+        // context's connection so SaveChanges runs under the same flag.
+        using var context = new TestDbContext(TestDbContext.CreateStickersSimulation());
+        context.Database.OpenConnection();
+        _ = context.Database.ExecuteSqlRaw("set identity_insert Stickers on");
 
-        using var context = new TestDbContext(simulation);
         _ = context.Stickers.Add(new Sticker { Id = 100, Tag = "explicit" });
         _ = context.SaveChanges();
 
@@ -145,15 +144,14 @@ public class EFCoreIdentity
     public void SaveChanges_WithIdentityInsertOn_AdvancesSeed()
     {
         // Inserting an explicit Id past the high-water mark via EF should
-        // reseed the same way raw SQL does.
+        // reseed the same way raw SQL does. SET IDENTITY_INSERT and the
+        // SaveChanges insert have to share the connection; IDENT_CURRENT
+        // (database-scoped, not session-scoped) is observable from anywhere.
         var simulation = TestDbContext.CreateStickersSimulation();
-        _ = simulation
-            .CreateOpenConnection()
-            .CreateCommand("set identity_insert Stickers on")
-            .ExecuteNonQuery();
-
         using (var context = new TestDbContext(simulation))
         {
+            context.Database.OpenConnection();
+            _ = context.Database.ExecuteSqlRaw("set identity_insert Stickers on");
             _ = context.Stickers.Add(new Sticker { Id = 50, Tag = "jump" });
             _ = context.SaveChanges();
         }
