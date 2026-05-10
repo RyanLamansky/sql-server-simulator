@@ -61,11 +61,12 @@ internal abstract class Expression
         {
             Numeric number => new Value(number.Value),
             Literal literal => new Value(literal.Value),
-            AtPrefixedString atPrefixed => new Value(atPrefixed, context),
+            AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
             DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
             {
                 AtAtKeyword.Identity => new LastIdentityExpression(context.Simulation),
                 AtAtKeyword.TranCount => new TranCountExpression(context),
+                AtAtKeyword.RowCount => new RowCountExpression(context.Simulation),
                 _ => new Value(doubleAtPrefixedString),
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),

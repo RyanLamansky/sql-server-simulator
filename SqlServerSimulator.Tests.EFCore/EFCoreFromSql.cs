@@ -44,4 +44,5 @@ public class EFCoreFromSql
         Assert.AreEqual(2, customer.Id);
         Assert.AreEqual("beta", customer.Name);
     }
+
 }

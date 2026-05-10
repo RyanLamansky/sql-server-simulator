@@ -178,7 +178,7 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
         Literal lit => new Value(lit.Value),
         Numeric num => new Value(num.Value),
         ReservedKeyword { Keyword: Keyword.Null } => new Value(),
-        AtPrefixedString atVar => new Value(atVar, context),
+        AtPrefixedString atVar => new VariableReference(atVar, context),
         Name name => new Reference(name),
         Operator { Character: '(' } => ParseParenthesizedZone(context),
         _ => throw SimulatedSqlException.SyntaxErrorNear(context),

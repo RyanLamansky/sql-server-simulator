@@ -13,6 +13,7 @@ enum AtAtKeyword
     NestLevel,
     Options,
     RemServer,
+    RowCount,
     ServerName,
     ServiceName,
     SpId,

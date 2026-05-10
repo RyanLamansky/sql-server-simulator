@@ -68,14 +68,27 @@ internal sealed partial class Selection
     /// </summary>
     public readonly bool HasTopOrOffsetOrFetch;
 
+    /// <summary>
+    /// True when every projection element is an <see cref="AssignmentExpression"/>
+    /// — i.e. <c>SELECT @v = expr [, @w = expr2 ...] [FROM ...]</c>. The
+    /// dispatch in <c>Simulation.CreateResultSetsForCommand</c> drains the
+    /// row sequence (running the per-row side effects of writing to slots)
+    /// but yields a <see cref="SimulatedNonQuery"/> rather than a result
+    /// set — matches SQL Server's behavior of suppressing the result-set
+    /// envelope for SELECT-assign. Set-op / recursive-CTE / etc. paths
+    /// default to false.
+    /// </summary>
+    public readonly bool IsAssignmentOnly;
+
     private readonly Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
         this.HasOrderBy = hasOrderBy;
         this.HasTopOrOffsetOrFetch = hasTopOrOffsetOrFetch;
+        this.IsAssignmentOnly = isAssignmentOnly;
         this.rowSource = rowSource;
     }
 
@@ -381,6 +394,29 @@ internal sealed partial class Selection
                     context.MoveNextOptional();
                     break;
 
+                // SELECT-assign disambiguation: `@v = expr` at projection-
+                // element-start position is variable assignment;
+                // `@v` followed by anything else (`+`, `,`, AS, etc.) is just
+                // a variable read. Peek past the @v token to decide.
+                case AtPrefixedString atPrefixed:
+                    {
+                        var checkpoint = context.SaveCheckpoint();
+                        _ = context.MoveNext();
+                        if (context.Token is Operator { Character: '=' })
+                        {
+                            var slot = context.GetVariableSlot(atPrefixed.Value);
+                            context.MoveNextRequired();
+                            var rhs = Expression.Parse(context);
+                            expressions.Add(new AssignmentExpression(slot, rhs));
+                        }
+                        else
+                        {
+                            context.RestoreCheckpoint(checkpoint);
+                            expressions.Add(Expression.Parse(context));
+                        }
+                    }
+                    break;
+
                 default:
                     expressions.Add(Expression.Parse(context));
                     break;
@@ -426,7 +462,7 @@ internal sealed partial class Selection
                     if (topCount is not null && fromClause.OffsetCount is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(expressions, sources);
-                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver);
+                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions));
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
                     ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
@@ -453,7 +489,31 @@ internal sealed partial class Selection
 
         if (topCount is not null && fromClause.OffsetCount is not null)
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount);
+        return BuildSynthesizedSqlRow(expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount, ResolveAssignmentMode(expressions));
+    }
+
+    /// <summary>
+    /// Walks the parsed projection list to detect <c>SELECT @v = expr</c>
+    /// mode. Returns true when every projection element is an
+    /// <see cref="AssignmentExpression"/>; false when none are; raises Msg
+    /// 141 when the projection mixes assignment and retrieval elements
+    /// (probe-confirmed real SQL Server behavior).
+    /// </summary>
+    private static bool ResolveAssignmentMode(List<Expression> expressions)
+    {
+        if (expressions.Count == 0) return false;
+        var assignCount = 0;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (expressions[i] is AssignmentExpression)
+                assignCount++;
+        }
+        return assignCount switch
+        {
+            0 => false,
+            var n when n == expressions.Count => true,
+            _ => throw SimulatedSqlException.SelectAssignmentMixedWithRetrieval(),
+        };
     }
 
     /// <summary>
@@ -1088,7 +1148,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount)
+    private static Selection BuildSynthesizedSqlRow(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly)
     {
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
@@ -1133,7 +1193,7 @@ internal sealed partial class Selection
             }
 
             return [RowEncoder.EncodeRow(schema, values)];
-        });
+        }, isAssignmentOnly);
     }
 
     /// <summary>

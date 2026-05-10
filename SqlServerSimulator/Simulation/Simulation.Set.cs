@@ -12,6 +12,9 @@ partial class Simulation
         if (afterSet is ReservedKeyword { Keyword: Keyword.Identity_Insert })
             return TryParseSetIdentityInsert(context);
 
+        if (afterSet is AtPrefixedString variableToken)
+            return TryParseSetVariable(context, variableToken);
+
         if (afterSet is not UnquotedString unquoted)
             return false;
 
@@ -31,6 +34,29 @@ partial class Simulation
             },
             _ => false
         };
+    }
+
+    /// <summary>
+    /// Parses <c>SET @v = expr</c>. Resolves the slot via
+    /// <see cref="ParserContext.GetVariableSlot"/> (Msg 137 if undeclared),
+    /// evaluates the RHS with no FROM context, then coerces the result
+    /// through the slot's declared type via
+    /// <see cref="Parser.Expressions.Cast.ApplyCoercion"/> — preserves
+    /// silent-truncation / Msg-245 / etc. semantics from the regular CAST
+    /// path. Compound forms (<c>+=</c> / <c>-=</c> / etc.) aren't modeled
+    /// in this bundle; rewrite as <c>SET @v = @v + expr</c>.
+    /// </summary>
+    private static bool TryParseSetVariable(ParserContext context, AtPrefixedString variableToken)
+    {
+        var slot = context.GetVariableSlot(variableToken.Value);
+
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            return false;
+
+        context.MoveNextRequired();
+        var rhsValue = Expression.Parse(context).Run(NoColumnResolver);
+        slot.Value = Parser.Expressions.Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
+        return true;
     }
 
     /// <summary>

@@ -26,6 +26,24 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 134 — fired when a <c>DECLARE</c> names a
+    /// variable that already exists in the batch (either a previous
+    /// <c>DECLARE</c> or a SqlClient parameter of the same name —
+    /// probe-confirmed parameters and declared variables share a
+    /// namespace).
+    /// </summary>
+    internal static SimulatedSqlException VariableAlreadyDeclared(string name) =>
+        new($"The variable name '@{name}' has already been declared. Variable names must be unique within a query batch or stored procedure.", 134, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 141 — fired when a <c>SELECT</c> mixes
+    /// variable assignment (<c>@v = expr</c>) with non-assignment
+    /// projection elements in the same projection list.
+    /// </summary>
+    internal static SimulatedSqlException SelectAssignmentMixedWithRetrieval() =>
+        new("A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", 141, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 4104: the OUTPUT clause references an
     /// identifier that doesn't exist in either the INSERTED/DELETED virtual
     /// tables or the MERGE source alias.

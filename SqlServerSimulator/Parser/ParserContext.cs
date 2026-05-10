@@ -1,7 +1,5 @@
 ﻿using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
-using System.Collections.Frozen;
-using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 
@@ -130,18 +128,40 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     /// </summary>
     public Dictionary<string, CteBinding>? CteBindings;
 
-    private readonly FrozenDictionary<string, SqlValue> variables = command
-        .Parameters
-        .Cast<DbParameter>()
-        .ToFrozenDictionary(parameter =>
+    /// <summary>
+    /// Per-batch variable store. Seeded with SqlClient parameters at
+    /// construction; <c>DECLARE</c> adds entries; <c>SET</c> /
+    /// <c>SELECT @v = expr</c> mutate them. Parameters and declared variables
+    /// share a namespace — a <c>DECLARE</c> whose name collides with a
+    /// parameter raises Msg 134 (probe-confirmed: real SQL Server treats
+    /// SqlClient parameters as if they were already declared). End-of-batch
+    /// write-back to <c>InputOutput</c> / <c>Output</c> direction parameters
+    /// reads from this store.
+    /// </summary>
+    public readonly Dictionary<string, VariableSlot> Variables = SeedVariables(command);
+
+    private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
+    {
+        var dict = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        foreach (DbParameter parameter in command.Parameters)
         {
             var name = parameter.ParameterName;
-            return name.StartsWith('@') ? name[1..] : name;
-        }, parameter => ConvertParameter(parameter.Value, SqlType.GetByDbType(parameter.DbType)),
-        StringComparer.InvariantCultureIgnoreCase);
-
-    private static SqlValue ConvertParameter(object? raw, SqlType type) =>
-        raw is null or DBNull ? SqlValue.Null(type) : type.ConvertParameter(raw);
+            if (name.StartsWith('@'))
+                name = name[1..];
+            var dbType = SqlType.GetByDbType(parameter.DbType);
+            var seed = parameter.Value is null or DBNull
+                ? SqlValue.Null(dbType)
+                : dbType.ConvertParameter(parameter.Value);
+            // For decimal / numeric parameters, ConvertParameter widens the
+            // declared type to fit the value's natural scale (e.g. caller sends
+            // 123.45m without an explicit scale → widens to decimal(28, 2)).
+            // Track the post-widen type so VariableReference.GetSqlType returns
+            // the right schema and downstream readers don't truncate.
+            var declaredType = seed.IsNull ? dbType : seed.Type;
+            dict[name] = new VariableSlot(declaredType, declaredMaxLength: null, seed, parameter);
+        }
+        return dict;
+    }
 
     public Simulation Simulation => Command.simulation;
 
@@ -156,15 +176,37 @@ internal sealed class ParserContext(SimulatedDbCommand command)
     public SimulatedDbConnection Connection => (SimulatedDbConnection)Command.Connection!;
 
     /// <summary>
-    /// Gets the value of the variable with the provided <paramref name="name"/>.
+    /// Resolves <paramref name="name"/> to a live <see cref="VariableSlot"/>
+    /// reference. Captured at parse time by <see cref="Expressions.VariableReference"/>
+    /// so subsequent <c>SET</c> / <c>SELECT @v = expr</c> mutations are
+    /// observable when the expression evaluates at runtime — the dictionary
+    /// is append-only within a batch (re-DECLARE raises Msg 134), so a slot
+    /// reference captured during parse stays valid.
     /// </summary>
-    /// <param name="name">The name of the variable.</param>
-    /// <returns>The variable's value.</returns>
     /// <exception cref="SimulatedSqlException">Must declare the scalar variable \"@{value of <paramref name="name"/>}\".</exception>
-    public SqlValue GetVariableValue(string name) =>
-        variables.TryGetValue(name, out var value)
-        ? value
+    public VariableSlot GetVariableSlot(string name) =>
+        Variables.TryGetValue(name, out var slot)
+        ? slot
         : throw SimulatedSqlException.MustDeclareScalarVariable(name);
+
+    /// <summary>
+    /// Snapshots the current tokenizer position and current token so a
+    /// caller can probe the upcoming token via <see cref="MoveNext"/> and
+    /// then restore to this point if the lookahead doesn't match. The
+    /// tokenizer is index-driven (re-running <see cref="MoveNext"/> from
+    /// the saved index produces the same token sequence), so a checkpoint
+    /// + restore round-trip is byte-stable.
+    /// </summary>
+    public (int Index, Token? Token) SaveCheckpoint() => (this.index, this.Token);
+
+    /// <summary>
+    /// Restores a checkpoint captured by <see cref="SaveCheckpoint"/>.
+    /// </summary>
+    public void RestoreCheckpoint((int Index, Token? Token) checkpoint)
+    {
+        this.index = checkpoint.Index;
+        this.Token = checkpoint.Token;
+    }
 
     /// <summary>
     /// Advances <see cref="Token"/> to the next token, if one exists.

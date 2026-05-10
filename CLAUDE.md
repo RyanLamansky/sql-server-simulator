@@ -250,6 +250,25 @@ Three entry points share one per-connection undo log: implicit (statement-level 
 ### `rowversion` (legacy synonym `timestamp`)
 8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one. Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration. Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738. Outbound CAST: `varbinary(N)`/`binary(N)` copy 8 bytes; `bigint` reads big-endian. `Promote(RowVersion, Varbinary) → Varbinary` so EF's `WHERE [rv] = @originalRv` parameter works directly. EF `[Timestamp]` SaveChanges round-trips end-to-end.
 
+### Variables: `DECLARE` / `SET` / `SELECT @v = expr`
+Per-batch scalar variables. `DECLARE @v TYPE [= expr] [, @w TYPE [= expr] ...]` registers slots; `SET @v = expr` and `SELECT @v = expr [, @w = expr2 ...]` mutate them. SqlClient parameters seed the same store as if pre-DECLAREd, so a parameter and a DECLARE can't share a name (Msg 134).
+
+Variable references resolve at runtime via a captured `VariableSlot` — required because mutations between statements have to be visible to subsequent reads. Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared type is honored: `SET @v(varchar(3)) = 'hello'` truncates to `'hel'`; `SET @v(int) = 'abc'` raises Msg 245.
+
+**SELECT-assign quirks**:
+- All-or-nothing: `SELECT @v = 1, 2` (mixing assign and projection) → Msg 141.
+- Empty result-set keeps prior value (no rows iterate, slot unchanged); `SET @v = (SELECT no rows)` differs — assigns NULL.
+- Multi-row last-row-wins post-ORDER-BY (per-row evaluation, last write wins).
+- The dispatch drains rows for side-effects and yields a `SimulatedNonQuery` rather than a result set (matches SQL Server's no-result-set-envelope behavior for SELECT-assign).
+
+**Errors**: Msg 137 use-before-declare (existing factory); Msg 134 duplicate DECLARE (also fires for parameter+DECLARE collision); Msg 141 mixed assignment + retrieval; standard CAST errors propagate from coercion (Msg 245, Msg 8115, etc.). `DECLARE @v INT NOT NULL` and `DECLARE @v INT = DEFAULT` raise Msg 102 / 156 respectively (DECLARE doesn't accept column-style constraints — falls out of grammar mismatch).
+
+**Output-parameter write-back**: at end of batch, the dispatch walks the parameter list and copies each `InputOutput` / `Output` direction parameter's final slot value back to `DbParameter.Value`. Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate parameters.
+
+**`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `Simulation.LastStatementRowCount`. SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
+
+**Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle. Statements within a batch require `;` separators (existing simulator-wide convention; real SQL Server accepts implicit separation in many cases).
+
 ### Common table expressions
 `WITH name [(col, …)] AS (SELECT …) [, …] {SELECT|INSERT|UPDATE|DELETE|MERGE} …`. WITH prefix scopes to exactly one immediately-following statement. Both non-recursive and recursive forms modeled.
 
@@ -329,6 +348,11 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - `PRIMARY KEY` / `UNIQUE` on a computed column (`NotSupportedException`).
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - Per-connection session state for `SCOPE_IDENTITY()` / `@@IDENTITY`, `SET IDENTITY_INSERT`'s active table, `DBCC TRACEON(N)` flags — all live on `Simulation` rather than connection. (Tx state is already per-connection.)
+- Compound assignment (`SET @v += expr` / `-=` / `*=` etc.) — rewrite as `SET @v = @v + expr`. The arithmetic-operator runtime is locked behind `protected` instance methods on `TwoSidedExpression`; exposing them as static helpers is the prerequisite refactor.
+- Table variables (`DECLARE @t TABLE (...)`) — separate feature with its own storage / scope / lifecycle.
+- T-SQL control flow (`IF` / `WHILE` / `BEGIN ... END` / `BREAK` / `CONTINUE`) — Bundle 2 of scripting.
+- `TRY ... CATCH`, `THROW`, `RAISERROR`, `@@ERROR`, `RETURN`, `PRINT`, stored procs / UDFs.
+- Implicit statement separation: real SQL Server accepts `declare @v int = 7 select @v` without `;`; simulator requires explicit semicolons between statements when one ends with an expression.
 - `hierarchyid`, `geography`, `geometry`.
 
 ## Quirks (modeled, not byte-identical to SQL Server)

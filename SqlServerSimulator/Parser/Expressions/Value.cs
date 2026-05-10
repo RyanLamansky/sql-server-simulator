@@ -17,9 +17,6 @@ internal sealed class Value : Expression
 
     public Value(SqlValue value) => this.Constant = value;
 
-    public Value(AtPrefixedString atPrefixed, ParserContext context) =>
-        this.Constant = context.GetVariableValue(atPrefixed.Value);
-
     public Value(DoubleAtPrefixedString doubleAtPrefixedString)
     {
         switch (doubleAtPrefixedString.Parse())

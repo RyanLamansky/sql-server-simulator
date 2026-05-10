@@ -80,6 +80,18 @@ public sealed partial class Simulation
     internal DateTime CurrentStatementUtcNow;
 
     /// <summary>
+    /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
+    /// <see cref="CreateResultSetsForCommand"/>: DML mutations write their
+    /// affected-row count; SELECT writes its produced-row count after the
+    /// reader fully iterates; SELECT-assign writes the rows-scanned count;
+    /// <c>SET</c> and <c>DECLARE @v T = init</c> write 1; bare <c>DECLARE
+    /// @v T</c> (no initializer) leaves it unchanged; most other
+    /// statement kinds reset to 0. Probe-confirmed against SQL Server 2025
+    /// (2026-05-12).
+    /// </summary>
+    internal int LastStatementRowCount;
+
+    /// <summary>
     /// Last identity value produced by an INSERT in this simulation —
     /// the source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>.
     /// SQL Server scopes these per session/scope; the simulator collapses
@@ -219,29 +231,51 @@ public sealed partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.With })
                 ParseCteBindings(context);
 
+            SimulatedStatementOutcome? outcome;
             switch (context.Token)
             {
                 case Operator { Character: ';' }:
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Select }:
-                    yield return Selection.Parse(context, 0).Execute();
+                    {
+                        var selection = Selection.Parse(context, 0);
+                        // Materialize rows up-front so @@ROWCOUNT reflects the
+                        // statement's full row count for the next statement in
+                        // the same batch (real SQL Server runs server-side and
+                        // sets @@ROWCOUNT on completion; the simulator
+                        // materializes to mirror that).
+                        var rows = selection.Execute().RowBytes.ToList();
+                        this.LastStatementRowCount = rows.Count;
+                        outcome = selection.IsAssignmentOnly
+                            ? new SimulatedNonQuery(rows.Count)
+                            : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
+                    }
+                    yield return outcome;
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Insert }:
-                    yield return RunMutation(context, ParseInsert);
+                    outcome = RunMutation(context, ParseInsert);
+                    this.LastStatementRowCount = outcome.RecordsAffected;
+                    yield return outcome;
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Merge }:
-                    yield return RunMutation(context, ParseMerge);
+                    outcome = RunMutation(context, ParseMerge);
+                    this.LastStatementRowCount = outcome.RecordsAffected;
+                    yield return outcome;
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Update }:
-                    yield return RunMutation(context, ParseUpdate);
+                    outcome = RunMutation(context, ParseUpdate);
+                    this.LastStatementRowCount = outcome.RecordsAffected;
+                    yield return outcome;
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Delete }:
-                    yield return RunMutation(context, ParseDelete);
+                    outcome = RunMutation(context, ParseDelete);
+                    this.LastStatementRowCount = outcome.RecordsAffected;
+                    yield return outcome;
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Begin } when TryParseBeginTransaction(context):
@@ -249,13 +283,52 @@ public sealed partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
                 case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
                 case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
-                case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
                 case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
                 case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
+                    this.LastStatementRowCount = 0;
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context):
+                    // SET @v = expr (probe-confirmed to set @@ROWCOUNT to 1).
+                    // Other SET shapes (SET NOCOUNT etc.) reach here too; the
+                    // simulator can't distinguish without re-parsing, but the
+                    // session-state SET shapes are rare and the rowcount they
+                    // leave isn't asserted-on in practice.
+                    this.LastStatementRowCount = 1;
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Declare }:
+                    {
+                        var initRowCount = TryParseDeclare(context);
+                        if (initRowCount is int n)
+                            this.LastStatementRowCount = n;
+                        // No initializer → @@ROWCOUNT preserved (probe-confirmed).
+                    }
                     continue;
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+
+        WriteBackOutputParameters(context);
+    }
+
+    /// <summary>
+    /// At end-of-batch, copies the final values of every InputOutput /
+    /// Output direction <see cref="DbParameter"/> from its variable slot
+    /// back into <see cref="DbParameter.Value"/>. Mirrors SqlClient's
+    /// behavior of round-tripping mutations made by SQL-text in the batch
+    /// (probe-confirmed against SQL Server 2025: a parameter sent in as 5,
+    /// mutated by `SET @x = 999`, reads 999 from the caller's
+    /// <c>param.Value</c> after <c>ExecuteNonQuery</c>).
+    /// </summary>
+    private static void WriteBackOutputParameters(ParserContext context)
+    {
+        foreach (var slot in context.Variables.Values)
+        {
+            if (slot.Parameter is { } parameter
+                && parameter.Direction is System.Data.ParameterDirection.InputOutput or System.Data.ParameterDirection.Output)
+            {
+                parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
+            }
         }
     }
 

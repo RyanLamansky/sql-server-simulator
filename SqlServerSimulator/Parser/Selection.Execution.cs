@@ -105,7 +105,8 @@ internal sealed partial class Selection
         int? topCount,
         List<AggregateExpression> aggregates,
         List<WindowExpression> windows,
-        Func<MultiPartName, SqlType>? outerTypeResolver)
+        Func<MultiPartName, SqlType>? outerTypeResolver,
+        bool isAssignmentOnly)
     {
         if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null))
             throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
@@ -175,7 +176,8 @@ internal sealed partial class Selection
                 ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, outerResolver)
                 : windows.Count > 0
                     ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, outerResolver)
-                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver));
+                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, outerResolver),
+            isAssignmentOnly);
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(
