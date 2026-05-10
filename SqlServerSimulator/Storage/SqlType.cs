@@ -135,10 +135,10 @@ internal abstract partial class SqlType
         _ when this == UniqueIdentifier => 16,
         _ when this == SystemName => 15,
         _ when this == NText => 14,
-        _ when this == NVarchar => 14,
+        NVarcharSqlType => 14,
         NCharSqlType => 13,
         _ when this == Text => 12,
-        _ when this == Varchar => 12,
+        VarcharSqlType => 12,
         CharSqlType => 11,
         _ when this == Float => 9,
         _ when this == Real => 8,
@@ -214,13 +214,13 @@ internal abstract partial class SqlType
     /// UTF-8-enabled collations (introduced in SQL Server 2019) are an opt-in
     /// feature and aren't modeled today.
     /// </remarks>
-    public static readonly VarcharSqlType Varchar = new();
+    public static readonly VarcharSqlType Varchar = VarcharSqlType.Unspecified;
 
     /// <remarks>
     /// Stored as UTF-16 LE bytes (2 bytes per BMP code unit, surrogate pairs for
     /// supplementary characters), matching SQL Server's on-disk nvarchar layout.
     /// </remarks>
-    public static readonly NVarcharSqlType NVarchar = new();
+    public static readonly NVarcharSqlType NVarchar = NVarcharSqlType.Unspecified;
 
     /// <remarks>
     /// SQL Server's <c>sysname</c> — historically <c>varchar(30)</c> in 6.5,
@@ -237,7 +237,7 @@ internal abstract partial class SqlType
     /// after passing it to <see cref="SqlValue.FromVarbinary"/> or after
     /// receiving it from <see cref="SqlValue.AsBytes"/>.
     /// </remarks>
-    public static readonly VarbinarySqlType Varbinary = new();
+    public static readonly VarbinarySqlType Varbinary = VarbinarySqlType.Unspecified;
 
     /// <remarks>
     /// SQL Server's deprecated <c>text</c> type: <c>varchar</c>-shaped CP1252
@@ -626,11 +626,12 @@ internal abstract partial class SqlType
         }
 
         // varchar(MAX) / nvarchar(MAX) / varbinary(MAX): the LOB-eligible form
-        // of the same SqlType singleton. HeapColumn.MaxLength carries the
-        // sentinel; row-level encoder uses it to route the column through LOB
-        // storage when present.
+        // of the same SqlType family. The Type now carries the MAX-form length
+        // (-1) directly via VarcharSqlType.MaxForm / NVarcharSqlType.MaxForm /
+        // VarbinarySqlType.MaxForm; HeapColumn.MaxLength duplicates the same
+        // sentinel for the row-level encoder's LOB-routing path.
         if (declaredMaxLength == MaxLengthSentinel)
-            return (resolved, MaxLengthSentinel);
+            return (ResolveVarFamilyForLength(resolved, MaxLengthSentinel), MaxLengthSentinel);
 
         // Variable-length string types are bounded per type. SQL Server has the
         // same two-context rule as fixed-length char/nchar/binary: missing
@@ -639,11 +640,11 @@ internal abstract partial class SqlType
         // between them. Probe-confirmed against SQL Server 2025: `CAST('hello'
         // AS varchar)` returns the full string, which would truncate to 'h' if
         // the CAST default were 1.
-        var max = resolved == NVarchar ? 4000 : 8000;
+        var max = resolved is NVarcharSqlType ? 4000 : 8000;
         var declared = declaredMaxLength ?? (columnName is null ? 30 : 1);
         if (declared < 1 || declared > max)
         {
-            throw (columnName, resolved == NVarchar) switch
+            throw (columnName, resolved is NVarcharSqlType) switch
             {
                 (not null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumColumn(columnName, declared),
                 (not null, false) => SimulatedSqlException.SizeExceedsMaximumColumn(columnName, declared, max),
@@ -651,8 +652,25 @@ internal abstract partial class SqlType
                 (null, false) => SimulatedSqlException.SizeExceedsMaximumCast(resolved.ToString()!, declared, max),
             };
         }
-        return (resolved, declared);
+        return (ResolveVarFamilyForLength(resolved, declared), declared);
     }
+
+    /// <summary>
+    /// Maps the length-unspecified <c>varchar</c> / <c>nvarchar</c> /
+    /// <c>varbinary</c> singleton coming back from <see cref="ResolveSimpleKeyword"/>
+    /// to its length-bearing variant via the per-type <c>Get</c> factory.
+    /// Pinning the length on the SqlType (parallel to <see cref="CharSqlType"/>'s
+    /// existing model) lets <see cref="PromoteForArithmetic"/>, <c>SELECT INTO</c>,
+    /// and computed columns track <c>varchar(N) + varchar(M) → varchar(N+M)</c>
+    /// without a parallel length channel.
+    /// </summary>
+    private static SqlType ResolveVarFamilyForLength(SqlType resolved, int length) => resolved switch
+    {
+        VarcharSqlType => VarcharSqlType.Get(length),
+        NVarcharSqlType => NVarcharSqlType.Get(length),
+        VarbinarySqlType => VarbinarySqlType.Get(length),
+        _ => resolved,
+    };
 
     /// <summary>
     /// Resolves a parameterized fixed-length string/binary type

@@ -130,9 +130,9 @@ internal sealed class Cast : Expression
             && targetMaxLength is int max
             && max < 36)
         {
-            if (targetType == SqlType.Varchar || targetType is CharSqlType)
+            if (targetType is VarcharSqlType or CharSqlType)
                 throw SimulatedSqlException.InsufficientResultSpaceForUniqueIdentifier();
-            if (targetType == SqlType.NVarchar || targetType is NCharSqlType)
+            if (targetType is NVarcharSqlType or NCharSqlType)
                 throw SimulatedSqlException.ArithmeticOverflow("nvarchar");
         }
 
@@ -184,30 +184,34 @@ internal sealed class Cast : Expression
         if (coerced.IsNull || targetMaxLength is not int max || max <= 0)
             return coerced;
 
-        if (targetType == SqlType.Varchar || targetType == SqlType.NVarchar)
+        if (targetType is VarcharSqlType or NVarcharSqlType)
         {
             var text = coerced.AsString;
+            // The error wording uses the bare type-family name ("varchar" /
+            // "nvarchar") regardless of the target's declared length, so
+            // ToString() — which would emit "varchar(5)" — is wrong here.
+            var familyName = targetType is NVarcharSqlType ? "nvarchar" : "varchar";
             return text.Length <= max ? coerced : sourceType.Category switch
             {
                 SqlTypeCategory.String or SqlTypeCategory.DateTime
                     => SqlValue.FromString(targetType, text[..max]),
                 SqlTypeCategory.Other when sourceType is VarbinarySqlType or BinarySqlType or ImageSqlType
                     => SqlValue.FromString(targetType, text[..max]),
-                SqlTypeCategory.Integer when sourceType != SqlType.BigInt && targetType == SqlType.Varchar
+                SqlTypeCategory.Integer when sourceType != SqlType.BigInt && targetType is VarcharSqlType
                     => SqlValue.FromVarchar("*"),
                 SqlTypeCategory.Integer
-                    => throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!),
+                    => throw SimulatedSqlException.ArithmeticOverflow(familyName),
                 SqlTypeCategory.Decimal
-                    => throw SimulatedSqlException.ArithmeticOverflowToTarget(targetType.ToString()!),
+                    => throw SimulatedSqlException.ArithmeticOverflowToTarget(familyName),
                 SqlTypeCategory.Money
-                    => throw SimulatedSqlException.InsufficientResultSpaceForMoney(targetType.ToString()!),
+                    => throw SimulatedSqlException.InsufficientResultSpaceForMoney(familyName),
                 SqlTypeCategory.Approximate
-                    => throw SimulatedSqlException.ArithmeticOverflowForType(targetType.ToString()!, FormatApproximateForOverflow(text)),
+                    => throw SimulatedSqlException.ArithmeticOverflowForType(familyName, FormatApproximateForOverflow(text)),
                 _ => coerced,
             };
         }
 
-        return targetType == SqlType.Varbinary && coerced.AsBytes.Length > max
+        return targetType is VarbinarySqlType && coerced.AsBytes.Length > max
             ? SqlValue.FromVarbinary(coerced.AsBytes[..max])
             : coerced;
     }

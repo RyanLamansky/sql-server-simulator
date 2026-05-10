@@ -89,6 +89,21 @@ internal static class RowEncoder
         if (schema.Length != values.Length)
             throw new ArgumentException($"Schema has {schema.Length} columns but values has {values.Length}.", nameof(values));
 
+        // The variable-length string/binary families are length-bearing on the
+        // SqlType (varchar(N), nvarchar(N), varbinary(N) — each declared length
+        // is a distinct singleton). Runtime values built via FromVarchar /
+        // FromNVarchar / FromVarbinary always land on the length-unspecified
+        // form; the declared cap lives on the schema's HeapColumn. So when
+        // comparing value-vs-schema type identity, accept any same-family pair
+        // regardless of length — write-time truncation/overflow is enforced
+        // upstream by Simulation.EnforceMaxLength + Cast.EnforceTargetMaxLength
+        // before the value reaches the encoder.
+        static bool IsCompatibleColumnType(SqlType valueType, SqlType columnType) =>
+            valueType == columnType
+            || (valueType is VarcharSqlType && columnType is VarcharSqlType)
+            || (valueType is NVarcharSqlType && columnType is NVarcharSqlType)
+            || (valueType is VarbinarySqlType && columnType is VarbinarySqlType);
+
         var n = schema.Length;
         var fixedSectionLength = 0;
         var varColumnCount = 0;
@@ -105,7 +120,7 @@ internal static class RowEncoder
 
         for (var i = 0; i < n; i++)
         {
-            if (!values[i].IsNull && values[i].Type != schema[i].Type)
+            if (!values[i].IsNull && !IsCompatibleColumnType(values[i].Type, schema[i].Type))
                 throw new ArgumentException($"Value at column {i} has type {values[i].Type}, schema declares {schema[i].Type}.", nameof(values));
 
             if (schema[i].Type == SqlType.Bit)

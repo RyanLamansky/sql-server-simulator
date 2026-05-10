@@ -224,10 +224,21 @@ partial class Simulation
         foreach (var pending in pendingComputed)
         {
             var resolvedType = pending.Expression.GetSqlType(ResolveComputedReference);
+            // Pull the declared length off the resolved type for the var-length
+            // string/binary families so EnforceMaxLength sees the same cap that
+            // GetSqlType inferred. Char/binary fixed-length types report their
+            // length via FixedLength; the var-length families surface it here.
+            int? computedMaxLength = resolvedType switch
+            {
+                VarcharSqlType v when v.length > 0 => v.length,
+                NVarcharSqlType nv when nv.length > 0 => nv.length,
+                VarbinarySqlType vb when vb.length > 0 => vb.length,
+                _ => null,
+            };
             heapColumns[pending.Index] = new HeapColumn(
                 pending.Name,
                 resolvedType,
-                maxLength: null,
+                maxLength: computedMaxLength,
                 nullable: pending.Nullable,
                 computedExpression: pending.Expression,
                 isPersisted: pending.Persisted);

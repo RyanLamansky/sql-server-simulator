@@ -50,13 +50,13 @@ partial class Simulation
             return;
 
         int actual;
-        if (column.Type == SqlType.Varbinary || column.Type is BinarySqlType)
+        if (column.Type is VarbinarySqlType or BinarySqlType)
         {
             if (source.Type is not (VarbinarySqlType or BinarySqlType))
                 return;
             actual = source.AsBytes.Length;
         }
-        else if (column.Type == SqlType.Varchar || column.Type is CharSqlType)
+        else if (column.Type is VarcharSqlType or CharSqlType)
         {
             if (source.Type.Category != SqlTypeCategory.String)
                 return;
@@ -75,7 +75,7 @@ partial class Simulation
         if (!simulation.IsVerboseTruncationActive())
             throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy();
 
-        throw column.Type == SqlType.Varbinary || column.Type is BinarySqlType
+        throw column.Type is VarbinarySqlType or BinarySqlType
             ? SimulatedSqlException.StringOrBinaryWouldBeTruncated(tableName, column.Name, source.AsBytes, max)
             : SimulatedSqlException.StringOrBinaryWouldBeTruncated(tableName, column.Name, source.AsString, max);
     }

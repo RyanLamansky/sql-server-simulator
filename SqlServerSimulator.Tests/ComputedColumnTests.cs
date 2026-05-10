@@ -186,4 +186,20 @@ public sealed class ComputedColumnTests
         Assert.AreEqual(10, reader.GetInt32(0));
         Assert.IsFalse(reader.Read());
     }
+
+    /// <summary>
+    /// Regression: <c>varchar(N) + varchar(M)</c> in a computed column should
+    /// resolve to <c>varchar(N+M)</c>. The earlier behavior dropped to
+    /// length-unspecified varchar (defaulting to 1 in column context),
+    /// which clobbered the persisted value to its first character.
+    /// </summary>
+    [TestMethod]
+    public void Computed_VarcharConcat_PreservesCombinedLength()
+        => Assert.AreEqual(
+            "abcdefghijklmnopqrstuvwxyz1234",
+            new Simulation().ExecuteScalar("""
+                create table t (a varchar(10), b varchar(20), c as a + b persisted);
+                insert t (a, b) values ('abcdefghij', 'klmnopqrstuvwxyz1234');
+                select c from t
+                """));
 }

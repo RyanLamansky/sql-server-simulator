@@ -90,7 +90,7 @@ internal static class BuiltInResources
         : type == SqlType.SmallInt ? SqlValue.FromInt16(Convert.ToInt16(value, CultureInfo.InvariantCulture))
         : type == SqlType.Int32 ? SqlValue.FromInt32(Convert.ToInt32(value, CultureInfo.InvariantCulture))
         : type == SqlType.Bit ? SqlValue.FromBoolean((bool)value)
-        : type == SqlType.Varchar ? SqlValue.FromVarchar((string)value)
+        : type is VarcharSqlType ? SqlValue.FromVarchar((string)value)
         : type == SqlType.SystemName ? SqlValue.FromSystemName((string)value)
         : throw new NotSupportedException($"Built-in resource materializer doesn't know how to convert {value.GetType().Name} to {type}.");
 }

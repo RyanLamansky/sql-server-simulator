@@ -142,7 +142,7 @@ internal sealed class StringConcat : Expression
             : value.CoerceTo(resultType).AsString;
 
     private static bool IsNationalString(SqlType type) =>
-        type == SqlType.NVarchar || type is NCharSqlType || type == SqlType.NText;
+        type is NVarcharSqlType or NCharSqlType || type == SqlType.NText;
 
     private static string LowercaseName(StringConcatKind kind) => kind switch
     {

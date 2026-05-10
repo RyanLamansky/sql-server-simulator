@@ -402,8 +402,8 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="type"/> is not a string type.</exception>
     public static SqlValue FromString(SqlType type, string value) =>
-        type == SqlType.Varchar ? FromVarchar(value)
-        : type == SqlType.NVarchar ? FromNVarchar(value)
+        type is VarcharSqlType ? FromVarchar(value)
+        : type is NVarcharSqlType ? FromNVarchar(value)
         : type == SqlType.SystemName ? FromSystemName(value)
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)

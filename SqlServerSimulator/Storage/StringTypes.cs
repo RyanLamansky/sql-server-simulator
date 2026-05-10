@@ -3,9 +3,23 @@ using System.Text;
 
 namespace SqlServerSimulator.Storage;
 
-internal sealed class VarcharSqlType() : SqlType(SqlTypeCategory.String)
+/// <summary>
+/// SQL Server's <c>varchar(N)</c>: variable-length CP1252 string, declared
+/// length 1-8000 bytes. Each declared length is a distinct singleton via
+/// <see cref="Get"/>; <see cref="Unspecified"/> (length 0) is the
+/// length-unspecified sentinel returned from arithmetic / column resolution
+/// paths that haven't pinned a length, and <see cref="MaxForm"/> (length -1)
+/// is the LOB <c>varchar(MAX)</c> form.
+/// </summary>
+internal sealed class VarcharSqlType : SqlType
 {
+    public readonly short length;
+
+    private VarcharSqlType(short length) : base(SqlTypeCategory.String) => this.length = length;
+
     public override Type ClrType => typeof(string);
+
+    public override string SqlServerName => "varchar";
 
     public override bool IsFixedLength => false;
 
@@ -17,12 +31,42 @@ internal sealed class VarcharSqlType() : SqlType(SqlTypeCategory.String)
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw);
 
-    public override string ToString() => "varchar";
+    public override string ToString() => this.length switch
+    {
+        0 => "varchar",
+        -1 => "varchar(MAX)",
+        _ => $"varchar({this.length})",
+    };
+
+    private static readonly ConcurrentDictionary<short, VarcharSqlType> cache = new();
+
+    internal static readonly VarcharSqlType Unspecified = new(0);
+
+    internal static readonly VarcharSqlType MaxForm = new(-1);
+
+    public static VarcharSqlType Get(int length) =>
+        length is 0 ? Unspecified
+        : length is SqlType.MaxLengthSentinel ? MaxForm
+        : length is < 1 or > 8000
+            ? throw new ArgumentOutOfRangeException(nameof(length), $"varchar length must be 1-8000, 0 (unspecified), or -1 (MAX); got {length}.")
+            : cache.GetOrAdd((short)length, l => new VarcharSqlType(l));
 }
 
-internal sealed class NVarcharSqlType() : SqlType(SqlTypeCategory.String)
+/// <summary>
+/// SQL Server's <c>nvarchar(N)</c>: variable-length UTF-16 LE string,
+/// declared length 1-4000 code units. Same singleton convention as
+/// <see cref="VarcharSqlType"/>; <see cref="Unspecified"/> = length 0,
+/// <see cref="MaxForm"/> = length -1.
+/// </summary>
+internal sealed class NVarcharSqlType : SqlType
 {
+    public readonly short length;
+
+    private NVarcharSqlType(short length) : base(SqlTypeCategory.String) => this.length = length;
+
     public override Type ClrType => typeof(string);
+
+    public override string SqlServerName => "nvarchar";
 
     public override bool IsFixedLength => false;
 
@@ -34,7 +78,25 @@ internal sealed class NVarcharSqlType() : SqlType(SqlTypeCategory.String)
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw);
 
-    public override string ToString() => "nvarchar";
+    public override string ToString() => this.length switch
+    {
+        0 => "nvarchar",
+        -1 => "nvarchar(MAX)",
+        _ => $"nvarchar({this.length})",
+    };
+
+    private static readonly ConcurrentDictionary<short, NVarcharSqlType> cache = new();
+
+    internal static readonly NVarcharSqlType Unspecified = new(0);
+
+    internal static readonly NVarcharSqlType MaxForm = new(-1);
+
+    public static NVarcharSqlType Get(int length) =>
+        length is 0 ? Unspecified
+        : length is SqlType.MaxLengthSentinel ? MaxForm
+        : length is < 1 or > 4000
+            ? throw new ArgumentOutOfRangeException(nameof(length), $"nvarchar length must be 1-4000, 0 (unspecified), or -1 (MAX); got {length}.")
+            : cache.GetOrAdd((short)length, l => new NVarcharSqlType(l));
 }
 
 internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
@@ -52,9 +114,20 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
     public override string ToString() => "sysname";
 }
 
-internal sealed class VarbinarySqlType() : SqlType(SqlTypeCategory.Other)
+/// <summary>
+/// SQL Server's <c>varbinary(N)</c>: variable-length raw bytes, declared
+/// length 1-8000. Same singleton convention as <see cref="VarcharSqlType"/>;
+/// <see cref="Unspecified"/> = length 0, <see cref="MaxForm"/> = length -1.
+/// </summary>
+internal sealed class VarbinarySqlType : SqlType
 {
+    public readonly short length;
+
+    private VarbinarySqlType(short length) : base(SqlTypeCategory.Other) => this.length = length;
+
     public override Type ClrType => typeof(byte[]);
+
+    public override string SqlServerName => "varbinary";
 
     public override bool IsFixedLength => false;
 
@@ -71,7 +144,25 @@ internal sealed class VarbinarySqlType() : SqlType(SqlTypeCategory.Other)
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarbinary((byte[])raw);
 
-    public override string ToString() => "varbinary";
+    public override string ToString() => this.length switch
+    {
+        0 => "varbinary",
+        -1 => "varbinary(MAX)",
+        _ => $"varbinary({this.length})",
+    };
+
+    private static readonly ConcurrentDictionary<short, VarbinarySqlType> cache = new();
+
+    internal static readonly VarbinarySqlType Unspecified = new(0);
+
+    internal static readonly VarbinarySqlType MaxForm = new(-1);
+
+    public static VarbinarySqlType Get(int length) =>
+        length is 0 ? Unspecified
+        : length is SqlType.MaxLengthSentinel ? MaxForm
+        : length is < 1 or > 8000
+            ? throw new ArgumentOutOfRangeException(nameof(length), $"varbinary length must be 1-8000, 0 (unspecified), or -1 (MAX); got {length}.")
+            : cache.GetOrAdd((short)length, l => new VarbinarySqlType(l));
 }
 
 /// <summary>

@@ -224,15 +224,17 @@ internal abstract partial class SqlType
         if (op is '&' or '|' or '^')
             return Promote(a, b);
 
-        // String + string is concatenation, not arithmetic. Pure char/nchar
-        // pairs preserve fixed-length-ness with combined lengths capped at
-        // the type's max (8000 for char, 4000 for nchar) — probe-confirmed
-        // against SQL Server 2025 (2026-05-09): `char(5) + char(5)` → char(10),
-        // `char(5) + nchar(5)` → nchar(10), `char(8000) + char(100)` → char(8000).
-        // Mixed fixed/variable pairs (`char + varchar`, `nchar + nvarchar`,
-        // etc.) drop to length-less varchar/nvarchar — the simulator stores
-        // variable-length string length at the column level, not the SqlType,
-        // so result-length metadata for varchar/nvarchar pairs isn't tracked.
+        // String + string is concatenation, not arithmetic. Lengths combine
+        // as min(8000, N+M) for varchar/char pairs, min(4000, N+M) for any
+        // pair containing nvarchar/nchar (which dominate the family choice).
+        // Probe-confirmed against SQL Server 2025 (2026-05-09): `char(5) +
+        // char(5)` → char(10); `varchar(10) + varchar(20)` → varchar(30);
+        // `char(8000) + char(100)` → char(8000). Pure char/nchar pairs keep
+        // fixed-length-ness; the moment a variable-length operand enters,
+        // the result drops to var* of the combined length. Length-unspecified
+        // operands (length=0 sentinel — e.g. CAST/runtime forms that haven't
+        // pinned a length) treat the missing operand as length 0 in the sum,
+        // mirroring the no-info-available behavior.
         if (op == '+' && a.Category == SqlTypeCategory.String && b.Category == SqlTypeCategory.String)
         {
             return (a, b) switch
@@ -241,8 +243,7 @@ internal abstract partial class SqlType
                 (NCharSqlType na, NCharSqlType nb) => GetNChar(Math.Min(4000, na.length + nb.length)),
                 (CharSqlType caMix, NCharSqlType nbMix) => GetNChar(Math.Min(4000, caMix.length + nbMix.length)),
                 (NCharSqlType naMix, CharSqlType cbMix) => GetNChar(Math.Min(4000, naMix.length + cbMix.length)),
-                _ => a == NVarchar || b == NVarchar || a is NCharSqlType || b is NCharSqlType || a == NText || b == NText
-                    ? NVarchar : Varchar,
+                _ => StringConcatResult(a, b),
             };
         }
 
@@ -384,6 +385,50 @@ internal abstract partial class SqlType
         DateTime2SqlType dt2 => dt2.precision,
         DateTimeOffsetSqlType dto => dto.precision,
         _ when type == DateTime => 3,
+        _ => 0,
+    };
+
+    /// <summary>
+    /// Computes the result type for a string-+-string operand pair when at
+    /// least one side is variable-length. National-string family wins; the
+    /// declared-length sum is capped at the family's maximum (4000 for
+    /// nvarchar, 8000 for varchar). LOB operands (text / ntext) drop the
+    /// result to the unspecified-length form because LOB has no per-cell
+    /// width to add.
+    /// </summary>
+    private static SqlType StringConcatResult(SqlType a, SqlType b)
+    {
+        var national = a is NVarcharSqlType or NCharSqlType
+            || b is NVarcharSqlType or NCharSqlType
+            || a == NText || b == NText;
+
+        if (a == Text || b == Text || a == NText || b == NText)
+            return national ? NVarchar : Varchar;
+
+        var aLen = StringLengthForConcat(a);
+        var bLen = StringLengthForConcat(b);
+        if (aLen == 0 || bLen == 0)
+            return national ? NVarchar : Varchar;
+
+        var max = national ? 4000 : 8000;
+        var summed = Math.Min(max, aLen + bLen);
+        return national ? NVarcharSqlType.Get(summed) : VarcharSqlType.Get(summed);
+    }
+
+    /// <summary>
+    /// Returns the declared length of a string operand for use in
+    /// <see cref="StringConcatResult"/>. char(N) / nchar(N) carry length on
+    /// the type; varchar(N) / nvarchar(N) carry it via the per-length
+    /// singleton. The unspecified-length form (length=0) and LOB families
+    /// (text / ntext / sysname) report 0, which the caller interprets as
+    /// "fall back to the unspecified result form."
+    /// </summary>
+    private static int StringLengthForConcat(SqlType type) => type switch
+    {
+        CharSqlType c => c.length,
+        NCharSqlType nc => nc.length,
+        VarcharSqlType v => v.length,
+        NVarcharSqlType nv => nv.length,
         _ => 0,
     };
 }
