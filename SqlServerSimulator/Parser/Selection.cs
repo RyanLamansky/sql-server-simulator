@@ -131,7 +131,53 @@ internal sealed partial class Selection
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetCount, topLevelTail.FetchCount);
         }
 
+        // OPTION (MAXRECURSION N) — statement-level hint applied to all
+        // recursive CTEs in the surrounding statement. Only MAXRECURSION
+        // is modeled; other hints (OPTIMIZE FOR / RECOMPILE / etc.) are
+        // valid in real SQL Server but raise NotSupportedException here.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Option })
+            ParseOptionClause(context);
+
         return combined;
+    }
+
+    /// <summary>
+    /// Parses the trailing <c>OPTION (MAXRECURSION N)</c> hint clause and
+    /// applies the value to every <see cref="CteBinding"/> in scope. Only
+    /// MAXRECURSION is modeled; reaching any other hint raises
+    /// <see cref="NotSupportedException"/>.
+    /// </summary>
+    private static void ParseOptionClause(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        while (true)
+        {
+            context.MoveNextRequired();
+            if (!context.MatchContextual(ContextualKeyword.MaxRecursion))
+                throw new NotSupportedException("Only OPTION (MAXRECURSION N) is modeled in the OPTION clause.");
+
+            if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } limitValue })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var limit = limitValue.AsInt32;
+            if (limit is < 0 or > 32_767)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            if (context.CteBindings is { } bindings)
+            {
+                foreach (var binding in bindings.Values)
+                    binding.MaxRecursion = limit;
+            }
+
+            context.MoveNextRequired();
+            if (context.Token is Operator { Character: ')' })
+            {
+                context.MoveNextOptional();
+                return;
+            }
+            if (context.Token is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
     }
 
     /// <summary>
@@ -180,7 +226,7 @@ internal sealed partial class Selection
     /// Higher-precedence set-op level: parses a chain of INTERSECT
     /// operators left-to-right.
     /// </summary>
-    private static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch)
+    internal static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch)
     {
         var left = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
@@ -203,7 +249,7 @@ internal sealed partial class Selection
     /// non-projected source columns; subsequent branches must defer
     /// ORDER BY to the top level.
     /// </summary>
-    private static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
+    internal static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         // Save / restore the parser's aggregate and window collectors so
         // each branch gets its own scope. Aggregates and window functions
@@ -587,8 +633,30 @@ internal sealed partial class Selection
                 if (context.CteBindings is { } cteBindings
                     && cteBindings.TryGetValue(tableName.Value, out var cteBinding))
                 {
+                    // Recursive-part self-reference: the body parser has
+                    // captured the anchor's schema and toggled
+                    // IsRecursivePartParse. The FromSource pulls rows from
+                    // the binding's per-iteration rowset slot, which the
+                    // recursive Selection rebinds between iterations.
+                    if (cteBinding.IsRecursivePartParse && cteBinding.Schema is { } recursiveSchema)
+                    {
+                        cteBinding.SelfReferenceCountInCurrentBranch++;
+                        var recursiveColumns = new HeapColumn[recursiveSchema.Length];
+                        for (var ci = 0; ci < recursiveColumns.Length; ci++)
+                            recursiveColumns[ci] = new HeapColumn(string.Empty, recursiveSchema[ci], maxLength: null, nullable: true);
+                        var recursiveAlias = ConsumeOptionalAlias(context);
+                        return new FromSource(
+                            qualifier: recursiveAlias ?? cteBinding.Name,
+                            columnNames: cteBinding.ColumnNames,
+                            columns: recursiveColumns,
+                            storedSchema: recursiveColumns,
+                            storageOrdinals: null,
+                            lobStore: null,
+                            rows: SelfReferenceRows(cteBinding));
+                    }
+
                     if (cteBinding.Plan is null)
-                        throw new NotSupportedException("Recursive common table expressions are not modeled.");
+                        throw SimulatedSqlException.RecursiveCteMissingUnionAll(cteBinding.Name);
 
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
                     for (var ci = 0; ci < cteColumns.Length; ci++)
@@ -815,6 +883,23 @@ internal sealed partial class Selection
             return aliasName.Value;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Yields the CTE binding's current iteration rowset to a recursive
+    /// branch's self-reference FromSource. The runtime
+    /// <see cref="CteBinding.CurrentIterationRows"/> slot is rebound by
+    /// <see cref="FromRecursiveCte"/> between iterations, so each
+    /// enumerator created here pulls the per-iteration rowset captured at
+    /// iterator-start time.
+    /// </summary>
+    private static IEnumerable<byte[]> SelfReferenceRows(CteBinding binding)
+    {
+        var rows = binding.CurrentIterationRows;
+        if (rows is null)
+            yield break;
+        foreach (var row in rows)
+            yield return row;
     }
 
     /// <summary>

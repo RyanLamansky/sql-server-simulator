@@ -27,6 +27,7 @@ enum ContextualKeyword
     First,
     Matched,
     Max,
+    MaxRecursion,
     Next,
     Offset,
     Only,

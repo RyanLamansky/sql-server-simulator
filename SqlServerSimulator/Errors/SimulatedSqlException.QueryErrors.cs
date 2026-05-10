@@ -213,6 +213,48 @@ partial class SimulatedSqlException
         new($"'{name}' has fewer columns than were specified in the column list.", 8159, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 240: anchor and recursive parts of a recursive
+    /// CTE produce different per-column types. Recursive CTEs require strict
+    /// type equality (no Promote-style widening), unlike regular UNION ALL.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteTypeMismatch(string columnName, string cteName) =>
+        new($"Types don't match between the anchor and the recursive part in column \"{columnName}\" of recursive query \"{cteName}\".", 240, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 247: an anchor branch (no self-reference)
+    /// appears after a recursive branch (self-reference) in a recursive CTE's
+    /// UNION ALL chain. All anchors must precede all recursive branches.
+    /// </summary>
+    internal static SimulatedSqlException AnchorAfterRecursive(string cteName) =>
+        new($"An anchor member was found in the recursive part of recursive query \"{cteName}\".", 247, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 252: a recursive CTE doesn't have a top-level
+    /// <c>UNION ALL</c> operator. Fires when the body has a self-reference
+    /// without UNION ALL splitting it from an anchor, or when a UNION (dedupe)
+    /// is used instead of UNION ALL.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteMissingUnionAll(string cteName) =>
+        new($"Recursive common table expression '{cteName}' does not contain a top-level UNION ALL operator.", 252, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 253: a single recursive branch references the
+    /// CTE more than once. Each recursive branch must contain exactly one
+    /// self-reference.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteMultipleReferences(string cteName) =>
+        new($"Recursive member of a common table expression '{cteName}' has multiple recursive references.", 253, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 530: the recursive CTE's iteration count
+    /// exceeded MAXRECURSION. The literal <paramref name="limit"/> appears
+    /// in the message — overrides via <c>OPTION (MAXRECURSION N)</c> are
+    /// reflected. <c>MAXRECURSION 0</c> disables the check.
+    /// </summary>
+    internal static SimulatedSqlException MaxRecursionExceeded(int limit) =>
+        new($"The statement terminated. The maximum recursion {limit} has been exhausted before statement completion.", 530, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1033: <c>ORDER BY</c> appears inside a CTE
     /// body without an accompanying <c>TOP</c> / <c>OFFSET</c> / <c>FOR XML</c>.
     /// Real SQL Server's wording lists the broader set of contexts (views,

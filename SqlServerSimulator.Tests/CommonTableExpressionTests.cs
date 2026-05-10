@@ -161,14 +161,146 @@ public sealed class CommonTableExpressionTests
         => AreEqual(2, WithSourceTable().ExecuteScalar("with c as (select id from src order by id desc offset 1 rows fetch next 1 rows only) select id from c"));
 
     [TestMethod]
-    public void Cte_RecursiveSelfReference_RaisesNotSupported()
-        => Throws<NotSupportedException>(() => WithSourceTable().ExecuteNonQuery("""
-            with a as (
+    public void Cte_Recursive_Counter()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            with c as (
                 select 1 as n
                 union all
-                select n + 1 from a where n < 5
-            ) select * from a
-            """));
+                select n + 1 from c where n < 5
+            ) select n from c order by n
+            """);
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 1, 2, 3, 4, 5 }, values);
+    }
+
+    [TestMethod]
+    public void Cte_Recursive_HierarchyTraversal()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table emp (id int, mgr_id int, name nvarchar(20));
+            insert emp values (1, null, 'CEO'), (2, 1, 'VP1'), (3, 1, 'VP2'), (4, 2, 'Dir1'), (5, 4, 'Mgr1')
+            """);
+        using var reader = simulation.ExecuteReader("""
+            with org as (
+                select id, mgr_id, name, 0 as depth from emp where mgr_id is null
+                union all
+                select e.id, e.mgr_id, e.name, o.depth + 1
+                from emp e inner join org o on e.mgr_id = o.id
+            )
+            select id, name, depth from org order by depth, id
+            """);
+        var rows = new List<(int id, string name, int depth)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2)));
+        CollectionAssert.AreEqual(new[] { (1, "CEO", 0), (2, "VP1", 1), (3, "VP2", 1), (4, "Dir1", 2), (5, "Mgr1", 3) }, rows);
+    }
+
+    [TestMethod]
+    public void Cte_Recursive_DefaultMaxRecursion100_RaisesMsg530()
+        => new Simulation().AssertSqlError("with c as (select 1 as n union all select n+1 from c) select count(*) from c", 530,
+            "The statement terminated. The maximum recursion 100 has been exhausted before statement completion.");
+
+    [TestMethod]
+    public void Cte_Recursive_OptionMaxRecursionLow_LimitInMessage()
+        => new Simulation().AssertSqlError("with c as (select 1 as n union all select n+1 from c) select count(*) from c option (maxrecursion 5)", 530,
+            "The statement terminated. The maximum recursion 5 has been exhausted before statement completion.");
+
+    [TestMethod]
+    public void Cte_Recursive_OptionMaxRecursionZero_Unlimited()
+        => AreEqual(200, new Simulation().ExecuteScalar("with c as (select 1 as n union all select n+1 from c where n < 200) select count(*) from c option (maxrecursion 0)"));
+
+    [TestMethod]
+    public void Cte_Recursive_MultipleAnchors()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            with c as (
+                select 1 as n
+                union all select 100
+                union all select n+1 from c where n < 3
+            ) select n from c order by n
+            """);
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 1, 2, 3, 100 }, values);
+    }
+
+    [TestMethod]
+    public void Cte_Recursive_AnchorAfterRecursive_RaisesMsg247()
+        => new Simulation().AssertSqlError("with c as (select 1 as n union all select 2 union all select n+1 from c where n < 4 union all select 99) select n from c", 247,
+            "An anchor member was found in the recursive part of recursive query \"c\".");
+
+    [TestMethod]
+    public void Cte_Recursive_MultipleSelfRefInOneBranch_RaisesMsg253()
+        => new Simulation().AssertSqlError("with c as (select 1 as n union all select c1.n + c2.n from c c1 cross join c c2 where c1.n < 5) select n from c", 253,
+            "Recursive member of a common table expression 'c' has multiple recursive references.");
+
+    [TestMethod]
+    public void Cte_Recursive_TypeMismatch_RaisesMsg240()
+        => new Simulation().AssertSqlError("with c as (select cast(1 as smallint) as n union all select cast(n+1 as int) from c where n < 5) select n from c", 240,
+            "Types don't match between the anchor and the recursive part in column \"n\" of recursive query \"c\".");
+
+    [TestMethod]
+    public void Cte_Recursive_UnionWithoutAll_RaisesMsg252()
+        => new Simulation().AssertSqlError("with c as (select 1 as n union select n+1 from c where n < 3) select n from c", 252,
+            "Recursive common table expression 'c' does not contain a top-level UNION ALL operator.");
+
+    [TestMethod]
+    public void Cte_Recursive_NoUnionAtAll_RaisesMsg252()
+        => new Simulation().AssertSqlError("with c as (select n+1 from c where n < 5) select n from c", 252);
+
+    [TestMethod]
+    public void Cte_Recursive_ZeroIterations_OnlyAnchor()
+    {
+        // Anchor produces a row whose WHERE in the recursive part rejects
+        // immediately; result is just the anchor's rows.
+        using var reader = new Simulation().ExecuteReader("with c as (select 100 as n union all select n+1 from c where n < 50) select n from c");
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 100 }, values);
+    }
+
+    [TestMethod]
+    public void Cte_Recursive_ConsumesParentRowsPerIteration()
+    {
+        // The recursive branch reads the previous-iteration rowset, NOT
+        // the cumulative result-so-far. With anchor n=1 and recursive
+        // `select n+1 from c where n < 3`, iteration 1 produces n=2,
+        // iteration 2 produces n=3, iteration 3 produces no rows (n=3
+        // doesn't satisfy n<3), so the result is {1, 2, 3}.
+        using var reader = new Simulation().ExecuteReader("with c as (select 1 as n union all select n+1 from c where n < 3) select n from c order by n");
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, values);
+    }
+
+    [TestMethod]
+    public void Cte_Recursive_AggregateOverFinalResult()
+        => AreEqual(15, new Simulation().ExecuteScalar("with c as (select 1 as n union all select n+1 from c where n < 5) select sum(n) from c"));
+
+    [TestMethod]
+    public void Cte_Recursive_StringConcatenation()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            with path as (
+                select cast('root' as varchar(100)) as p, 0 as depth
+                union all
+                select cast(p + '/' + cast(depth + 1 as varchar(10)) as varchar(100)), depth + 1
+                from path where depth < 3
+            )
+            select p from path order by depth
+            """);
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "root", "root/1", "root/1/2", "root/1/2/3" }, values);
+    }
 
     [TestMethod]
     public void Cte_BindingClearsBetweenStatements()

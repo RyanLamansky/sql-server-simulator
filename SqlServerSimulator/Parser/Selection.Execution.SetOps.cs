@@ -19,7 +19,7 @@ internal sealed partial class Selection
     /// <see cref="HasOrderBy"/>; if it stuck around when a set operator
     /// follows, that's a syntax error).
     /// </summary>
-    private static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind)
+    internal static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind)
     {
         if (left.HasOrderBy)
         {
