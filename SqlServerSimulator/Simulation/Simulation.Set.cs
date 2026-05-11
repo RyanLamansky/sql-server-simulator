@@ -73,7 +73,7 @@ partial class Simulation
             return false;
 
         var tableName = tableNameToken.Value;
-        if (!context.CurrentDatabase.HeapTables.TryGetValue(tableName, out var heapTable))
+        if (!context.Batch.TryResolveTable(tableName, out var heapTable))
             throw SimulatedSqlException.InvalidObjectName(tableNameToken);
 
         if (onOff == Keyword.On)

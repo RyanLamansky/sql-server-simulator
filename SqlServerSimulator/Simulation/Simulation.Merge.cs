@@ -29,7 +29,7 @@ partial class Simulation
         var destinationTableToken = context.Token as StringToken
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var destinationTable = context.CurrentDatabase.HeapTables.TryGetValue(destinationTableToken.Value, out var table)
+        var destinationTable = context.Batch.TryResolveTable(destinationTableToken.Value, out var table)
             ? table
             : throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
 

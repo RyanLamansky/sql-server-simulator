@@ -221,6 +221,7 @@ public sealed partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
                 case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
                 case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
+                case ReservedKeyword { Keyword: Keyword.Drop } when TryParseDrop(context):
                 case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
                 case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
                     connection.LastStatementRowCount = 0;
@@ -271,7 +272,7 @@ public sealed partial class Simulation
         {
             Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
                 or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
-                or Keyword.Save or Keyword.Create or Keyword.Alter or Keyword.Dbcc
+                or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
                 or Keyword.Set or Keyword.Declare or Keyword.With
         };
 

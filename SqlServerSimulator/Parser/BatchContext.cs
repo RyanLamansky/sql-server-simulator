@@ -98,4 +98,27 @@ internal sealed class BatchContext
         Variables.TryGetValue(name, out var slot)
         ? slot
         : throw SimulatedSqlException.MustDeclareScalarVariable(name);
+
+    /// <summary>
+    /// Recognizes a local temp-table name (<c>#foo</c>, including bare
+    /// <c>#</c>). Global temps (<c>##foo</c>) aren't modeled and return
+    /// false. The rule: leading <c>#</c>, second char is not <c>#</c> (so
+    /// <c>##</c>-prefixed names fall out as not-local).
+    /// </summary>
+    public static bool IsLocalTempName(string name) =>
+        name.Length >= 1 && name[0] == '#' && (name.Length == 1 || name[1] != '#');
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> against the right table dictionary —
+    /// the connection's <see cref="SimulatedDbConnection.TempTables"/> for
+    /// <c>#foo</c> names, otherwise the current database's user tables and
+    /// the simulation's system tables. Centralizes the routing rule so call
+    /// sites (SELECT/INSERT/UPDATE/DELETE/MERGE name lookups,
+    /// <c>IDENT_CURRENT</c>, <c>SET IDENTITY_INSERT</c>) stay uniform.
+    /// </summary>
+    public bool TryResolveTable(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table) =>
+        IsLocalTempName(name)
+            ? this.Connection.TempTables.TryGetValue(name, out table)
+            : this.CurrentDatabase.HeapTables.TryGetValue(name, out table)
+                || Simulation.SystemHeapTables.TryGetValue(name, out table);
 }

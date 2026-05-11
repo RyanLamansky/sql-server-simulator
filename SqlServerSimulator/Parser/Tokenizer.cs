@@ -42,6 +42,7 @@ static class Tokenizer
             >= '0' and <= '9' => ParseNumeric(command, ref index),
             '\'' => ParseStringLiteral(command, ref index),
             '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
+            '#' => ParseHashPrefixedName(command, ref index),
             '-' => ParseMinusOrComment(command, ref index),
             '/' => ParseForwardSlashOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
@@ -70,6 +71,32 @@ static class Tokenizer
                 break;
         }
 
+        return UnquotedString.CheckReserved(command, start, index - start);
+    }
+
+    /// <summary>
+    /// Parses a <c>#</c>-prefixed local-temp or <c>##</c>-prefixed global-temp
+    /// identifier. The leading <c>#</c> (and optional second <c>#</c>) are part
+    /// of the token's value; the trailing identifier body follows the same
+    /// letter/digit/underscore rule as a regular unquoted name. The bare forms
+    /// <c>#</c> and <c>##</c> are valid identifiers in SQL Server, so the
+    /// trailing body is allowed to be empty.
+    /// </summary>
+    private static Token ParseHashPrefixedName(string command, ref int index)
+    {
+        var start = index;
+        index++; // leading '#'
+        if (index < command.Length && command[index] == '#')
+            index++; // optional second '#' for ## globals
+        while (index < command.Length)
+        {
+            var c = command[index];
+            if (!char.IsLetterOrDigit(c) && c != '_')
+                break;
+            index++;
+        }
+        // CheckReserved short-circuits to UnquotedString because no reserved
+        // keyword begins with '#'.
         return UnquotedString.CheckReserved(command, start, index - start);
     }
 

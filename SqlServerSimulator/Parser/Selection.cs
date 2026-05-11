@@ -783,11 +783,8 @@ internal sealed partial class Selection
                         lateralPlan: cteBinding.Plan);
                 }
 
-                if (!context.CurrentDatabase.HeapTables.TryGetValue(tableName.Value, out var heapTable)
-                    && !Simulation.SystemHeapTables.TryGetValue(tableName.Value, out heapTable))
-                {
+                if (!context.Batch.TryResolveTable(tableName.Value, out var heapTable))
                     throw SimulatedSqlException.InvalidObjectName(tableName);
-                }
 
                 var heapColumnNames = new string[heapTable.Columns.Length];
                 for (var ci = 0; ci < heapColumnNames.Length; ci++)

@@ -26,6 +26,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 
     /// <summary>
+    /// Mimics SQL Server error 3701: <c>DROP TABLE</c> targeted a name that
+    /// doesn't exist. Real SQL Server suppresses this when <c>IF EXISTS</c>
+    /// is present; callers should branch on the parsed flag and only construct
+    /// this when the table is genuinely missing. Wording probe-confirmed
+    /// against SQL Server 2025 for both regular and temp table targets
+    /// (the name is shown verbatim, so <c>#foo</c> appears with its hash).
+    /// </summary>
+    internal static SimulatedSqlException CannotDropTableDoesNotExist(string name) =>
+        new($"Cannot drop the table '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 302: <c>newsequentialid()</c> appeared anywhere
     /// other than as the entire DEFAULT expression of a <c>uniqueidentifier</c>
     /// column. Wording verified against SQL Server 2025 — the simulator

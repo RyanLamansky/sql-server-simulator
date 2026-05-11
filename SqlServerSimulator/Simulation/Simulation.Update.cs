@@ -49,7 +49,7 @@ partial class Simulation
         // alias for the FROM clause that follows (multi-table form). Try
         // table-resolution now; if it fails, the FROM clause must provide
         // the binding via alias-matching.
-        _ = context.CurrentDatabase.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
+        _ = context.Batch.TryResolveTable(leadingIdentToken.Value, out var leadingTable);
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);

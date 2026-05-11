@@ -29,7 +29,7 @@ internal sealed class IdentCurrent : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        if (!runtime.Batch.CurrentDatabase.HeapTables.TryGetValue(this.tableName, out var table))
+        if (!runtime.Batch.TryResolveTable(this.tableName, out var table))
             return SqlValue.Null(ResultType);
         var identityOrdinal = table.IdentityOrdinal;
         return identityOrdinal < 0

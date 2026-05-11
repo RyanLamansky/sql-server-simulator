@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
@@ -14,11 +16,14 @@ internal enum UndoKind
 
 /// <summary>
 /// Per-statement (Bundle 1) / per-connection-transaction (Bundle 2) record
-/// of heap mutations, walked in reverse on rollback. Insert entries are
-/// undone by tombstoning the slot they created; delete entries by clearing
-/// the tombstone bit on the slot they cleared. UPDATE decomposes to a
-/// delete-of-old plus an insert-of-new pair, so its rollback is naturally
-/// the inverse pair walked LIFO.
+/// of heap mutations and temp-table DDL, walked in reverse on rollback.
+/// Insert entries are undone by tombstoning the slot they created; delete
+/// entries by clearing the tombstone bit on the slot they cleared.
+/// <c>CREATE TABLE #foo</c> entries undo by removing the table from the
+/// connection's <see cref="SimulatedDbConnection.TempTables"/> dict;
+/// <c>DROP TABLE #foo</c> entries undo by restoring the table. UPDATE
+/// decomposes to a delete-of-old plus an insert-of-new pair, so its
+/// rollback is naturally the inverse pair walked LIFO.
 /// </summary>
 /// <remarks>
 /// Identity counters and the database-scoped rowversion counter are
@@ -26,17 +31,26 @@ internal enum UndoKind
 /// 2025 (2026-05-08): both keep advancing even when the writes that
 /// consumed their values are rolled back. LOB chains allocated for
 /// rolled-back inserts are also outside the log; they leak the same way
-/// committed deletes leak (the existing CLAUDE.md quirk).
+/// committed deletes leak (the existing CLAUDE.md quirk). Regular
+/// <c>CREATE TABLE</c> / <c>DROP TABLE</c> (non-<c>#</c>) doesn't append
+/// entries either — it's a known asymmetry with temp DDL that's
+/// transactional; document it where the temp behavior is described.
 /// </remarks>
 internal sealed class UndoLog
 {
-    private readonly List<(Heap Heap, UndoKind Kind, int PageIndex, int SlotIndex)> entries = [];
+    private readonly List<UndoEntry> entries = [];
 
     public void RecordInsert(Heap heap, int pageIndex, int slotIndex) =>
-        this.entries.Add((heap, UndoKind.Insert, pageIndex, slotIndex));
+        this.entries.Add(new SlotChange(heap, UndoKind.Insert, pageIndex, slotIndex));
 
     public void RecordDelete(Heap heap, int pageIndex, int slotIndex) =>
-        this.entries.Add((heap, UndoKind.Delete, pageIndex, slotIndex));
+        this.entries.Add(new SlotChange(heap, UndoKind.Delete, pageIndex, slotIndex));
+
+    public void RecordTempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) =>
+        this.entries.Add(new TempTableCreation(owner, name));
+
+    public void RecordTempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) =>
+        this.entries.Add(new TempTableRemoval(owner, name, table));
 
     /// <summary>
     /// Current end-of-log position, captured by callers as a marker before a
@@ -58,19 +72,7 @@ internal sealed class UndoLog
     public void RollbackTo(int position)
     {
         for (var i = this.entries.Count - 1; i >= position; i--)
-        {
-            var (heap, kind, pageIndex, slotIndex) = this.entries[i];
-            var page = heap.Pages[pageIndex];
-            switch (kind)
-            {
-                case UndoKind.Insert:
-                    page.DeleteSlot(slotIndex);
-                    break;
-                case UndoKind.Delete:
-                    page.UndeleteSlot(slotIndex);
-                    break;
-            }
-        }
+            this.entries[i].Undo();
         this.entries.RemoveRange(position, this.entries.Count - position);
     }
 
@@ -86,4 +88,48 @@ internal sealed class UndoLog
     /// rollback, and a successful commit means rollback won't be needed.
     /// </summary>
     public void Clear() => this.entries.Clear();
+
+    private abstract class UndoEntry
+    {
+        public abstract void Undo();
+    }
+
+    private sealed class SlotChange(Heap heap, UndoKind kind, int pageIndex, int slotIndex) : UndoEntry
+    {
+        public readonly Heap Heap = heap;
+        public readonly UndoKind Kind = kind;
+        public readonly int PageIndex = pageIndex;
+        public readonly int SlotIndex = slotIndex;
+
+        public override void Undo()
+        {
+            var page = this.Heap.Pages[this.PageIndex];
+            switch (this.Kind)
+            {
+                case UndoKind.Insert:
+                    page.DeleteSlot(this.SlotIndex);
+                    break;
+                case UndoKind.Delete:
+                    page.UndeleteSlot(this.SlotIndex);
+                    break;
+            }
+        }
+    }
+
+    private sealed class TempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) : UndoEntry
+    {
+        public readonly ConcurrentDictionary<string, HeapTable> Owner = owner;
+        public readonly string Name = name;
+
+        public override void Undo() => this.Owner.TryRemove(this.Name, out _);
+    }
+
+    private sealed class TempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) : UndoEntry
+    {
+        public readonly ConcurrentDictionary<string, HeapTable> Owner = owner;
+        public readonly string Name = name;
+        public readonly HeapTable Table = table;
+
+        public override void Undo() => this.Owner[this.Name] = this.Table;
+    }
 }

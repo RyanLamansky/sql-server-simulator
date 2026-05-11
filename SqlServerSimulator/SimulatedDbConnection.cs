@@ -1,6 +1,8 @@
-﻿using System.Data;
+﻿using System.Collections.Concurrent;
+using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -19,13 +21,32 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal Database CurrentDatabase = simulation.Databases[Simulation.DefaultDatabaseName];
 
     /// <summary>
+    /// Local temp tables (<c>#foo</c>) created from this session. Real SQL
+    /// Server name-mangles internally so two sessions can each hold a
+    /// <c>#foo</c> independently; the simulator keeps user-visible names
+    /// (the mangling is invisible at the SQL surface) and isolates by giving
+    /// each connection its own dictionary. Cleared in <see cref="Dispose"/>,
+    /// matching the real-server rule that <c>#foo</c> auto-drops at session
+    /// close. <c>##foo</c> globals aren't modeled.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025: <c>#foo</c> persists across
+    /// batches in the same connection, is invisible to other connections
+    /// (Msg 208 on access), and database-qualified references
+    /// (<c>tempdb..#foo</c>, <c>tempdb.dbo.#foo</c>, even
+    /// <c>claude..#foo</c>) all resolve to the local session's table — the
+    /// database qualifier is effectively ignored for <c>#</c> names.
+    /// </remarks>
+    internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(Collation.Default);
+
+    /// <summary>
     /// The single active explicit transaction on this connection, or null if
     /// none. SqlClient rejects parallel transactions on the same connection
     /// (probe-confirmed: <c>InvalidOperationException: SqlConnection does
     /// not support parallel transactions.</c>); the simulator mirrors that.
     /// Statements executed via this connection consult this field through
     /// <see cref="Simulation.RunMutation"/> — when set, mutations append to
-    /// the transaction's <see cref="Storage.UndoLog"/> so an eventual
+    /// the transaction's <see cref="UndoLog"/> so an eventual
     /// <see cref="SimulatedDbTransaction.Rollback"/> can unwind them.
     /// </summary>
     internal SimulatedDbTransaction? CurrentTransaction;
@@ -118,7 +139,13 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
             this.CurrentTransaction?.Dispose();
+            // Local temp tables auto-drop at session close. Clearing the dict
+            // releases each table's Heap and LOB pages for GC; nothing else
+            // holds long-lived references to them after the connection ends.
+            this.TempTables.Clear();
+        }
         base.Dispose(disposing);
     }
 

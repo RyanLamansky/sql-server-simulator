@@ -261,9 +261,25 @@ partial class Simulation
         var keyConstraints = ResolveKeyConstraints(tableName.Value, heapColumns!, pendingKeys);
         var checkConstraints = ResolveCheckConstraints(tableName.Value, pendingChecks);
         var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints, checkConstraints);
-        return context.CurrentDatabase.HeapTables.TryAdd(heapTable.Name, heapTable)
-            ? true
-            : throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
+        // #foo lives in the per-connection TempTables dict so it's isolated
+        // from regular user tables and auto-drops at connection close.
+        // ##foo (global temps) aren't modeled yet — surface explicitly rather
+        // than letting it silently land as a regular table.
+        if (heapTable.Name.Length >= 2 && heapTable.Name[0] == '#' && heapTable.Name[1] == '#')
+            throw new NotSupportedException($"Global temp tables (##{heapTable.Name[2..]}) aren't modeled. Use a local temp table (#{heapTable.Name[2..]}) or a permanent table.");
+        var isTempTable = BatchContext.IsLocalTempName(heapTable.Name);
+        var destination = isTempTable
+            ? context.Batch.Connection.TempTables
+            : context.CurrentDatabase.HeapTables;
+        if (!destination.TryAdd(heapTable.Name, heapTable))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
+        // Temp-table DDL participates in transaction rollback: probe-confirmed
+        // that a CREATE TABLE #foo inside BEGIN TRAN is undone by ROLLBACK on
+        // real SQL Server. Regular CREATE TABLE isn't logged — a known
+        // asymmetry documented as a quirk.
+        if (isTempTable && context.Connection.CurrentTransaction is { } tx)
+            tx.UndoLog.RecordTempTableCreation(context.Batch.Connection.TempTables, heapTable.Name);
+        return true;
     }
 
     /// <summary>

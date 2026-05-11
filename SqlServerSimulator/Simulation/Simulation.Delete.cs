@@ -31,7 +31,7 @@ partial class Simulation
         if (next is not StringToken leadingIdentToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        _ = context.CurrentDatabase.HeapTables.TryGetValue(leadingIdentToken.Value, out var leadingTable);
+        _ = context.Batch.TryResolveTable(leadingIdentToken.Value, out var leadingTable);
         context.MoveNextOptional();
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
