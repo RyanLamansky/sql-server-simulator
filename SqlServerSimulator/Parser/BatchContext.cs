@@ -39,32 +39,78 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
-    /// True while the dispatch loop is walking through an un-taken IF branch.
-    /// Each statement parser still runs its full parse (advances the cursor,
-    /// resolves names, evaluates constant subexpressions) but gates the
-    /// actual state mutation — heap inserts/updates/deletes, dict adds for
+    /// Raw IF-skip flag: true while the dispatch loop is walking through an
+    /// un-taken IF branch. The <see cref="IsSkipping"/> property OR's this
+    /// with <see cref="LoopControl"/>-driven skipping (BREAK / CONTINUE in
+    /// flight) so the statement-level gates can read one combined predicate
+    /// regardless of why execution is short-circuited.
+    /// </summary>
+    public bool SkipModeFlag;
+
+    /// <summary>
+    /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
+    /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
+    /// <see cref="LoopControl.None"/> the default. Only the
+    /// immediately-enclosing WHILE consumes the value — IF / BEGIN…END /
+    /// nested blocks pass it through unchanged (subsequent statements in
+    /// their scope skip naturally via <see cref="IsSkipping"/>). The
+    /// BREAK / CONTINUE parsers don't throw — flag-based control flow
+    /// composes cleanly with iterator-based dispatch in a way exception-
+    /// signaled control flow doesn't.
+    /// </summary>
+    public LoopControl LoopControl;
+
+    /// <summary>
+    /// Number of WHILE loops currently mid-iteration in this batch.
+    /// Incremented unconditionally by WHILE on entry (even when the WHILE
+    /// itself is in skip mode), decremented on exit. BREAK / CONTINUE check
+    /// this at parse time: when zero, raise Msg 135 / 136 (matches real SQL
+    /// Server's compile-time loop-scope check — fires even from un-taken IF
+    /// branches, distinct from the Q15 deferred-name-resolution gap).
+    /// </summary>
+    public int LoopDepth;
+
+    /// <summary>
+    /// Total WHILE iterations executed in this batch. Counted across all
+    /// loops; the cap is global per batch. Real SQL Server has no such cap
+    /// (timeouts handle runaway loops in production); the simulator caps
+    /// at <see cref="LoopIterationLimit"/> so a buggy test doesn't hang CI.
+    /// </summary>
+    public long LoopIterations;
+
+    /// <summary>Per-batch ceiling on total WHILE iterations.</summary>
+    public const long LoopIterationLimit = 100_000;
+
+    /// <summary>
+    /// True while the dispatch loop should treat each statement parser as
+    /// "parse only" — advance the cursor and resolve names but skip the
+    /// actual state mutation (heap inserts/updates/deletes, dict adds for
     /// CREATE TABLE / DECLARE, variable slot writes for SET, transaction
     /// state changes for BEGIN TRAN / COMMIT / ROLLBACK / SAVE, the existence
     /// check + drop for DROP TABLE, the create + bulk insert for SELECT INTO,
-    /// the OBJECT_ID lookup for SET IDENTITY_INSERT, and so on. SELECT
-    /// statements in a skipped branch don't yield result sets and don't
+    /// the OBJECT_ID lookup for SET IDENTITY_INSERT, and so on). SELECT
+    /// statements with this flag set don't yield result sets and don't
     /// update <see cref="SimulatedDbConnection.LastStatementRowCount"/>.
+    /// Combines the raw IF skip flag with the in-flight loop-flow signal so
+    /// statements after a BREAK / CONTINUE in the same block also skip.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Fidelity gap vs SQL Server: real SQL Server defers name resolution
-    /// for un-taken IF branches (an un-taken <c>SELECT bad_col FROM bad_table</c>
-    /// runs silently). The simulator parses both branches the same way, so
-    /// invalid table/column references in un-taken branches still raise
-    /// <c>Msg 208</c> / <c>Msg 207</c> here. Common patterns
-    /// (<c>IF NOT EXISTS (…) CREATE TABLE foo (…)</c>,
+    /// Fidelity gap vs SQL Server (un-taken IF): real SQL Server defers name
+    /// resolution for un-taken IF branches (an un-taken
+    /// <c>SELECT bad_col FROM bad_table</c> runs silently). The simulator
+    /// parses both branches the same way, so invalid table/column references
+    /// in un-taken branches still raise <c>Msg 208</c> / <c>Msg 207</c> here.
+    /// Common patterns (<c>IF NOT EXISTS (…) CREATE TABLE foo (…)</c>,
     /// <c>IF OBJECT_ID('foo','U') IS NOT NULL DROP TABLE foo</c>) reference
     /// names that exist at parse time when the branch is skipped, so they
     /// work end-to-end; only synthetic patterns that name nothing-tables hit
-    /// the gap.
+    /// the gap. BREAK / CONTINUE scope checks (Msg 135 / 136) explicitly
+    /// don't defer — they fire even in skip mode, matching real SQL Server's
+    /// compile-time check on those statements.
     /// </para>
     /// </remarks>
-    public bool IsSkipping;
+    public bool IsSkipping => this.SkipModeFlag || this.LoopControl != LoopControl.None;
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;

@@ -296,6 +296,19 @@ public sealed partial class Simulation
                     yield return o;
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.While }:
+                foreach (var o in ParseWhileStatement(batch))
+                    yield return o;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Break }:
+                ParseBreakStatement(batch);
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Continue }:
+                ParseContinueStatement(batch);
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Begin }:
                 // Peek the token after BEGIN to disambiguate transaction-start
                 // (BEGIN TRAN / BEGIN TRANSACTION / BEGIN DISTRIBUTED TRAN) from
@@ -386,7 +399,7 @@ public sealed partial class Simulation
                 or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
                 or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
                 or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
-                or Keyword.End
+                or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
         };
 
     /// <summary>

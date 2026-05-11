@@ -95,4 +95,24 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(Token? nextToken) =>
         new($"An expression of non-boolean type specified in a context where a condition is expected, near '{nextToken}'.", 4145, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 135: a <c>BREAK</c> statement appeared outside
+    /// any enclosing <c>WHILE</c>. Probe-confirmed against SQL Server 2025
+    /// (2026-05-11): Class 15, State 1, exact wording verbatim. Fires even
+    /// from un-taken IF branches — SQL Server applies the loop-scope check
+    /// at compile time, so the simulator does too (distinct from the Q15
+    /// deferred-name-resolution gap, where un-taken branches escape Msg 208).
+    /// </summary>
+    internal static SimulatedSqlException BreakOutsideLoop() =>
+        new("Cannot use a BREAK statement outside the scope of a WHILE statement.", 135, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 136: a <c>CONTINUE</c> statement appeared
+    /// outside any enclosing <c>WHILE</c>. Probe-confirmed against SQL
+    /// Server 2025 (2026-05-11): Class 15, State 1, exact wording verbatim.
+    /// Same compile-time semantics as Msg 135.
+    /// </summary>
+    internal static SimulatedSqlException ContinueOutsideLoop() =>
+        new("Cannot use a CONTINUE statement outside the scope of a WHILE statement.", 136, 15, 1);
 }
