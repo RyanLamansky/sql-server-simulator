@@ -423,6 +423,7 @@ internal sealed partial class Selection
                         or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
                         or Keyword.Set or Keyword.Declare or Keyword.If or Keyword.Else or Keyword.End
                         or Keyword.While or Keyword.Break or Keyword.Continue or Keyword.Return
+                        or Keyword.Print
                 } when depth == 0:
                     goto ExitWhileTokenLoop;
 
@@ -566,6 +567,7 @@ internal sealed partial class Selection
                         or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
                         or Keyword.Set or Keyword.Declare or Keyword.If or Keyword.Else or Keyword.End
                         or Keyword.While or Keyword.Break or Keyword.Continue or Keyword.Return
+                        or Keyword.Print
                 } when depth == 0:
                     goto ExitWhileTokenLoop;
 

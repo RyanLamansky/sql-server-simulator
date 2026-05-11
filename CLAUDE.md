@@ -370,6 +370,19 @@ Each statement parser still runs its full parse — the cursor advances normally
 
 **Fidelity gap** (Q15): real SQL Server defers name resolution for un-taken branches — `IF 1=0 SELECT bad_col FROM bad_table` runs silently. The simulator's parsers do name resolution inline with parsing, so un-taken branches with non-existent table/column refs still raise Msg 208 / Msg 207. Common idioms (safe-CREATE / safe-DROP / safe-INSERT against pre-existing tables) work end-to-end because referenced names exist when the branch is skipped.
 
+### `PRINT`
+`PRINT <expression>` parses + evaluates the operand and **discards the result** — no `InfoMessage` event on `SimulatedDbConnection` (DbConnection doesn't define one, and no application has needed PRINT output observation yet). The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=' + 5` raises Msg 245 because the `+` operator's int-side promotion tries to parse `'val='` as int (probe-confirmed against SQL Server 2025).
+
+Probe-confirmed semantics (2026-05-11) the simulator handles correctly because evaluation runs unchanged:
+- `PRINT NULL` and `PRINT ''` are silent no-ops (no message body, no error).
+- `PRINT` resets `@@ROWCOUNT` to 0 — applied by the dispatcher after the parser returns.
+- Skip-mode (un-taken IF, after BREAK / CONTINUE / RETURN) suppresses operand evaluation entirely, so an error-bearing operand in a skipped branch doesn't fire. Standard pattern: parse the expression unconditionally to advance the cursor, then gate `expression.Run` on `!batch.IsSkipping`.
+- Rollback doesn't undo a PRINT (real SQL Server's InfoMessage stream is non-transactional too); orthogonal to the simulator's discard-everything design.
+
+**Fidelity gaps** (modeled deviations from probed behavior):
+- Real SQL Server's PRINT truncates messages at 8000 chars (varchar) / 4000 chars (nvarchar). Simulator: no truncation modeled (output is discarded).
+- Real SQL Server raises **Msg 1046** ("Subqueries are not allowed in this context. Only scalar expressions are allowed.") for `PRINT (SELECT 'inner')`. The simulator silently evaluates the scalar subquery — Msg 1046 isn't modeled.
+
 ### Local temp tables (`#foo`)
 Per-connection `Dictionary<string, HeapTable> TempTables` on `SimulatedDbConnection`; routed by `BatchContext.TryResolveTable` (`#`-prefix → connection dict, else current DB + system tables). Auto-cleared on `Dispose`, matching real SQL Server's session-close drop. Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confirmed against SQL Server 2025.
 
@@ -414,7 +427,8 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - **`ALTER TABLE #foo`**, **`TRUNCATE TABLE #foo`**, **`OBJECT_ID('tempdb..#foo')`** — none modeled (none of those exist for regular tables either yet). The common `IF OBJECT_ID(...) IS NOT NULL DROP TABLE` cleanup pattern works via `DROP TABLE IF EXISTS #foo` instead.
 - **Three-part name resolution outside DROP TABLE**: `tempdb..#foo` in FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT raises `InvalidObjectName` (Msg 208) on the qualifier; use bare `#foo`. DROP TABLE alone tolerates the qualifier (probe pattern).
 - T-SQL `GOTO` / labels — `IF` / `BEGIN…END` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` (bare) ship; unconditional jumps don't.
-- `TRY ... CATCH`, `THROW`, `RAISERROR`, `@@ERROR`, `PRINT`, stored procs / UDFs. `BEGIN TRY` / `BEGIN ATOMIC` / `BEGIN DISTRIBUTED TRANSACTION` raise `NotSupportedException` at dispatch (peeked after `BEGIN`). Value-form `RETURN N` raises Msg 178 (reserved for the stored-proc / function scope, neither modeled yet).
+- `TRY ... CATCH`, `THROW`, `RAISERROR`, `@@ERROR`, stored procs / UDFs. `BEGIN TRY` / `BEGIN ATOMIC` / `BEGIN DISTRIBUTED TRANSACTION` raise `NotSupportedException` at dispatch (peeked after `BEGIN`). Value-form `RETURN N` raises Msg 178 (reserved for the stored-proc / function scope, neither modeled yet).
+- **`PRINT` message capture** — the statement parses + evaluates the operand (so operand-side errors like Msg 245 surface), but the message is discarded. `DbConnection` has no `InfoMessage` event (that's a `SqlConnection` extension), so adding a public observability surface would mean a new event on `SimulatedDbConnection`. Defer until an application needs it.
 - `hierarchyid`, `geography`, `geometry`.
 
 ## Quirks (modeled, not byte-identical to SQL Server)
