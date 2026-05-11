@@ -40,6 +40,13 @@ partial class Simulation
         var targetName = selection.IntoTarget!;
         var destColumns = selection.DestColumnSchema!;
 
+        // In a skipped IF branch the destination shouldn't be created at all
+        // — the existence check (Msg 2714) and the SELECT execution both
+        // need to be skipped so a `IF NOT EXISTS (…) SELECT … INTO foo` over
+        // an already-existing `foo` doesn't false-positive.
+        if (batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
         // Global temp tables aren't modeled — surface explicitly rather than
         // letting it land as a regular table.
         if (targetName.Length >= 2 && targetName[0] == '#' && targetName[1] == '#')

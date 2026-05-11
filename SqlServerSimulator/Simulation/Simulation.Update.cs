@@ -246,6 +246,9 @@ partial class Simulation
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
         MutationOutputProjection? output)
     {
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
         if (affected.Count == 0)
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, []);
 

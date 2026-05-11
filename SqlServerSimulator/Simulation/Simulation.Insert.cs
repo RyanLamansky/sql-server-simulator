@@ -190,18 +190,24 @@ partial class Simulation
             EnforceNotNull(destinationTable, rowValues);
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
 
-            var storedValues = ProjectStoredValues(destinationTable, rowValues);
-            EnforceKeyConstraints(destinationTable, storedValues);
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.Batch.CurrentUndoLog);
+            if (!context.Batch.IsSkipping)
+            {
+                var storedValues = ProjectStoredValues(destinationTable, rowValues);
+                EnforceKeyConstraints(destinationTable, storedValues);
+                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.Batch.CurrentUndoLog);
 
-            if (output is { } o)
-                outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues: null));
+                if (output is { } o)
+                    outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues: null));
+            }
         }
 
         // Per SQL Server: any INSERT updates SCOPE_IDENTITY/@@IDENTITY —
         // to the generated/explicit identity if the table has one, or to
         // NULL otherwise (resetting state from a prior identity insert).
-        context.Connection.LastIdentity = lastIdentityValue;
+        // Suppressed in skip mode so an un-taken IF branch's INSERT doesn't
+        // perturb the session's identity history.
+        if (!context.Batch.IsSkipping)
+            context.Connection.LastIdentity = lastIdentityValue;
 
         return output is { } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)

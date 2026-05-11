@@ -31,6 +31,8 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: ')' })
             return false;
 
+        if (context.Batch.IsSkipping)
+            return true;
         var flag = numericValue.AsInt32;
         var flags = context.Connection.TraceFlags;
         _ = turningOn ? flags.Add(flag) : flags.Remove(flag);

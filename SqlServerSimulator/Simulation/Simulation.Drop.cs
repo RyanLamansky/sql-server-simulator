@@ -102,6 +102,12 @@ partial class Simulation
 
     private static void DropOneTable(ParserContext context, string name, bool ifExists)
     {
+        // In a skipped IF branch, gate both the existence check (Msg 3701)
+        // and the dict removal: `IF OBJECT_ID('foo','U') IS NOT NULL DROP
+        // TABLE foo` when foo doesn't exist should silently skip the un-taken
+        // branch rather than raise.
+        if (context.Batch.IsSkipping)
+            return;
         var isTempTable = BatchContext.IsLocalTempName(name);
         var destination = isTempTable
             ? context.Batch.Connection.TempTables

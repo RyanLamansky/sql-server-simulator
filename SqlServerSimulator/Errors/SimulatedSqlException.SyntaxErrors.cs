@@ -82,4 +82,17 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException MergeMustBeTerminated() =>
         new("A MERGE statement must be terminated by a semi-colon (;).", 10713, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4145: an <c>IF</c> condition (or any other
+    /// slot SQL Server typed as a Boolean predicate) received a value-typed
+    /// expression instead of a Boolean expression — e.g.
+    /// <c>IF 1</c>, <c>IF NULL</c>, <c>IF (cast(null as bit))</c>,
+    /// <c>IF 'abc'</c>. Probe-confirmed against SQL Server 2025 (2026-05-11):
+    /// Class 15, State 1, exact wording verbatim. The "near 'X'" suffix
+    /// is whatever token follows the cond — usually a statement-starting
+    /// keyword like <c>'select'</c> or a paren.
+    /// </summary>
+    internal static SimulatedSqlException NonBooleanInConditionContext(Token? nextToken) =>
+        new($"An expression of non-boolean type specified in a context where a condition is expected, near '{nextToken}'.", 4145, 15, 1);
 }

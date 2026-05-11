@@ -420,8 +420,8 @@ internal sealed partial class Selection
                 {
                     Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
                         or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
-                        or Keyword.Save or Keyword.Create or Keyword.Alter or Keyword.Dbcc
-                        or Keyword.Set or Keyword.Declare
+                        or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
+                        or Keyword.Set or Keyword.Declare or Keyword.If or Keyword.Else or Keyword.End
                 } when depth == 0:
                     goto ExitWhileTokenLoop;
 
@@ -562,8 +562,8 @@ internal sealed partial class Selection
                 {
                     Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
                         or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
-                        or Keyword.Save or Keyword.Create or Keyword.Alter or Keyword.Dbcc
-                        or Keyword.Set or Keyword.Declare
+                        or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
+                        or Keyword.Set or Keyword.Declare or Keyword.If or Keyword.Else or Keyword.End
                 } when depth == 0:
                     goto ExitWhileTokenLoop;
 

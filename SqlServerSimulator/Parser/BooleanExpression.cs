@@ -155,7 +155,16 @@ internal abstract class BooleanExpression
             ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: true),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         },
-        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        // No comparison / LIKE / IS / IN / NOT-IN / NOT-LIKE following the LHS:
+        // the user wrote a value-typed expression where a boolean predicate
+        // was expected (IF / WHERE / HAVING / ON / CASE-WHEN / CHECK). Probe-
+        // confirmed (2026-05-11) that real SQL Server raises Msg 4145 here,
+        // not Msg 102 — the wording specifically calls out non-boolean type.
+        // The "near 'X'" suffix is the current token (the one that should have
+        // been a comparison op); for paren-wrapped value cases like
+        // `IF (1) select`, real SQL Server reports the post-paren token where
+        // the simulator reports the in-paren token, a minor positional gap.
+        _ => throw SimulatedSqlException.NonBooleanInConditionContext(context.Token),
     };
 
     private static LikeExpression ParseLike(Expression left, ParserContext context, bool negated)

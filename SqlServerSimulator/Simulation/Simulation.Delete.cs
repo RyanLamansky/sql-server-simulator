@@ -182,6 +182,9 @@ partial class Simulation
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
         MutationOutputProjection? output)
     {
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
         foreach (var (pageIndex, slotIndex, _) in deleted)
             table.Heap.DeleteAt(pageIndex, slotIndex, context.Batch.CurrentUndoLog);
 

@@ -267,6 +267,12 @@ partial class Simulation
         // than letting it silently land as a regular table.
         if (heapTable.Name.Length >= 2 && heapTable.Name[0] == '#' && heapTable.Name[1] == '#')
             throw new NotSupportedException($"Global temp tables (##{heapTable.Name[2..]}) aren't modeled. Use a local temp table (#{heapTable.Name[2..]}) or a permanent table.");
+        // In a skipped IF branch, gate both the existence check (Msg 2714)
+        // and the dict add: the safe-CREATE idiom (`IF NOT EXISTS (...) CREATE
+        // TABLE foo (...)`) relies on the un-taken CREATE not surfacing
+        // "already exists" when the cond was false because foo *did* exist.
+        if (context.Batch.IsSkipping)
+            return true;
         var isTempTable = BatchContext.IsLocalTempName(heapTable.Name);
         var destination = isTempTable
             ? context.Batch.Connection.TempTables

@@ -28,7 +28,12 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             var variableName = variableToken.Value;
-            if (context.Batch.Variables.ContainsKey(variableName))
+            // In skip mode the duplicate-name check (Msg 134) is also gated:
+            // real SQL Server defers binding of un-taken IF branches, so a
+            // second DECLARE of the same name in an un-taken branch never
+            // sees the first DECLARE. Without this gate, the simulator would
+            // surface Msg 134 where SQL Server stays silent.
+            if (!context.Batch.IsSkipping && context.Batch.Variables.ContainsKey(variableName))
                 throw SimulatedSqlException.VariableAlreadyDeclared(variableName);
 
             // Optional AS keyword between name and type spec — `DECLARE @v AS INT`.
@@ -40,15 +45,20 @@ partial class Simulation
 
             // Optional initializer.
             var initialValue = SqlValue.Null(declaredType);
-            if (context.Token is Operator { Character: '=' })
+            var hasInitializer = context.Token is Operator { Character: '=' };
+            if (hasInitializer)
             {
                 context.MoveNextRequired();
                 var initExpression = Expression.Parse(context);
-                initialValue = Parser.Expressions.Cast.ApplyCoercion(initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch)), declaredType, declaredMaxLength);
-                rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
+                if (!context.Batch.IsSkipping)
+                {
+                    initialValue = Parser.Expressions.Cast.ApplyCoercion(initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch)), declaredType, declaredMaxLength);
+                    rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
+                }
             }
 
-            context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
+            if (!context.Batch.IsSkipping)
+                context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
         } while (context.Token is Operator { Character: ',' });
 
         return rowsAffected;

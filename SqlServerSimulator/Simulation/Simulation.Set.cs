@@ -54,7 +54,10 @@ partial class Simulation
             return false;
 
         context.MoveNextRequired();
-        var rhsValue = Expression.Parse(context).Run(new RuntimeContext(NoColumnResolver, context.Batch));
+        var rhs = Expression.Parse(context);
+        if (context.Batch.IsSkipping)
+            return true;
+        var rhsValue = rhs.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         slot.Value = Parser.Expressions.Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
         return true;
     }
@@ -71,6 +74,9 @@ partial class Simulation
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var onOff } || onOff is not (Keyword.On or Keyword.Off))
             return false;
+
+        if (context.Batch.IsSkipping)
+            return true;
 
         var tableName = tableNameToken.Value;
         if (!context.Batch.TryResolveTable(tableName, out var heapTable))

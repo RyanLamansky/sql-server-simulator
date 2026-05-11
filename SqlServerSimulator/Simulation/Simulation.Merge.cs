@@ -310,16 +310,20 @@ partial class Simulation
             EnforceNotNull(destinationTable, rowValues);
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
 
-            var storedValues = ProjectStoredValues(destinationTable, rowValues);
-            EnforceKeyConstraints(destinationTable, storedValues);
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.Batch.CurrentUndoLog);
-            insertedCount++;
+            if (!context.Batch.IsSkipping)
+            {
+                var storedValues = ProjectStoredValues(destinationTable, rowValues);
+                EnforceKeyConstraints(destinationTable, storedValues);
+                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.Batch.CurrentUndoLog);
+                insertedCount++;
 
-            if (output is { } o)
-                outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues));
+                if (output is { } o)
+                    outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues));
+            }
         }
 
-        context.Connection.LastIdentity = lastIdentityValue;
+        if (!context.Batch.IsSkipping)
+            context.Connection.LastIdentity = lastIdentityValue;
 
         return output is { } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)

@@ -44,6 +44,8 @@ partial class Simulation
             return false;
 
         var requested = numericValue.AsInt32;
+        if (context.Batch.IsSkipping)
+            return true;
         if (!Enum.IsDefined((CompatibilityLevel)requested))
             throw SimulatedSqlException.InvalidCompatibilityLevel();
 
@@ -70,7 +72,8 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
             return false;
 
-        context.CurrentDatabase.VerboseTruncationWarnings = on == Keyword.On;
+        if (!context.Batch.IsSkipping)
+            context.CurrentDatabase.VerboseTruncationWarnings = on == Keyword.On;
         return true;
     }
 }
