@@ -227,7 +227,7 @@ internal sealed partial class Selection
         while (true)
         {
             context.MoveNextRequired();
-            if (!context.MatchContextual(ContextualKeyword.MaxRecursion))
+            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.MaxRecursion })
                 throw new NotSupportedException("Only OPTION (MAXRECURSION N) is modeled in the OPTION clause.");
 
             if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } limitValue })
@@ -1014,7 +1014,7 @@ internal sealed partial class Selection
                     kind = JoinKind.Cross;
                     return true;
                 }
-                if (context.MatchContextual(ContextualKeyword.Apply))
+                if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Apply })
                 {
                     kind = JoinKind.CrossApply;
                     return true;
@@ -1026,7 +1026,7 @@ internal sealed partial class Selection
             // cases above). The cursor is on OUTER; advance and require APPLY.
             case Keyword.Outer:
                 context.MoveNextRequired();
-                if (!context.MatchContextual(ContextualKeyword.Apply))
+                if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Apply })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 kind = JoinKind.OuterApply;
                 return true;
@@ -1193,7 +1193,7 @@ internal sealed partial class Selection
         if (context.Token is ReservedKeyword { Keyword: Keyword.Fetch })
             throw SimulatedSqlException.FetchInvalidUsageWithoutOffset();
 
-        if (!context.MatchContextual(ContextualKeyword.Offset))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Offset })
             return;
 
         context.MoveNextRequired();
@@ -1207,7 +1207,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.OffsetMustNotBeNegative();
         fromClause.OffsetCount = offsetCount;
 
-        if (!context.MatchContextual(ContextualKeyword.Row) && !context.MatchContextual(ContextualKeyword.Rows))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
@@ -1215,7 +1215,7 @@ internal sealed partial class Selection
             return;
 
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Next) && !context.MatchContextual(ContextualKeyword.First))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Next or ContextualKeyword.First })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
@@ -1229,11 +1229,11 @@ internal sealed partial class Selection
             throw SimulatedSqlException.FetchMustBeGreaterThanZero();
         fromClause.FetchCount = fetchCount;
 
-        if (!context.MatchContextual(ContextualKeyword.Row) && !context.MatchContextual(ContextualKeyword.Rows))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        if (!context.MatchContextual(ContextualKeyword.Only))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Only })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
     }

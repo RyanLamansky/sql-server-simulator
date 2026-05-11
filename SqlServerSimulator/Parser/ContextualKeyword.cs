@@ -11,19 +11,23 @@ namespace SqlServerSimulator.Parser;
 /// <remarks>
 /// Recognition happens at parse time, not tokenization time: tokenizer keeps
 /// emitting <see cref="Tokens.UnquotedString"/> for any unquoted identifier,
-/// and <see cref="ParserContext.MatchContextual"/> /
-/// <see cref="ParserContext.AsContextual"/> classify on demand. This keeps
-/// column references whose names happen to match a contextual keyword
-/// (e.g. <c>create table t (Output int)</c>) working without special casing
-/// — identifier positions never invoke the contextual lookup.
+/// and <see cref="Tokens.UnquotedString.ContextualKeyword"/> classifies on
+/// demand with per-token caching. This keeps column references whose names
+/// happen to match a contextual keyword (e.g. <c>create table t (Output int)</c>)
+/// working without special casing — identifier positions never invoke the
+/// contextual lookup.
 /// </remarks>
 enum ContextualKeyword
 {
-    _ = 0, // Default — current token isn't a contextual keyword.
+    NotChecked = 0, // Default field value — token hasn't been classified yet.
+    _,              // Classified: not a contextual keyword.
     Apply,
     At,
+    Atomic,
+    Catch,
     Compatibility_Level,
     Configuration,
+    Delay,
     First,
     Matched,
     Max,
@@ -38,11 +42,14 @@ enum ContextualKeyword
     Row,
     Rows,
     Scoped,
+    Throw,
     Time,
     TraceOff,
     TraceOn,
+    Try,
     Using,
     Verbose_Truncation_Warnings,
     Within,
+    Work,
     Zone,
 }

@@ -15,7 +15,7 @@ partial class Simulation
     {
         context.MoveNextRequired();
         bool turningOn;
-        switch (context.AsContextual())
+        switch ((context.Token as UnquotedString)?.ContextualKeyword)
         {
             case ContextualKeyword.TraceOn: turningOn = true; break;
             case ContextualKeyword.TraceOff: turningOn = false; break;

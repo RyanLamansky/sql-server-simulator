@@ -11,7 +11,9 @@ namespace SqlServerSimulator.Parser;
 /// to this enum is a bug because the tokenizer relies on the enum to decide
 /// what surfaces as <c>ReservedKeyword</c> vs. <c>UnquotedString</c>, and a
 /// non-reserved word being treated as reserved breaks valid SQL (e.g.
-/// blocking <c>select 1 as throw</c>).
+/// blocking <c>select 1 as throw</c>). Contextual keywords belong in
+/// <see cref="ContextualKeyword"/> instead — parser sites then read them via
+/// <see cref="Tokens.UnquotedString.ContextualKeyword"/>.
 /// </summary>
 /// <remarks>
 /// The test cross-checks both directions: every entry in <see cref="Keyword"/>
@@ -95,7 +97,7 @@ public sealed class ReservedKeywordsTests
 
         IsEmpty(
             unexpectedExtras,
-            $"Keyword enum has entries not in the canonical reserved list at {SourceUrl}: {string.Join(", ", unexpectedExtras)}. The reserved-keyword list is frozen — remove the entry from the enum (and route any contextual-keyword usage through UnquotedString, matching the TRY / CATCH / THROW pattern).");
+            $"Keyword enum has entries not in the canonical reserved list at {SourceUrl}: {string.Join(", ", unexpectedExtras)}. The reserved-keyword list is frozen — remove the entry from Keyword. If the parser needs to recognize the identifier in specific positions, add it to ContextualKeyword instead; call sites read it via UnquotedString.ContextualKeyword (see the TRY / CATCH / THROW pattern in Simulation.TryCatch.cs / Simulation.Throw.cs).");
 
         IsEmpty(
             unexpectedOmissions,

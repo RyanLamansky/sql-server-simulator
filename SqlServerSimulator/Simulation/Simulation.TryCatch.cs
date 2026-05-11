@@ -98,7 +98,7 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        if (!IsUnquotedKeywordIs(context, "TRY"))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Try })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
@@ -106,7 +106,7 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        if (!IsUnquotedKeywordIs(context, "CATCH"))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
@@ -165,7 +165,7 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        if (!IsUnquotedKeywordIs(context, "CATCH"))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
     }
@@ -181,21 +181,12 @@ partial class Simulation
         var checkpoint = context.SaveCheckpoint();
         try
         {
-            return context.MoveNext() && IsUnquotedKeywordIs(context, "TRY");
+            return context.MoveNext()
+                && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Try };
         }
         finally
         {
             context.RestoreCheckpoint(checkpoint);
         }
     }
-
-    /// <summary>
-    /// True when <paramref name="context"/>'s current token is the
-    /// case-insensitive unquoted identifier <paramref name="text"/>. TRY and
-    /// CATCH aren't reserved keywords in SQL Server's grammar (they're
-    /// contextual), so the tokenizer surfaces them as <see cref="UnquotedString"/>.
-    /// </summary>
-    private static bool IsUnquotedKeywordIs(ParserContext context, string text) =>
-        context.Token is UnquotedString u
-        && u.Span.Equals(text, StringComparison.OrdinalIgnoreCase);
 }

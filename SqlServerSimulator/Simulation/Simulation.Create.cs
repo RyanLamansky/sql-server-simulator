@@ -78,7 +78,7 @@ partial class Simulation
                 var lengthToken = context.GetNextRequired();
                 declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
                     ? numericValue.AsInt32
-                    : context.MatchContextual(ContextualKeyword.Max)
+                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
                         ? SqlType.MaxLengthSentinel
                         : throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -365,7 +365,7 @@ partial class Simulation
         bool? nullable = null;
         while (true)
         {
-            if (!persisted && context.MatchContextual(ContextualKeyword.Persisted))
+            if (!persisted && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Persisted })
             {
                 persisted = true;
                 context.MoveNextRequired();

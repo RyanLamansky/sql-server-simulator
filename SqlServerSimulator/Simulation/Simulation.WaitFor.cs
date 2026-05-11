@@ -46,12 +46,15 @@ partial class Simulation
         // tokenized as UnquotedString. WAITFOR TIME isn't modeled — it's an
         // absolute-time wait whose primary use case is scheduling, which is
         // out of scope for the simulator.
-        if (context.Token is not UnquotedString verb)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (verb.Span.Equals("TIME", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException("WAITFOR TIME (absolute-time wait) isn't modeled — WAITFOR DELAY is.");
-        if (!verb.Span.Equals("DELAY", StringComparison.OrdinalIgnoreCase))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        switch ((context.Token as UnquotedString)?.ContextualKeyword)
+        {
+            case ContextualKeyword.Time:
+                throw new NotSupportedException("WAITFOR TIME (absolute-time wait) isn't modeled — WAITFOR DELAY is.");
+            case ContextualKeyword.Delay:
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
 
         context.MoveNextRequired(); // consume DELAY
 

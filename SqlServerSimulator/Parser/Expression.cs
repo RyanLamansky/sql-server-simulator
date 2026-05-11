@@ -176,10 +176,9 @@ internal abstract class Expression
                 // ordered-set aggregate postfix. STRING_AGG accepts it; every
                 // other aggregate kind raises Msg 10757. WITHIN is contextual
                 // (SQL Server doesn't reserve the identifier).
-                case UnquotedString unquoted when expression is AggregateExpression aggregateForOrderBy
-                    && context.AsContextual() == ContextualKeyword.Within:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Within }
+                    when expression is AggregateExpression aggregateForOrderBy:
                     {
-                        _ = unquoted;
                         ParseWithinGroupOrderBy(aggregateForOrderBy, context);
                         continue;
                     }
@@ -188,9 +187,8 @@ internal abstract class Expression
                 // reserve any of them); the runtime check rejects date/time
                 // LHS with Msg 8116. Binds tighter than `+` so the zone-name
                 // slot is a primary expression — full expressions need parens.
-                case UnquotedString atToken when context.AsContextual() == ContextualKeyword.At:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.At }:
                     {
-                        _ = atToken;
                         expression = AtTimeZone.ParsePostfix(expression, context);
                         continue;
                     }

@@ -191,7 +191,7 @@ internal sealed class WindowExpression : Expression
     /// <c>ORDER</c>, <c>ROWS</c>, <c>RANGE</c>, or the closing <c>)</c>).
     /// </summary>
     private static Expression[] ParseOptionalPartitionBy(ParserContext context) =>
-        !context.MatchContextual(ContextualKeyword.Partition)
+        context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Partition }
             ? []
             : context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By }
                 ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -207,10 +207,13 @@ internal sealed class WindowExpression : Expression
     /// </summary>
     private static void RejectFrameSpec(ParserContext context)
     {
-        if (context.MatchContextual(ContextualKeyword.Rows))
-            throw new NotSupportedException("Explicit window frame ROWS BETWEEN inside OVER isn't modeled; only the implicit default frame is supported.");
-        if (context.MatchContextual(ContextualKeyword.Range))
-            throw new NotSupportedException("Explicit window frame RANGE BETWEEN inside OVER isn't modeled; only the implicit default frame is supported.");
+        switch (context.Token)
+        {
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Rows }:
+                throw new NotSupportedException("Explicit window frame ROWS BETWEEN inside OVER isn't modeled; only the implicit default frame is supported.");
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Range }:
+                throw new NotSupportedException("Explicit window frame RANGE BETWEEN inside OVER isn't modeled; only the implicit default frame is supported.");
+        }
     }
 
     /// <summary>

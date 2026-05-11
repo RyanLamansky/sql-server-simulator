@@ -33,7 +33,7 @@ partial class Simulation
             : throw SimulatedSqlException.InvalidObjectName(destinationName);
 
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Using))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -99,7 +99,7 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
             {
                 context.MoveNextRequired();
-                if (!context.MatchContextual(ContextualKeyword.Matched))
+                if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Matched })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Then })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -155,7 +155,7 @@ partial class Simulation
                 {
                     context.MoveNextOptional();
                 }
-                if (context.Token is UnquotedString && !context.MatchContextual(ContextualKeyword.Output))
+                if (context.Token is UnquotedString u && u.ContextualKeyword != ContextualKeyword.Output)
                     context.MoveNextOptional();
             }
         }

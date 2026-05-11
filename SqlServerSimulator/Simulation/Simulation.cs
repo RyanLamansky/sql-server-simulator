@@ -399,7 +399,7 @@ public sealed partial class Simulation
                 ParseReturnStatement(batch);
                 break;
 
-            case UnquotedString u when u.Span.Equals("THROW", StringComparison.OrdinalIgnoreCase):
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
                 ParseThrowStatement(batch);
                 if (!batch.IsSkipping)
                     connection.LastStatementRowCount = 0;
@@ -443,11 +443,11 @@ public sealed partial class Simulation
                             break;
                         case ReservedKeyword { Keyword: Keyword.Distributed }:
                             throw new NotSupportedException("BEGIN DISTRIBUTED TRANSACTION isn't modeled (no distributed transaction coordinator).");
-                        case UnquotedString u when u.Span.Equals("TRY", StringComparison.OrdinalIgnoreCase):
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Try }:
                             foreach (var o in ParseTryCatch(batch))
                                 yield return o;
                             break;
-                        case UnquotedString u when u.Span.Equals("ATOMIC", StringComparison.OrdinalIgnoreCase):
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Atomic }:
                             throw new NotSupportedException(
                                 "BEGIN ATOMIC blocks aren't modeled (natively-compiled stored-proc semantics).");
                         default:
@@ -521,8 +521,8 @@ public sealed partial class Simulation
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.
         // It surfaces as UnquotedString from the tokenizer; statement-boundary
-        // detection has to special-case the text match.
-        || (token is UnquotedString u && u.Span.Equals("THROW", StringComparison.OrdinalIgnoreCase));
+        // detection routes through the cached ContextualKeyword classifier.
+        or UnquotedString { ContextualKeyword: ContextualKeyword.Throw };
 
     /// <summary>
     /// At end-of-batch, copies the final values of every InputOutput /
@@ -637,7 +637,7 @@ public sealed partial class Simulation
         // COMMIT WORK is an ANSI-equivalent. WORK isn't reserved in the
         // simulator's keyword list; accept it as an unquoted identifier
         // following COMMIT.
-        else if (context.Token is UnquotedString u && u.Span.Equals("WORK", StringComparison.OrdinalIgnoreCase))
+        else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Work })
         {
             context.MoveNextOptional();
         }
@@ -688,7 +688,7 @@ public sealed partial class Simulation
                     return true;
                 }
             }
-            else if (context.Token is UnquotedString u && u.Span.Equals("WORK", StringComparison.OrdinalIgnoreCase))
+            else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Work })
             {
                 context.MoveNextOptional();
             }

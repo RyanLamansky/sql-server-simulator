@@ -39,7 +39,7 @@ partial class Simulation
         MutationOutputProjection? output = null;
         if (leadingTable is not null)
             output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true);
-        else if (context.MatchContextual(ContextualKeyword.Output))
+        else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw new NotSupportedException("OUTPUT with alias-form multi-source DELETE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })

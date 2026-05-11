@@ -153,13 +153,13 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
     public static AtTimeZone ParsePostfix(Expression source, ParserContext context)
     {
         // Cursor is on AT.
-        if (!context.MatchContextual(ContextualKeyword.At))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.At })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Time))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Time })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Zone))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Zone })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 

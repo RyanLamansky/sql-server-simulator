@@ -281,7 +281,7 @@ internal sealed partial class Selection
                 var lengthToken = context.GetNextRequired();
                 declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
                     ? numericValue.AsInt32
-                    : context.MatchContextual(ContextualKeyword.Max)
+                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
                         ? SqlType.MaxLengthSentinel
                         : throw SimulatedSqlException.SyntaxErrorNear(context);
 

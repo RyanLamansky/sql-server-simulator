@@ -19,7 +19,7 @@ partial class Simulation
             return false;
 
         var afterDatabase = context.GetNextRequired();
-        if (context.MatchContextual(ContextualKeyword.Scoped))
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Scoped })
             return TryParseAlterDatabaseScopedConfiguration(context);
 
         // Otherwise a database name (or CURRENT). The simulator has one
@@ -34,7 +34,7 @@ partial class Simulation
             return false;
 
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Compatibility_Level))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level })
             return false;
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
@@ -56,14 +56,14 @@ partial class Simulation
     private static bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
     {
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Configuration))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Configuration })
             return false;
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             return false;
 
         context.MoveNextRequired();
-        if (!context.MatchContextual(ContextualKeyword.Verbose_Truncation_Warnings))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Verbose_Truncation_Warnings })
             return false;
 
         if (context.GetNextRequired() is not Operator { Character: '=' })

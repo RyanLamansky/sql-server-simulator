@@ -36,7 +36,7 @@ partial class Simulation
         bool allowInserted,
         bool allowDeleted)
     {
-        if (!context.MatchContextual(ContextualKeyword.Output))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
 
         var expressions = new List<Expression>();
@@ -154,7 +154,7 @@ partial class Simulation
     /// <param name="sourceColumnNames">For MERGE only: the source alias's column names. <see langword="null"/> for plain INSERT.</param>
     private static OutputProjection? TryParseOutputClause(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames)
     {
-        if (!context.MatchContextual(ContextualKeyword.Output))
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
 
         var expressions = new List<Expression>();
