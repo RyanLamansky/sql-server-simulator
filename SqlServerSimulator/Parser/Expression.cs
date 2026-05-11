@@ -495,6 +495,7 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                "ERROR_LINE" => new ErrorLineFunction(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
                 "JSON_VALUE" => new JsonValue(context),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
@@ -503,6 +504,7 @@ internal abstract class Expression
             },
             11 => uppercaseName switch
             {
+                "ERROR_STATE" => new ErrorStateFunction(context),
                 "JSON_MODIFY" => new JsonModify(context),
                 "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
@@ -512,23 +514,27 @@ internal abstract class Expression
             {
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),
+                "ERROR_NUMBER" => new ErrorNumberFunction(context),
                 _ => null
             },
             13 => uppercaseName switch
             {
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
+                "ERROR_MESSAGE" => new ErrorMessageFunction(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null
             },
             14 => uppercaseName switch
             {
+                "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
                 "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
                 _ => null
             },
             15 => uppercaseName switch
             {
+                "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
                 _ => null
             },

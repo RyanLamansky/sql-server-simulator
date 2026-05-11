@@ -64,6 +64,18 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal int LastStatementRowCount;
 
     /// <summary>
+    /// Backs <c>@@ERROR</c>: error number of the most recently completed
+    /// statement on this connection, or <c>0</c> on success. Set by the
+    /// <c>TRY/CATCH</c> dispatch wrapper when a statement throws a
+    /// <see cref="SimulatedSqlException"/> caught at a TRY boundary; reset to
+    /// <c>0</c> after every successful statement (so the value reflects the
+    /// previous-statement-only contract, matching SQL Server). Before the
+    /// TRY/CATCH bundle this was hardcoded to <c>0</c> because errors
+    /// terminated the batch — no caught error path existed.
+    /// </summary>
+    internal int LastErrorNumber;
+
+    /// <summary>
     /// Last identity value produced by an INSERT on this connection — the
     /// source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>. SQL
     /// Server scopes these per session/scope; the simulator collapses both

@@ -209,6 +209,74 @@ public sealed partial class Simulation
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool requireSemicolonBeforeCte)
     {
+        // Snapshot the statement-start line before parser advance — used as
+        // ERROR_LINE() default when an error fires inside this statement.
+        batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
+
+        // Two-phase dispatch: the core iterator runs the statement body
+        // (parser + execution); the wrapper materializes its outcomes and
+        // intercepts SimulatedSqlException only when an enclosing TRY frame
+        // is active (TryFrameDepth > 0). Iterator methods can't have catch
+        // clauses around yield, so the materialize-then-yield split is the
+        // structural workaround. Materialization is cheap — every statement
+        // produces ≤ 1 outcome and SELECT already materializes its rows to
+        // a List before yielding the result set.
+        List<SimulatedStatementOutcome>? outcomes = null;
+        SimulatedSqlException? caught = null;
+        try
+        {
+            outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte)];
+        }
+        catch (SimulatedSqlException ex) when (batch.TryFrameDepth > 0)
+        {
+            caught = ex;
+        }
+
+        var connection = batch.Connection;
+        if (caught is not null)
+        {
+            // First error in this TRY body wins; subsequent throws while
+            // already-signaled (from skip-mode parsers that still hit
+            // runtime errors) silently swallow — the captured first error
+            // is what CATCH sees.
+            if (!batch.ErrorSignaled)
+            {
+                batch.InFlightError = new CaughtError(
+                    caught.Number,
+                    caught.Message,
+                    caught.Class,
+                    caught.State,
+                    batch.CurrentStatement.StartLine,
+                    Procedure: null);
+                batch.ErrorSignaled = true;
+            }
+            connection.LastErrorNumber = caught.Number;
+
+            // The parser threw mid-statement, so the cursor is at an
+            // unpredictable position. Advance to the next statement boundary
+            // (a `;`, statement-starting keyword like `END`, or EOB) so the
+            // outer DispatchStatementsUntil loop can resume cleanly — without
+            // this scan it'd re-dispatch the same partially-parsed statement
+            // and infinite-loop. IsStatementBoundary treats `END` as a stop,
+            // so we land at `END TRY` for the typical case.
+            var parser = batch.Parser;
+            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
+                parser.MoveNextOptional();
+            yield break;
+        }
+
+        // Skip-mode statements don't count toward @@ERROR reset (skip-mode
+        // dispatch is conceptually "didn't run" — the surrounding scope owns
+        // @@ERROR). Successful real statements clear @@ERROR to 0.
+        if (!batch.IsSkipping)
+            connection.LastErrorNumber = 0;
+
+        foreach (var o in outcomes!)
+            yield return o;
+    }
+
+    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte)
+    {
         var context = batch.Parser;
         var connection = context.Connection;
 
@@ -331,6 +399,12 @@ public sealed partial class Simulation
                 ParseReturnStatement(batch);
                 break;
 
+            case UnquotedString u when u.Span.Equals("THROW", StringComparison.OrdinalIgnoreCase):
+                ParseThrowStatement(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Print }:
                 ParsePrintStatement(batch);
                 if (!batch.IsSkipping)
@@ -369,11 +443,13 @@ public sealed partial class Simulation
                             break;
                         case ReservedKeyword { Keyword: Keyword.Distributed }:
                             throw new NotSupportedException("BEGIN DISTRIBUTED TRANSACTION isn't modeled (no distributed transaction coordinator).");
-                        case UnquotedString u
-                            when u.Span.Equals("TRY", StringComparison.OrdinalIgnoreCase)
-                                 || u.Span.Equals("ATOMIC", StringComparison.OrdinalIgnoreCase):
+                        case UnquotedString u when u.Span.Equals("TRY", StringComparison.OrdinalIgnoreCase):
+                            foreach (var o in ParseTryCatch(batch))
+                                yield return o;
+                            break;
+                        case UnquotedString u when u.Span.Equals("ATOMIC", StringComparison.OrdinalIgnoreCase):
                             throw new NotSupportedException(
-                                $"BEGIN {u.Value.ToUpperInvariant()} blocks aren't modeled (T-SQL TRY/CATCH and natively-compiled stored-proc ATOMIC blocks).");
+                                "BEGIN ATOMIC blocks aren't modeled (natively-compiled stored-proc semantics).");
                         default:
                             foreach (var o in ParseBeginBlock(batch))
                                 yield return o;
@@ -441,7 +517,12 @@ public sealed partial class Simulation
                 or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
                 or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
                 or Keyword.Return or Keyword.Print or Keyword.WaitFor or Keyword.Truncate
-        };
+        }
+        // THROW is a contextual keyword in SQL Server's grammar — added with
+        // the TRY/CATCH companion feature in 2012, not in the reserved list.
+        // It surfaces as UnquotedString from the tokenizer; statement-boundary
+        // detection has to special-case the text match.
+        || (token is UnquotedString u && u.Span.Equals("THROW", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// At end-of-batch, copies the final values of every InputOutput /

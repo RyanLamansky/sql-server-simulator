@@ -4,16 +4,17 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// Backs <c>@@ERROR</c>: error number of the most recently completed
-/// statement, <see cref="SqlType.Int32"/>. Always returns 0 in the simulator
-/// because TRY/CATCH isn't modeled — any <see cref="SimulatedSqlException"/>
-/// propagates out of the dispatch loop and terminates the batch, so the only
-/// statements that ever complete are successful ones. When TRY/CATCH lands,
-/// this expression becomes the natural home for live error-number tracking
-/// against state on <see cref="BatchContext"/>.
+/// statement on the connection, <see cref="SqlType.Int32"/>. Reads
+/// <see cref="SimulatedDbConnection.LastErrorNumber"/>, which the
+/// per-statement dispatch wrapper sets to the caught error's number on
+/// failure (inside a <c>TRY/CATCH</c> body) and resets to <c>0</c> on
+/// successful statement completion. Outside any TRY/CATCH the value is
+/// always <c>0</c> because uncaught errors tear down the batch — no path
+/// returns to a subsequent statement that could read @@ERROR.
 /// </summary>
 internal sealed class LastErrorExpression : Expression
 {
-    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(0);
+    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(runtime.Batch.Connection.LastErrorNumber);
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

@@ -127,4 +127,29 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ReturnWithValueNotAllowed() =>
         new("A RETURN statement with a return value cannot be used in this context.", 178, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10704: a no-arg <c>THROW;</c> was used outside
+    /// any enclosing <c>CATCH</c> block. Probe-confirmed against SQL Server
+    /// 2025 (2026-05-12): Class 15, State 1, exact wording verbatim. The
+    /// re-raise form only makes sense inside a CATCH (where there's an
+    /// in-flight error to re-raise); outside CATCH the parser surfaces this
+    /// to nudge the user toward either inserting the statement into a CATCH
+    /// or supplying the (number, message, state) parameter form.
+    /// </summary>
+    internal static SimulatedSqlException ThrowMustBeInsideCatch() =>
+        new("To rethrow an error, a THROW statement must be used inside a CATCH block. Insert the THROW statement inside a CATCH block, or add error parameters to the THROW statement.", 10704, 15, 1);
+
+    /// <summary>
+    /// Constructs a <c>THROW &lt;number&gt;, &lt;message&gt;, &lt;state&gt;</c>-raised
+    /// exception with the user-supplied number / message / state. Real SQL
+    /// Server fixes the severity at <c>16</c> for the value form regardless
+    /// of which <c>number</c> the user supplies (probe-confirmed against
+    /// SQL Server 2025: <c>THROW 50001, 'custom', 7</c> reports Class 16
+    /// State 7). The factory also serves the no-arg <c>THROW;</c> re-raise
+    /// by reconstructing from the in-flight error's captured number /
+    /// message / state.
+    /// </summary>
+    internal static SimulatedSqlException ThrowRaised(int number, string message, byte state) =>
+        new(message, number, 16, state);
 }

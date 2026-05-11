@@ -37,4 +37,13 @@ internal sealed class StatementContext
     /// <c>+00:00</c> offset.
     /// </summary>
     public DateTime UtcNow;
+
+    /// <summary>
+    /// 1-based line within the batch where this statement started (taken
+    /// from <see cref="Token.LineNumber"/> of the leading token at dispatch
+    /// time). Used as the default for <c>ERROR_LINE()</c> when an error fires
+    /// inside this statement: the exception itself doesn't carry a line so
+    /// the statement-start line is the closest approximation available.
+    /// </summary>
+    public int StartLine;
 }

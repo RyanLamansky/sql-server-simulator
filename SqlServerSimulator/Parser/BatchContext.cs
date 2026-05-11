@@ -83,6 +83,48 @@ internal sealed class BatchContext
     public const long LoopIterationLimit = 100_000;
 
     /// <summary>
+    /// Active error context inside a <c>CATCH</c> block — set when the
+    /// associated <c>TRY</c> body's dispatch caught a
+    /// <see cref="SimulatedSqlException"/>, cleared when the enclosing
+    /// <c>BEGIN CATCH ... END CATCH</c> exits. Drives
+    /// <c>ERROR_NUMBER</c> / <c>ERROR_MESSAGE</c> / <c>ERROR_SEVERITY</c> /
+    /// <c>ERROR_STATE</c> / <c>ERROR_LINE</c> / <c>ERROR_PROCEDURE</c>
+    /// (which return NULL when this is null) and the no-arg
+    /// <c>THROW;</c> re-raise. Nested <c>TRY/CATCH</c> saves+restores this
+    /// around the inner CATCH so the outer CATCH (if reached via re-throw)
+    /// sees the re-thrown error.
+    /// </summary>
+    public CaughtError? InFlightError;
+
+    /// <summary>
+    /// Set true when a <c>SimulatedSqlException</c> is caught at a
+    /// <c>TRY/CATCH</c> boundary; <see cref="IsSkipping"/> OR's it in so the
+    /// rest of the TRY body skip-dispatches until <c>END TRY</c>. Cleared
+    /// when the matching CATCH begins running so its statements aren't
+    /// themselves skipped.
+    /// </summary>
+    public bool ErrorSignaled;
+
+    /// <summary>
+    /// Number of <c>TRY</c> bodies currently being dispatched on the stack.
+    /// Incremented at <c>BEGIN TRY</c>, decremented at <c>END TRY</c> — does
+    /// <em>not</em> increment when the matching CATCH body runs (CATCH isn't
+    /// inside its own TRY). The dispatch wrapper catches
+    /// <see cref="SimulatedSqlException"/> only when this is positive;
+    /// otherwise errors propagate out of the batch as before.
+    /// </summary>
+    public int TryFrameDepth;
+
+    /// <summary>
+    /// Number of <c>CATCH</c> bodies currently being dispatched on the stack.
+    /// Incremented when a CATCH body starts running (i.e. the matching TRY
+    /// caught an error), decremented when it ends. Gates <c>THROW;</c> (the
+    /// no-arg re-raise — Msg 10704 when zero) and the in-CATCH detection for
+    /// <c>ERROR_*()</c> functions.
+    /// </summary>
+    public int CatchDepth;
+
+    /// <summary>
     /// True after a <c>RETURN</c> statement has fired in this batch. Drives
     /// early-exit propagation: the dispatch loop (and every enclosing
     /// construct — WHILE, BEGIN…END block) checks this and stops as soon as
@@ -131,7 +173,8 @@ internal sealed class BatchContext
     public bool IsSkipping =>
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None
-        || this.ReturnSignaled;
+        || this.ReturnSignaled
+        || this.ErrorSignaled;
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;

@@ -172,14 +172,6 @@ public sealed class IfBlockTests
             "begin if 1=1 select 'inside-if' end"));
 
     [TestMethod]
-    public void BeginTry_NotSupported()
-    {
-        var ex = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "if 1=1 begin try select 1 end try begin catch select 2 end catch"));
-        Contains("TRY", ex.Message, StringComparison.Ordinal);
-    }
-
-    [TestMethod]
     public void BeginAtomic_NotSupported()
         => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
             "begin atomic with (transaction isolation level = snapshot, language = N'us_english') select 1 end"));
