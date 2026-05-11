@@ -266,14 +266,21 @@ internal sealed class BatchContext
     /// <summary>
     /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
     /// DROP / TRUNCATE / SELECT-INTO target lives in. Returns false when the
-    /// schema (the segment to the left of the leaf) doesn't exist, or when a
-    /// 3-part name's db segment doesn't match <see cref="CurrentDatabase"/>.
-    /// A 1-part name resolves to <see cref="Database.DefaultSchemaName"/>
+    /// schema (the segment to the left of the leaf) doesn't exist, when a
+    /// 3-part name's db segment doesn't match <see cref="CurrentDatabase"/>,
+    /// or when the name is 4-part (linked-server names aren't modeled — the
+    /// simulator returns false rather than silently ignoring the server
+    /// segment). A 1-part name resolves to <see cref="Database.DefaultSchemaName"/>
     /// (always present, so this branch never returns false).
     /// </summary>
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
-        if (name.Count >= 3 && !Collation.Default.Equals(name[name.Count - 3], this.CurrentDatabase.Name))
+        if (name.Count >= 4)
+        {
+            schema = null;
+            return false;
+        }
+        if (name.Count == 3 && !Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
         {
             schema = null;
             return false;

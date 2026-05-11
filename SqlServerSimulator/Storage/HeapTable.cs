@@ -10,9 +10,10 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable
 {
-    public HeapTable(string name, HeapColumn[] columns, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null)
+    public HeapTable(string name, HeapColumn[] columns, int objectId, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null)
     {
         this.Name = name;
+        this.ObjectId = objectId;
         this.Columns = columns;
         this.KeyConstraints = keyConstraints ?? [];
         this.CheckConstraints = checkConstraints ?? [];
@@ -47,6 +48,15 @@ internal sealed class HeapTable
     }
 
     public readonly string Name;
+
+    /// <summary>
+    /// Per-database object identifier — assigned at CREATE TABLE time from
+    /// <see cref="Database.AllocateObjectId"/>. Stable across the table's
+    /// lifetime; DROP-then-recreate yields a fresh ID (matches real SQL
+    /// Server, probe-confirmed 2026-05-11). Surfaced via <c>OBJECT_ID()</c>
+    /// and the upcoming <c>sys.objects.object_id</c> catalog column.
+    /// </summary>
+    public readonly int ObjectId;
 
     /// <summary>
     /// Full column set in declaration order, the surface area used for name

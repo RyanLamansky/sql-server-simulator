@@ -70,4 +70,17 @@ internal sealed class Database
     /// path.
     /// </summary>
     public long AllocateRowVersion() => Interlocked.Increment(ref this.rowVersionCounter);
+
+    private int nextObjectId = 100;
+
+    /// <summary>
+    /// Allocates the next per-object identifier. Each user table gets one at
+    /// CREATE; the value is stable through INSERT / UPDATE / DELETE / TRUNCATE
+    /// (DROP-then-recreate yields a fresh ID, matching real SQL Server —
+    /// probe-confirmed 2026-05-11). The counter never reuses a value and
+    /// bypasses transaction rollback (matches the identity-counter rule for
+    /// INSERT — rolling back doesn't return IDs to the pool). Backs
+    /// <c>OBJECT_ID()</c> and the upcoming <c>sys.objects</c> catalog view.
+    /// </summary>
+    public int AllocateObjectId() => Interlocked.Increment(ref this.nextObjectId);
 }

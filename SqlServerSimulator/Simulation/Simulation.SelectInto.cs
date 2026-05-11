@@ -53,7 +53,7 @@ partial class Simulation
         if (leaf.Length >= 2 && leaf[0] == '#' && leaf[1] == '#')
             throw new NotSupportedException($"Global temp tables (##{leaf[2..]}) aren't modeled. Use a local temp table (#{leaf[2..]}) or a permanent table.");
 
-        var destTable = new HeapTable(leaf, destColumns);
+        var destTable = new HeapTable(leaf, destColumns, batch.CurrentDatabase.AllocateObjectId());
         var isTempTable = BatchContext.IsLocalTempName(leaf);
         var destination = isTempTable
             ? batch.Connection.TempTables

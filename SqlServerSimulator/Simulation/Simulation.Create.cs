@@ -288,7 +288,7 @@ partial class Simulation
         }
 
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks);
-        var heapTable = new HeapTable(tableName.Leaf, [.. heapColumns!], keyConstraints, checkConstraints);
+        var heapTable = new HeapTable(tableName.Leaf, [.. heapColumns!], context.CurrentDatabase.AllocateObjectId(), keyConstraints, checkConstraints);
         // #foo lives in the per-connection TempTables dict so it's isolated
         // from regular user tables and auto-drops at connection close.
         // ##foo (global temps) aren't modeled yet — surface explicitly rather

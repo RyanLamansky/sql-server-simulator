@@ -70,7 +70,11 @@ internal static class BuiltInResources
             new("scale", SqlType.TinyInt, null, true),
             new("collation", SqlType.SystemName, 128, true),
         ];
-        var systypes = new HeapTable("systypes", systypesColumns);
+        // System tables live outside any user database's id space — they're
+        // process-shared and the simulator doesn't expose them via OBJECT_ID
+        // (which routes through per-DB schema resolution). A small negative
+        // id keeps them distinguishable in debug output.
+        var systypes = new HeapTable("systypes", systypesColumns, objectId: -1);
 
         foreach (var row in SystypesRowData)
         {
