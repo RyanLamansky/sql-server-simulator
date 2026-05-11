@@ -290,21 +290,27 @@ internal sealed class BatchContext
     }
 
     /// <summary>
-    /// Resolves <paramref name="name"/> to a <see cref="CatalogView"/> in the
-    /// <c>sys</c> schema. Returns true for 2-part names whose qualifier is
-    /// <c>sys</c> (case-insensitive) and whose leaf matches a registered
-    /// view, or 3-part names that also pass the db-segment check. Used by
-    /// the FROM parser to route <c>sys.tables</c> / <c>sys.objects</c> /
-    /// <c>sys.schemas</c> references to virtual catalog views before
-    /// falling through to the regular <see cref="TryResolveTable"/> path.
+    /// Resolves <paramref name="name"/> to a <see cref="CatalogView"/> in
+    /// either the <c>sys</c> or <c>INFORMATION_SCHEMA</c> schema. Returns
+    /// true for 2-part names <c>{sys|INFORMATION_SCHEMA}.&lt;view&gt;</c>
+    /// (case-insensitive) whose leaf matches a registered view, or for
+    /// 3-part names whose db segment matches <see cref="CurrentDatabase"/>.
+    /// Used by the FROM parser to route catalog-view references to virtual
+    /// projections before falling through to the regular
+    /// <see cref="TryResolveTable"/> path. The registry is keyed by the
+    /// fully-qualified name (e.g. <c>"sys.tables"</c>,
+    /// <c>"INFORMATION_SCHEMA.COLUMNS"</c>) so one resolver can serve both
+    /// schemas without per-namespace dispatch.
     /// </summary>
     public bool TryResolveCatalogView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? view)
     {
         view = null;
-        return name.Count is 2 or 3
-            && (name.Count != 3 || Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
-            && Collation.Default.Equals(name.ImmediateQualifier, "sys")
-            && Simulation.CatalogViews.TryGetValue(name.Leaf, out view);
+        if (name.Count is not (2 or 3))
+            return false;
+        if (name.Count == 3 && !Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
+            return false;
+        var key = $"{name.ImmediateQualifier}.{name.Leaf}";
+        return Simulation.CatalogViews.TryGetValue(key, out view);
     }
 
     /// <summary>

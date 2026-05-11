@@ -153,6 +153,55 @@ internal abstract partial class SqlType
         _ => throw new NotSupportedException($"No precedence defined for {this}."),
     };
 
+    /// <summary>
+    /// Tinyint system-type id matching real SQL Server's <c>sys.types.system_type_id</c> /
+    /// <c>sys.columns.system_type_id</c> — stable integers documented in the
+    /// SQL Server catalog (e.g. <c>int = 56</c>, <c>nvarchar = 231</c>,
+    /// <c>uniqueidentifier = 36</c>). <see cref="SystemName"/> shares
+    /// <c>231</c> with <c>nvarchar</c> because <c>sysname</c> is implemented
+    /// as an <c>nvarchar(128)</c> alias; <see cref="UserTypeId"/> distinguishes
+    /// it via the alias id <c>256</c>. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    public byte SystemTypeId => this switch
+    {
+        _ when this == Image => 34,
+        _ when this == Text => 35,
+        _ when this == UniqueIdentifier => 36,
+        _ when this == Date => 40,
+        TimeSqlType => 41,
+        DateTime2SqlType => 42,
+        DateTimeOffsetSqlType => 43,
+        _ when this == TinyInt => 48,
+        _ when this == SmallInt => 52,
+        _ when this == Int32 => 56,
+        _ when this == SmallDateTime => 58,
+        _ when this == Real => 59,
+        _ when this == Money => 60,
+        _ when this == DateTime => 61,
+        _ when this == Float => 62,
+        _ when this == NText => 99,
+        _ when this == Bit => 104,
+        DecimalSqlType => 106,
+        _ when this == SmallMoney => 122,
+        _ when this == BigInt => 127,
+        VarbinarySqlType => 165,
+        VarcharSqlType => 167,
+        BinarySqlType => 173,
+        CharSqlType => 175,
+        _ when this == RowVersion => 189,
+        NVarcharSqlType => 231,
+        _ when this == SystemName => 231,
+        NCharSqlType => 239,
+        _ => throw new NotSupportedException($"No SystemTypeId defined for {this}."),
+    };
+
+    /// <summary>
+    /// User-type id matching real SQL Server's <c>sys.columns.user_type_id</c>.
+    /// Equal to <see cref="SystemTypeId"/> for every shipped type except
+    /// <see cref="SystemName"/>, which carries its alias id <c>256</c>.
+    /// </summary>
+    public int UserTypeId => this == SystemName ? 256 : this.SystemTypeId;
+
     /// <summary>True for SQL integer-family types (bit, tinyint, smallint, int, bigint).</summary>
     public static bool IsIntegerCategory(SqlType type) => type.Category == SqlTypeCategory.Integer;
 
