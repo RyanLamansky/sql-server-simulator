@@ -279,6 +279,8 @@ Variable references resolve at runtime via a captured `VariableSlot` — require
 
 **`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `SimulatedDbConnection.LastStatementRowCount`. SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
 
+**`@@ERROR`**: error number of the most-recently-completed statement; `int`. **Always 0 in the simulator** because TRY/CATCH isn't modeled — every `SimulatedSqlException` propagates out of the dispatch loop and terminates the batch, so only successful statements ever complete. Straight-line scripts that read `@@ERROR` after a known-good statement get correct behavior; scripts that wrap a statement-terminating-only error in `TRY ... CATCH` and expect to observe the number won't until TRY/CATCH lands — at which point `LastErrorExpression` becomes the natural home for live tracking on `BatchContext`.
+
 **Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle.
 
 ### Common table expressions
@@ -433,7 +435,7 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - **`ALTER TABLE #foo`**, **`OBJECT_ID('tempdb..#foo')`** — none modeled (none of those exist for regular tables either yet). The common `IF OBJECT_ID(...) IS NOT NULL DROP TABLE` cleanup pattern works via `DROP TABLE IF EXISTS #foo` instead.
 - **Three-part name resolution outside DROP TABLE**: `tempdb..#foo` in FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT raises `InvalidObjectName` (Msg 208) on the qualifier; use bare `#foo`. DROP TABLE alone tolerates the qualifier (probe pattern).
 - T-SQL `GOTO` / labels — `IF` / `BEGIN…END` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` (bare) ship; unconditional jumps don't.
-- `TRY ... CATCH`, `THROW`, `RAISERROR`, `@@ERROR`, stored procs / UDFs. `BEGIN TRY` / `BEGIN ATOMIC` / `BEGIN DISTRIBUTED TRANSACTION` raise `NotSupportedException` at dispatch (peeked after `BEGIN`). Value-form `RETURN N` raises Msg 178 (reserved for the stored-proc / function scope, neither modeled yet).
+- `TRY ... CATCH`, `THROW`, `RAISERROR`, stored procs / UDFs. `BEGIN TRY` / `BEGIN ATOMIC` / `BEGIN DISTRIBUTED TRANSACTION` raise `NotSupportedException` at dispatch (peeked after `BEGIN`). Value-form `RETURN N` raises Msg 178 (reserved for the stored-proc / function scope, neither modeled yet). `@@ERROR` parses + returns 0 (see batch-state section); live tracking lands with TRY/CATCH.
 - **`PRINT` message capture** — the statement parses + evaluates the operand (so operand-side errors like Msg 245 surface), but the message is discarded. `DbConnection` has no `InfoMessage` event (that's a `SqlConnection` extension), so adding a public observability surface would mean a new event on `SimulatedDbConnection`. Defer until an application needs it.
 - `hierarchyid`, `geography`, `geometry`.
 
