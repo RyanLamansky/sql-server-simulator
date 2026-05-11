@@ -488,6 +488,7 @@ internal abstract class Expression
                 "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
                 "OBJECT_ID" => new ObjectId(context),
+                "SCHEMA_ID" => new SchemaId(context),
                 "SUBSTRING" => new Substring(context),
                 _ => null
             },

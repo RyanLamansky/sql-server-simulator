@@ -62,6 +62,15 @@ public sealed partial class Simulation
     internal static Dictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
 
     /// <summary>
+    /// Virtual <c>sys.&lt;view&gt;</c> catalog views (<c>sys.schemas</c>,
+    /// <c>sys.tables</c>, <c>sys.objects</c>), keyed by leaf name. Each
+    /// projects live <see cref="Database"/> / <see cref="Schema"/> /
+    /// <see cref="HeapTable"/> metadata on every read; rows aren't cached.
+    /// Materialized once per process via <see cref="BuiltInResources"/>.
+    /// </summary>
+    internal static Dictionary<string, CatalogView> CatalogViews => BuiltInResources.CatalogViews.Value;
+
+    /// <summary>
     /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for
     /// <see cref="GenerateNewSequentialId"/>. Filled once at construction —
     /// stands in for SQL Server's "MAC address + boot timestamp" anchor that

@@ -97,4 +97,162 @@ internal static class BuiltInResources
         : type is VarcharSqlType ? SqlValue.FromVarchar((string)value)
         : type == SqlType.SystemName ? SqlValue.FromSystemName((string)value)
         : throw new NotSupportedException($"Built-in resource materializer doesn't know how to convert {value.GetType().Name} to {type}.");
+
+    public static readonly Lazy<Dictionary<string, CatalogView>> CatalogViews = new(BuildCatalogViews);
+
+    /// <summary>
+    /// Registers the <c>sys.&lt;view&gt;</c> virtual tables. Each row generator
+    /// projects from live <see cref="Database"/> / <see cref="Schema"/> /
+    /// <see cref="HeapTable"/> metadata at iteration time, so changes made
+    /// earlier in the same batch (CREATE TABLE, CREATE SCHEMA, DROP TABLE)
+    /// appear immediately in the next read. The shipped views are
+    /// <c>sys.schemas</c> / <c>sys.tables</c> / <c>sys.objects</c>; columns
+    /// match the load-bearing subset of real SQL Server's catalog (apps that
+    /// <c>SELECT *</c> see fewer columns — documented quirk).
+    /// </summary>
+    private static Dictionary<string, CatalogView> BuildCatalogViews()
+    {
+        // sys.schemas: (name sysname, schema_id int, principal_id int null)
+        var schemasColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+        };
+        var schemasView = new CatalogView("schemas", schemasColumns, batch =>
+            batch.CurrentDatabase.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
+            {
+                SqlValue.FromSystemName(s.Name),
+                SqlValue.FromInt32(s.SchemaId),
+                SqlValue.Null(SqlType.Int32),
+            }));
+
+        // sys.tables: object_id / name / schema_id / type / type_desc /
+        // create_date / modify_date / is_ms_shipped. Real SQL Server has many
+        // more columns; the shipped subset covers the dominant query shapes.
+        // type is char(2) with trailing space ('U ') — probe-confirmed.
+        var charTwo = CharSqlType.Get(2);
+        var tableType = SqlValue.FromChar(charTwo, "U ");
+        var tableTypeDesc = SqlValue.FromNVarchar("USER_TABLE");
+        var notMsShipped = SqlValue.FromBoolean(false);
+        var tablesColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+        };
+        var tablesView = new CatalogView("tables", tablesColumns, batch =>
+            batch.CurrentDatabase.Schemas.Values
+                .SelectMany(s => s.HeapTables.Values)
+                .OrderBy(t => t.ObjectId)
+                .Select(t => new SqlValue[]
+                {
+                    SqlValue.FromInt32(t.ObjectId),
+                    SqlValue.FromSystemName(t.Name),
+                    SqlValue.FromInt32(t.SchemaId),
+                    tableType,
+                    tableTypeDesc,
+                    SqlValue.FromDateTime(t.CreateDate),
+                    SqlValue.FromDateTime(t.ModifyDate),
+                    notMsShipped,
+                }));
+
+        // sys.objects: a superset of sys.tables that also emits one row per
+        // PK / UQ / CHECK constraint, with parent_object_id linking back to
+        // the owning table. type_desc strings probe-confirmed: 'U ' /
+        // USER_TABLE, 'PK' / PRIMARY_KEY_CONSTRAINT, 'UQ' / UNIQUE_CONSTRAINT,
+        // 'C ' / CHECK_CONSTRAINT.
+        var pkType = SqlValue.FromChar(charTwo, "PK");
+        var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
+        var uqType = SqlValue.FromChar(charTwo, "UQ");
+        var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
+        var checkType = SqlValue.FromChar(charTwo, "C ");
+        var checkTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
+        var zeroParent = SqlValue.FromInt32(0);
+        var objectsColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, true),
+        };
+        var objectsView = new CatalogView("objects", objectsColumns, batch =>
+            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
+
+        return new Dictionary<string, CatalogView>(Collation.Default)
+        {
+            [schemasView.Name] = schemasView,
+            [tablesView.Name] = tablesView,
+            [objectsView.Name] = objectsView,
+        };
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateObjects(
+        Parser.BatchContext batch,
+        SqlValue tableType, SqlValue tableTypeDesc,
+        SqlValue pkType, SqlValue pkTypeDesc,
+        SqlValue uqType, SqlValue uqTypeDesc,
+        SqlValue checkType, SqlValue checkTypeDesc,
+        SqlValue zeroParent, SqlValue notMsShipped)
+    {
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            {
+                var schemaId = SqlValue.FromInt32(t.SchemaId);
+                var createDate = SqlValue.FromDateTime(t.CreateDate);
+                var modifyDate = SqlValue.FromDateTime(t.ModifyDate);
+                yield return [
+                    SqlValue.FromInt32(t.ObjectId),
+                    SqlValue.FromSystemName(t.Name),
+                    schemaId,
+                    zeroParent,
+                    tableType,
+                    tableTypeDesc,
+                    createDate,
+                    modifyDate,
+                    notMsShipped,
+                ];
+                var parent = SqlValue.FromInt32(t.ObjectId);
+                foreach (var key in t.KeyConstraints)
+                {
+                    yield return [
+                        SqlValue.FromInt32(key.ObjectId),
+                        SqlValue.FromSystemName(key.Name),
+                        schemaId,
+                        parent,
+                        key.Kind == KeyConstraintKind.PrimaryKey ? pkType : uqType,
+                        key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
+                        createDate,
+                        modifyDate,
+                        notMsShipped,
+                    ];
+                }
+                foreach (var chk in t.CheckConstraints)
+                {
+                    yield return [
+                        SqlValue.FromInt32(chk.ObjectId),
+                        SqlValue.FromSystemName(chk.Name),
+                        schemaId,
+                        parent,
+                        checkType,
+                        checkTypeDesc,
+                        createDate,
+                        modifyDate,
+                        notMsShipped,
+                    ];
+                }
+            }
+        }
+    }
 }

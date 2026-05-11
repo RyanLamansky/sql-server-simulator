@@ -122,6 +122,33 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Wraps a <see cref="CatalogView"/>'s row generator + column schema as a
+    /// <see cref="Selection"/> suitable for use as a <see cref="FromSource.LateralPlan"/>.
+    /// Executing the resulting plan invokes the view's generator with the
+    /// live <see cref="BatchContext"/>, encodes each row's
+    /// <see cref="SqlValue"/> array via <c>RowEncoder.EncodeRow</c>, and
+    /// streams the bytes. Re-executes on each call so changes made earlier
+    /// in the same batch (CREATE TABLE, CREATE SCHEMA, DROP TABLE) appear
+    /// immediately.
+    /// </summary>
+    internal static Selection ForCatalogView(CatalogView view)
+    {
+        var schema = new SqlType[view.Columns.Length];
+        var columnNames = new string[view.Columns.Length];
+        for (var i = 0; i < view.Columns.Length; i++)
+        {
+            schema[i] = view.Columns[i].Type;
+            columnNames[i] = view.Columns[i].Name;
+        }
+        return new Selection(
+            schema,
+            columnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            rowSource: (batch, _) => view.RowGenerator(batch).Select(values => RowEncoder.EncodeRow(view.Columns, values)));
+    }
+
+    /// <summary>
     /// Materializes the SELECT against the given outer-row resolver
     /// (null for top-level / non-correlated scopes). Each call produces a
     /// fresh <see cref="SimulatedSqlResultSet"/>; the underlying row sequence
@@ -836,6 +863,28 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: cteBinding.Plan);
+                }
+
+                // Catalog views (sys.tables / sys.objects / sys.schemas)
+                // route to a virtual FromSource whose rows project from live
+                // metadata at execution time — wrapped as a LateralPlan so
+                // each Execute re-runs the generator and picks up CREATE /
+                // DROP changes from earlier in the same batch.
+                if (context.Batch.TryResolveCatalogView(objectName, out var catalogView))
+                {
+                    var catalogColumnNames = new string[catalogView.Columns.Length];
+                    for (var ci = 0; ci < catalogColumnNames.Length; ci++)
+                        catalogColumnNames[ci] = catalogView.Columns[ci].Name;
+                    var catalogAlias = ConsumeOptionalAlias(context);
+                    return new FromSource(
+                        qualifier: catalogAlias ?? catalogView.Name,
+                        columnNames: catalogColumnNames,
+                        columns: catalogView.Columns,
+                        storedSchema: catalogView.Columns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: Selection.ForCatalogView(catalogView));
                 }
 
                 if (!context.Batch.TryResolveTable(objectName, out var heapTable))

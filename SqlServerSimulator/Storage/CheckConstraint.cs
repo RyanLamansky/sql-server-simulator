@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Storage;
 /// to UNKNOWN (any NULL operand without explicit NULL handling) passes —
 /// only an explicit <c>false</c> rejects.
 /// </summary>
-internal sealed class CheckConstraint(string name, BooleanExpression predicate, string? inlineColumn)
+internal sealed class CheckConstraint(string name, BooleanExpression predicate, string? inlineColumn, int objectId)
 {
     public readonly string Name = name;
 
@@ -23,4 +23,12 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     /// message omits the column suffix — matching real SQL Server.
     /// </summary>
     public readonly string? InlineColumn = inlineColumn;
+
+    /// <summary>
+    /// Per-database object identifier for this constraint — allocated at
+    /// CREATE TABLE alongside the table. Surfaces in <c>sys.objects</c> as
+    /// a <c>C</c> row with <c>parent_object_id</c> linking back to the
+    /// owning table.
+    /// </summary>
+    public readonly int ObjectId = objectId;
 }

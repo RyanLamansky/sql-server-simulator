@@ -29,10 +29,25 @@ internal sealed class Database
     /// </summary>
     public readonly ConcurrentDictionary<string, Schema> Schemas = new(Collation.Default);
 
+    /// <summary>
+    /// Schema-id of the default <c>dbo</c> schema. Matches real SQL Server's
+    /// conventional value; surfaces in <c>sys.schemas</c>, <c>sys.tables.schema_id</c>,
+    /// etc. Apps that hard-code <c>schema_id = 1</c> for dbo work as expected.
+    /// </summary>
+    public const int DboSchemaId = 1;
+
+    /// <summary>Conventional schema-id for <c>INFORMATION_SCHEMA</c> (matches real SQL Server).</summary>
+    public const int InformationSchemaId = 3;
+
+    /// <summary>Conventional schema-id for <c>sys</c> (matches real SQL Server).</summary>
+    public const int SysSchemaId = 4;
+
     public Database(string name)
     {
         this.Name = name;
-        this.Schemas[DefaultSchemaName] = new Schema(DefaultSchemaName);
+        this.Schemas[DefaultSchemaName] = new Schema(DefaultSchemaName, DboSchemaId);
+        this.Schemas["INFORMATION_SCHEMA"] = new Schema("INFORMATION_SCHEMA", InformationSchemaId);
+        this.Schemas["sys"] = new Schema("sys", SysSchemaId);
     }
 
     /// <summary>
@@ -41,6 +56,16 @@ internal sealed class Database
     /// <c>Schemas[DefaultSchemaName].HeapTables</c>.
     /// </summary>
     public ConcurrentDictionary<string, HeapTable> DefaultSchemaTables => this.Schemas[DefaultSchemaName].HeapTables;
+
+    private int nextSchemaId = 4;
+
+    /// <summary>
+    /// Allocates the next user schema id. Counter is seeded so the first
+    /// allocation returns 5 (matching real SQL Server's "user schemas start
+    /// at 5" convention; ids 1-4 are pre-assigned to dbo / guest /
+    /// INFORMATION_SCHEMA / sys, with guest unmodeled in the simulator).
+    /// </summary>
+    public int AllocateSchemaId() => Interlocked.Increment(ref this.nextSchemaId);
 
     /// <summary>
     /// Database compatibility level. Freshly-constructed databases default

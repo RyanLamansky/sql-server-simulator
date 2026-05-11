@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -263,8 +264,6 @@ partial class Simulation
         if (fixedWidthSum > Heap.MaxRowSize)
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Leaf, fixedWidthSum, Heap.MaxRowSize);
 
-        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys);
-
         // Real SQL Server's Msg 8141 (probed against SQL Server 2025) rejects
         // an inline column-level CHECK that references any column other than
         // its owning column — table-level CHECK has no such restriction.
@@ -287,25 +286,60 @@ partial class Simulation
                 }));
         }
 
-        var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks);
-        var heapTable = new HeapTable(tableName.Leaf, [.. heapColumns!], context.CurrentDatabase.AllocateObjectId(), keyConstraints, checkConstraints);
         // #foo lives in the per-connection TempTables dict so it's isolated
         // from regular user tables and auto-drops at connection close.
         // ##foo (global temps) aren't modeled yet — surface explicitly rather
         // than letting it silently land as a regular table.
-        if (heapTable.Name.Length >= 2 && heapTable.Name[0] == '#' && heapTable.Name[1] == '#')
-            throw new NotSupportedException($"Global temp tables (##{heapTable.Name[2..]}) aren't modeled. Use a local temp table (#{heapTable.Name[2..]}) or a permanent table.");
+        if (tableName.Leaf.Length >= 2 && tableName.Leaf[0] == '#' && tableName.Leaf[1] == '#')
+            throw new NotSupportedException($"Global temp tables (##{tableName.Leaf[2..]}) aren't modeled. Use a local temp table (#{tableName.Leaf[2..]}) or a permanent table.");
         // In a skipped IF branch, gate both the existence check (Msg 2714)
         // and the dict add: the safe-CREATE idiom (`IF NOT EXISTS (...) CREATE
         // TABLE foo (...)`) relies on the un-taken CREATE not surfacing
         // "already exists" when the cond was false because foo *did* exist.
         if (context.Batch.IsSkipping)
             return true;
-        var isTempTable = BatchContext.IsLocalTempName(heapTable.Name);
-        var destination = isTempTable
-            ? context.Batch.Connection.TempTables
-            : context.Batch.TryResolveSchema(tableName, out var schema) ? schema.HeapTables
-                : throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.Count >= 2 ? tableName.ImmediateQualifier! : Database.DefaultSchemaName);
+
+        // Resolve the target schema first — Msg 2760 fires if the qualified
+        // schema doesn't exist. For temp tables the schema is conceptual
+        // (real SQL Server lists them under tempdb's dbo); store DboSchemaId
+        // for sys.* projection consistency. Schema resolution also fixes the
+        // schemaId we stamp on KeyConstraint / CheckConstraint / HeapTable so
+        // constraint object_ids allocate alongside the table's id without
+        // discovering they had no home.
+        var isTempTable = BatchContext.IsLocalTempName(tableName.Leaf);
+        Schema? schema = null;
+        var schemaId = Database.DboSchemaId;
+        ConcurrentDictionary<string, HeapTable> destination;
+        if (isTempTable)
+        {
+            destination = context.Batch.Connection.TempTables;
+        }
+        else
+        {
+            if (!context.Batch.TryResolveSchema(tableName, out schema))
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.Count >= 2 ? tableName.ImmediateQualifier! : Database.DefaultSchemaName);
+            // sys and INFORMATION_SCHEMA exist in Database.Schemas to carry
+            // their conventional schema_ids and host catalog views — they
+            // aren't writable namespaces. Real SQL Server rejects user
+            // CREATE TABLE in either via a permission error; the simulator
+            // surfaces NotSupportedException with the schema name so the
+            // diagnostic is clear.
+            if (schema.SchemaId is Database.SysSchemaId or Database.InformationSchemaId)
+                throw new NotSupportedException($"Cannot CREATE TABLE in the built-in '{schema.Name}' schema. Use 'dbo' or a user-created schema.");
+            destination = schema.HeapTables;
+            schemaId = schema.SchemaId;
+        }
+
+        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase);
+        var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase);
+        var heapTable = new HeapTable(
+            tableName.Leaf,
+            [.. heapColumns!],
+            context.CurrentDatabase.AllocateObjectId(),
+            schemaId,
+            context.Batch.CurrentStatement.UtcNow,
+            keyConstraints,
+            checkConstraints);
         if (!destination.TryAdd(heapTable.Name, heapTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
         // Temp-table DDL participates in transaction rollback: probe-confirmed
@@ -415,7 +449,8 @@ partial class Simulation
     /// </summary>
     private static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks)
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        Database database)
     {
         if (pendingChecks.Count == 0)
             return [];
@@ -425,7 +460,7 @@ partial class Simulation
         {
             var pending = pendingChecks[c];
             var name = pending.Name ?? AutoCheckName(tableName, pending.InlineColumn, c);
-            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn);
+            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId());
         }
         return resolved;
     }
@@ -577,7 +612,8 @@ partial class Simulation
     private static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
         List<HeapColumn> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys)
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        Database database)
     {
         if (pendingKeys.Count == 0)
             return [];
@@ -611,7 +647,7 @@ partial class Simulation
                 storageOrdinals[i] = storageOrdinal;
             }
 
-            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals);
+            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId());
         }
 
         return resolved;

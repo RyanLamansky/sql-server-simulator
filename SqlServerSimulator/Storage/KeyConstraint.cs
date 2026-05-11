@@ -19,13 +19,21 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId)
 {
     public readonly KeyConstraintKind Kind = kind;
 
     public readonly string Name = name;
 
     public readonly int[] StorageOrdinals = storageOrdinals;
+
+    /// <summary>
+    /// Per-database object identifier for this constraint — allocated at
+    /// CREATE TABLE alongside the table itself. Surfaces in
+    /// <c>sys.objects</c> as a <c>PK</c> / <c>UQ</c> row with
+    /// <c>parent_object_id</c> linking back to the owning table.
+    /// </summary>
+    public readonly int ObjectId = objectId;
 
     /// <summary>
     /// The phrase SQL Server emits in Msg 2627 for this constraint kind:

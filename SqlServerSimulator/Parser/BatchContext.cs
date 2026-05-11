@@ -290,6 +290,24 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Resolves <paramref name="name"/> to a <see cref="CatalogView"/> in the
+    /// <c>sys</c> schema. Returns true for 2-part names whose qualifier is
+    /// <c>sys</c> (case-insensitive) and whose leaf matches a registered
+    /// view, or 3-part names that also pass the db-segment check. Used by
+    /// the FROM parser to route <c>sys.tables</c> / <c>sys.objects</c> /
+    /// <c>sys.schemas</c> references to virtual catalog views before
+    /// falling through to the regular <see cref="TryResolveTable"/> path.
+    /// </summary>
+    public bool TryResolveCatalogView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? view)
+    {
+        view = null;
+        return name.Count is 2 or 3
+            && (name.Count != 3 || Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
+            && Collation.Default.Equals(name.ImmediateQualifier, "sys")
+            && Simulation.CatalogViews.TryGetValue(name.Leaf, out view);
+    }
+
+    /// <summary>
     /// Parses an object name (1–4 dotted segments) at the current token,
     /// leaving the cursor on the <em>last</em> consumed name segment (matching
     /// the standard parser-context contract that every parser leaves Token on

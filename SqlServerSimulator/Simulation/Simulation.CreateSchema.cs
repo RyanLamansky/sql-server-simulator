@@ -68,7 +68,7 @@ partial class Simulation
         // server-owned. Real SQL Server raises Msg 2760 on each — replicated.
         return IsReservedSchemaName(schemaName)
             ? throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName)
-            : context.CurrentDatabase.Schemas.TryAdd(schemaName, new Schema(schemaName))
+            : context.CurrentDatabase.Schemas.TryAdd(schemaName, new Schema(schemaName, context.CurrentDatabase.AllocateSchemaId()))
                 ? true
                 : throw SimulatedSqlException.ThereIsAlreadyAnObject(schemaName);
     }
