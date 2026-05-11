@@ -1,0 +1,82 @@
+using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator;
+
+partial class Simulation
+{
+    /// <summary>
+    /// Parses <c>TRUNCATE TABLE &lt;name&gt;</c>. Routes <c>#foo</c> names to
+    /// the connection's <see cref="SimulatedDbConnection.TempTables"/> dict;
+    /// everything else to <see cref="Database.HeapTables"/>. Missing target
+    /// raises <c>Msg 4701</c> — distinct from <c>DROP TABLE</c>'s Msg 3701 and
+    /// generic INSERT/UPDATE/DELETE's Msg 208.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Truncation clears every row and resets each identity column's
+    /// high-water mark to its declared seed — probe-confirmed against
+    /// SQL Server 2025 (2026-05-11) that a subsequent INSERT receives the
+    /// seed, not the next-after-the-prior-max. Distinct from the simulator's
+    /// general "identity bypasses the undo log" rule (which is INSERT-only):
+    /// TRUNCATE's reset DOES participate in rollback, so a
+    /// <c>BEGIN TRAN; TRUNCATE; ROLLBACK</c> restores both the row data and
+    /// the original identity counter — also probe-confirmed.
+    /// </para>
+    /// <para>
+    /// Rollback support uses a single <see cref="UndoLog"/> entry that
+    /// snapshots the heap's pre-truncate <see cref="Heap.Pages"/> /
+    /// <see cref="Heap.LobPages"/> lists and each identity column's
+    /// pre-truncate high-water mark. Outside an explicit transaction the
+    /// truncation commits immediately (no log entry — same pattern as
+    /// regular CREATE / DROP TABLE).
+    /// </para>
+    /// <para>
+    /// <c>@@ROWCOUNT</c> resets to 0 (probe-confirmed); skip-mode (un-taken
+    /// IF, after BREAK / CONTINUE / RETURN) suppresses the entire action.
+    /// Multi-part names (<c>tempdb..#foo</c>, <c>claude.dbo.t</c>) are
+    /// accepted via the same lenient parser <c>DROP TABLE</c> uses —
+    /// qualifier segments are cosmetic; the leaf is the routing key.
+    /// </para>
+    /// </remarks>
+    private static void ParseTruncateStatement(BatchContext batch)
+    {
+        var context = batch.Parser;
+        context.MoveNextRequired(); // consume TRUNCATE
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Table })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired(); // consume TABLE
+
+        var name = ParseDropTargetName(context);
+
+        if (batch.IsSkipping)
+            return;
+
+        var isTempTable = BatchContext.IsLocalTempName(name);
+        var destination = isTempTable
+            ? context.Connection.TempTables
+            : context.CurrentDatabase.HeapTables;
+
+        if (!destination.TryGetValue(name, out var table))
+            throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name);
+
+        var oldPages = new List<HeapPage>(table.Heap.Pages);
+        var oldLobPages = new List<HeapLobPage>(table.Heap.LobPages);
+
+        var identitySnapshots = new List<(IdentityState State, long? HighWaterMark)>();
+        foreach (var column in table.Columns)
+        {
+            if (column.Identity is { } identity)
+                identitySnapshots.Add((identity, identity.Snapshot()));
+        }
+
+        table.Heap.Pages.Clear();
+        table.Heap.LobPages.Clear();
+        for (var i = 0; i < identitySnapshots.Count; i++)
+            identitySnapshots[i].State.Restore(null);
+
+        if (context.Connection.CurrentTransaction is { } tx)
+            tx.UndoLog.RecordTruncation(table.Heap, oldPages, oldLobPages, [.. identitySnapshots]);
+    }
+}

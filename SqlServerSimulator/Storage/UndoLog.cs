@@ -52,6 +52,9 @@ internal sealed class UndoLog
     public void RecordTempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) =>
         this.entries.Add(new TempTableRemoval(owner, name, table));
 
+    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
+        this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, identitySnapshots));
+
     /// <summary>
     /// Current end-of-log position, captured by callers as a marker before a
     /// scope of mutations so a later <see cref="RollbackTo"/> can undo only
@@ -131,5 +134,29 @@ internal sealed class UndoLog
         public readonly HeapTable Table = table;
 
         public override void Undo() => this.Owner[this.Name] = this.Table;
+    }
+
+    /// <summary>
+    /// Records a <c>TRUNCATE TABLE</c> against <paramref name="heap"/>. The
+    /// snapshots are the pre-truncate <see cref="Heap.Pages"/> /
+    /// <see cref="Heap.LobPages"/> list contents and each identity column's
+    /// pre-truncate high-water mark. Undo splices the snapshot lists back
+    /// into the live heap and restores each identity state — probe-
+    /// confirmed against SQL Server 2025 that a rollback after TRUNCATE
+    /// restores both the row data AND the identity counter (distinct from
+    /// the simulator's general "identity bypasses the log" rule, which
+    /// applies to INSERT only).
+    /// </summary>
+    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) : UndoEntry
+    {
+        public override void Undo()
+        {
+            heap.Pages.Clear();
+            heap.Pages.AddRange(oldPages);
+            heap.LobPages.Clear();
+            heap.LobPages.AddRange(oldLobPages);
+            for (var i = 0; i < identitySnapshots.Length; i++)
+                identitySnapshots[i].State.Restore(identitySnapshots[i].HighWaterMark);
+        }
     }
 }

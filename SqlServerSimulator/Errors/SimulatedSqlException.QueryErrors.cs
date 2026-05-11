@@ -362,4 +362,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException InlineCheckReferencesAnotherColumn(string owningColumn, string tableName) =>
         new($"Column CHECK constraint for column '{owningColumn}' references another column, table '{tableName}'.", 8141, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4701 — <c>TRUNCATE TABLE</c> against a name
+    /// that doesn't resolve to a table. Distinct from <c>DROP TABLE</c>'s
+    /// Msg 3701 and from generic INSERT/UPDATE/DELETE's Msg 208: TRUNCATE
+    /// has its own error path. Probe-confirmed against SQL Server 2025
+    /// (2026-05-11): Class 16, State 1, verbatim wording (the
+    /// <c>"or you do not have permissions"</c> suffix is part of the
+    /// real-server message and is preserved here).
+    /// </summary>
+    internal static SimulatedSqlException CannotTruncateObjectDoesNotExist(string name) =>
+        new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 4701, 16, 1);
 }

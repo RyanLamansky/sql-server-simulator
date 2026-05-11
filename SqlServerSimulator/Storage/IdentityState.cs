@@ -70,4 +70,28 @@ internal sealed class IdentityState(long seed, long increment)
                 this.highWaterMark = value;
         }
     }
+
+    /// <summary>
+    /// Reads the current high-water mark for snapshot purposes — TRUNCATE's
+    /// undo entry captures this so a rollback restores both the row data
+    /// and the counter position. Returns <c>null</c> when no value has yet
+    /// been generated.
+    /// </summary>
+    internal long? Snapshot()
+    {
+        lock (this.gate)
+            return this.highWaterMark;
+    }
+
+    /// <summary>
+    /// Overwrites the high-water mark, used by TRUNCATE to reset to
+    /// "no values generated yet" (passing <c>null</c>) and by the matching
+    /// undo entry to restore the snapshot on rollback. Distinct from
+    /// <see cref="ObserveExplicit"/>, which only advances forward.
+    /// </summary>
+    internal void Restore(long? value)
+    {
+        lock (this.gate)
+            this.highWaterMark = value;
+    }
 }
