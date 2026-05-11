@@ -115,4 +115,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ContinueOutsideLoop() =>
         new("Cannot use a CONTINUE statement outside the scope of a WHILE statement.", 136, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 178: a <c>RETURN</c> statement carries a
+    /// value (e.g. <c>RETURN 5</c>) in a context where the value form isn't
+    /// allowed — at batch level, only the bare <c>RETURN</c> form is legal.
+    /// The value form is reserved for stored procedures and scalar functions.
+    /// Probe-confirmed against SQL Server 2025 (2026-05-11): Class 15,
+    /// State 1, exact wording verbatim. Fires at compile time — even from
+    /// un-taken IF branches, same pattern as Msg 135 (BREAK).
+    /// </summary>
+    internal static SimulatedSqlException ReturnWithValueNotAllowed() =>
+        new("A RETURN statement with a return value cannot be used in this context.", 178, 15, 1);
 }

@@ -159,6 +159,15 @@ public sealed partial class Simulation
 
         while (context.Token is not null)
         {
+            // Early-exit on RETURN: stop dispatching once the batch has been
+            // signaled to exit. Any remaining statements (including the END
+            // terminator of an enclosing block) are abandoned — the caller
+            // handles cursor state. Checked here at the top of every iteration
+            // so RETURN inside a block exits the block dispatcher promptly
+            // (the block's "expect END" check has a matching short-circuit).
+            if (batch.ReturnSignaled)
+                yield break;
+
             if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)
                 yield break;
 
@@ -309,6 +318,10 @@ public sealed partial class Simulation
                 ParseContinueStatement(batch);
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.Return }:
+                ParseReturnStatement(batch);
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Begin }:
                 // Peek the token after BEGIN to disambiguate transaction-start
                 // (BEGIN TRAN / BEGIN TRANSACTION / BEGIN DISTRIBUTED TRAN) from
@@ -400,6 +413,7 @@ public sealed partial class Simulation
                 or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
                 or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
                 or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
+                or Keyword.Return
         };
 
     /// <summary>

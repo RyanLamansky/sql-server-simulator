@@ -196,6 +196,12 @@ partial class Simulation
                     foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false))
                         yield return o;
 
+                    // RETURN propagates through WHILE (unlike BREAK / CONTINUE
+                    // which we catch). Exit the loop without clearing — the
+                    // outer DispatchStatementsUntil also stops on ReturnSignaled.
+                    if (batch.ReturnSignaled)
+                        goto ExitLoop;
+
                     switch (batch.LoopControl)
                     {
                         case LoopControl.Break:
@@ -259,6 +265,51 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Dispatches a <c>RETURN</c> statement. In batch context (the only
+    /// context the simulator currently supports — stored procs and scalar
+    /// functions still aren't modeled), only the bare form is legal: a
+    /// value-form <c>RETURN &lt;expr&gt;</c> raises <c>Msg 178</c> at parse
+    /// time regardless of skip mode (compile-time check, same pattern as
+    /// <c>BREAK</c>'s Msg 135 from an un-taken IF). Bare RETURN sets
+    /// <see cref="BatchContext.ReturnSignaled"/>; <see cref="BatchContext.IsSkipping"/>
+    /// then OR's the flag into the skip predicate so any remaining statements
+    /// in the same block no-op, and the dispatch loop's early-exit check
+    /// (in <c>DispatchStatementsUntil</c>) terminates the batch as soon as
+    /// the next statement boundary is reached.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RETURN propagates through every enclosing construct — IF, BEGIN…END,
+    /// nested WHILE — exiting the batch entirely (unlike BREAK / CONTINUE
+    /// which the innermost WHILE catches). WHILE checks the flag after each
+    /// body dispatch and exits its iteration loop; BEGIN…END's
+    /// <c>ParseBeginBlock</c> short-circuits the "expect END" check when
+    /// the flag is set (the cursor may not have reached END if RETURN fired
+    /// mid-block).
+    /// </para>
+    /// <para>
+    /// The expression-presence check uses <see cref="IsStatementBoundary"/>
+    /// to decide bare vs value-form: any non-boundary token following RETURN
+    /// (operators, variables, literals, parens, non-statement-start keywords)
+    /// triggers Msg 178. Statement-boundary tokens (<c>;</c>, EOB, statement-
+    /// starting keywords) leave RETURN bare.
+    /// </para>
+    /// </remarks>
+    private static void ParseReturnStatement(BatchContext batch)
+    {
+        var context = batch.Parser;
+        context.MoveNextOptional(); // consume RETURN
+
+        // Compile-time: any non-boundary token following RETURN is an
+        // expression and value-form RETURN isn't legal at batch scope.
+        if (!IsStatementBoundary(context.Token))
+            throw SimulatedSqlException.ReturnWithValueNotAllowed();
+
+        if (!batch.IsSkipping)
+            batch.ReturnSignaled = true;
+    }
+
+    /// <summary>
     /// Parses and runs a <c>BEGIN … END</c> compound-statement block. Dispatches
     /// each contained statement through <see cref="DispatchStatementsUntil"/>
     /// until the matching <c>END</c>. Empty blocks (<c>BEGIN END</c> or
@@ -296,6 +347,11 @@ partial class Simulation
 
         foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
             yield return o;
+
+        // RETURN inside the block exits early without reaching END — abandon
+        // the block; outer DispatchStatementsUntil also stops on ReturnSignaled.
+        if (batch.ReturnSignaled)
+            yield break;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context);

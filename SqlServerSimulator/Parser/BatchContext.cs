@@ -82,6 +82,23 @@ internal sealed class BatchContext
     public const long LoopIterationLimit = 100_000;
 
     /// <summary>
+    /// True after a <c>RETURN</c> statement has fired in this batch. Drives
+    /// early-exit propagation: the dispatch loop (and every enclosing
+    /// construct — WHILE, BEGIN…END block) checks this and stops as soon as
+    /// the current statement's dispatch completes. <see cref="IsSkipping"/>
+    /// also OR's this in so any statements still parsed after RETURN in the
+    /// same scope no-op via the skip-mode gates.
+    /// </summary>
+    /// <remarks>
+    /// RETURN propagates through WHILE (unlike BREAK / CONTINUE, which the
+    /// innermost WHILE catches). Batch-level only for now; once stored
+    /// procedures and functions land, the proc-call boundary will consume
+    /// the signal (and the value-form <c>RETURN N</c> will start being legal
+    /// inside those scopes, ungating the Msg 178 check).
+    /// </remarks>
+    public bool ReturnSignaled;
+
+    /// <summary>
     /// True while the dispatch loop should treat each statement parser as
     /// "parse only" — advance the cursor and resolve names but skip the
     /// actual state mutation (heap inserts/updates/deletes, dict adds for
@@ -110,7 +127,10 @@ internal sealed class BatchContext
     /// compile-time check on those statements.
     /// </para>
     /// </remarks>
-    public bool IsSkipping => this.SkipModeFlag || this.LoopControl != LoopControl.None;
+    public bool IsSkipping =>
+        this.SkipModeFlag
+        || this.LoopControl != LoopControl.None
+        || this.ReturnSignaled;
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;
