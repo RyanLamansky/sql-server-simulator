@@ -17,4 +17,6 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
     public override Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Wrapped.GetSqlType(resolveColumnType);
 
     internal override string DebugDisplay() => $"( {this.Wrapped.DebugDisplay()} )";
+
+    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Wrapped.VisitColumnReferences(visit);
 }

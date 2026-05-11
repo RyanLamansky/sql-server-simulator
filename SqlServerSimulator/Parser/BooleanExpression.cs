@@ -256,6 +256,19 @@ internal abstract class BooleanExpression
     internal abstract string DebugDisplay();
 
     /// <summary>
+    /// Visits every top-level <see cref="Expression"/> operand carried by
+    /// this predicate, recursing into nested <see cref="BooleanExpression"/>
+    /// children (e.g. <c>AND</c> / <c>OR</c> / <c>NOT</c>) so the visitor
+    /// only ever sees Expression nodes. Used by CREATE TABLE's inline-CHECK
+    /// validator to enumerate column references via the standard
+    /// <see cref="Expression.GetSqlType"/> resolver — the Expression-side
+    /// walk is unchanged because every <c>Reference</c> already feeds the
+    /// resolver, so callers only need to drive the BooleanExpression-side
+    /// traversal from here.
+    /// </summary>
+    internal abstract void VisitOperandExpressions(Action<Expression> visitor);
+
+    /// <summary>
     /// Three-valued <c>AND</c>: <c>false AND x = false</c> regardless of
     /// <c>x</c>; <c>true AND x = x</c>; <c>NULL AND NULL = NULL</c>. Short-
     /// circuits when the left side is <c>false</c> — the right side isn't
@@ -276,6 +289,12 @@ internal abstract class BooleanExpression
         }
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} AND {right.DebugDisplay()}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            left.VisitOperandExpressions(visitor);
+            right.VisitOperandExpressions(visitor);
+        }
     }
 
     /// <summary>
@@ -297,6 +316,12 @@ internal abstract class BooleanExpression
         }
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} OR {right.DebugDisplay()}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            left.VisitOperandExpressions(visitor);
+            right.VisitOperandExpressions(visitor);
+        }
     }
 
     /// <summary>
@@ -313,6 +338,8 @@ internal abstract class BooleanExpression
             source.Run(runtime).IsNull ^ negated;
 
         internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
     }
 
     /// <summary>
@@ -351,6 +378,13 @@ internal abstract class BooleanExpression
             var keyword = negated ? "NOT IN" : "IN";
             return $"{source.DebugDisplay()} {keyword} ({string.Join(", ", candidates.Select(c => c.DebugDisplay()))})";
         }
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            visitor(source);
+            foreach (var candidate in candidates)
+                visitor(candidate);
+        }
     }
 
     /// <summary>
@@ -367,6 +401,11 @@ internal abstract class BooleanExpression
             inner.Execute(runtime.Batch, runtime.ResolveColumn).RowBytes.Any();
 
         internal override string DebugDisplay() => "EXISTS (...)";
+
+        // No top-level Expression operands — the subquery's references are
+        // unreachable from this validator (and a subquery in inline CHECK
+        // raises Msg 1046 in real SQL Server anyway).
+        internal override void VisitOperandExpressions(Action<Expression> visitor) { }
     }
 
     /// <summary>
@@ -405,6 +444,10 @@ internal abstract class BooleanExpression
         }
 
         internal override string DebugDisplay() => $"{source.DebugDisplay()} {(negated ? "NOT IN" : "IN")} (...)";
+
+        // Only the LHS source is a reachable Expression operand; the subquery
+        // side is a Selection (handled by its own machinery).
+        internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
     }
 
     /// <summary>
@@ -423,6 +466,8 @@ internal abstract class BooleanExpression
         };
 
         internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
     }
 
     /// <summary>
@@ -462,6 +507,12 @@ internal abstract class BooleanExpression
         /// </summary>
         protected static bool? ComparePromoted(Expression left, Expression right, RuntimeContext runtime, string operatorName, Func<SqlValue, SqlValue, bool> compare) =>
             CompareValuesPromoted(left.Run(runtime), right.Run(runtime), operatorName, compare);
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            visitor(this.left);
+            visitor(this.right);
+        }
     }
 
     /// <summary>
@@ -701,5 +752,13 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => this.escape is null
             ? $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()}"
             : $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()} ESCAPE {this.escape.DebugDisplay()}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            visitor(this.left);
+            visitor(this.right);
+            if (this.escape is not null)
+                visitor(this.escape);
+        }
     }
 }

@@ -237,7 +237,7 @@ NOT swallowed: Msg 529 (explicit-cast disallowed pair like `int → date`), Msg 
 String-source truncation isn't a "conversion failure" path either way — `TRY_CAST('hello' AS varchar(3))` → `'hel'`. EF doesn't emit TRY_CAST/TRY_CONVERT from idiomatic LINQ (raw SQL only).
 
 ### Constraints
-- `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate.
+- `CHECK`: inline single-column and table-level forms; Msg 547 per row on definitely-false predicate. Inline column-level CHECK predicates may only reference their owning column — peer references raise **Msg 8141** at CREATE TABLE (probe-confirmed verbatim wording). The walker is structural via `Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`; coverage is currently limited to common container subclasses (`Reference`, `Parenthesized`, `TwoSidedExpression`, `Cast`, `Length`) — peer refs buried in less-common containers (`DATEPART`, `SUBSTRING`, nested `CASE`, etc.) silently escape the CREATE-TABLE check and surface at INSERT instead. Table-level CHECK has no peer restriction.
 - `PRIMARY KEY` / `UNIQUE`: linear scan (O(N) per insert); no B-tree.
 
 ### Transactions
@@ -420,7 +420,6 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - `LEN(ntext)` raising Msg 8116; legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
 - `OUTPUT INTO @table_var`, `OUTPUT DELETED.*` / `INSERTED.*` star expansion.
 - MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`.
-- Msg 8141 (inline CHECK referencing a peer column — SQL Server rejects at CREATE TABLE; simulator allows).
 - `PRIMARY KEY` / `UNIQUE` on a computed column (`NotSupportedException`).
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - Compound assignment (`SET @v += expr` / `-=` / `*=` etc.) — rewrite as `SET @v = @v + expr`. The arithmetic-operator runtime is locked behind `protected` instance methods on `TwoSidedExpression`; exposing them as static helpers is the prerequisite refactor.

@@ -34,4 +34,6 @@ internal sealed class Length(ParserContext context) : Expression
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
+
+    internal override void VisitColumnReferences(Action<MultiPartName> visit) => source.VisitColumnReferences(visit);
 }

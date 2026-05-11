@@ -65,6 +65,8 @@ internal sealed class Cast : Expression
     internal override string DebugDisplay() =>
         $"{(this.tryMode ? "TRY_CAST" : "CAST")}({source.DebugDisplay()} AS {targetType})";
 
+    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.source.VisitColumnReferences(visit);
+
     /// <summary>
     /// Parses the optional <c>(length)</c> or <c>(precision, scale)</c> spec
     /// after a CAST/CONVERT target type name and resolves the type. The caller

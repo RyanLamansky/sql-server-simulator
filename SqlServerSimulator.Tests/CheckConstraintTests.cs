@@ -177,4 +177,78 @@ public sealed class CheckConstraintTests
         var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values ('C')"));
         Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
     }
+
+    // Msg 8141: an inline column-level CHECK constraint may only reference
+    // its owning column. Table-level CHECK has no such restriction. Probed
+    // against SQL Server 2025 (2026-05-11).
+
+    [TestMethod]
+    public void InlineCheck_ReferencesPeerColumn_Msg8141()
+        => new Simulation().AssertSqlError(
+            "create table t (a int check (b > 0), b int)",
+            8141,
+            "Column CHECK constraint for column 'a' references another column, table 't'.");
+
+    [TestMethod]
+    public void InlineCheck_OwningAndPeer_StillMsg8141()
+        => new Simulation().AssertSqlError(
+            "create table t (a int check (a > 0 and b > 0), b int)",
+            8141);
+
+    [TestMethod]
+    public void InlineCheck_PeerOnSecondColumn_Msg8141()
+        => new Simulation().AssertSqlError(
+            "create table t (a int, b int check (a > 0))",
+            8141,
+            "Column CHECK constraint for column 'b' references another column, table 't'.");
+
+    [TestMethod]
+    public void InlineCheck_PeerInsideFunctionCall_Msg8141()
+        => new Simulation().AssertSqlError(
+            "create table t (a int, b nvarchar(10) check (len(a) > 0))",
+            8141);
+
+    [TestMethod]
+    public void InlineCheck_PeerInsideInList_Msg8141()
+        => new Simulation().AssertSqlError(
+            "create table t (a int check (a in (b, 1, 2)), b int)",
+            8141);
+
+    [TestMethod]
+    public void InlineCheck_NamedConstraint_PeerColumn_Msg8141()
+        => new Simulation().AssertSqlError(
+            "create table t (a int constraint ck_peer check (b > 0), b int)",
+            8141);
+
+    [TestMethod]
+    public void InlineCheck_OnlyOwningColumn_Works()
+        => _ = new Simulation().ExecuteNonQuery("""
+            create table t (a int check (a > 0), b int);
+            insert t values (1, 100)
+            """);
+
+    /// <summary>
+    /// Predicate has no column references at all — should not trip Msg 8141.
+    /// </summary>
+    [TestMethod]
+    public void InlineCheck_NoColumnRef_Works()
+        => _ = new Simulation().ExecuteNonQuery("""
+            create table t (a int check (1 = 1), b int);
+            insert t values (1, 2)
+            """);
+
+    [TestMethod]
+    public void TableLevelCheck_ReferencesMultipleColumns_Works()
+    {
+        // Table-level CHECK (no owning column) is allowed to reference any
+        // columns — the Msg 8141 rule is inline-only.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int, b int, check (a < b));
+            insert t values (1, 2)
+            """);
+
+        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (5, 3)"));
+        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+    }
 }

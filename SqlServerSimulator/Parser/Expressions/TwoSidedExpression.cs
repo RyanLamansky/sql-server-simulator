@@ -364,4 +364,10 @@ internal abstract class TwoSidedExpression(Expression left, ParserContext contex
     protected abstract char Operator { get; }
 
     internal sealed override string DebugDisplay() => $"{left.DebugDisplay()} {Operator} {right.DebugDisplay()}";
+
+    internal sealed override void VisitColumnReferences(Action<MultiPartName> visit)
+    {
+        this.left.VisitColumnReferences(visit);
+        this.right.VisitColumnReferences(visit);
+    }
 }

@@ -348,4 +348,18 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException WaitForCannotBeTimeType() =>
         new("Waitfor delay and waitfor time cannot be of type time.", 9815, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8141 — an inline column-level CHECK constraint
+    /// (i.e. one written next to a column definition rather than at the
+    /// table level) references a column other than its owning column. Real
+    /// SQL Server enforces a "one-column scope" rule on inline CHECKs:
+    /// they may only reference the column they're attached to. Probe-confirmed
+    /// against SQL Server 2025 (2026-05-11): Class 16, State 0, first-line
+    /// wording verbatim (real SQL Server appends a second "Could not create
+    /// constraint or index. See previous errors." sentence which the simulator
+    /// doesn't model; apps that string-match the error read the first line).
+    /// </summary>
+    internal static SimulatedSqlException InlineCheckReferencesAnotherColumn(string owningColumn, string tableName) =>
+        new($"Column CHECK constraint for column '{owningColumn}' references another column, table '{tableName}'.", 8141, 16, 0);
 }

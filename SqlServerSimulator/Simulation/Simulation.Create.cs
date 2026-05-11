@@ -259,6 +259,29 @@ partial class Simulation
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Value, fixedWidthSum, Heap.MaxRowSize);
 
         var keyConstraints = ResolveKeyConstraints(tableName.Value, heapColumns!, pendingKeys);
+
+        // Real SQL Server's Msg 8141 (probed against SQL Server 2025) rejects
+        // an inline column-level CHECK that references any column other than
+        // its owning column — table-level CHECK has no such restriction.
+        // Walk each inline predicate's Expression operands structurally via
+        // <see cref="Expression.VisitColumnReferences"/> and reject any peer
+        // reference. Coverage is limited to the common container subclasses
+        // (Reference, Parenthesized, TwoSidedExpression, Cast, Length) — peer
+        // refs buried in less-common containers escape detection here and
+        // surface at INSERT instead (fidelity gap documented on
+        // <see cref="Expression.VisitColumnReferences"/>).
+        foreach (var pending in pendingChecks)
+        {
+            if (pending.InlineColumn is not { } owningColumn)
+                continue;
+            pending.Predicate.VisitOperandExpressions(op =>
+                op.VisitColumnReferences(name =>
+                {
+                    if (!Collation.Default.Equals(name.Leaf, owningColumn))
+                        throw SimulatedSqlException.InlineCheckReferencesAnotherColumn(owningColumn, tableName.Value);
+                }));
+        }
+
         var checkConstraints = ResolveCheckConstraints(tableName.Value, pendingChecks);
         var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints, checkConstraints);
         // #foo lives in the per-connection TempTables dict so it's isolated
@@ -354,6 +377,7 @@ partial class Simulation
 
     private static long EvaluateLiteralBigInt(Expression expression, BatchContext batch) =>
         expression.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch)).CoerceTo(SqlType.BigInt).AsInt64;
+
 
     /// <summary>
     /// Parses a CHECK constraint's parenthesized predicate body. Entered with

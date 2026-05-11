@@ -341,6 +341,31 @@ internal abstract class Expression
     };
 
     /// <summary>
+    /// Visits every <see cref="Reference"/> node in this expression's tree,
+    /// calling <paramref name="visit"/> with each reference's
+    /// <see cref="MultiPartName"/>. Used by CREATE TABLE's inline-CHECK
+    /// validator (Msg 8141) to enumerate column references statically —
+    /// distinct from <see cref="GetSqlType"/>'s walk because the latter is
+    /// optimized for type inference and several function-call subclasses
+    /// shortcut to a fixed result type without visiting their child
+    /// expressions. Default implementation is empty; container Expression
+    /// subclasses override to recurse into their child Expressions.
+    /// </summary>
+    /// <remarks>
+    /// Coverage gap: only the most common container subclasses
+    /// (<see cref="Reference"/>, <see cref="Parenthesized"/>, the binary
+    /// arithmetic / bitwise via <see cref="TwoSidedExpression"/>,
+    /// <see cref="Cast"/>, <see cref="Length"/>) currently override this.
+    /// Less-common containers (date-arithmetic functions, JSON functions,
+    /// nested CASE, etc.) fall through to the empty default, so peer
+    /// references buried inside them silently escape Msg 8141 detection at
+    /// CREATE TABLE. Real SQL Server catches these; the simulator surfaces
+    /// the runtime error at INSERT instead. New overrides can be added as
+    /// applications surface the gap.
+    /// </remarks>
+    internal virtual void VisitColumnReferences(Action<MultiPartName> visit) { }
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar

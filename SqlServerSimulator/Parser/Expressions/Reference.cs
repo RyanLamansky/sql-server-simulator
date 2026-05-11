@@ -53,4 +53,6 @@ internal sealed class Reference : Expression
     internal override string DebugDisplay() => this.ReferencedName.ToString();
 
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => resolveColumnNullable(this.ReferencedName);
+
+    internal override void VisitColumnReferences(Action<MultiPartName> visit) => visit(this.ReferencedName);
 }
