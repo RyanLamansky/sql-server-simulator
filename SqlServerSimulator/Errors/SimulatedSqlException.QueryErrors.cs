@@ -326,4 +326,26 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException AllResultsInCaseAreNull() =>
         new("At least one of the result expressions in a CASE specification must be an expression other than the NULL constant.", 8133, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 148 — the string operand of <c>WAITFOR DELAY</c>
+    /// (or <c>WAITFOR TIME</c>, not modeled) wasn't a valid time format. Probe-
+    /// confirmed against SQL Server 2025 (2026-05-11): Class 15, State 1,
+    /// verbatim wording. Valid format is <c>HH:MM:SS[.fff]</c> with hours
+    /// 0-23 and no leading sign. Negative, day-component, and over-24h
+    /// strings all surface this same error.
+    /// </summary>
+    internal static SimulatedSqlException IncorrectWaitForTimeSyntax(string value) =>
+        new($"Incorrect time syntax in time string '{value}' used with WAITFOR.", 148, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 9815 — the operand of <c>WAITFOR DELAY</c>
+    /// (or <c>WAITFOR TIME</c>) is a variable typed as <c>time</c>. Real
+    /// SQL Server reserves the operand for char/varchar/nchar/nvarchar
+    /// values; the <c>time</c> type is paradoxically rejected. Probe-
+    /// confirmed against SQL Server 2025 (2026-05-11): Class 16, State 0,
+    /// verbatim wording.
+    /// </summary>
+    internal static SimulatedSqlException WaitForCannotBeTimeType() =>
+        new("Waitfor delay and waitfor time cannot be of type time.", 9815, 16, 0);
 }
