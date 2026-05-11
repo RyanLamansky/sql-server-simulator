@@ -174,4 +174,91 @@ public sealed class CaseExpressionTests
         var ex = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("select case when 1=1 then 'a'"));
         AreEqual("102", ex.Data["HelpLink.EvtID"]);
     }
+
+    // === Msg 8133: every result expression is a bare NULL ===
+    // Probed against SQL Server 2025 (2026-05-11). Class 16 State 1 verbatim:
+    // "At least one of the result expressions in a CASE specification must
+    //  be an expression other than the NULL constant."
+
+    [TestMethod]
+    public void Case_AllBareNull_NoElse_Searched_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case when 1=1 then null end",
+            8133,
+            "At least one of the result expressions in a CASE specification must be an expression other than the NULL constant.");
+
+    [TestMethod]
+    public void Case_AllBareNull_WithElseNull_Searched_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case when 1=1 then null else null end",
+            8133);
+
+    [TestMethod]
+    public void Case_AllBareNull_MultipleWhens_NoElse_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case when 1=1 then null when 1=0 then null end",
+            8133);
+
+    [TestMethod]
+    public void Case_AllBareNull_Simple_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case 1 when 1 then null else null end",
+            8133);
+
+    [TestMethod]
+    public void Case_AllBareNull_SimpleNoElse_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case 1 when 1 then null end",
+            8133);
+
+    [TestMethod]
+    public void Case_AllBareNull_ParenWrapped_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case when 1=1 then (null) else (null) end",
+            8133);
+
+    [TestMethod]
+    public void Case_AllBareNull_DoubleParenWrapped_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case when 1=1 then ((null)) else null end",
+            8133);
+
+    [TestMethod]
+    public void Case_TypedNullElse_Accepted()
+    {
+        // A typed NULL (`cast(null as int)`) on any branch satisfies the
+        // rule because the result type can be inferred.
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select case when 1=1 then null else cast(null as int) end"));
+    }
+
+    [TestMethod]
+    public void Case_TypedNullThen_Accepted()
+    {
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select case when 1=1 then cast(null as varchar(10)) else null end"));
+    }
+
+    [TestMethod]
+    public void Case_OneBranchTyped_OneBareNull_Accepted()
+    {
+        // One typed branch satisfies Msg 8133. Use int branches because the
+        // simulator currently types bare NULL as int and a varchar typed
+        // branch would collide on Promote (pre-existing fidelity gap that's
+        // orthogonal to Msg 8133).
+        AreEqual(7, new Simulation().ExecuteScalar(
+            "select case when 1=1 then 7 when 1=0 then null else null end"));
+    }
+
+    [TestMethod]
+    public void Case_AllBareNull_InWhere_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select 1 where case when 1=1 then null else null end is null",
+            8133);
+
+    [TestMethod]
+    public void Case_AllBareNull_Nested_OuterTrips_Msg8133()
+        => new Simulation().AssertSqlError(
+            "select case when 1=1 then case when 1=1 then null else null end else null end",
+            8133);
 }

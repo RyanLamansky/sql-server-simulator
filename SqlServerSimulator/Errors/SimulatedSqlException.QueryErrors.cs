@@ -311,4 +311,19 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException IntegerIndexNotAllowedInOrderedAggregate() =>
         new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.", 5308, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8133 — every result expression in a
+    /// <c>CASE</c> specification is a bare <c>NULL</c> literal. SQL Server
+    /// requires at least one branch (THEN body or explicit ELSE) to be a
+    /// typed expression so the result type can be inferred. An absent ELSE
+    /// is treated as implicit NULL — so a single <c>WHEN cond THEN NULL</c>
+    /// with no ELSE also fires Msg 8133. Probe-confirmed against SQL Server
+    /// 2025 (2026-05-11): Class 16, State 1, verbatim wording. Also fires
+    /// for <c>IIF(cond, NULL, NULL)</c> (real SQL Server desugars IIF to
+    /// CASE); <c>COALESCE(NULL, NULL)</c> takes a different path (Msg 4127)
+    /// and <c>NULLIF</c> a third (Msg 4151).
+    /// </summary>
+    internal static SimulatedSqlException AllResultsInCaseAreNull() =>
+        new("At least one of the result expressions in a CASE specification must be an expression other than the NULL constant.", 8133, 16, 1);
 }

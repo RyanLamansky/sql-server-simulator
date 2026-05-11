@@ -196,6 +196,35 @@ public sealed class IsNullIifNullIfTests
         _ = Throws<DbException>(() => ExecuteScalar("select nullif(1, 2, 3)"));
     }
 
+    // === Msg 8133 via IIF: IIF desugars to CASE so all-bare-NULL arms ===
+    // share the CASE wording. Probed against SQL Server 2025 (2026-05-11).
+
+    [TestMethod]
+    public void Iif_BothArmsBareNull_Msg8133()
+        => AssertSqlError("select iif(1=1, null, null)", 8133,
+            "At least one of the result expressions in a CASE specification must be an expression other than the NULL constant.");
+
+    [TestMethod]
+    public void Iif_BothArmsBareNullParenWrapped_Msg8133()
+        => AssertSqlError("select iif(1=1, (null), (null))", 8133);
+
+    [TestMethod]
+    public void Iif_OneArmTypedNull_Accepted()
+    {
+        // A typed NULL on one arm satisfies the rule.
+        AreEqual(DBNull.Value, ExecuteScalar("select iif(1=1, null, cast(null as int))"));
+    }
+
+    [TestMethod]
+    public void Iif_OneArmTyped_OneArmBareNull_Accepted()
+    {
+        // One typed arm satisfies Msg 8133. Int both sides because the
+        // simulator currently types bare NULL as int (cross-family
+        // varchar+null promotion is a pre-existing fidelity gap orthogonal
+        // to Msg 8133).
+        AreEqual(7, ExecuteScalar("select iif(1=1, 7, null)"));
+    }
+
     // EF Core emits NULLIF for safe-divide: a / NULLIF(b, 0).
     [TestMethod]
     public void NullIf_FromTableRow_EfCoreSafeDividePattern()

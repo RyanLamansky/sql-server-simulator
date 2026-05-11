@@ -323,6 +323,24 @@ internal abstract class Expression
     internal virtual bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
 
     /// <summary>
+    /// Returns true when <paramref name="expression"/> is a bare <c>NULL</c>
+    /// literal at the syntactic level — that is, the keyword <c>NULL</c>
+    /// optionally wrapped in any number of parentheses. A typed NULL like
+    /// <c>CAST(NULL AS int)</c> is NOT a bare NULL (it's a <see cref="Cast"/>
+    /// expression carrying a typed value). Used by <see cref="CaseExpression"/>
+    /// and <see cref="Iif"/> to enforce SQL Server's Msg 8133 rule: every
+    /// result expression in a CASE specification being a bare NULL is a
+    /// compile-time error, but a single explicitly-typed NULL among the
+    /// branches satisfies the rule.
+    /// </summary>
+    internal static bool IsBareNullLiteral(Expression expression) => expression switch
+    {
+        Parenthesized p => IsBareNullLiteral(p.Wrapped),
+        Value v => v.Constant.IsNull,
+        _ => false,
+    };
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar

@@ -26,6 +26,14 @@ internal sealed class Iif : Expression
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.falseValue = Parse(context.MoveNextRequiredReturnSelf());
+
+        // IIF desugars to a searched CASE in SQL Server, so Msg 8133 fires
+        // when both value arms are bare NULL literals — probe-confirmed
+        // against SQL Server 2025 (verbatim CASE wording, not an IIF-specific
+        // message). A single typed NULL (`CAST(NULL AS int)`) on either arm
+        // satisfies the rule.
+        if (IsBareNullLiteral(this.trueValue) && IsBareNullLiteral(this.falseValue))
+            throw SimulatedSqlException.AllResultsInCaseAreNull();
     }
 
     public override SqlValue Run(RuntimeContext runtime)

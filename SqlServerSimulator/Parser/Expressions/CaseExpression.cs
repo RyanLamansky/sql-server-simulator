@@ -161,13 +161,24 @@ internal sealed class CaseExpression : Expression
             elseBranch = Expression.Parse(context);
         }
 
+        // Real SQL Server fires Msg 8133 at compile time when every result
+        // expression — every THEN body, plus the explicit ELSE if present
+        // (absent ELSE = implicit NULL) — is a bare NULL literal. A typed
+        // NULL (e.g. `CAST(NULL AS int)`) satisfies the rule because its
+        // type isn't ambiguous. Probe-confirmed against SQL Server 2025.
+        var anyTypedBranch = elseBranch is not null && !IsBareNullLiteral(elseBranch);
+        for (var i = 0; !anyTypedBranch && i < thens.Count; i++)
+            anyTypedBranch = !IsBareNullLiteral(thens[i]);
+
         return context.Token is not ReservedKeyword { Keyword: Keyword.End }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : new CaseExpression(
-                input,
-                input is null ? [.. searchedWhensList!] : null,
-                input is not null ? [.. compareValuesList!] : null,
-                [.. thens],
-                elseBranch);
+            : !anyTypedBranch
+                ? throw SimulatedSqlException.AllResultsInCaseAreNull()
+                : new CaseExpression(
+                    input,
+                    input is null ? [.. searchedWhensList!] : null,
+                    input is not null ? [.. compareValuesList!] : null,
+                    [.. thens],
+                    elseBranch);
     }
 }

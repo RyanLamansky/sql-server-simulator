@@ -104,7 +104,7 @@ The dispatch loop drains optional `;`s at the top of each iteration and trusts e
 - Boolean combinators (WHERE / MERGE-ON / CHECK): `AND` / `OR` / `NOT`, parens, `IS [NOT] NULL`, `[NOT] IN (literal,...)`. Tri-valued.
 - Set ops (UNION / UNION ALL / INTERSECT / EXCEPT): standard precedence (INTERSECT > UNION/EXCEPT). **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state). Per-branch ORDER BY in non-final branch → Msg 156. Top-level ORDER BY references first-branch column names only.
 - `SELECT *`: bare and qualified `<source>.*`. Multi-source `*` keeps duplicate names. Unbound `<qualifier>.*` → Msg 4104.
-- CASE: searched + simple. UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through. Result type from `SqlType.Promote` over THEN/ELSE.
+- CASE: searched + simple. UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through. Result type from `SqlType.Promote` over THEN/ELSE. **Msg 8133** fires at parse when every result expression (every THEN body + the explicit ELSE if present; an absent ELSE counts as implicit bare NULL) is a bare `NULL` literal — `Expression.IsBareNullLiteral` unwraps `Parenthesized` so `(NULL)` still trips. A single typed branch (e.g. `CAST(NULL AS int)`) satisfies the rule. `IIF` enforces the same check on its two value arms (real SQL Server desugars IIF to CASE).
 - `ISNULL` truncates fallback to first arg's type. `IIF` = sugar for searched CASE. `NULLIF(a, b)` = `CASE WHEN a = b THEN NULL ELSE a END`. EF emits `ISNULL` only for `??` with a CAST; bare `??` emits `COALESCE`. Neither IIF nor NULLIF is EF-emitted (LINQ ternary → CASE) — load-bearing for `FromSqlInterpolated`.
 
 ### JOINs / APPLY
@@ -418,7 +418,6 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - `OUTPUT INTO @table_var`, `OUTPUT DELETED.*` / `INSERTED.*` star expansion.
 - MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`.
 - Msg 8141 (inline CHECK referencing a peer column — SQL Server rejects at CREATE TABLE; simulator allows).
-- Msg 8133 (CASE where every branch is bare `NULL`; simulator returns NULL of `int`).
 - `PRIMARY KEY` / `UNIQUE` on a computed column (`NotSupportedException`).
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - Compound assignment (`SET @v += expr` / `-=` / `*=` etc.) — rewrite as `SET @v = @v + expr`. The arithmetic-operator runtime is locked behind `protected` instance methods on `TwoSidedExpression`; exposing them as static helpers is the prerequisite refactor.

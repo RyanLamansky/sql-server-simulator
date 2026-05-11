@@ -9,9 +9,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class Parenthesized(Expression wrapped) : Expression
 {
-    public override Storage.SqlValue Run(RuntimeContext runtime) => wrapped.Run(runtime);
+    /// <summary>The expression nested inside the parentheses. Exposed so callers (notably <see cref="Expression.IsBareNullLiteral"/>) can peer through paren wrappers.</summary>
+    public readonly Expression Wrapped = wrapped;
 
-    public override Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType) => wrapped.GetSqlType(resolveColumnType);
+    public override Storage.SqlValue Run(RuntimeContext runtime) => this.Wrapped.Run(runtime);
 
-    internal override string DebugDisplay() => $"( {wrapped.DebugDisplay()} )";
+    public override Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Wrapped.GetSqlType(resolveColumnType);
+
+    internal override string DebugDisplay() => $"( {this.Wrapped.DebugDisplay()} )";
 }
