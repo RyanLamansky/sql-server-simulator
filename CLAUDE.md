@@ -161,11 +161,9 @@ Integer/money operands canonicalize before formulas apply (bit→(1,0) … bigin
 
 Errors: `SQRT(neg)` / `LOG(<= 0)` / `LOG10(<= 0)` / `LOG(x, 1)` / `POWER(neg, frac)` → Msg 3623. `POWER(0, neg)` → Msg 8134. `EXP` / `SQUARE` overflow → Msg 8115 float. `ABS(int.MinValue)` / `ABS(bigint.MinValue)` → Msg 8115 with the result type's family. `POWER` int-result overflow → Msg 232.
 
-**Trig family** (`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`ATN2`/`COT`/`PI`/`SQUARE`) always returns `float`. Domain errors → Msg 3623: `ASIN`/`ACOS` outside `[-1, 1]`, `COT(0)`, `ATN2(0, 0)` (the last diverges from .NET's `Math.Atan2(0, 0) = 0`). Wrong arg count → Msg 174 (`"The {lower-name} function requires {N} argument(s)."`). `pi(1)` raises Msg 174 not Msg 102.
+**Trig family** (`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`ATN2`/`COT`/`PI`/`SQUARE`) always returns `float`. Domain errors → Msg 3623 (including `ATN2(0, 0)`, which diverges from .NET's `Math.Atan2(0, 0) = 0`). Wrong arg count → Msg 174 (`"The {lower-name} function requires {N} argument(s)."`) — `pi(1)` raises Msg 174 not Msg 102.
 
-**`DEGREES`/`RADIANS`** are type-preserving with one tweak: `decimal(p, s)` widens to `decimal(38, max(s, 18))` rather than preserving. Other categories follow the shared rule. Integer arm truncates toward zero — `DEGREES(360)` → `20626` from `20626.48...`; out-of-range integer results raise Msg 8115 with the family name. Decimal arm uses a 28-digit `DecimalPi` constant in evaluation order `(input * 180m) / DecimalPi` for trailing-digit fidelity. .NET decimal's 28-digit precision cap means scale > 28 results land at scale 28 (pre-existing quirk).
-
-**`Math.Sign(decimal)` doesn't work end-to-end** against either real SQL Server or the simulator: LINQ's CLR signature returns `int` but EF emits `SIGN([col])` which returns decimal for decimal inputs, so the reader-side cast throws. Same failure mode in both — not a fidelity bug. `Math.Sign` over int columns works.
+**`DEGREES`/`RADIANS`** are type-preserving with one tweak: `decimal(p, s)` widens to `decimal(38, max(s, 18))` rather than preserving. Integer arm truncates toward zero; out-of-range integer results raise Msg 8115 with the family name. Decimal arm uses a 28-digit `DecimalPi` constant in evaluation order `(input * 180m) / DecimalPi` for trailing-digit fidelity. .NET decimal's 28-digit precision cap means scale > 28 results land at scale 28.
 
 ### Date scalar functions: `DATEPART` / `DATEADD` / `DATEDIFF` / `DATEDIFF_BIG`
 All take a bare datepart keyword. Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` → int; `DATEDIFF_BIG` → bigint.
@@ -200,13 +198,9 @@ Both stringify each arg via CAST-to-varchar/nvarchar, **skip NULL args** (don't 
 **Result-type fidelity**: `char(N) + char(M)` → `char(N+M)` (capped at 8000); `nchar` analogous; mixed `char + nchar` → `nchar`. Variable-length pairs and mixed fixed/variable → length-bearing `varchar(N+M)` / `nvarchar(N+M)` (capped at 8000/4000). LOB and unspecified-length operands fall back to the unspecified form. `Subtract`/`Multiply`/etc. on string operands → `NotSupportedException` (real SQL Server: Msg 402 / Msg 8117).
 
 ### Date-construction scalars: `*FROMPARTS` family + `EOMONTH`
-Six builders: `DATEFROMPARTS`, `DATETIMEFROMPARTS`, `DATETIME2FROMPARTS`, `DATETIMEOFFSETFROMPARTS`, `SMALLDATETIMEFROMPARTS`, `TIMEFROMPARTS`. Shared shape: NULL on any non-precision arg propagates; non-int operands coerce through CAST (decimal/string/bigint accepted); out-of-range → Msg 289 with type-specific State (1=date, 2=time, 3=datetime, 5=datetime2, 6=datetimeoffset).
+Six builders (`DATE`/`DATETIME`/`DATETIME2`/`DATETIMEOFFSET`/`SMALLDATETIME`/`TIME` + `FROMPARTS`). Shared shape: NULL on any non-precision arg propagates; non-int operands coerce through CAST; out-of-range → Msg 289 with type-specific State (1=date, 2=time, 3=datetime, 5=datetime2, 6=datetimeoffset). Variable-precision builders (`datetime2`/`datetimeoffset`/`time`) take the precision as a constant-foldable expression — column refs → Msg 10760; out-of-`[0, 7]` → Msg 1002.
 
-Variable-precision builders (`datetime2`/`datetimeoffset`/`time`) extract precision at parse time by evaluating the parsed sub-expression with a NULL-returning resolver — literal `1+2` folds to `3`, but a column ref degrades to NULL → Msg 10760. Out-of-`[0, 7]` precision → Msg 1002. Result type carries the captured precision: `DATETIME2FROMPARTS(..., 3)` → `datetime2(3)`.
-
-`DATETIMEFROMPARTS` ms 999 with hour 23/min 59/sec 59 rolls to next day via legacy datetime's 1/300s tick rounding. `DATETIMEOFFSETFROMPARTS` enforces sign-consistency between hour_offset and minute_offset (mixed signs → Msg 289 St 6) and a |offset| ≤ 14:00 cap.
-
-`EOMONTH(start_date [, month_offset])` always returns `date` regardless of input type. **Quirk**: NULL `month_offset` is silently treated as zero, unlike NULL `start_date` which propagates.
+Per-builder quirks: `DATETIMEFROMPARTS` ms 999 + h23:m59:s59 rolls to next day (1/300s tick rounding); `DATETIMEOFFSETFROMPARTS` enforces sign-consistency between hour/minute_offset (mixed → Msg 289 St 6) and |offset| ≤ 14:00. `EOMONTH(start_date [, month_offset])` always returns `date` and silently treats NULL `month_offset` as zero (NULL `start_date` propagates normally).
 
 ### `AT TIME ZONE`
 Postfix operator; LHS-type-discriminated semantics:
@@ -261,8 +255,7 @@ Three entry points share one per-connection undo log: implicit (statement-level 
 - **Joined UPDATE/DELETE: each unique target row processed exactly once.** When the same target matches multiple join tuples, SQL Server uses the *first* matching tuple's RHS for SET. The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map. LEFT JOIN with no right-side match still surfaces the target (RHS sees NULL).
 - **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).
 - **Multi-column SET evaluates RHS against pre-update snapshot** — `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` → `(a=100, b=11)`. Scalar subquery RHS sees pre-update state.
-- Identity update → Msg 8102. Computed update → Msg 271. Rowversion update → Msg 272. Per-row constraint re-validation: NOT NULL → Msg 515 ("UPDATE fails."); CHECK → Msg 547 ("UPDATE statement"); PK/UNIQUE → Msg 2627 (verbatim "Cannot insert duplicate key" wording even on UPDATE — SQL Server quirk).
-- Two-phase: phase 1 picks affected rows + computes new values + per-row validation; phase 2 validates PK/UNIQUE against the post-update virtual state; phase 3 mutates (tombstone old, insert new).
+- Identity update → Msg 8102. Computed update → Msg 271. Rowversion update → Msg 272. Per-row constraint re-validation: NOT NULL → Msg 515 ("UPDATE fails."); CHECK → Msg 547 ("UPDATE statement"); PK/UNIQUE → Msg 2627 (verbatim "Cannot insert duplicate key" wording even on UPDATE — SQL Server quirk). PK/UNIQUE validation runs against the post-update virtual state, so mass-shift on a unique key can false-positive (see Quirks).
 - `OUTPUT INSERTED.<col>` (post-update) / `DELETED.<col>` (pre-update). UPDATE allows both qualifiers; DELETE rejects `INSERTED.<col>` at parse → Msg 4104. Star expansion (`INSERTED.*`/`DELETED.*`) and `OUTPUT INTO @table_var` not modeled.
 
 ### `rowversion` (legacy synonym `timestamp`)
@@ -283,26 +276,16 @@ Variable references resolve at runtime via a captured `VariableSlot` — require
 
 **Output-parameter write-back**: at end of batch, the dispatch walks the parameter list and copies each `InputOutput` / `Output` direction parameter's final slot value back to `DbParameter.Value`. Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate parameters.
 
-**`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `SimulatedDbConnection.LastStatementRowCount` (per-session state, not shared across connections that fan out from one `Simulation`). SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
-
-**Per-session state lives on `SimulatedDbConnection`** (see the Context layering section for the full five-scope map): alongside `@@ROWCOUNT`, the connection carries `LastIdentity` (`SCOPE_IDENTITY()` / `@@IDENTITY`), `IdentityInsertTable` (active `SET IDENTITY_INSERT` table), `TraceFlags` (`DBCC TRACEON(N)`), `IsVerboseTruncationActive()` (reads its own `TraceFlags` plus the current database's compat / scoped-config), `CurrentDatabase` (per-session pointer into `Simulation.Databases`), and `CurrentTransaction`. Two connections fanned from one `Simulation` are isolated — matches SQL Server's session = ADO.NET connection scoping.
-
-**Expression runtime context** (`RuntimeContext`): `Expression.Run` takes a single `RuntimeContext runtime` bundling `ResolveColumn` (per-row column lookup) and `Batch` (the executing `BatchContext`). Most expressions only touch `runtime.ResolveColumn`; the few that need batch-, session-, or database-scoped state (`CurrentTimeFunction`, `LastIdentityExpression`, `RowCountExpression`, `IdentCurrent`) read `runtime.Batch.CurrentStatement.UtcNow`, `runtime.Batch.Connection.LastIdentity`, etc. directly. Explicit threading replaced an earlier `Simulation.ActiveBatch` `AsyncLocal` — necessary because column defaults parsed once at CREATE TABLE run on every later INSERT, possibly from a different batch / connection, and parse-time capture froze them on the wrong batch.
-
-`BooleanExpression.Run(RuntimeContext)` mirrors the same shape (returning `bool?` for three-valued logic). `Selection.Execute(BatchContext, Func<MPN, V>? outerResolver)` threads `batch` through the row pipeline so internal helpers can build `new RuntimeContext(perRowResolver, batch)` at each Run call site. The only callsites that don't have a `BatchContext` in scope are EF-relevant SCALAR expressions evaluated at parse time (TOP / OFFSET / FETCH literals, column-default eval for `BuildSynthesizedSqlRow`) — those construct a `new RuntimeContext(throwingResolver, context.Batch)` from the parser context's batch.
+**`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `SimulatedDbConnection.LastStatementRowCount`. SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
 
 **Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle.
 
 ### Common table expressions
 `WITH name [(col, …)] AS (SELECT …) [, …] {SELECT|INSERT|UPDATE|DELETE|MERGE} …`. WITH prefix scopes to exactly one immediately-following statement. Both non-recursive and recursive forms modeled.
 
-Bindings registered at statement-loop top in `ParserContext.CteBindings` (a `Dictionary<string, CteBinding>`); cleared on next iteration. CTE name shadows a real table for the prefixed statement. Multiple comma-separated CTEs cascade — later ones see earlier ones.
+CTE name shadows a real table for the prefixed statement. Multiple comma-separated CTEs cascade — later ones see earlier ones.
 
-**Non-recursive**: branches folded via `CombineSetOps` (type-promotion matches regular set-op chain). FromSource uses `lateralPlan: binding.Plan` so each FROM-side reference re-runs the inner Selection.
-
-**Recursive**: body parser splits branches into anchor (no self-ref) and recursive (one self-ref each); `Selection.FromRecursiveCte` runs anchors once into a seed rowset, then iterates each recursive branch against the previous-iteration rowset until empty (or `MaxRecursion` trips Msg 530 with the literal limit). Default 100; `OPTION (MAXRECURSION N)` overrides; `0` disables.
-
-Self-reference resolution: during the recursive-part parse, `binding.IsRecursivePartParse` is set after anchor completes (which captures Schema + ColumnNames). Subsequent branches route self-refs through a FromSource backed by `binding.CurrentIterationRows`. Per-branch `SelfReferenceCountInCurrentBranch` classifies the branch as anchor (count 0) or recursive (count 1) and enforces one-self-ref-per-branch (Msg 253).
+**Recursive form**: anchor branches (no self-ref) run once into a seed rowset; recursive branches (one self-ref each) iterate against the previous rowset until empty or `MaxRecursion` trips Msg 530. Default 100; `OPTION (MAXRECURSION N)` overrides; `0` disables.
 
 Errors:
 - **Msg 240**: anchor and recursive parts produce different per-column types (strict type-equality, no Promote-style widening — must explicitly cast).
@@ -332,9 +315,7 @@ Unlocks EF's owned-types-as-JSON (`OwnsOne(...).ToJson()`) and primitive-collect
 
 `OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning, structurally a new FromSource kind. Without WITH: default schema `(key nvarchar, value nvarchar, type int)` — type codes 0=null/1=string/2=number/3=bool/4=array/5=object. With WITH: each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primitive collections use `'$'`. `AS JSON` modifier → `NotSupportedException`. NULL/invalid JSON → zero rows under lax.
 
-OPENJSON WITH-clause types: `int`/`bigint`/`decimal(p,s)`/`float`/`bit`/`nvarchar(N|max)`/`varchar(N)`/`date`/`datetime2(N)`/`datetimeoffset(N)`/`uniqueidentifier`. Coercion via `SqlValue.CoerceTo`. Backed by `System.Text.Json` (no NuGet dep added).
-
-EF emissions covered: `Where(c => c.Address.City == "X")`; `c.Tags.Contains("x")` → `OPENJSON ... WITH ([value] nvarchar(max) '$')` inside `IN(SELECT)`; `c.Scores.Count` / `Any(...)`; owned-as-JSON partial UPDATE → `JSON_MODIFY([Address], 'strict $.City', JSON_VALUE(@p0, '$.""'))`. Quoted-property escape `""` → literal `"`.
+OPENJSON WITH-clause types: `int`/`bigint`/`decimal(p,s)`/`float`/`bit`/`nvarchar(N|max)`/`varchar(N)`/`date`/`datetime2(N)`/`datetimeoffset(N)`/`uniqueidentifier`. Coercion via `SqlValue.CoerceTo`. Backed by `System.Text.Json`. JSON-path quoted-property escape `""` → literal `"`.
 
 Not emitted by EF / not modeled: `JSON_QUERY`, `ISJSON`, `FOR JSON PATH`/`AUTO`. Reachable only via raw SQL.
 
