@@ -26,6 +26,16 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 
     /// <summary>
+    /// Mimics SQL Server error 2760: a statement referenced a schema that
+    /// doesn't exist (or whose principal the caller can't access). Probe-
+    /// confirmed wording — real SQL Server uses the same Msg / wording for
+    /// <c>CREATE TABLE missingschema.t</c>, <c>CREATE SCHEMA dbo</c> (when
+    /// targeting a built-in / reserved schema), and a few other lookups.
+    /// </summary>
+    internal static SimulatedSqlException SpecifiedSchemaNameDoesNotExist(string schemaName) =>
+        new($"The specified schema name \"{schemaName}\" either does not exist or you do not have permission to use it.", 2760, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2705: <c>SELECT … INTO target</c> produced a
     /// projection with two columns of the same name. Wording probe-confirmed
     /// against SQL Server 2025: the table name is the SELECT INTO target

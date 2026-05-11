@@ -42,14 +42,15 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseUpdate(ParserContext context)
     {
-        if (context.GetNextRequired() is not StringToken leadingIdentToken)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var leadingIdent = BatchContext.ParseObjectName(context);
 
         // Leading identifier: target table name (single-table form) or an
         // alias for the FROM clause that follows (multi-table form). Try
         // table-resolution now; if it fails, the FROM clause must provide
-        // the binding via alias-matching.
-        _ = context.Batch.TryResolveTable(leadingIdentToken.Value, out var leadingTable);
+        // the binding via alias-matching. Aliases are always single-segment,
+        // so a multi-part name that fails to resolve is always Msg 208.
+        _ = context.Batch.TryResolveTable(leadingIdent, out var leadingTable);
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -103,10 +104,10 @@ partial class Simulation
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            return ExecuteJoinedUpdate(context, leadingIdentToken, leadingTable, rawAssignments, output);
+            return ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output);
         }
 
-        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdent);
         return ExecuteUpdateAgainstTable(context, table, rawAssignments, output);
     }
 
@@ -175,7 +176,7 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ExecuteJoinedUpdate(
         ParserContext context,
-        StringToken leadingIdentToken,
+        MultiPartName leadingIdent,
         HeapTable? leadingTable,
         List<(string ColumnName, Expression Expr)> rawAssignments,
         MutationOutputProjection? output)
@@ -186,9 +187,9 @@ partial class Simulation
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
-        var targetIndex = FindMutationTargetIndex(sources, leadingIdentToken.Value, leadingTable);
+        var targetIndex = FindMutationTargetIndex(sources, leadingIdent.Leaf, leadingTable);
         if (targetIndex < 0)
-            throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+            throw SimulatedSqlException.InvalidObjectName(leadingIdent);
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");

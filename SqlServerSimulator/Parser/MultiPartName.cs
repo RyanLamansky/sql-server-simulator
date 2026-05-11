@@ -73,6 +73,20 @@ internal readonly struct MultiPartName
         };
     }
 
+    /// <summary>
+    /// Indexed access to populated segments, left-to-right. <c>name[0]</c> is
+    /// the leftmost qualifier (e.g. the db in <c>db.schema.table</c>);
+    /// <c>name[Count - 1]</c> is the <see cref="Leaf"/>.
+    /// </summary>
+    public string this[int index] => index switch
+    {
+        0 when this.Count >= 1 => this.p1,
+        1 when this.Count >= 2 => this.p2!,
+        2 when this.Count >= 3 => this.p3!,
+        3 when this.Count >= 4 => this.p4!,
+        _ => throw new ArgumentOutOfRangeException(nameof(index)),
+    };
+
     /// <summary>The rightmost segment — the column / object name itself.</summary>
     public string Leaf => this.Count switch
     {

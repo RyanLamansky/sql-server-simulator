@@ -107,7 +107,7 @@ internal sealed partial class Selection
         List<WindowExpression> windows,
         Func<MultiPartName, SqlType>? outerTypeResolver,
         bool isAssignmentOnly,
-        string? intoTarget)
+        MultiPartName? intoTarget)
     {
         if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null))
             throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
@@ -174,8 +174,8 @@ internal sealed partial class Selection
         // dispatch handler can CREATE TABLE before executing. The inference
         // walk also enforces the SELECT-INTO-specific validations
         // (Msg 1038 unnamed projection, Msg 2705 duplicate name).
-        var destColumnSchema = intoTarget is not null
-            ? ComputeIntoDestSchema(intoTarget, expressions, outputSchema, outputColumnNames, sources, joins)
+        var destColumnSchema = intoTarget is { } target
+            ? ComputeIntoDestSchema(target, expressions, outputSchema, outputColumnNames, sources, joins)
             : null;
 
         return new Selection(outputSchema, outputColumnNames,

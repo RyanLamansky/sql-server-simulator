@@ -12,13 +12,35 @@ namespace SqlServerSimulator;
 /// <see cref="Simulation"/> ships with exactly one entry named
 /// <see cref="Simulation.DefaultDatabaseName"/>.
 /// </summary>
-internal sealed class Database(string name)
+internal sealed class Database
 {
-    /// <summary>Database name (the key in <see cref="Simulation.Databases"/>).</summary>
-    public readonly string Name = name;
+    /// <summary>The schema name an unqualified table reference resolves through.</summary>
+    public const string DefaultSchemaName = "dbo";
 
-    /// <summary>User tables in this database, keyed by name.</summary>
-    public readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
+    /// <summary>Database name (the key in <see cref="Simulation.Databases"/>).</summary>
+    public readonly string Name;
+
+    /// <summary>
+    /// Namespaces inside this database, keyed by name. Pre-populated with the
+    /// default <c>dbo</c> schema; <c>CREATE SCHEMA &lt;name&gt;</c> adds more.
+    /// Schema-qualified table references (<c>SELECT * FROM audit.t</c>) route
+    /// through here; unqualified references fall back to
+    /// <see cref="DefaultSchemaName"/>.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Schema> Schemas = new(Collation.Default);
+
+    public Database(string name)
+    {
+        this.Name = name;
+        this.Schemas[DefaultSchemaName] = new Schema(DefaultSchemaName);
+    }
+
+    /// <summary>
+    /// Convenience accessor for the <c>dbo</c> schema's tables — the
+    /// unqualified-reference fallback path. Equivalent to
+    /// <c>Schemas[DefaultSchemaName].HeapTables</c>.
+    /// </summary>
+    public ConcurrentDictionary<string, HeapTable> DefaultSchemaTables => this.Schemas[DefaultSchemaName].HeapTables;
 
     /// <summary>
     /// Database compatibility level. Freshly-constructed databases default

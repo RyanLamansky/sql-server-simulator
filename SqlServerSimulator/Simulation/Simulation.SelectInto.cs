@@ -20,9 +20,9 @@ partial class Simulation
     /// </para>
     /// <list type="bullet">
     /// <item>Target name routes by <c>#</c>-prefix to the connection's
-    /// <see cref="SimulatedDbConnection.TempTables"/> or the current
-    /// database's <see cref="Database.HeapTables"/>. Same routing rule as
-    /// CREATE TABLE.</item>
+    /// <see cref="SimulatedDbConnection.TempTables"/> or the named schema's
+    /// (or default <c>dbo</c>'s) heap-table dict via
+    /// <see cref="Database.Schemas"/>. Same routing rule as CREATE TABLE.</item>
     /// <item>Target-already-exists raises Msg 2714 (same error as
     /// <c>CREATE TABLE</c> with a duplicate name).</item>
     /// <item>Identity column on the destination tracks the source's values
@@ -37,8 +37,9 @@ partial class Simulation
     /// </remarks>
     private static SimulatedNonQuery ExecuteSelectInto(Selection selection, BatchContext batch)
     {
-        var targetName = selection.IntoTarget!;
+        var targetName = selection.IntoTarget!.Value;
         var destColumns = selection.DestColumnSchema!;
+        var leaf = targetName.Leaf;
 
         // In a skipped IF branch the destination shouldn't be created at all
         // — the existence check (Msg 2714) and the SELECT execution both
@@ -49,22 +50,23 @@ partial class Simulation
 
         // Global temp tables aren't modeled — surface explicitly rather than
         // letting it land as a regular table.
-        if (targetName.Length >= 2 && targetName[0] == '#' && targetName[1] == '#')
-            throw new NotSupportedException($"Global temp tables (##{targetName[2..]}) aren't modeled. Use a local temp table (#{targetName[2..]}) or a permanent table.");
+        if (leaf.Length >= 2 && leaf[0] == '#' && leaf[1] == '#')
+            throw new NotSupportedException($"Global temp tables (##{leaf[2..]}) aren't modeled. Use a local temp table (#{leaf[2..]}) or a permanent table.");
 
-        var destTable = new HeapTable(targetName, destColumns);
-        var isTempTable = BatchContext.IsLocalTempName(targetName);
+        var destTable = new HeapTable(leaf, destColumns);
+        var isTempTable = BatchContext.IsLocalTempName(leaf);
         var destination = isTempTable
             ? batch.Connection.TempTables
-            : batch.CurrentDatabase.HeapTables;
-        if (!destination.TryAdd(targetName, destTable))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(targetName);
+            : batch.TryResolveSchema(targetName, out var schema) ? schema.HeapTables
+                : throw SimulatedSqlException.InvalidObjectName(targetName);
+        if (!destination.TryAdd(leaf, destTable))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
 
         // Temp-table SELECT INTO participates in transactional CREATE undo
         // (same rule as CREATE TABLE #foo). Regular SELECT INTO doesn't —
         // matches the asymmetry already documented for CREATE TABLE.
         if (isTempTable && batch.Connection.CurrentTransaction is { } tx)
-            tx.UndoLog.RecordTempTableCreation(batch.Connection.TempTables, targetName);
+            tx.UndoLog.RecordTempTableCreation(batch.Connection.TempTables, leaf);
 
         // Execute the SELECT and stream each row into the destination. The
         // row bytes are encoded per Selection.Schema; decode to SqlValue[]

@@ -90,7 +90,7 @@ internal sealed partial class Selection
     /// dispatch routes Selections with this set to the SELECT INTO handler
     /// rather than the regular execute path.
     /// </summary>
-    public readonly string? IntoTarget;
+    public readonly MultiPartName? IntoTarget;
 
     /// <summary>
     /// Pre-computed destination schema (column names + types + nullability
@@ -109,7 +109,7 @@ internal sealed partial class Selection
 
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, string? intoTarget = null, HeapColumn[]? destColumnSchema = null)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, MultiPartName? intoTarget = null, HeapColumn[]? destColumnSchema = null)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
@@ -382,7 +382,7 @@ internal sealed partial class Selection
 
         List<Expression> expressions = [];
         var fromClause = new FromClause();
-        string? intoTarget = null;
+        MultiPartName? intoTarget = null;
 
         do
         {
@@ -535,7 +535,8 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.Into }:
                     if (intoTarget is not null)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
-                    intoTarget = context.GetNextRequired<Name>().Value;
+                    context.MoveNextRequired();
+                    intoTarget = BatchContext.ParseObjectName(context);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
@@ -764,6 +765,8 @@ internal sealed partial class Selection
                 // as a built-in rowset function, so unconditional name-
                 // dispatch matches real-server behavior — a CTE / table
                 // named OPENJSON would already conflict on a real server.
+                // OPENJSON never carries a schema qualifier, so this fires
+                // before ParseObjectName / cursor advance.
                 if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
                 {
                     var openJsonPlan = ParseOpenJson(context, outerTypeResolver);
@@ -782,11 +785,16 @@ internal sealed partial class Selection
                         lateralPlan: openJsonPlan);
                 }
 
-                // CTE binding wins over a real table of the same name —
-                // `WITH name AS (...)` shadows for the prefixed statement
-                // (probe-confirmed against SQL Server 2025).
-                if (context.CteBindings is { } cteBindings
-                    && cteBindings.TryGetValue(tableName.Value, out var cteBinding))
+                // Multi-part name parse: advances the cursor past the last
+                // dotted segment, leaving Token on the first non-name token
+                // (alias / AS / WHERE / JOIN / etc.). CTE binding only fires
+                // for a single-segment leaf (CTE names can't be schema-
+                // qualified — they're aliases, not real tables).
+                var objectName = BatchContext.ParseObjectName(context);
+
+                if (objectName.Count == 1
+                    && context.CteBindings is { } cteBindings
+                    && cteBindings.TryGetValue(objectName.Leaf, out var cteBinding))
                 {
                     // Recursive-part self-reference: the body parser has
                     // captured the anchor's schema and toggled
@@ -830,15 +838,15 @@ internal sealed partial class Selection
                         lateralPlan: cteBinding.Plan);
                 }
 
-                if (!context.Batch.TryResolveTable(tableName.Value, out var heapTable))
-                    throw SimulatedSqlException.InvalidObjectName(tableName);
+                if (!context.Batch.TryResolveTable(objectName, out var heapTable))
+                    throw SimulatedSqlException.InvalidObjectName(objectName);
 
                 var heapColumnNames = new string[heapTable.Columns.Length];
                 for (var ci = 0; ci < heapColumnNames.Length; ci++)
                     heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
                 var heapAlias = ConsumeOptionalAlias(context);
-                var heapQualifier = heapAlias ?? tableName.Value;
+                var heapQualifier = heapAlias ?? objectName.Leaf;
 
                 return new FromSource(
                     qualifier: heapQualifier,
@@ -1240,7 +1248,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, string? intoTarget)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget)
     {
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
@@ -1291,8 +1299,8 @@ internal sealed partial class Selection
         // FROM-less SELECT INTO: no source sources/joins to inspect, so the
         // analyzer routes through the empty-FROM branch and produces
         // dest columns with literal-derived nullability and no identity.
-        destColumnSchema: intoTarget is not null
-            ? ComputeIntoDestSchema(intoTarget, expressions, schema, columnNames, [], [])
+        destColumnSchema: intoTarget is { } target
+            ? ComputeIntoDestSchema(target, expressions, schema, columnNames, [], [])
             : null);
     }
 

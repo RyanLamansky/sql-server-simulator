@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 using System.Data.Common;
 
@@ -205,14 +206,127 @@ internal sealed class BatchContext
     /// <summary>
     /// Resolves <paramref name="name"/> against the right table dictionary —
     /// the connection's <see cref="SimulatedDbConnection.TempTables"/> for
-    /// <c>#foo</c> names, otherwise the current database's user tables and
-    /// the simulation's system tables. Centralizes the routing rule so call
-    /// sites (SELECT/INSERT/UPDATE/DELETE/MERGE name lookups,
+    /// <c>#foo</c> names, otherwise the named schema (or
+    /// <see cref="Database.DefaultSchemaName"/> for an unqualified reference)
+    /// plus the simulation's flat system-table dict. Centralizes the routing
+    /// rule so callsites (SELECT/INSERT/UPDATE/DELETE/MERGE name lookups,
     /// <c>IDENT_CURRENT</c>, <c>SET IDENTITY_INSERT</c>) stay uniform.
     /// </summary>
-    public bool TryResolveTable(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table) =>
-        IsLocalTempName(name)
-            ? this.Connection.TempTables.TryGetValue(name, out table)
-            : this.CurrentDatabase.HeapTables.TryGetValue(name, out table)
-                || Simulation.SystemHeapTables.TryGetValue(name, out table);
+    /// <remarks>
+    /// <para>
+    /// Resolution by <see cref="MultiPartName.Count"/>:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>1-part <c>t</c> — temp dict (if <c>#</c>-prefixed); else default
+    /// schema then system tables.</item>
+    /// <item>2-part <c>schema.t</c> — named schema; falls through to false
+    /// when the schema doesn't exist or doesn't hold a table by that name.
+    /// System tables are <em>not</em> reachable through a schema qualifier
+    /// (real SQL Server's <c>sys.&lt;table&gt;</c> isn't modeled).</item>
+    /// <item>3-part <c>db.schema.t</c> — same as 2-part after validating the
+    /// db segment matches <see cref="CurrentDatabase"/>'s name; mismatched db
+    /// returns false.</item>
+    /// <item>4-part <c>server.db.schema.t</c> — false (linked servers not
+    /// modeled; the callsite raises Msg 208 via the standard path).</item>
+    /// </list>
+    /// <para>
+    /// For <c>#</c>-prefixed leaves a qualifier is cosmetic and ignored —
+    /// matches probe-confirmed behavior for <c>tempdb..#foo</c> /
+    /// <c>tempdb.dbo.#foo</c> in DROP TABLE; the connection's temp-table dict
+    /// is the routing key regardless of preceding segments.
+    /// </para>
+    /// </remarks>
+    public bool TryResolveTable(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
+    {
+        if (IsLocalTempName(name.Leaf))
+            return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
+
+        if (!this.TryResolveSchema(name, out var schema))
+        {
+            // 1-part fallback to system tables when the default schema lookup
+            // misses; matches the legacy bare-`systypes` access path.
+            if (name.Count == 1)
+                return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
+            table = null;
+            return false;
+        }
+
+        if (schema.HeapTables.TryGetValue(name.Leaf, out table))
+            return true;
+
+        // Bare 1-part also falls through to system tables when the default
+        // schema doesn't hold the table.
+        if (name.Count == 1)
+            return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
+
+        table = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
+    /// DROP / TRUNCATE / SELECT-INTO target lives in. Returns false when the
+    /// schema (the segment to the left of the leaf) doesn't exist, or when a
+    /// 3-part name's db segment doesn't match <see cref="CurrentDatabase"/>.
+    /// A 1-part name resolves to <see cref="Database.DefaultSchemaName"/>
+    /// (always present, so this branch never returns false).
+    /// </summary>
+    public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
+    {
+        if (name.Count >= 3 && !Collation.Default.Equals(name[name.Count - 3], this.CurrentDatabase.Name))
+        {
+            schema = null;
+            return false;
+        }
+        var schemaName = name.Count >= 2 ? name.ImmediateQualifier! : Database.DefaultSchemaName;
+        return this.CurrentDatabase.Schemas.TryGetValue(schemaName, out schema);
+    }
+
+    /// <summary>
+    /// Parses an object name (1–4 dotted segments) at the current token,
+    /// leaving the cursor on the <em>last</em> consumed name segment (matching
+    /// the standard parser-context contract that every parser leaves Token on
+    /// its last consumed token). Empty segments (<c>tempdb..#foo</c>, db with
+    /// omitted schema) are tolerated — they're silently compressed out, so
+    /// <c>tempdb..#foo</c> returns a 2-part name (<c>tempdb</c> + <c>#foo</c>).
+    /// Used everywhere a table-shaped name appears (CREATE / DROP / TRUNCATE
+    /// / SELECT-FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT)
+    /// so the multi-part-name grammar lives in one place. The 5th segment
+    /// raises Msg 4104 via <see cref="MultiPartName.WithAddedPart"/>.
+    /// </summary>
+    public static MultiPartName ParseObjectName(ParserContext context)
+    {
+        if (context.Token is not Name first)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var name = new MultiPartName(first.Value);
+        while (true)
+        {
+            // Peek for a `.` continuation without permanently advancing — if
+            // the next token isn't a dot, restore so the cursor sits on the
+            // last consumed name segment.
+            var checkpoint = context.SaveCheckpoint();
+            if (!context.MoveNext() || context.Token is not Operator { Character: '.' })
+            {
+                context.RestoreCheckpoint(checkpoint);
+                return name;
+            }
+
+            // Advanced past the dot. Read the next segment — a Name extends
+            // the dotted name; a second `.` is an empty segment that we skip
+            // and read one more time.
+            if (!context.MoveNext())
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is Name next)
+            {
+                name = name.WithAddedPart(next.Value);
+                continue;
+            }
+            if (context.Token is Operator { Character: '.' } && context.MoveNext() && context.Token is Name afterEmpty)
+            {
+                name = name.WithAddedPart(afterEmpty.Value);
+                continue;
+            }
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+    }
 }

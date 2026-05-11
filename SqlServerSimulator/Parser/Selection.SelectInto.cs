@@ -27,7 +27,7 @@ partial class Selection
     /// <param name="sources">FROM-clause sources; null/empty for no-FROM SELECT.</param>
     /// <param name="joins">FROM-clause join specs; identity drops on any join.</param>
     internal static HeapColumn[] ComputeIntoDestSchema(
-        string targetName,
+        MultiPartName targetName,
         List<Expression> projections,
         SqlType[] outputSchema,
         string[] outputColumnNames,
@@ -53,7 +53,7 @@ partial class Selection
             if (string.IsNullOrEmpty(colName))
                 throw SimulatedSqlException.SelectIntoMissingColumnName();
             if (!seenNames.Add(colName))
-                throw SimulatedSqlException.DuplicateColumnInSelectInto(colName, targetName);
+                throw SimulatedSqlException.DuplicateColumnInSelectInto(colName, targetName.ToString());
 
             var nullable = projections[i].ResultIsNullable(ResolveColumnNullable);
             IdentityState? identity = null;

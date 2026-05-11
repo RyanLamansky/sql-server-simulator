@@ -29,7 +29,16 @@ internal sealed class IdentCurrent : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        if (!runtime.Batch.TryResolveTable(this.tableName, out var table))
+        // Argument is the textual object name; split on '.' so
+        // `IDENT_CURRENT('schema.t')` routes through the named schema. Bracket-
+        // quoted segments aren't decoded — they'll show up with their brackets
+        // in the segment and either match a literally-named identifier or miss
+        // (returning NULL, matching real SQL Server's no-such-table behavior).
+        var parts = this.tableName.Split('.');
+        var multiPart = new MultiPartName(parts[0]);
+        for (var i = 1; i < parts.Length; i++)
+            multiPart = multiPart.WithAddedPart(parts[i]);
+        if (!runtime.Batch.TryResolveTable(multiPart, out var table))
             return SqlValue.Null(ResultType);
         var identityOrdinal = table.IdentityOrdinal;
         return identityOrdinal < 0

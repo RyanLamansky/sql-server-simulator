@@ -24,14 +24,12 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseDelete(ParserContext context)
     {
-        var next = context.GetNextRequired();
-        if (next is ReservedKeyword { Keyword: Keyword.From })
-            next = context.GetNextRequired();
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+            context.MoveNextRequired();
 
-        if (next is not StringToken leadingIdentToken)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        _ = context.Batch.TryResolveTable(leadingIdentToken.Value, out var leadingTable);
+        var leadingIdent = BatchContext.ParseObjectName(context);
+        _ = context.Batch.TryResolveTable(leadingIdent, out var leadingTable);
         context.MoveNextOptional();
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
@@ -46,10 +44,10 @@ partial class Simulation
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            return ExecuteJoinedDelete(context, leadingIdentToken, leadingTable, output);
+            return ExecuteJoinedDelete(context, leadingIdent, leadingTable, output);
         }
 
-        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdent);
         return ExecuteDeleteAgainstTable(context, table, output);
     }
 
@@ -114,7 +112,7 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ExecuteJoinedDelete(
         ParserContext context,
-        StringToken leadingIdentToken,
+        MultiPartName leadingIdent,
         HeapTable? leadingTable,
         MutationOutputProjection? output)
     {
@@ -124,9 +122,9 @@ partial class Simulation
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
-        var targetIndex = FindMutationTargetIndex(sources, leadingIdentToken.Value, leadingTable);
+        var targetIndex = FindMutationTargetIndex(sources, leadingIdent.Leaf, leadingTable);
         if (targetIndex < 0)
-            throw SimulatedSqlException.InvalidObjectName(leadingIdentToken);
+            throw SimulatedSqlException.InvalidObjectName(leadingIdent);
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");

@@ -26,12 +26,11 @@ partial class Simulation
         if (afterMerge is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        var destinationTableToken = context.Token as StringToken
-            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        var destinationName = BatchContext.ParseObjectName(context);
 
-        var destinationTable = context.Batch.TryResolveTable(destinationTableToken.Value, out var table)
+        var destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
             ? table
-            : throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
+            : throw SimulatedSqlException.InvalidObjectName(destinationName);
 
         context.MoveNextRequired();
         if (!context.MatchContextual(ContextualKeyword.Using))

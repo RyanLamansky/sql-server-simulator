@@ -9,7 +9,8 @@ partial class Simulation
     /// <summary>
     /// Parses <c>TRUNCATE TABLE &lt;name&gt;</c>. Routes <c>#foo</c> names to
     /// the connection's <see cref="SimulatedDbConnection.TempTables"/> dict;
-    /// everything else to <see cref="Database.HeapTables"/>. Missing target
+    /// everything else to the named schema's heap-table dict via
+    /// <see cref="Database.Schemas"/>. Missing target
     /// raises <c>Msg 4701</c> — distinct from <c>DROP TABLE</c>'s Msg 3701 and
     /// generic INSERT/UPDATE/DELETE's Msg 208.
     /// </summary>
@@ -48,18 +49,20 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired(); // consume TABLE
 
-        var name = ParseDropTargetName(context);
+        var name = BatchContext.ParseObjectName(context);
 
         if (batch.IsSkipping)
             return;
 
-        var isTempTable = BatchContext.IsLocalTempName(name);
+        var isTempTable = BatchContext.IsLocalTempName(name.Leaf);
         var destination = isTempTable
             ? context.Connection.TempTables
-            : context.CurrentDatabase.HeapTables;
+            : batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
 
-        if (!destination.TryGetValue(name, out var table))
-            throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name);
+        // Msg 4701 carries only the leaf name (probe-confirmed against SQL
+        // Server 2025), distinct from Msg 208 / 3701 which embed the qualifier.
+        if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
+            throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
 
         var oldPages = new List<HeapPage>(table.Heap.Pages);
         var oldLobPages = new List<HeapLobPage>(table.Heap.LobPages);

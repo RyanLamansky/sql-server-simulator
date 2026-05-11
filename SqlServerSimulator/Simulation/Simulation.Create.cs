@@ -14,11 +14,16 @@ partial class Simulation
     /// </summary>
     private bool TryParseCreate(ParserContext context)
     {
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Table })
+        var afterCreate = context.GetNextRequired();
+        if (afterCreate is ReservedKeyword { Keyword: Keyword.Schema })
+            return TryParseCreateSchema(context);
+        if (afterCreate is not ReservedKeyword { Keyword: Keyword.Table })
             return false;
 
-        if (context.GetNextRequired() is not Name tableName)
+        context.MoveNextRequired();
+        if (context.Token is not Name)
             return false;
+        var tableName = BatchContext.ParseObjectName(context);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
             return false;
@@ -154,7 +159,7 @@ partial class Simulation
             if (inlineKeyKind == KeyConstraintKind.PrimaryKey)
             {
                 if (nullable == true)
-                    throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName.Value);
+                    throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName.Leaf);
                 nullable = false;
             }
 
@@ -167,9 +172,9 @@ partial class Simulation
             if (identity is not null)
             {
                 if (++identityCount > 1)
-                    throw SimulatedSqlException.MultipleIdentityColumns(tableName.Value);
+                    throw SimulatedSqlException.MultipleIdentityColumns(tableName.Leaf);
                 if (actualNullable)
-                    throw SimulatedSqlException.IdentityOnNullableColumn(columnName.Value, tableName.Value);
+                    throw SimulatedSqlException.IdentityOnNullableColumn(columnName.Value, tableName.Leaf);
                 if (resolvedType != SqlType.Int32 && resolvedType != SqlType.BigInt && resolvedType != SqlType.SmallInt && resolvedType != SqlType.TinyInt)
                     throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
             }
@@ -182,7 +187,7 @@ partial class Simulation
                 for (var i = 0; i < heapColumns.Count; i++)
                 {
                     if (heapColumns[i] is { } existing && existing.Type == SqlType.RowVersion)
-                        throw SimulatedSqlException.MultipleTimestampColumns(tableName.Value, columnName.Value);
+                        throw SimulatedSqlException.MultipleTimestampColumns(tableName.Leaf, columnName.Value);
                 }
                 actualNullable = false;
             }
@@ -206,7 +211,7 @@ partial class Simulation
                 if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, reference.Leaf))
                 {
                     return existing.Computed is not null
-                        ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, tableName.Value)
+                        ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, tableName.Leaf)
                         : existing.Type;
                 }
                 if (heapColumns[i] is null)
@@ -214,7 +219,7 @@ partial class Simulation
                     foreach (var pending in pendingComputed)
                     {
                         if (pending.Index == i && Collation.Default.Equals(pending.Name, reference.Leaf))
-                            throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, tableName.Value);
+                            throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, tableName.Leaf);
                     }
                 }
             }
@@ -256,9 +261,9 @@ partial class Simulation
                 fixedWidthSum += column.Type.FixedLength;
         }
         if (fixedWidthSum > Heap.MaxRowSize)
-            throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Value, fixedWidthSum, Heap.MaxRowSize);
+            throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Leaf, fixedWidthSum, Heap.MaxRowSize);
 
-        var keyConstraints = ResolveKeyConstraints(tableName.Value, heapColumns!, pendingKeys);
+        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys);
 
         // Real SQL Server's Msg 8141 (probed against SQL Server 2025) rejects
         // an inline column-level CHECK that references any column other than
@@ -278,12 +283,12 @@ partial class Simulation
                 op.VisitColumnReferences(name =>
                 {
                     if (!Collation.Default.Equals(name.Leaf, owningColumn))
-                        throw SimulatedSqlException.InlineCheckReferencesAnotherColumn(owningColumn, tableName.Value);
+                        throw SimulatedSqlException.InlineCheckReferencesAnotherColumn(owningColumn, tableName.Leaf);
                 }));
         }
 
-        var checkConstraints = ResolveCheckConstraints(tableName.Value, pendingChecks);
-        var heapTable = new HeapTable(tableName.Value, [.. heapColumns!], keyConstraints, checkConstraints);
+        var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks);
+        var heapTable = new HeapTable(tableName.Leaf, [.. heapColumns!], keyConstraints, checkConstraints);
         // #foo lives in the per-connection TempTables dict so it's isolated
         // from regular user tables and auto-drops at connection close.
         // ##foo (global temps) aren't modeled yet — surface explicitly rather
@@ -299,7 +304,8 @@ partial class Simulation
         var isTempTable = BatchContext.IsLocalTempName(heapTable.Name);
         var destination = isTempTable
             ? context.Batch.Connection.TempTables
-            : context.CurrentDatabase.HeapTables;
+            : context.Batch.TryResolveSchema(tableName, out var schema) ? schema.HeapTables
+                : throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.Count >= 2 ? tableName.ImmediateQualifier! : Database.DefaultSchemaName);
         if (!destination.TryAdd(heapTable.Name, heapTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
         // Temp-table DDL participates in transaction rollback: probe-confirmed

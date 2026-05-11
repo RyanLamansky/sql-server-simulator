@@ -16,12 +16,11 @@ partial class Simulation
         if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        var destinationTableToken = context.Token as StringToken
-            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        var destinationName = BatchContext.ParseObjectName(context);
 
-        return context.Batch.TryResolveTable(destinationTableToken.Value, out var destinationTable)
+        return context.Batch.TryResolveTable(destinationName, out var destinationTable)
             ? ProcessHeapInsert(destinationTable, context)
-            : throw SimulatedSqlException.InvalidObjectName(destinationTableToken);
+            : throw SimulatedSqlException.InvalidObjectName(destinationName);
     }
 
     /// <summary>

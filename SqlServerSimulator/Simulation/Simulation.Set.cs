@@ -69,8 +69,10 @@ partial class Simulation
     /// </summary>
     private static bool TryParseSetIdentityInsert(ParserContext context)
     {
-        if (context.GetNextRequired() is not StringToken tableNameToken)
+        context.MoveNextRequired();
+        if (context.Token is not Name)
             return false;
+        var tableName = BatchContext.ParseObjectName(context);
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var onOff } || onOff is not (Keyword.On or Keyword.Off))
             return false;
@@ -78,9 +80,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var tableName = tableNameToken.Value;
         if (!context.Batch.TryResolveTable(tableName, out var heapTable))
-            throw SimulatedSqlException.InvalidObjectName(tableNameToken);
+            throw SimulatedSqlException.InvalidObjectName(tableName);
 
         if (onOff == Keyword.On)
         {

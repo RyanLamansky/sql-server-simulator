@@ -114,7 +114,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <c>Simulation.ParseCteBindings</c> before the SELECT / INSERT /
     /// UPDATE / DELETE / MERGE dispatch and cleared at the top of the next
     /// statement iteration. Consulted by <c>Selection.ParseSingleFromSource</c>
-    /// before falling through to <see cref="Database.HeapTables"/>; matching
+    /// before falling through to <see cref="Database.Schemas"/>; matching
     /// names build a deferred-plan <see cref="FromSource"/> (re-runs per
     /// reference, parallel to derived tables in FROM). Null when no WITH
     /// prefix is in scope.
