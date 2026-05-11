@@ -106,7 +106,8 @@ internal sealed partial class Selection
         List<AggregateExpression> aggregates,
         List<WindowExpression> windows,
         Func<MultiPartName, SqlType>? outerTypeResolver,
-        bool isAssignmentOnly)
+        bool isAssignmentOnly,
+        string? intoTarget)
     {
         if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null))
             throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
@@ -168,6 +169,15 @@ internal sealed partial class Selection
             }
         }
 
+        // SELECT INTO schema inference: when an INTO clause was captured,
+        // derive the destination HeapColumn[] now (parse-time) so the
+        // dispatch handler can CREATE TABLE before executing. The inference
+        // walk also enforces the SELECT-INTO-specific validations
+        // (Msg 1038 unnamed projection, Msg 2705 duplicate name).
+        var destColumnSchema = intoTarget is not null
+            ? ComputeIntoDestSchema(intoTarget, expressions, outputSchema, outputColumnNames, sources, joins)
+            : null;
+
         return new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
@@ -177,7 +187,9 @@ internal sealed partial class Selection
                 : windows.Count > 0
                     ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                     : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),
-            isAssignmentOnly);
+            isAssignmentOnly,
+            intoTarget,
+            destColumnSchema);
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(

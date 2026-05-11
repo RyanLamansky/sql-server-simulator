@@ -34,4 +34,6 @@ internal sealed class Value : Expression
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Constant.Type;
 
     internal override string DebugDisplay() => this.Constant.DebugDisplay();
+
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Constant.IsNull;
 }

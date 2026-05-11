@@ -5,11 +5,19 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal sealed class Reference : Expression
 {
-    private MultiPartName name;
+    /// <summary>
+    /// The referenced name. Mutated by <see cref="AddMultiPartComponent"/>
+    /// as the parser walks dotted qualifiers. Internal so SELECT INTO
+    /// schema inference can resolve the source column for identity
+    /// propagation — direct column refs (a top-level <see cref="Reference"/>,
+    /// possibly wrapped in <see cref="NamedExpression"/>) propagate identity
+    /// from the source when the FROM clause is a single non-joined heap.
+    /// </summary>
+    internal MultiPartName ReferencedName;
 
     public Reference(Name name)
     {
-        this.name = new MultiPartName(name.Value);
+        this.ReferencedName = new MultiPartName(name.Value);
     }
 
     /// <summary>
@@ -19,7 +27,7 @@ internal sealed class Reference : Expression
     /// </summary>
     public Reference(string name)
     {
-        this.name = new MultiPartName(name);
+        this.ReferencedName = new MultiPartName(name);
     }
 
     /// <summary>
@@ -31,16 +39,18 @@ internal sealed class Reference : Expression
     /// </summary>
     public Reference(string qualifier, string column)
     {
-        this.name = new MultiPartName(qualifier).WithAddedPart(column);
+        this.ReferencedName = new MultiPartName(qualifier).WithAddedPart(column);
     }
 
-    public override string Name => this.name.Leaf;
+    public override string Name => this.ReferencedName.Leaf;
 
-    public void AddMultiPartComponent(Name next) => this.name = this.name.WithAddedPart(next.Value);
+    public void AddMultiPartComponent(Name next) => this.ReferencedName = this.ReferencedName.WithAddedPart(next.Value);
 
-    public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.name);
+    public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.ReferencedName);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.name);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.ReferencedName);
 
-    internal override string DebugDisplay() => this.name.ToString();
+    internal override string DebugDisplay() => this.ReferencedName.ToString();
+
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => resolveColumnNullable(this.ReferencedName);
 }

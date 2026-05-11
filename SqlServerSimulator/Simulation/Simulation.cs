@@ -172,6 +172,17 @@ public sealed partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Select }:
                     {
                         var selection = Selection.Parse(context, 0);
+                        if (selection.IntoTarget is not null)
+                        {
+                            // SELECT INTO: creates the destination table and
+                            // inserts each projected row. RunMutation gives
+                            // the executor access to the active undo log so
+                            // transactional CREATE+INSERT can roll back.
+                            outcome = RunMutation(context, _ => ExecuteSelectInto(selection, batch));
+                            connection.LastStatementRowCount = outcome.RecordsAffected;
+                            yield return outcome;
+                            break;
+                        }
                         // Materialize rows up-front so @@ROWCOUNT reflects the
                         // statement's full row count for the next statement in
                         // the same batch (real SQL Server runs server-side and

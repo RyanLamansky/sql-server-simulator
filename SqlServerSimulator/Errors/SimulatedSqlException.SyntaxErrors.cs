@@ -16,6 +16,16 @@ partial class SimulatedSqlException
 
     internal static SimulatedSqlException SyntaxErrorNearKeyword(ReservedKeyword token) => new($"Incorrect syntax near the keyword '{token}'.", 156, 15, 1);
 
+    /// <summary>
+    /// Msg 156 variant that takes the keyword text directly — for sites
+    /// where the parser detected the misplaced keyword via lookahead /
+    /// post-parse semantic check rather than the original ReservedKeyword
+    /// token. Lowercased to match the existing factory's output. Used by
+    /// the SELECT INTO + UNION rejection path (INTO is only valid on the
+    /// first branch of a set-op chain).
+    /// </summary>
+    internal static SimulatedSqlException SyntaxErrorNearKeyword(string keyword) => new($"Incorrect syntax near the keyword '{keyword}'.", 156, 15, 1);
+
     internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => new($"Incorrect syntax near '{context.Token}'.", 102, 15, 1);
 
     internal static SimulatedSqlException SyntaxErrorNear(Token? token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);

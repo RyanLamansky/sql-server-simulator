@@ -298,6 +298,31 @@ internal abstract class Expression
     internal abstract string DebugDisplay();
 
     /// <summary>
+    /// SELECT INTO projection inference: returns whether this expression's
+    /// result can be NULL. Default is conservative-true. Subclasses that can
+    /// prove non-nullability (literal-non-null, column-ref-to-NOT-NULL,
+    /// ISNULL-with-non-null-arg, CASE-with-all-branches-non-null) override
+    /// to return false where applicable. Probe-confirmed rules:
+    /// <list type="bullet">
+    /// <item>Direct column ref preserves the source column's nullability.</item>
+    /// <item>Integer arithmetic, CAST, CONVERT, COALESCE, aggregates all
+    /// project as nullable (always YES). Aggregates include COUNT, which
+    /// real SQL Server projects as NULL allowed despite the runtime
+    /// guarantee that COUNT never returns NULL.</item>
+    /// <item>ISNULL(x, y) is non-null iff EITHER operand is non-null.</item>
+    /// <item>CASE WHEN ... END is non-null iff every THEN/ELSE branch is
+    /// non-null (no-ELSE counts as implicit ELSE NULL).</item>
+    /// </list>
+    /// String <c>+</c> concatenation also projects as non-null when both
+    /// operands are non-null in real SQL Server, but the simulator can't
+    /// easily distinguish string-vs-arithmetic <c>+</c> at static analysis
+    /// time (the dispatch is runtime per operand SqlValue.Type) so it
+    /// conservatively reads as nullable — a minor fidelity gap with no
+    /// practical impact since staging tables rarely rely on NOT NULL.
+    /// </summary>
+    internal virtual bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar

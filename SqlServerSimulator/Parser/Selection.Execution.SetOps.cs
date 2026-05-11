@@ -36,12 +36,41 @@ internal sealed partial class Selection
         if (left.Schema.Length != right.Schema.Length)
             throw SimulatedSqlException.SetOpUnequalColumnCount();
 
+        // SELECT INTO on a set-op chain: probe-confirmed against SQL Server
+        // 2025 that INTO is only valid on the FIRST branch (parses inside
+        // the first SELECT's projection-clause-end). A right branch carrying
+        // its own INTO is a syntax error in real SQL Server too — the
+        // simulator detects this and rejects. Identity is always dropped on
+        // set-op results (probed), so the combined Selection emits a
+        // synthesized dest schema with no identity even if the left branch
+        // had one.
+        if (right.IntoTarget is not null)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword("into");
+
         var combinedSchema = new SqlType[left.Schema.Length];
         for (var i = 0; i < combinedSchema.Length; i++)
             combinedSchema[i] = SqlType.Promote(left.Schema[i], right.Schema[i]);
 
         // Result column names come from the first (leftmost) branch.
         var combinedNames = left.ColumnNames;
+
+        // Propagate INTO from the left branch; strip identity on each
+        // destination column since set-op results lose the source's
+        // identity property.
+        HeapColumn[]? combinedDestSchema = null;
+        if (left.IntoTarget is not null && left.DestColumnSchema is { } leftDest)
+        {
+            combinedDestSchema = new HeapColumn[combinedSchema.Length];
+            for (var i = 0; i < combinedDestSchema.Length; i++)
+            {
+                combinedDestSchema[i] = new HeapColumn(
+                    leftDest[i].Name,
+                    combinedSchema[i],
+                    maxLength: null,
+                    nullable: leftDest[i].Nullable,
+                    identity: null);
+            }
+        }
 
         return new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
@@ -53,7 +82,7 @@ internal sealed partial class Selection
             SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, batch, outerResolver),
             SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
             _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
-        });
+        }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema);
     }
 
     /// <summary>
@@ -203,7 +232,7 @@ internal sealed partial class Selection
             }
 
             return ApplyOffsetTake(ordered, offsetCount, fetchCount);
-        });
+        }, intoTarget: inner.IntoTarget, destColumnSchema: inner.DestColumnSchema);
     }
 }
 

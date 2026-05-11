@@ -48,4 +48,10 @@ internal sealed class IsNullExpression : Expression
     }
 
     internal override string DebugDisplay() => $"ISNULL({this.check.DebugDisplay()}, {this.replacement.DebugDisplay()})";
+
+    // ISNULL(x, y) is non-null iff EITHER operand is non-null: a non-null x
+    // short-circuits, otherwise the result is the (possibly-non-null) y.
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
+        this.check.ResultIsNullable(resolveColumnNullable)
+        && this.replacement.ResultIsNullable(resolveColumnNullable);
 }

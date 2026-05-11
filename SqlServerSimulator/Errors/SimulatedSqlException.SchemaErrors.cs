@@ -26,6 +26,27 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 
     /// <summary>
+    /// Mimics SQL Server error 2705: <c>SELECT … INTO target</c> produced a
+    /// projection with two columns of the same name. Wording probe-confirmed
+    /// against SQL Server 2025: the table name is the SELECT INTO target
+    /// (not yet created at this point — the error fires during the schema
+    /// inference walk, before the heap table is allocated).
+    /// </summary>
+    internal static SimulatedSqlException DuplicateColumnInSelectInto(string columnName, string targetTableName) =>
+        new($"Column names in each table must be unique. Column name '{columnName}' in table '{targetTableName}' is specified more than once.", 2705, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 1038: a <c>SELECT INTO</c> projection
+    /// contains an unnamed column (an arithmetic expression / function call
+    /// without an explicit <c>AS alias</c>). Regular SELECTs allow unnamed
+    /// columns (the column is just rendered with an empty header); SELECT
+    /// INTO needs a name to declare on the destination table. Verbatim
+    /// wording from SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException SelectIntoMissingColumnName() =>
+        new("An object or column name is missing or empty. For SELECT INTO statements, verify each column has a name. For other statements, look for empty alias names. Aliases defined as \"\" or [] are not allowed. Change the alias to a valid name.", 1038, 15, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 3701: <c>DROP TABLE</c> targeted a name that
     /// doesn't exist. Real SQL Server suppresses this when <c>IF EXISTS</c>
     /// is present; callers should branch on the parsed flag and only construct

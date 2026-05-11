@@ -80,9 +80,36 @@ internal sealed partial class Selection
     /// </summary>
     public readonly bool IsAssignmentOnly;
 
+    /// <summary>
+    /// Target table name for a <c>SELECT … INTO target …</c> statement; null
+    /// for a regular SELECT. Captured at parse time when an <c>INTO</c>
+    /// clause appears between the projection list and FROM. Set-op chains
+    /// propagate the first-branch INTO through <c>CombineSetOps</c>;
+    /// a subsequent branch carrying its own INTO is rejected as a syntax
+    /// error (real SQL Server allows INTO only on the first branch). The
+    /// dispatch routes Selections with this set to the SELECT INTO handler
+    /// rather than the regular execute path.
+    /// </summary>
+    public readonly string? IntoTarget;
+
+    /// <summary>
+    /// Pre-computed destination schema (column names + types + nullability
+    /// + identity flags) for a <c>SELECT INTO</c> statement; null when
+    /// <see cref="IntoTarget"/> is null. Built during projection planning
+    /// from the projection expressions and FROM sources, applying SQL
+    /// Server's documented schema-inference rules (direct refs preserve
+    /// source nullability + identity; expressions / aggregates / casts /
+    /// COALESCE always nullable; ISNULL non-null when either arg is
+    /// non-null; CASE non-null when every branch is non-null; string `+`
+    /// non-null when both operands non-null; integer arithmetic always
+    /// nullable due to overflow). The SELECT INTO handler reads this
+    /// directly to create the destination heap table.
+    /// </summary>
+    public readonly HeapColumn[]? DestColumnSchema;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, string? intoTarget = null, HeapColumn[]? destColumnSchema = null)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
@@ -90,6 +117,8 @@ internal sealed partial class Selection
         this.HasTopOrOffsetOrFetch = hasTopOrOffsetOrFetch;
         this.IsAssignmentOnly = isAssignmentOnly;
         this.rowSource = rowSource;
+        this.IntoTarget = intoTarget;
+        this.DestColumnSchema = destColumnSchema;
     }
 
     /// <summary>
@@ -353,12 +382,14 @@ internal sealed partial class Selection
 
         List<Expression> expressions = [];
         var fromClause = new FromClause();
+        string? intoTarget = null;
 
         do
         {
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.From }:
+                case ReservedKeyword { Keyword: Keyword.Into }:
                     break;
 
                 case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp }:
@@ -491,7 +522,19 @@ internal sealed partial class Selection
                     if (topCount is not null && fromClause.OffsetCount is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(expressions, sources);
-                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions));
+                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
+
+                // SELECT projection INTO target [FROM ...] — captures the
+                // destination table name. Real SQL Server requires every
+                // projection to have a name (Msg 1038) and rejects duplicate
+                // names (Msg 2705); both validations happen at build time
+                // alongside the schema-inference walk, so we can flag the
+                // offending column with the target table name in the message.
+                case ReservedKeyword { Keyword: Keyword.Into }:
+                    if (intoTarget is not null)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    intoTarget = context.GetNextRequired<Name>().Value;
+                    continue;
 
                 case ReservedKeyword { Keyword: Keyword.Where }:
                     ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
@@ -537,7 +580,7 @@ internal sealed partial class Selection
 
         if (topCount is not null && fromClause.OffsetCount is not null)
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-        return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount, ResolveAssignmentMode(expressions));
+        return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount, ResolveAssignmentMode(expressions), intoTarget);
     }
 
     /// <summary>
@@ -1193,7 +1236,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, string? intoTarget)
     {
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
@@ -1239,7 +1282,14 @@ internal sealed partial class Selection
             }
 
             return [RowEncoder.EncodeRow(schema, values)];
-        }, isAssignmentOnly);
+        }, isAssignmentOnly,
+        intoTarget,
+        // FROM-less SELECT INTO: no source sources/joins to inspect, so the
+        // analyzer routes through the empty-FROM branch and produces
+        // dest columns with literal-derived nullability and no identity.
+        destColumnSchema: intoTarget is not null
+            ? ComputeIntoDestSchema(intoTarget, expressions, schema, columnNames, [], [])
+            : null);
     }
 
     /// <summary>

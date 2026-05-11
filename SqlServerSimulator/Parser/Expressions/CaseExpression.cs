@@ -97,6 +97,23 @@ internal sealed class CaseExpression : Expression
 
     internal override string DebugDisplay() => "CASE ...";
 
+    // CASE result is non-null only when every THEN branch is non-null AND
+    // either there's a non-null ELSE or every WHEN covers every possible
+    // input. Since proving exhaustive WHEN coverage is intractable, the
+    // simulator follows real SQL Server's documented projection rule:
+    // non-null iff every THEN AND the ELSE (or implicit ELSE NULL → null)
+    // is non-null.
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable)
+    {
+        for (var i = 0; i < this.thens.Length; i++)
+        {
+            if (this.thens[i].ResultIsNullable(resolveColumnNullable))
+                return true;
+        }
+        // Missing ELSE = implicit NULL = nullable; explicit ELSE delegates.
+        return this.elseBranch is null || this.elseBranch.ResultIsNullable(resolveColumnNullable);
+    }
+
     /// <summary>
     /// Parses a CASE expression. Entered with
     /// <see cref="ParserContext.Token"/> on the <c>CASE</c> keyword;
