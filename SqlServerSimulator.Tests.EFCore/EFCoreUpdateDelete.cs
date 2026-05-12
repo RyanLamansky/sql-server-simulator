@@ -177,6 +177,92 @@ public class EFCoreUpdateDelete
     }
 
     [TestMethod]
+    public void ExecuteUpdate_MultipleProperties_BothApplied()
+    {
+        // Chained SetProperty calls compile to a single UPDATE with multiple SET clauses.
+        using var context = SeededContext();
+        var rows = context.People.Where(p => p.Id == 1)
+            .ExecuteUpdate(setters => setters
+                .SetProperty(p => p.Name, "renamed")
+                .SetProperty(p => p.Code, "X"));
+        Assert.AreEqual(1, rows);
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var reloaded = fresh.People.Single(p => p.Id == 1);
+        Assert.AreEqual("renamed", reloaded.Name);
+        Assert.AreEqual("X", reloaded.Code);
+    }
+
+    [TestMethod]
+    public void ExecuteUpdate_TopNSubqueryFilter_OrderByTake()
+    {
+        // .OrderBy(...).Take(n).ExecuteUpdate(...) emits the
+        // UPDATE [c] ... WHERE [c].[Id] IN (SELECT TOP(@p) [c0].[Id] FROM ... ORDER BY ...)
+        // shape — different from the flat WHERE form. Confirms the subquery
+        // filter through bulk-DML works against the TOP-N pattern.
+        using var context = SeededContext();
+        var rows = context.People.OrderBy(p => p.Id).Take(2)
+            .ExecuteUpdate(setters => setters.SetProperty(p => p.Code, "TOP"));
+        Assert.AreEqual(2, rows);
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var codes = fresh.People.OrderBy(p => p.Id).Select(p => p.Code).ToArray();
+        CollectionAssert.AreEqual(new[] { "TOP", "TOP", "C", "D" }, codes);
+    }
+
+    [TestMethod]
+    public void ExecuteDelete_TopNSubqueryFilter_OrderByTake()
+    {
+        // .OrderBy(...).Take(n).ExecuteDelete() emits the
+        // DELETE [c] ... WHERE [c].[Id] IN (SELECT TOP(@p) [c0].[Id] FROM ... ORDER BY ...) shape.
+        using var context = SeededContext();
+        var rows = context.People.OrderBy(p => p.Id).Take(2).ExecuteDelete();
+        Assert.AreEqual(2, rows);
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var ids = fresh.People.OrderBy(p => p.Id).Select(p => p.Id).ToArray();
+        CollectionAssert.AreEqual(new[] { 3, 4 }, ids);
+    }
+
+    [TestMethod]
+    public void ExecuteUpdate_ColumnDerivedArithmetic_AppliesPerRow()
+    {
+        // SetProperty(col, c => c.OtherCol + literal) compiles to a setter
+        // that references the row's other columns — a different shape from
+        // Name.ToUpper() because the right-hand expression is a binary op.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table Scores (Id int primary key, Value int)");
+        using var context = new ScoreContext(simulation);
+        context.Scores.AddRange(
+            new Score { Id = 1, Value = 10 },
+            new Score { Id = 2, Value = 20 });
+        _ = context.SaveChanges();
+
+        var rows = context.Scores.ExecuteUpdate(s => s.SetProperty(x => x.Value, x => (x.Value * 3) + 1));
+        Assert.AreEqual(2, rows);
+
+        using var fresh = new ScoreContext(simulation);
+        var values = fresh.Scores.OrderBy(x => x.Id).Select(x => x.Value).ToArray();
+        CollectionAssert.AreEqual(new[] { 31, 61 }, values);
+    }
+
+    [TestMethod]
+    public void ExecuteUpdate_AnySubqueryFilter_ScopesAffectedRows()
+    {
+        // WHERE EXISTS / WHERE col IN (SELECT ...) reach bulk DML through
+        // EF Core's standard subquery translation. This case translates Any
+        // into EXISTS — confirms ExecuteUpdate's WHERE accepts subquery shapes.
+        using var context = SeededContext();
+        var rows = context.People.Where(p => context.People.Any(o => o.Id == p.Id - 1))
+            .ExecuteUpdate(setters => setters.SetProperty(p => p.Code, "NEXT"));
+        Assert.AreEqual(3, rows);
+
+        using var fresh = new TestDbContext(context.Simulation);
+        var codes = fresh.People.OrderBy(p => p.Id).Select(p => p.Code).ToArray();
+        CollectionAssert.AreEqual(new[] { "A", "NEXT", "NEXT", "NEXT" }, codes);
+    }
+
+    [TestMethod]
     public void SaveChanges_TimestampEntity_ReadsBackAutoBumpedRowVersion()
     {
         // [Timestamp] entity → UPDATE OUTPUT INSERTED.[RowVersion] WHERE [Id]=@p AND [RowVersion]=@orig.
@@ -197,6 +283,25 @@ public class EFCoreUpdateDelete
 
         Assert.IsFalse(initialRv.SequenceEqual(bumpedRv), "rowversion must change after SaveChanges of a modified entity");
     }
+}
+
+internal class Score
+{
+    public int Id { get; set; }
+
+    public int Value { get; set; }
+}
+
+internal class ScoreContext(Simulation simulation) : DbContext
+{
+    public Simulation Simulation { get; set; } = simulation;
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        _ = optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
+    }
+
+    public DbSet<Score> Scores => Set<Score>();
 }
 
 internal class TimestampedItem
