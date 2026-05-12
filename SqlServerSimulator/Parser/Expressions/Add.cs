@@ -2,8 +2,11 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
-internal sealed class Add(Expression left, ParserContext context) : TwoSidedExpression(left, context)
+internal sealed class Add : TwoSidedExpression
 {
+    public Add(Expression left, ParserContext context) : base(left, context) { }
+    internal Add(Expression left, Expression right) : base(left, right) { }
+
     public override byte Precedence => 3;
 
     protected override SqlValue Run(SqlValue left, SqlValue right) =>

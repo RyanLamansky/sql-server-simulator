@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 
 namespace SqlServerSimulator;
@@ -37,30 +38,63 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>SET @v = expr</c>. Resolves the slot via
-    /// <see cref="BatchContext.GetVariableSlot"/> (Msg 137 if undeclared),
-    /// evaluates the RHS with no FROM context, then coerces the result
-    /// through the slot's declared type via
-    /// <see cref="Parser.Expressions.Cast.ApplyCoercion"/> — preserves
-    /// silent-truncation / Msg-245 / etc. semantics from the regular CAST
-    /// path. Compound forms (<c>+=</c> / <c>-=</c> / etc.) aren't modeled
-    /// in this bundle; rewrite as <c>SET @v = @v + expr</c>.
+    /// Parses <c>SET @v = expr</c> and the compound forms <c>SET @v += expr</c>
+    /// / <c>-=</c> / <c>*=</c> / <c>/=</c> / <c>%=</c> / <c>&amp;=</c> / <c>|=</c>
+    /// / <c>^=</c>. Resolves the slot via <see cref="BatchContext.GetVariableSlot"/>
+    /// (Msg 137 if undeclared); compound forms desugar to the equivalent
+    /// <c>FromCompoundOp(op, VariableReference(@v), rhs)</c> so the existing
+    /// arithmetic / string-concat dispatch runs unchanged (NULL propagates,
+    /// string <c>+=</c> concatenates, decimal/money widening matches plain
+    /// <c>+</c>). The compound op's two characters must be adjacent in the
+    /// source (probe-confirmed: <c>SET @v + = 5</c> with a space raises
+    /// Msg 102 near <c>'+'</c>). After the arithmetic step the result is
+    /// coerced through the slot's declared type via
+    /// <see cref="Cast.ApplyCoercion"/>, preserving
+    /// silent-truncation / Msg-245 semantics from the regular CAST path.
     /// </summary>
     private static bool TryParseSetVariable(ParserContext context, AtPrefixedString variableToken)
     {
         var slot = context.Batch.GetVariableSlot(variableToken.Value);
 
-        if (context.GetNextRequired() is not Operator { Character: '=' })
+        context.MoveNextRequired();
+        if (TryConsumeAssignmentOperator(context) is not char assignOp)
             return false;
 
         context.MoveNextRequired();
         var rhs = Expression.Parse(context);
         if (context.Batch.IsSkipping)
             return true;
-        var rhsValue = rhs.Run(new RuntimeContext(NoColumnResolver, context.Batch));
-        slot.Value = Parser.Expressions.Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
+        var assignedExpr = assignOp == '='
+            ? rhs
+            : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs);
+        var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+        slot.Value = Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
         return true;
     }
+
+    /// <summary>
+    /// At the current token position, detects whether the parser is sitting
+    /// on the assignment-operator slot of a SET / UPDATE-SET statement.
+    /// Returns <c>'='</c> for a plain assignment (one token consumed), the
+    /// arithmetic char for compound (<c>+ - * / % &amp; | ^</c>, two tokens
+    /// consumed), or <c>null</c> when the position isn't a recognized
+    /// assignment operator (caller raises Msg 102). Compound forms require
+    /// the arith char and the trailing <c>=</c> to be adjacent in source
+    /// (no intervening whitespace) — probe-confirmed against SQL Server 2025.
+    /// On a successful match, <see cref="ParserContext.Token"/> is left at
+    /// the last consumed operator token; callers advance once more to step
+    /// onto the RHS first token.
+    /// </summary>
+    private static char? TryConsumeAssignmentOperator(ParserContext context) =>
+        context.Token is not Operator first
+            ? null
+            : first.Character == '='
+                ? '='
+                : first.Character is not ('+' or '-' or '*' or '/' or '%' or '&' or '|' or '^')
+                    ? null
+                    : context.GetNextRequired() is not Operator { Character: '=' } second || second.StartIndex != first.EndIndex
+                        ? null
+                        : first.Character;
 
     /// <summary>
     /// Parses <c>SET IDENTITY_INSERT &lt;table&gt; ON|OFF</c>. ON sets the

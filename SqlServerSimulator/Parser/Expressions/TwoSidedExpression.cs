@@ -2,9 +2,41 @@
 
 namespace SqlServerSimulator.Parser.Expressions;
 
-internal abstract class TwoSidedExpression(Expression left, ParserContext context) : Expression
+internal abstract class TwoSidedExpression : Expression
 {
-    private Expression left = left, right = Parse(context.MoveNextRequiredReturnSelf());
+    private Expression left, right;
+
+    private protected TwoSidedExpression(Expression left, ParserContext context)
+    {
+        this.left = left;
+        this.right = Parse(context.MoveNextRequiredReturnSelf());
+    }
+
+    private protected TwoSidedExpression(Expression left, Expression right)
+    {
+        this.left = left;
+        this.right = right;
+    }
+
+    /// <summary>
+    /// Builds the <see cref="TwoSidedExpression"/> that corresponds to a
+    /// compound-assignment operator's arithmetic step. Used by the SET and
+    /// UPDATE-SET parsers: <c>SET @v += rhs</c> becomes
+    /// <c>SET @v = FromCompoundOp('+', VariableReference(@v), rhs)</c> and the
+    /// existing assignment path runs unchanged.
+    /// </summary>
+    internal static TwoSidedExpression FromCompoundOp(char op, Expression left, Expression right) => op switch
+    {
+        '+' => new Add(left, right),
+        '-' => new Subtract(left, right),
+        '*' => new Multiply(left, right),
+        '/' => new Divide(left, right),
+        '%' => new Modulus(left, right),
+        '&' => new BitwiseAnd(left, right),
+        '|' => new BitwiseOr(left, right),
+        '^' => new BitwiseExclusiveOr(left, right),
+        _ => throw new ArgumentException($"'{op}' isn't a compound-assignment arithmetic operator.", nameof(op)),
+    };
 
     public TwoSidedExpression AdjustForPrecedence()
     {

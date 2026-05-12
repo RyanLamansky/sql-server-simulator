@@ -1,5 +1,6 @@
 using System.Text;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -78,7 +79,13 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // Phase-1 SET parsing: raw (columnName, expr) pairs without ordinal
-        // resolution — target may not be known yet.
+        // resolution — target may not be known yet. Each entry recognizes
+        // single or qualified column names on the LHS, plain '=' or compound
+        // arithmetic-assignment (+= -= *= /= %= &= |= ^=) on the operator
+        // slot. Compound forms desugar to FromCompoundOp(op, Reference(col),
+        // rhs) so the per-row ResolveOriginal resolver evaluates the column's
+        // pre-update value as the LHS — matches probe-confirmed
+        // "UPDATE t SET v += rhs" semantics on a real SQL Server instance.
         var rawAssignments = new List<(string ColumnName, Expression Expr)>();
         while (true)
         {
@@ -86,25 +93,29 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             string columnName;
-            switch (context.GetNextRequired())
+            Expression lhsForCompound;
+            var afterName = context.GetNextRequired();
+            if (afterName is Operator { Character: '.' })
             {
-                case Operator { Character: '.' }:
-                    if (context.GetNextRequired() is not StringToken col)
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    columnName = col.Value;
-                    if (context.GetNextRequired() is not Operator { Character: '=' })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    break;
-                case Operator { Character: '=' }:
-                    columnName = first.Value;
-                    break;
-                default:
+                if (context.GetNextRequired() is not StringToken col)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                columnName = col.Value;
+                lhsForCompound = new Reference(first.Value, col.Value);
+                context.MoveNextRequired();
+            }
+            else
+            {
+                columnName = first.Value;
+                lhsForCompound = new Reference(columnName);
             }
 
+            if (TryConsumeAssignmentOperator(context) is not char assignOp)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
             context.MoveNextRequired();
-            var expr = Expression.Parse(context);
-            rawAssignments.Add((columnName, expr));
+            var rhs = Expression.Parse(context);
+            var finalExpr = assignOp == '=' ? rhs : TwoSidedExpression.FromCompoundOp(assignOp, lhsForCompound, rhs);
+            rawAssignments.Add((columnName, finalExpr));
 
             if (context.Token is Operator { Character: ',' })
                 continue;
