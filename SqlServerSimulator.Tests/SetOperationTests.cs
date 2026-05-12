@@ -182,4 +182,156 @@ public sealed class SetOperationTests
     public void Except_AcrossTwoTables_LeftMinusRight()
         => CollectionAssert.AreEquivalent(new[] { 1, 2 },
             ReadInts(SeededTwoTables().CreateCommand("select v from left_t except select v from right_t")));
+
+    // Set-ops inside a subquery body. The simulator's subquery parsers
+    // (Expression.cs / BooleanExpression.cs) all route through Selection.Parse,
+    // which already drives the set-op chain — exercised here as a regression so
+    // refactors of that surface don't silently break TPC-shaped queries.
+
+    [TestMethod]
+    public void Union_InsideFromDerivedTable()
+        => CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4, 5 },
+            ReadInts(SeededTwoTables().CreateCommand(
+                "select x.v from (select v from left_t union select v from right_t) x")));
+
+    [TestMethod]
+    public void UnionAll_InsideFromDerivedTable_PreservesDuplicates()
+        => CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 3, 4, 5 },
+            ReadInts(SeededTwoTables().CreateCommand(
+                "select x.v from (select v from left_t union all select v from right_t) x")));
+
+    [TestMethod]
+    public void Union_InsideExistsSubquery_AnyBranchSatisfies()
+    {
+        using var connection = SeededTwoTables().CreateOpenConnection();
+        using var reader = connection.CreateCommand(
+            "select v from left_t where exists (select 1 from right_t where v = left_t.v union select 1 from right_t where v = left_t.v)").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEquivalent(new[] { 3 }, values);
+    }
+
+    [TestMethod]
+    public void Union_InsideInSubquery_MembershipMatchesEitherBranch()
+        => CollectionAssert.AreEquivalent(new[] { 1, 3 },
+            ReadInts(SeededTwoTables().CreateCommand(
+                "select v from left_t where v in (select 1 union select 3)")));
+
+    [TestMethod]
+    public void Union_InsideScalarSubquery_SingleColumnSingleRowOk()
+    {
+        // Scalar subquery + UNION: both branches project a single column AND the
+        // UNION dedups to a single row (max(v) = 3 in both branches), so the scalar
+        // value resolves to 3.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (v int); insert t values (1), (2), (3)");
+        using var reader = simulation.CreateCommand(
+            "select (select max(v) from t union select max(v) from t) as m").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(3, reader.GetInt32(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Union_InsideScalarSubquery_MultiRowResultRaises512()
+        => SeededTwoTables().AssertSqlError(
+            "select (select max(v) from left_t union select max(v) from right_t) as m",
+            512);
+
+    [TestMethod]
+    public void Union_InsideCteBody_RecursiveAndAnchorBranches()
+    {
+        // Non-recursive CTE body that's itself a UNION: a common EF Core 7 TPC shape
+        // wrapped inside WITH for downstream filtering.
+        using var connection = SeededTwoTables().CreateOpenConnection();
+        var values = ReadInts(connection.CreateCommand(
+            "with combined as (select v from left_t union select v from right_t) select v from combined"));
+        CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4, 5 }, values);
+    }
+
+    [TestMethod]
+    public void TpcDiscriminator_Shape_OuterFiltersRoundTrip()
+    {
+        // Mimics EF Core 7+'s TPC inheritance emit shape: each concrete table contributes
+        // a SELECT with a constant discriminator column, the branches UNION ALL inside
+        // a derived table, and the outer query filters / projects through that table.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table dogs (Id int, Name nvarchar(50), BarkVolume int);
+            create table cats (Id int, Name nvarchar(50), Purrs bit);
+            insert dogs values (1, 'Rex', 5), (2, 'Buddy', 7);
+            insert cats values (3, 'Whiskers', 1)
+            """);
+
+        using var reader = simulation.CreateCommand("""
+            select t.Id, t.Name from (
+                select Id, Name, 'Dog' as TypeTag from dogs
+                union all
+                select Id, Name, 'Cat' as TypeTag from cats
+            ) t
+            where t.TypeTag = 'Cat'
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(3, reader.GetInt32(0));
+        AreEqual("Whiskers", reader.GetString(1));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Union_DerivedTable_LeftJoinedWithOuterTable()
+    {
+        // TPC variant: union'd derived table is joined to another table.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table dogs (Id int, Name nvarchar(50));
+            create table cats (Id int, Name nvarchar(50));
+            create table owners (PetId int, OwnerName nvarchar(50));
+            insert dogs values (1, 'Rex');
+            insert cats values (2, 'Whiskers');
+            insert owners values (1, 'alice'), (2, 'bob')
+            """);
+
+        using var reader = simulation.CreateCommand("""
+            select t.Id, o.OwnerName from (
+                select Id, Name from dogs
+                union all
+                select Id, Name from cats
+            ) t
+            left join owners o on t.Id = o.PetId
+            order by t.Id
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual("alice", reader.GetString(1));
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        AreEqual("bob", reader.GetString(1));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void NestedUnion_InsideUnionInsideFrom()
+    {
+        // Tests the parser's depth bookkeeping: a UNION-bearing derived table inside
+        // another UNION-bearing derived table.
+        using var reader = new Simulation().CreateCommand(
+            "select y.a from (select a from (select 1 as a union select 2) x union select 3) y order by y.a").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, values);
+    }
+
+    [TestMethod]
+    public void Except_InsideFromDerivedTable()
+        => CollectionAssert.AreEquivalent(new[] { 1, 2 },
+            ReadInts(SeededTwoTables().CreateCommand(
+                "select x.v from (select v from left_t except select v from right_t) x")));
+
+    [TestMethod]
+    public void Intersect_InsideFromDerivedTable()
+        => CollectionAssert.AreEquivalent(new[] { 3 },
+            ReadInts(SeededTwoTables().CreateCommand(
+                "select x.v from (select v from left_t intersect select v from right_t) x")));
 }
