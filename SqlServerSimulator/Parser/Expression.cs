@@ -445,6 +445,7 @@ internal abstract class Expression
                 "CAST" => new Cast(context),
                 "LEAD" => WindowExpression.ParseLead(context),
                 "LEFT" => new Left(context),
+                "RAND" => new Rand(context),
                 "RANK" => WindowExpression.ParseRank(context),
                 "SIGN" => new Sign(context),
                 "SQRT" => new Sqrt(context),
@@ -465,13 +466,17 @@ internal abstract class Expression
                 "RIGHT" => new Right(context),
                 "ROUND" => new Round(context),
                 "RTRIM" => new RightTrim(context),
+                "SPACE" => new Space(context),
                 "STDEV" => AggregateExpression.Parse(context, AggregateKind.Stdev),
+                "STUFF" => new Stuff(context),
                 "UPPER" => new Upper(context),
                 _ => null
             },
             6 => uppercaseName switch
             {
                 "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
+                "FORMAT" => new Format(context),
+                "ISDATE" => new IsDate(context),
                 "ISNULL" => new IsNullExpression(context),
                 "NULLIF" => new NullIf(context),
                 "SQUARE" => new TrigFunction(context, TrigKind.Square),
@@ -497,6 +502,7 @@ internal abstract class Expression
                 "COALESCE" => new Coalesce(context),
                 "DATEDIFF" => new DateDiff.Standard(context),
                 "DATEPART" => new DatePart(context),
+                "PATINDEX" => new PatIndex(context),
                 "TRY_CAST" => new Cast(context, tryMode: true),
                 _ => null
             },
@@ -505,7 +511,10 @@ internal abstract class Expression
                 "CHARINDEX" => new CharIndex(context),
                 "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
+                "ISNUMERIC" => new IsNumeric(context),
                 "OBJECT_ID" => new ObjectId(context),
+                "QUOTENAME" => new QuoteName(context),
+                "REPLICATE" => new Replicate(context),
                 "SCHEMA_ID" => new SchemaId(context),
                 "SUBSTRING" => new Substring(context),
                 _ => null

@@ -93,8 +93,11 @@ internal readonly partial struct SqlValue
     /// Shared body of <see cref="ParseLegacyDateTime"/> and
     /// <see cref="ParseSmallDateTime"/>. Returns whether the string parsed;
     /// the caller throws the appropriate Msg-241/Msg-295 factory on failure.
+    /// Also reachable from <c>ISDATE</c>, which wraps with an additional
+    /// 1753-9999 year-range gate (the shared parser accepts pre-1753
+    /// values via the datetime2 paths).
     /// </summary>
-    private static bool TryParseLegacyDateTime(string value, out DateTime result)
+    internal static bool TryParseLegacyDateTime(string value, out DateTime result)
     {
         if (string.IsNullOrEmpty(value))
         {

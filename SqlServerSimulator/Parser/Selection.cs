@@ -776,8 +776,27 @@ internal sealed partial class Selection
         // Server, guarded by ApplyTests).
         var checkpoint = context.SaveCheckpoint();
         var next = context.GetNextRequired();
-        if (next is Name)
+        if (next is Name nextName)
         {
+            // The right-side source's column references can correlate to the
+            // left sources of the APPLY — wire the chained resolver up front
+            // so OPENJSON / STRING_SPLIT / user TVF parse-time GetSqlType
+            // calls reach them.
+            var leftSnapshotForName = leftSources.ToArray();
+            SqlType ChainedResolverForName(MultiPartName name) =>
+                ResolveColumnTypeAcrossSources(leftSnapshotForName, name, surroundingOuter);
+
+            // Built-in rowset functions (OPENJSON, STRING_SPLIT) share the
+            // same APPLY-friendly shape as user-defined inline TVFs — route
+            // them back through ParseSingleFromSource. Case-insensitive
+            // match to mirror real SQL Server's grammar.
+            if (string.Equals(nextName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(nextName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
+            {
+                context.RestoreCheckpoint(checkpoint);
+                return ParseSingleFromSource(context, depth, ChainedResolverForName);
+            }
+
             // Peek the resolved object name to decide between TVF route
             // and reject-as-syntax-error.
             var afterNameCheckpoint = context.SaveCheckpoint();
@@ -788,7 +807,7 @@ internal sealed partial class Selection
             if (resolvedIsTvf)
             {
                 context.RestoreCheckpoint(checkpoint);
-                return ParseSingleFromSource(context, depth, surroundingOuter);
+                return ParseSingleFromSource(context, depth, ChainedResolverForName);
             }
             // Restore + fall through to the generic syntax-error throw.
             context.RestoreCheckpoint(checkpoint);
@@ -862,6 +881,30 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: openJsonPlan);
+                }
+
+                // STRING_SPLIT dispatch: same shape as OPENJSON — a built-in
+                // TVF that turns into a synthesized Selection plan. The name
+                // can't be schema-qualified (a 2-part `dbo.STRING_SPLIT(...)`
+                // wouldn't match here since this branch handles a single Name
+                // token before ParseObjectName), matching real SQL Server's
+                // grammar.
+                if (string.Equals(tableName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
+                {
+                    var stringSplitPlan = ParseStringSplit(context, outerTypeResolver);
+                    var stringSplitColumns = new HeapColumn[stringSplitPlan.Schema.Length];
+                    for (var ci = 0; ci < stringSplitColumns.Length; ci++)
+                        stringSplitColumns[ci] = new HeapColumn(stringSplitPlan.ColumnNames[ci], stringSplitPlan.Schema[ci], maxLength: null, nullable: true);
+                    var stringSplitAlias = ConsumeOptionalAliasInPlace(context);
+                    return new FromSource(
+                        qualifier: stringSplitAlias,
+                        columnNames: stringSplitPlan.ColumnNames,
+                        columns: stringSplitColumns,
+                        storedSchema: stringSplitColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: stringSplitPlan);
                 }
 
                 // Multi-part name parse: advances the cursor past the last

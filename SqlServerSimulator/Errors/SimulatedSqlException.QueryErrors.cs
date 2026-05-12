@@ -382,4 +382,22 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotTruncateObjectDoesNotExist(string name) =>
         new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 4701, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 214 — fired by <c>STRING_SPLIT</c> when the
+    /// separator argument is NULL, empty, or multi-character (probe-confirmed
+    /// against SQL Server 2025: class 16 state 11, verbatim wording referring
+    /// to the parameter as <c>'separator'</c> of type <c>nchar(1)/nvarchar(1)</c>).
+    /// </summary>
+    internal static SimulatedSqlException StringSplitSeparatorMustBeSingleChar() =>
+        new("Procedure expects parameter 'separator' of type 'nchar(1)/nvarchar(1)'.", 214, 16, 11);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4199 — fired by <c>STRING_SPLIT</c> when the
+    /// optional third argument (<c>enable_ordinal</c>) is something other than
+    /// 0 / 1 / NULL. Wording is verbatim from the probe; the message echoes
+    /// both the offending value and the argument index.
+    /// </summary>
+    internal static SimulatedSqlException StringSplitInvalidEnableOrdinal(long value) =>
+        new($"Argument value {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is invalid for argument 3 of string_split function.", 4199, 16, 1);
 }
