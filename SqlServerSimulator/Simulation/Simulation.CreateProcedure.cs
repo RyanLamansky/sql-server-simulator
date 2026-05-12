@@ -168,6 +168,29 @@ partial class Simulation
         var name = variable.Value;
         context.MoveNextRequired();
 
+        // Try table-valued-parameter binding first. A multi-part name (e.g.
+        // `dbo.MyType`) unambiguously means user-defined type; a 1-part name
+        // checks TableTypes first with fallback to the scalar parser.
+        var tableType = TryResolveProcedureTableTypeParameter(context, name);
+        if (tableType is not null)
+        {
+            // READONLY is mandatory after a TVP parameter (probe-confirmed:
+            // Msg 352 if missing). DEFAULT / OUTPUT shapes raise Msg 102
+            // because the grammar after a TVP-type parameter only permits
+            // READONLY (probe-confirmed wording: "Incorrect syntax near
+            // '=' / 'output'").
+            if (context.Token is Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.ReadOnly })
+                throw SimulatedSqlException.TableValuedParameterMustBeReadOnly("@" + name);
+            context.MoveNextRequired();
+            // After READONLY no further trailers are accepted (no = default,
+            // no OUTPUT).
+            return new ProcedureParameter(name, SqlType.Int32, declaredMaxLength: null, defaultExpression: null, isOutput: false, tableType: tableType);
+        }
+
         var (paramType, declaredMaxLength) = ParseProcedureParameterType(context);
 
         Expression? defaultExpression = null;
@@ -189,6 +212,42 @@ partial class Simulation
         }
 
         return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput);
+    }
+
+    /// <summary>
+    /// Probes the cursor for a user-defined table type reference. Returns
+    /// the matched <see cref="TableType"/> with the cursor advanced past the
+    /// type name; returns null (cursor unchanged) for any other shape so the
+    /// caller falls through to the scalar parameter-type parser.
+    /// </summary>
+    private static TableType? TryResolveProcedureTableTypeParameter(ParserContext context, string parameterName)
+    {
+        if (context.Token is not Name firstName)
+            return null;
+
+        // Multi-part detection: peek for `.` without permanently advancing.
+        var checkpoint = context.SaveCheckpoint();
+        var sawDot = context.MoveNext() && context.Token is Operator { Character: '.' };
+        context.RestoreCheckpoint(checkpoint);
+
+        if (sawDot)
+        {
+            // Multi-part name: only resolvable as user-defined type.
+            // Built-in scalars are 1-part only; a 2-part scalar reference
+            // would already fail in the scalar parser, so consuming the
+            // name here is safe.
+            var objectName = BatchContext.ParseObjectName(context);
+            if (!context.Batch.TryResolveTableType(objectName, out var tableType))
+                throw SimulatedSqlException.CannotFindDataType(parameterIndex: 1, objectName.ToString(), "@" + parameterName);
+            context.MoveNextOptional();
+            return tableType;
+        }
+
+        // 1-part: try TableTypes, fall through to scalar on miss.
+        if (!context.Batch.TryResolveTableType(new MultiPartName(firstName.Value), out var singleType))
+            return null;
+        context.MoveNextOptional();
+        return singleType;
     }
 
     /// <summary>

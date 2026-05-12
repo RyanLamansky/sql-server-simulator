@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable
 {
-    public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false)
+    public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false)
     {
         this.Name = name;
         this.ObjectId = objectId;
@@ -21,6 +21,7 @@ internal sealed class HeapTable
         this.KeyConstraints = keyConstraints ?? [];
         this.CheckConstraints = checkConstraints ?? [];
         this.IsTableVariable = isTableVariable;
+        this.IsTableValuedParameter = isTableValuedParameter;
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -161,6 +162,19 @@ internal sealed class HeapTable
     /// (matching real SQL Server's <c>table '@t'</c> wording).
     /// </summary>
     public readonly bool IsTableVariable;
+
+    /// <summary>
+    /// True when this <c>@t</c> entry was bound from a table-valued
+    /// parameter — either as a stored-procedure parameter declared
+    /// <c>READONLY</c> or as an ADO.NET <see cref="System.Data.SqlDbType.Structured"/>
+    /// parameter materialized from a <see cref="System.Data.DataTable"/> /
+    /// <see cref="System.Data.IDataReader"/>. Implies <see cref="IsTableVariable"/>
+    /// is also true. DML statements targeting a TVP-flagged table variable
+    /// raise Msg 10700 ("the table-valued parameter is READONLY and cannot
+    /// be modified") — probe-confirmed against SQL Server 2025 for INSERT /
+    /// UPDATE / DELETE / MERGE.
+    /// </summary>
+    public readonly bool IsTableValuedParameter;
 
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();

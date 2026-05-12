@@ -122,11 +122,14 @@ partial class Simulation
             string? argName = null;
 
             // Named-arg form: `@name = value`. Peek for the `=` to
-            // disambiguate from a bare `@var` positional argument.
+            // disambiguate from a bare `@var` positional argument. EOF after
+            // the `@name` is legal here (the `@var` is the last positional
+            // argument), so use MoveNextOptional and just bail to the
+            // positional path if no token follows.
             if (context.Token is AtPrefixedString nameToken)
             {
                 var checkpoint = context.SaveCheckpoint();
-                context.MoveNextRequired();
+                context.MoveNextOptional();
                 if (context.Token is Operator { Character: '=' })
                 {
                     argName = nameToken.Value;
@@ -180,9 +183,18 @@ partial class Simulation
 
         // @variable reference — capture the slot (live, so OUTPUT writeback
         // sees the proc's final value), read its value now, and check for a
-        // trailing OUTPUT / OUT keyword.
+        // trailing OUTPUT / OUT keyword. When the name resolves to a table
+        // variable instead of a scalar, carry the live <see cref="HeapTable"/>
+        // through the TVP-arg path; OUTPUT after a table-variable arg is
+        // syntactically rejected by real SQL Server (TVP params are
+        // implicitly read-only and don't write back).
         if (context.Token is AtPrefixedString varRef)
         {
+            if (batch.TableVariables.TryGetValue(varRef.Value, out var tableVar))
+            {
+                context.MoveNextOptional();
+                return new ProcArgument(name, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tableVar);
+            }
             var slot = batch.GetVariableSlot(varRef.Value);
             context.MoveNextOptional();
             VariableSlot? outputSlot = null;
@@ -251,10 +263,20 @@ partial class Simulation
 /// invocation writes the proc's final parameter value back into this slot
 /// at exit.
 /// </summary>
-internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot)
+internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null)
 {
     public readonly string? Name = name;
     public readonly bool IsDefault = isDefault;
     public readonly SqlValue Value = value;
     public readonly VariableSlot? OutputSlot = outputSlot;
+
+    /// <summary>
+    /// Non-null when the caller passed a table variable (or, eventually, an
+    /// ADO.NET <see cref="System.Data.SqlDbType.Structured"/> parameter) as
+    /// the argument value. <see cref="Value"/> is ignored when this is set;
+    /// the binding path in <see cref="Simulation.InvokeProcedure"/> looks
+    /// here first for the corresponding TVP parameter and routes through
+    /// the child <see cref="BatchContext.TableVariables"/> dict.
+    /// </summary>
+    public readonly HeapTable? TableValue = tableValue;
 }

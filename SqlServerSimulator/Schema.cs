@@ -58,4 +58,15 @@ internal sealed class Schema(string name, int schemaId)
     /// removes it.
     /// </summary>
     public readonly ConcurrentDictionary<string, Procedure> Procedures = new(Collation.Default);
+
+    /// <summary>
+    /// User-defined table types hosted by this schema. Created via
+    /// <c>CREATE TYPE schema.name AS TABLE (...)</c>, consumed by
+    /// <c>DECLARE @t schema.name</c> and as <c>READONLY</c> procedure
+    /// parameters (TVPs). Probed against SQL Server 2025: type names occupy
+    /// a separate namespace from tables / views / functions / procs — a
+    /// table type can share a leaf with a table (Msg 219 on dup type name
+    /// only).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, TableType> TableTypes = new(Collation.Default);
 }

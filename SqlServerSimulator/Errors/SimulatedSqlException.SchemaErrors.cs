@@ -97,6 +97,89 @@ partial class SimulatedSqlException
         new($"Cannot drop the procedure '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 219: <c>CREATE TYPE</c> targeted a name that
+    /// already exists in the schema's type namespace. Probe-confirmed verbatim
+    /// against SQL Server 2025 (2026-05-12) — the wording's
+    /// "or you do not have permission to create it" tail mirrors the real
+    /// server's permission/existence ambiguity (distinct from Msg 2714 which
+    /// uses the cross-namespace object collision wording).
+    /// </summary>
+    internal static SimulatedSqlException TypeAlreadyExists(string fullName) =>
+        new($"The type '{fullName}' already exists, or you do not have permission to create it.", 219, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 218: <c>DROP TYPE</c> targeted a name that
+    /// doesn't exist (suppressed by <c>IF EXISTS</c>). Probe-confirmed
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException TypeDoesNotExist(string fullName) =>
+        new($"Could not find the type '{fullName}'. Either it does not exist or you do not have the necessary permission.", 218, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3732: <c>DROP TYPE</c> targeted a type that is
+    /// still referenced by at least one procedure (or function / view, when
+    /// those grow TVP parameters). Probe-confirmed verbatim wording against
+    /// SQL Server 2025: the error names a single referencing object even
+    /// when more than one exists, and the trailing "There may be other
+    /// objects that reference this type." line is part of the canonical
+    /// message.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropTypeBecauseReferenced(string typeFullName, string referencingObject) =>
+        new($"Cannot drop type '{typeFullName}' because it is being referenced by object '{referencingObject}'. There may be other objects that reference this type.", 3732, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2715: a <c>DECLARE</c> / <c>CREATE
+    /// PROCEDURE</c> / <c>CREATE FUNCTION</c> parameter referenced a type
+    /// name that doesn't resolve. Probe-confirmed two-line wording against
+    /// SQL Server 2025 (the "Parameter or variable" suffix is part of the
+    /// canonical message).
+    /// </summary>
+    internal static SimulatedSqlException CannotFindDataType(int parameterIndex, string typeFullName, string parameterName) =>
+        new($"Column, parameter, or variable #{parameterIndex}: Cannot find data type {typeFullName}.{Environment.NewLine}Parameter or variable '{parameterName}' has an invalid data type.", 2715, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 352: a <c>CREATE PROCEDURE</c> / <c>CREATE
+    /// FUNCTION</c> parameter was typed by a user-defined table type but
+    /// didn't include the mandatory <c>READONLY</c> keyword. Probe-confirmed
+    /// verbatim wording against SQL Server 2025 — the message names the
+    /// parameter (with leading <c>@</c>) in double-quotes.
+    /// </summary>
+    internal static SimulatedSqlException TableValuedParameterMustBeReadOnly(string parameterName) =>
+        new($"The table-valued parameter \"{parameterName}\" must be declared with the READONLY option.", 352, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10700: a procedure body attempted to mutate
+    /// (INSERT / UPDATE / DELETE / MERGE) a parameter declared with
+    /// <c>READONLY</c> (the only shape supported is the table-valued
+    /// parameter). Probe-confirmed verbatim wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException TableValuedParameterIsReadOnly(string parameterName) =>
+        new($"The table-valued parameter \"{parameterName}\" is READONLY and cannot be modified.", 10700, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 500: a TVP value supplied via ADO.NET (a
+    /// <see cref="System.Data.DataTable"/> or <see cref="System.Data.IDataReader"/>)
+    /// has a column count that doesn't match the target table type's column
+    /// count. Probe-confirmed verbatim wording against SQL Server 2025: the
+    /// real server raises this from the client-side batch encoder when the
+    /// row schema mismatch is detected before the command reaches the
+    /// engine; the simulator mirrors the wording at parameter materialization.
+    /// </summary>
+    internal static SimulatedSqlException TableValuedParameterColumnCountMismatch(int suppliedColumns, int requiredColumns) =>
+        new($"Trying to pass a table-valued parameter with {suppliedColumns} column(s) where the corresponding user-defined table type requires {requiredColumns} column(s).", 500, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1077: a TVP value supplied via ADO.NET
+    /// included an explicit value for an identity column on the target
+    /// table type. Probe-confirmed verbatim wording against SQL Server 2025
+    /// — real SQL Server rejects this because <c>SET IDENTITY_INSERT @t</c>
+    /// is not a legal statement (the only path to insert explicit identity
+    /// values into a table variable / TVP).
+    /// </summary>
+    internal static SimulatedSqlException InsertIntoIdentityColumnNotAllowedOnTableVariables() =>
+        new("INSERT into an identity column not allowed on table variables.", 1077, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 302: <c>newsequentialid()</c> appeared anywhere
     /// other than as the entire DEFAULT expression of a <c>uniqueidentifier</c>
     /// column. Wording verified against SQL Server 2025 — the simulator

@@ -48,6 +48,7 @@ partial class Simulation
         var boundValues = new SqlValue?[procedure.Parameters.Length];
         var boundOutputSlots = new VariableSlot?[procedure.Parameters.Length];
         var boundIsDefault = new bool[procedure.Parameters.Length];
+        var boundTableValues = new HeapTable?[procedure.Parameters.Length];
         var positionalIndex = 0;
         foreach (var arg in arguments)
         {
@@ -82,15 +83,26 @@ partial class Simulation
             boundValues[paramIndex] = arg.Value;
             boundOutputSlots[paramIndex] = arg.OutputSlot;
             boundIsDefault[paramIndex] = arg.IsDefault;
+            boundTableValues[paramIndex] = arg.TableValue;
         }
 
         // Apply defaults for unbound parameters; raise Msg 201 for any
-        // still-unbound parameter without a default.
+        // still-unbound parameter without a default. TVP parameters have a
+        // distinct path: an unbound TVP parameter materializes as an empty
+        // table-variable clone (probe-confirmed: <c>EXEC p</c> with the TVP
+        // arg omitted is legal and the body sees an empty <c>@rows</c>),
+        // while a TVP parameter passed a scalar argument raises Msg 206.
         for (var i = 0; i < procedure.Parameters.Length; i++)
         {
+            var param = procedure.Parameters[i];
+            if (param.TableType is { } tvpType)
+            {
+                if (boundValues[i] is not null && boundTableValues[i] is null && !boundIsDefault[i])
+                    throw SimulatedSqlException.OperandTypeClashScalarVsTableType(boundValues[i]!.Value.Type, tvpType.Name);
+                continue;
+            }
             if (boundValues[i] is not null && !boundIsDefault[i])
                 continue;
-            var param = procedure.Parameters[i];
             if (param.Default is null)
                 throw SimulatedSqlException.ProcedureExpectsParameter(procedure.Name, param.Name);
             // Defaults are re-evaluated per call in the outer batch's
@@ -103,11 +115,29 @@ partial class Simulation
         }
 
         // Seed the child batch's variable dictionary with the bound values,
-        // coerced to each parameter's declared type.
+        // coerced to each parameter's declared type. TVP parameters land in
+        // a parallel table-variables seed (registered on the child batch
+        // post-construction).
         var variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        var tableVariables = new Dictionary<string, HeapTable>(StringComparer.InvariantCultureIgnoreCase);
         for (var i = 0; i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];
+            if (param.TableType is { } tvpType)
+            {
+                // The caller may have supplied an existing table variable
+                // (which we pass through as-is, but flagged read-only) or
+                // omitted the arg entirely (we clone an empty table from
+                // the type template).
+                var clone = tvpType.Clone("@" + param.Name, outerBatch, isTableValuedParameter: true);
+                if (boundTableValues[i] is { } supplied)
+                {
+                    foreach (var row in supplied.Heap.EnumerateRows())
+                        clone.Heap.Insert(row);
+                }
+                tableVariables[param.Name] = clone;
+                continue;
+            }
             var coerced = boundValues[i]!.Value.CoerceTo(param.Type);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null);
         }
@@ -135,7 +165,7 @@ partial class Simulation
             bodyCommand.CommandText = procedure.BodyText;
 #pragma warning restore CA2100
 
-            var innerBatch = new BatchContext(bodyCommand, variables, procFrame);
+            var innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables);
             connection.NestingLevel++;
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code

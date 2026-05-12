@@ -79,10 +79,22 @@ internal sealed class Procedure(
 /// is stored with the leading <c>@</c> stripped (matching the
 /// <see cref="BatchContext.Variables"/> keying convention).
 /// </summary>
-internal sealed class ProcedureParameter(string name, SqlType type, int? declaredMaxLength, Expression? defaultExpression, bool isOutput)
+internal sealed class ProcedureParameter(string name, SqlType type, int? declaredMaxLength, Expression? defaultExpression, bool isOutput, TableType? tableType = null)
 {
     public readonly string Name = name;
     public readonly SqlType Type = type;
+
+    /// <summary>
+    /// Non-null when this parameter is a table-valued parameter — references
+    /// the <see cref="TableType"/> that defines its column shape. Always
+    /// implies <see cref="IsOutput"/> is false and <c>READONLY</c> was set
+    /// at CREATE PROCEDURE time (Msg 352 otherwise — probed). The
+    /// <see cref="Type"/> field for TVP parameters is the placeholder
+    /// <see cref="SqlType.Int32"/> (catalog views consult
+    /// <see cref="TableType"/> instead — system_type_id 243 for TVP rows in
+    /// sys.parameters / sys.types).
+    /// </summary>
+    public readonly TableType? TableType = tableType;
 
     /// <summary>
     /// The declared <c>(N)</c> on a variable-length string/binary type, kept

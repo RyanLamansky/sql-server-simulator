@@ -22,9 +22,11 @@ partial class Simulation
     {
         var rowsAffected = (int?)null;
         var sawScalar = false;
+        var variableIndex = 0;
 
         do
         {
+            variableIndex++;
             if (context.GetNextRequired() is not AtPrefixedString variableToken)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -62,6 +64,19 @@ partial class Simulation
                 return context.Token is Operator { Character: ',' }
                     ? throw SimulatedSqlException.SyntaxErrorNear(context)
                     : null;
+            }
+
+            // User-defined table type form: `DECLARE @t [schema.]MyType`.
+            // Distinct from inline TABLE — multi-variable DECLARE is allowed
+            // (probe-confirmed: `DECLARE @t1 dbo.MyType, @t2 dbo.MyType`
+            // works, unlike the inline TABLE form which raises Msg 102).
+            // A multi-part name unambiguously means user-defined type (built-
+            // in scalars are 1-part only); for 1-part names, table-type
+            // lookup runs first with fallback to the scalar path.
+            if (context.Token is Name firstNameToken && TryParseDeclareTableTypeVariable(context, firstNameToken, variableName, variableIndex))
+            {
+                sawScalar = true;
+                continue;
             }
 
             var (declaredType, declaredMaxLength) = ParseDeclareTypeSpec(context, variableName);
@@ -145,6 +160,48 @@ partial class Simulation
         throw SimulatedSqlException.InvalidColumnName(name);
 
     /// <summary>
+    /// Tries to bind <paramref name="variableName"/> to a user-defined
+    /// <see cref="TableType"/>. Returns true on success (a fresh
+    /// <see cref="HeapTable"/> clone is registered on
+    /// <see cref="BatchContext.TableVariables"/> and the cursor sits past
+    /// the type name); returns false to fall through to the scalar parser.
+    /// Multi-part names always commit (a miss raises Msg 2715 — probe-
+    /// confirmed); 1-part names only commit on a successful TableTypes
+    /// lookup so built-in scalars still resolve.
+    /// </summary>
+    private static bool TryParseDeclareTableTypeVariable(ParserContext context, Name firstNameToken, string variableName, int variableIndex)
+    {
+        // Peek for `.` continuation. Multi-part means user-defined type.
+        var checkpoint = context.SaveCheckpoint();
+        var sawDot = context.MoveNext() && context.Token is Operator { Character: '.' };
+        context.RestoreCheckpoint(checkpoint);
+
+        if (sawDot)
+        {
+            var objectName = BatchContext.ParseObjectName(context);
+            if (!context.Batch.TryResolveTableType(objectName, out var tableType))
+                throw SimulatedSqlException.CannotFindDataType(variableIndex, objectName.ToString(), "@" + variableName);
+            context.MoveNextOptional();
+            RegisterTableTypeVariable(context, variableName, tableType);
+            return true;
+        }
+
+        // 1-part name. Try TableType lookup; on miss, fall through to scalar.
+        if (!context.Batch.TryResolveTableType(new MultiPartName(firstNameToken.Value), out var singleType))
+            return false;
+        context.MoveNextOptional();
+        RegisterTableTypeVariable(context, variableName, singleType);
+        return true;
+    }
+
+    private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        context.Batch.TableVariables[variableName] = tableType.Clone("@" + variableName, context.Batch);
+    }
+
+    /// <summary>
     /// Parses the column-list body of <c>DECLARE @t TABLE (...)</c> and
     /// registers the resulting <see cref="HeapTable"/> on
     /// <see cref="BatchContext.TableVariables"/>. Cursor on entry: the
@@ -189,7 +246,7 @@ partial class Simulation
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
 
-        if (!ParseColumnList(context, fullName, isTableVariable: true, heapColumns, pendingKeys, pendingChecks, pendingComputed))
+        if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextOptional();

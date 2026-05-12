@@ -306,6 +306,15 @@ partial class SimulatedSqlException
         new($"Operand type clash: {FamilyRootName(left)} is incompatible with {FamilyRootName(right)}", 206, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 206 against a user-defined table type: the
+    /// scalar-typed EXEC argument is incompatible with the TVP parameter's
+    /// table type. Probe-confirmed wording — the table type renders as its
+    /// bare leaf name (no schema qualifier).
+    /// </summary>
+    internal static SimulatedSqlException OperandTypeClashScalarVsTableType(SqlType scalar, string tableTypeLeaf) =>
+        new($"Operand type clash: {FamilyRootName(scalar)} is incompatible with {tableTypeLeaf}", 206, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 529: an explicit <c>CAST</c> requested a
     /// conversion that SQL Server doesn't allow even with the explicit
     /// keyword (e.g. <c>cast(0 as date)</c>, <c>cast(d as int)</c> when

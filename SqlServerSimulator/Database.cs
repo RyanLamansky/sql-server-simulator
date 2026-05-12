@@ -108,4 +108,16 @@ internal sealed class Database
     /// <c>OBJECT_ID()</c> and the upcoming <c>sys.objects</c> catalog view.
     /// </summary>
     public int AllocateObjectId() => Interlocked.Increment(ref this.nextObjectId);
+
+    private int nextUserTypeId = 256;
+
+    /// <summary>
+    /// Allocates the next per-database <c>user_type_id</c> for a user-defined
+    /// type. Surfaces in <c>sys.types.user_type_id</c> and
+    /// <c>sys.table_types.user_type_id</c>; system types occupy ids 0–255
+    /// (matching real SQL Server's convention), so user-defined types start
+    /// at 256. The counter is monotonic and never reuses a value — same
+    /// invariant as <see cref="AllocateObjectId"/>.
+    /// </summary>
+    public int AllocateUserTypeId() => Interlocked.Increment(ref this.nextUserTypeId);
 }

@@ -33,6 +33,8 @@ partial class Simulation
             : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
                 ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
                 : SimulatedSqlException.InvalidObjectName(destinationName));
+        if (destinationTable.IsTableValuedParameter)
+            throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
 
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })

@@ -15,7 +15,7 @@ public class QualityTests
             .Where(type => type.IsPublic)
             .ToArray();
 
-        HashSet<Type> allowedTypes = [simulation];
+        HashSet<Type> allowedTypes = [simulation, typeof(TableValuedParameterExtensions)];
         Assert.HasCount(allowedTypes.Count, types);
         foreach (var type in types)
             Assert.Contains(type, allowedTypes);

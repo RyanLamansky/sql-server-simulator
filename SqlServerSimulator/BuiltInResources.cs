@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 
 internal static class BuiltInResources
 {
-    private static readonly object?[][] SystypesRowData =
+    internal static readonly object?[][] SystypesRowData =
     [
         ["image", 34, 0, 34, 16, 0, 0, 0, 0, 4, 0, null, 20, false, true, 34, null, null, null, null],
         ["text", 35, 0, 35, 16, 0, 0, 0, 0, 4, 0, 872468488, 19, false, true, 35, null, null, null, "SQL_Latin1_General_CP1_CI_AS"],
@@ -330,6 +330,7 @@ internal static class BuiltInResources
             new("scale", SqlType.TinyInt, null, false),
             new("is_output", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, false),
+            new("is_readonly", SqlType.Bit, null, false),
         };
         var parametersView = new CatalogView("parameters", parametersColumns, EnumerateParameters);
 
@@ -431,6 +432,53 @@ internal static class BuiltInResources
         var isViewsView = new CatalogView("VIEWS", isViewsColumns, batch =>
             EnumerateInformationSchemaViews(batch, checkOptionNone, checkOptionCascade, isUpdatableNo));
 
+        // sys.types: per-database list of system + user-defined types. Probe-
+        // confirmed shipped subset: name / system_type_id / user_type_id /
+        // schema_id / is_user_defined / is_table_type / is_nullable. Real SQL
+        // Server has many more columns (principal_id, max_length, precision,
+        // scale, collation_name, is_assembly_type, default_object_id, etc.);
+        // the shipped set is what apps typically test for.
+        var typesColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("is_user_defined", SqlType.Bit, null, false),
+            new("is_table_type", SqlType.Bit, null, false),
+            new("is_nullable", SqlType.Bit, null, false),
+        };
+        var typesView = new CatalogView("types", typesColumns, EnumerateSysTypes);
+
+        // sys.table_types: per-database list of user-defined table types
+        // only. Probe-confirmed shipped subset: name / type_table_object_id /
+        // is_user_defined / schema_id / user_type_id.
+        var tableTypesColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("type_table_object_id", SqlType.Int32, null, false),
+            new("is_user_defined", SqlType.Bit, null, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+        };
+        var tableTypesView = new CatalogView("table_types", tableTypesColumns, EnumerateSysTableTypes);
+
+        // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
+        // emits a row for every user-defined type (scalar UDTs surface their
+        // base type; table types surface 'table type' as the data_type
+        // literal — probe-confirmed G6). Load-bearing subset: DOMAIN_CATALOG /
+        // DOMAIN_SCHEMA / DOMAIN_NAME / DATA_TYPE.
+        var isDomainsColumns = new HeapColumn[]
+        {
+            new("DOMAIN_CATALOG", SqlType.SystemName, 128, true),
+            new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
+            new("DOMAIN_NAME", SqlType.SystemName, 128, false),
+            new("DATA_TYPE", SqlType.NVarchar, 128, true),
+        };
+        var tableTypeDataType = SqlValue.FromNVarchar("table type");
+        var isDomainsView = new CatalogView("DOMAINS", isDomainsColumns, batch =>
+            EnumerateInformationSchemaDomains(batch, tableTypeDataType));
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -440,13 +488,104 @@ internal static class BuiltInResources
             ["sys.parameters"] = parametersView,
             ["sys.views"] = viewsCatalogView,
             ["sys.procedures"] = proceduresView,
+            ["sys.types"] = typesView,
+            ["sys.table_types"] = tableTypesView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
             ["INFORMATION_SCHEMA.VIEWS"] = isViewsView,
             ["INFORMATION_SCHEMA.ROUTINES"] = isRoutinesView,
             ["INFORMATION_SCHEMA.PARAMETERS"] = isParametersView,
+            ["INFORMATION_SCHEMA.DOMAINS"] = isDomainsView,
         };
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.types</c>: every <see cref="SystypesRowData"/> entry
+    /// (system types) followed by user-defined table types from each schema's
+    /// <see cref="Schema.TableTypes"/> dict. Probe-confirmed (G1) shape:
+    /// table-type rows surface <c>system_type_id = 243</c>,
+    /// <c>is_user_defined = 1</c>, <c>is_table_type = 1</c>,
+    /// <c>is_nullable = 0</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysTypes(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
+        // System types: project from SystypesRowData using its name (col 0),
+        // xtype (col 1, used as system_type_id), xusertype (col 3, used as
+        // user_type_id). is_user_defined is derived from a hardcoded set:
+        // sysname is user-defined; everything else system.
+        foreach (var row in SystypesRowData)
+        {
+            var name = (string)row[0]!;
+            var systemTypeId = Convert.ToByte(row[1]!, CultureInfo.InvariantCulture);
+            var userTypeId = Convert.ToInt32(row[3]!, CultureInfo.InvariantCulture);
+            yield return [
+                SqlValue.FromSystemName(name),
+                SqlValue.FromByte(systemTypeId),
+                SqlValue.FromInt32(userTypeId),
+                sysSchemaId,
+                name == "sysname" ? trueBit : falseBit,
+                falseBit,
+                trueBit,
+            ];
+        }
+        // User-defined table types: probe-confirmed system_type_id 243.
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
+            {
+                yield return [
+                    SqlValue.FromSystemName(tt.Name),
+                    SqlValue.FromByte(243),
+                    SqlValue.FromInt32(tt.UserTypeId),
+                    schemaId,
+                    trueBit,
+                    trueBit,
+                    falseBit,
+                ];
+            }
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysTableTypes(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
+            {
+                yield return [
+                    SqlValue.FromSystemName(tt.Name),
+                    SqlValue.FromInt32(tt.TypeTableObjectId),
+                    trueBit,
+                    schemaId,
+                    SqlValue.FromInt32(tt.UserTypeId),
+                ];
+            }
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, SqlValue tableTypeDataType)
+    {
+        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
+            {
+                yield return [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(tt.Name),
+                    tableTypeDataType,
+                ];
+            }
+        }
     }
 
     /// <summary>
@@ -662,17 +801,23 @@ internal static class BuiltInResources
                 for (var i = 0; i < proc.Parameters.Length; i++)
                 {
                     var param = proc.Parameters[i];
+                    // TVP parameters surface system_type_id 243 (table type)
+                    // and the user_type_id of the referenced TableType.
+                    // is_readonly is true only for TVP params (probe-confirmed
+                    // — scalar params with a future READONLY shape don't ship).
+                    var isTvp = param.TableType is not null;
                     yield return [
                         procObjectId,
                         SqlValue.FromSystemName("@" + param.Name),
                         SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(param.Type.SystemTypeId),
-                        SqlValue.FromInt32(param.Type.UserTypeId),
+                        SqlValue.FromByte(isTvp ? (byte)243 : param.Type.SystemTypeId),
+                        SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : param.Type.UserTypeId),
                         SqlValue.FromInt16(0),
                         zeroByte,
                         zeroByte,
                         SqlValue.FromBoolean(param.IsOutput),
                         trueBit,
+                        SqlValue.FromBoolean(isTvp),
                     ];
                 }
             }
@@ -696,6 +841,7 @@ internal static class BuiltInResources
                         zeroByte,
                         trueBit,
                         trueBit,
+                        falseBit,
                     ];
                 }
                 for (var i = 0; i < fn.Parameters.Length; i++)
@@ -712,6 +858,7 @@ internal static class BuiltInResources
                         zeroByte,
                         falseBit,
                         trueBit,
+                        falseBit,
                     ];
                 }
             }
@@ -797,6 +944,32 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Nullable),
                         falseBit,
                         falseBit,
+                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                    ];
+                }
+            }
+            // Table types surface their columns through sys.columns keyed by
+            // type_table_object_id (probe G3). Computed columns inherit
+            // is_computed=true; identity columns inherit is_identity=true.
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.TypeTableObjectId))
+            {
+                var typeObjectId = SqlValue.FromInt32(tt.TypeTableObjectId);
+                for (var i = 0; i < tt.Columns.Length; i++)
+                {
+                    var col = tt.Columns[i];
+                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
+                    yield return [
+                        typeObjectId,
+                        SqlValue.FromSystemName(col.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromByte(col.Type.SystemTypeId),
+                        SqlValue.FromInt32(col.Type.UserTypeId),
+                        SqlValue.FromInt16(maxLength),
+                        SqlValue.FromByte(precision),
+                        SqlValue.FromByte(scale),
+                        SqlValue.FromBoolean(col.Nullable),
+                        SqlValue.FromBoolean(col.Identity is not null),
+                        SqlValue.FromBoolean(col.Computed is not null),
                         col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
                     ];
                 }

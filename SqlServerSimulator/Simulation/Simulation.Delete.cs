@@ -72,7 +72,9 @@ partial class Simulation
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
             : SimulatedSqlException.InvalidObjectName(leadingIdent));
-        return ExecuteDeleteAgainstTable(context, table, output, leadingView);
+        return table.IsTableValuedParameter
+            ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
+            : ExecuteDeleteAgainstTable(context, table, output, leadingView);
     }
 
     /// <summary>

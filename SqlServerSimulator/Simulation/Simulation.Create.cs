@@ -25,6 +25,8 @@ partial class Simulation
                 return TryParseCreateView(context);
             case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:
                 return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: false);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
+                return TryParseCreateType(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER PROCEDURE — modern upsert syntax. The only
                 // ALTER-able object that ships in the simulator today is the
@@ -52,7 +54,7 @@ partial class Simulation
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
-        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, heapColumns, pendingKeys, pendingChecks, pendingComputed))
+        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed))
             return false;
 
         // Pass 2: resolve computed columns now that every column's name has
@@ -232,10 +234,22 @@ partial class Simulation
     /// computed / rowversion) are accepted uniformly in both shapes.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Shared column-list parser for CREATE TABLE, DECLARE @t TABLE, and
+    /// CREATE TYPE … AS TABLE. The <c>isTableVariable</c> and
+    /// <c>isTableType</c> flags gate the table-variable- and table-type-
+    /// specific restrictions (<c>CONSTRAINT name</c> / <c>REFERENCES</c>
+    /// raise Msg 102 / Msg 156 on either flag — probe-confirmed against SQL
+    /// Server 2025). Everything else (IDENTITY / inline + table-level PK /
+    /// UNIQUE / CHECK / computed / rowversion / DEFAULT) is shared by all
+    /// three sites. Distinct flags rather than one combined flag because
+    /// future restrictions may diverge.
+    /// </summary>
     private static bool ParseColumnList(
         ParserContext context,
         string tableName,
         bool isTableVariable,
+        bool isTableType,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
@@ -261,8 +275,8 @@ partial class Simulation
             // expectation. Inside DECLARE @t TABLE the `CONSTRAINT` form
             // raises Msg 102 (probe-confirmed: real SQL Server's grammar
             // disallows named constraints in table-variable declarations).
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint } && isTableVariable)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint } constraintKw && (isTableVariable || isTableType))
+                throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(constraintKw) : SimulatedSqlException.SyntaxErrorNear(context);
             if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check })
             {
                 ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed);
@@ -353,7 +367,9 @@ partial class Simulation
                         try { defaultExpression = Expression.Parse(context); }
                         finally { context.InDefaultClause = false; }
                         continue;
-                    case ReservedKeyword { Keyword: Keyword.Constraint } when inlineKeyKind is null:
+                    case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null:
+                        if (isTableType)
+                            throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
                         if (isTableVariable)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         if (context.GetNextRequired() is not Name namedConstraint)
@@ -375,8 +391,8 @@ partial class Simulation
                     case ReservedKeyword { Keyword: Keyword.Check }:
                         pendingChecks.Add((null, ParseInlineCheckPredicate(context), columnName.Value));
                         continue;
-                    case ReservedKeyword { Keyword: Keyword.References } when isTableVariable:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    case ReservedKeyword { Keyword: Keyword.References } referencesKw when isTableVariable || isTableType:
+                        throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
                 }
                 break;
             }
@@ -549,9 +565,9 @@ partial class Simulation
     /// table-level. The 8-hex suffix is a stable FNV-1a hash of the
     /// constraint shape, same convention as <see cref="AutoConstraintName"/>.
     /// </summary>
-    private static CheckConstraint[] ResolveCheckConstraints(
+    internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
         Database database)
     {
         if (pendingChecks.Count == 0)
@@ -711,10 +727,10 @@ partial class Simulation
     /// Computed columns are not yet supported as key participants — those
     /// raise <see cref="NotSupportedException"/>.
     /// </summary>
-    private static KeyConstraint[] ResolveKeyConstraints(
+    internal static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
-        List<HeapColumn> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        IReadOnlyList<HeapColumn> heapColumns,
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
         Database database)
     {
         if (pendingKeys.Count == 0)
@@ -766,7 +782,7 @@ partial class Simulation
     /// object-id-derived suffix because that would require modeling system
     /// catalog allocations.
     /// </summary>
-    private static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, List<HeapColumn> heapColumns)
+    private static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
     {
         const ulong fnvOffset = 14695981039346656037;
         const ulong fnvPrime = 1099511628211;

@@ -251,6 +251,7 @@ internal sealed class BatchContext
     {
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);
+        SeedTableVariablesFromStructuredParameters(this, command);
     }
 
     /// <summary>
@@ -282,11 +283,16 @@ internal sealed class BatchContext
     /// propagate to the outer caller — the call site yields them through
     /// (distinct from UDF bodies, where they're discarded).
     /// </summary>
-    public BatchContext(SimulatedDbCommand procBodyCommand, Dictionary<string, VariableSlot> variables, ProcFrame procFrame)
+    public BatchContext(SimulatedDbCommand procBodyCommand, Dictionary<string, VariableSlot> variables, ProcFrame procFrame, Dictionary<string, HeapTable>? tableVariables = null)
     {
         this.Variables = variables;
         this.ProcFrame = procFrame;
         this.Parser = new ParserContext(procBodyCommand, this);
+        if (tableVariables is not null)
+        {
+            foreach (var kvp in tableVariables)
+                this.TableVariables[kvp.Key] = kvp.Value;
+        }
     }
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
@@ -294,6 +300,15 @@ internal sealed class BatchContext
         var dict = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
         foreach (DbParameter parameter in command.Parameters)
         {
+            // Skip structured / table-valued parameters here — they land in
+            // TableVariables via SeedTableVariablesFromStructuredParameters.
+            // Detection: a DataTable or IDataReader value combined with a
+            // non-empty TypeName extension property. SqlDbType.Structured
+            // itself isn't directly observable on DbParameter (the simulator
+            // doesn't expose a SqlDbType property), so the value-type +
+            // TypeName combination is the signal.
+            if (IsTableValuedParameterValue(parameter))
+                continue;
             var name = parameter.ParameterName;
             if (name.StartsWith('@'))
                 name = name[1..];
@@ -310,6 +325,125 @@ internal sealed class BatchContext
             dict[name] = new VariableSlot(declaredType, declaredMaxLength: null, seed, parameter);
         }
         return dict;
+    }
+
+    /// <summary>
+    /// True when <paramref name="parameter"/> looks like a table-valued
+    /// parameter: a <see cref="System.Data.DataTable"/> or
+    /// <see cref="System.Data.IDataReader"/>-typed <see cref="DbParameter.Value"/>.
+    /// <c>TypeName</c> presence is required for a valid TVP but isn't
+    /// gated here — a missing <c>TypeName</c> raises an explicit
+    /// <see cref="ArgumentException"/> at materialization (mirroring
+    /// <c>Microsoft.Data.SqlClient</c>'s client-side check).
+    /// </summary>
+    private static bool IsTableValuedParameterValue(DbParameter parameter) =>
+        parameter.Value is System.Data.DataTable or System.Data.IDataReader;
+
+    /// <summary>
+    /// Materializes each TVP-shaped <see cref="DbParameter"/> into the
+    /// batch's <see cref="TableVariables"/> dict. Reads the
+    /// <c>TypeName</c> extension property off the parameter to look up the
+    /// registered <see cref="TableType"/>;
+    /// resolves the value source (<see cref="System.Data.DataTable"/> or
+    /// <see cref="System.Data.IDataReader"/>) into rows via the type's
+    /// <see cref="TableType.Clone"/> + per-row INSERT path. The clone is
+    /// flagged as a TVP (<see cref="HeapTable.IsTableValuedParameter"/>)
+    /// so any downstream DML attempt against the bound name raises Msg 10700.
+    /// </summary>
+    private static void SeedTableVariablesFromStructuredParameters(BatchContext batch, SimulatedDbCommand command)
+    {
+        foreach (DbParameter parameter in command.Parameters)
+        {
+            if (!IsTableValuedParameterValue(parameter))
+                continue;
+            var typeName = parameter.TypeName;
+            if (string.IsNullOrEmpty(typeName))
+                throw new ArgumentException($"The table type parameter '{parameter.ParameterName}' must have a valid type name.", parameter.ParameterName);
+
+            var parsedTypeName = ParseSimpleQualifiedName(typeName);
+            if (!batch.TryResolveTableType(parsedTypeName, out var tableType))
+                throw SimulatedSqlException.CannotFindDataType(parameterIndex: 1, typeName, parameter.ParameterName);
+
+            var paramName = parameter.ParameterName;
+            if (paramName.StartsWith('@'))
+                paramName = paramName[1..];
+            var clone = tableType.Clone("@" + paramName, batch, isTableValuedParameter: true);
+            MaterializeTvpRows(parameter.Value!, tableType, clone);
+            batch.TableVariables[paramName] = clone;
+        }
+    }
+
+    private static MultiPartName ParseSimpleQualifiedName(string typeName)
+    {
+        var trimmed = typeName.Trim();
+        var firstDot = trimmed.IndexOf('.', StringComparison.Ordinal);
+        if (firstDot < 0)
+            return new MultiPartName(trimmed);
+        var schema = trimmed[..firstDot].Trim();
+        var leaf = trimmed[(firstDot + 1)..].Trim();
+        return new MultiPartName(schema).WithAddedPart(leaf);
+    }
+
+    private static void MaterializeTvpRows(object source, TableType tableType, HeapTable destination)
+    {
+        switch (source)
+        {
+            case System.Data.DataTable dt:
+                if (dt.Columns.Count != tableType.Columns.Length)
+                    throw SimulatedSqlException.TableValuedParameterColumnCountMismatch(dt.Columns.Count, tableType.Columns.Length);
+                foreach (System.Data.DataRow row in dt.Rows)
+                    InsertOneRowFromValueArray(row.ItemArray, tableType, destination);
+                break;
+            case System.Data.IDataReader reader:
+                if (reader.FieldCount != tableType.Columns.Length)
+                    throw SimulatedSqlException.TableValuedParameterColumnCountMismatch(reader.FieldCount, tableType.Columns.Length);
+                var buffer = new object?[reader.FieldCount];
+                while (reader.Read())
+                {
+                    for (var i = 0; i < buffer.Length; i++)
+                        buffer[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                    InsertOneRowFromValueArray(buffer, tableType, destination);
+                }
+                break;
+        }
+    }
+
+    private static void InsertOneRowFromValueArray(object?[] sourceValues, TableType tableType, HeapTable destination)
+    {
+        // Build a SqlValue[] matching the destination's stored column order.
+        // Identity columns are not allowed to receive caller-supplied values
+        // through a TVP (probe-confirmed: real SQL Server raises Msg 1077).
+        // Position-based mapping: source column N → destination column N.
+        // Real SQL Server ignores DataTable column names entirely (probe-
+        // confirmed F2 / F2b — reversing the order with matching names
+        // reverses the values).
+        var fullValues = new SqlValue[tableType.Columns.Length];
+        for (var i = 0; i < tableType.Columns.Length; i++)
+        {
+            var column = tableType.Columns[i];
+            if (column.Identity is not null && sourceValues[i] is not null and not DBNull)
+                throw SimulatedSqlException.InsertIntoIdentityColumnNotAllowedOnTableVariables();
+            // Identity columns get the next auto-allocated value.
+            if (column.Identity is not null)
+            {
+                fullValues[i] = Simulation.CoerceForIdentity(column.Identity.GenerateNext(), column);
+                continue;
+            }
+            fullValues[i] = sourceValues[i] is null or DBNull
+                ? SqlValue.Null(column.Type)
+                : column.Type.ConvertParameter(sourceValues[i]!);
+        }
+        // Encode via the destination's StoredColumns (skipping non-stored
+        // computed-without-PERSISTED slots, since the encoder works against
+        // stored cells only).
+        var storedValues = new SqlValue[destination.StoredColumns.Length];
+        var s = 0;
+        for (var i = 0; i < tableType.Columns.Length; i++)
+        {
+            if (tableType.Columns[i].IsStored)
+                storedValues[s++] = fullValues[i];
+        }
+        destination.Heap.Insert(Storage.RowEncoder.EncodeRow(destination.Schema, storedValues));
     }
 
     /// <summary>
@@ -487,6 +621,21 @@ internal sealed class BatchContext
         procedure = null;
         return this.TryResolveSchema(name, out var schema)
             && schema.Procedures.TryGetValue(name.Leaf, out procedure);
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to a registered user-defined
+    /// <see cref="TableType"/>. Like views / procedures (and unlike scalar
+    /// UDFs), table types accept 1-part names: probe-confirmed against SQL
+    /// Server 2025 that <c>DECLARE @t MyType</c> finds <c>dbo.MyType</c>.
+    /// The lookup falls back to <see cref="Database.DefaultSchemaName"/> for
+    /// the unqualified case.
+    /// </summary>
+    public bool TryResolveTableType(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TableType? tableType)
+    {
+        tableType = null;
+        return this.TryResolveSchema(name, out var schema)
+            && schema.TableTypes.TryGetValue(name.Leaf, out tableType);
     }
 
     /// <summary>

@@ -12,7 +12,7 @@ partial class Simulation
     /// declared integer type, raising the IDENTITY-specific Msg 8115 if the
     /// next value won't fit.
     /// </summary>
-    private static SqlValue CoerceForIdentity(long value, HeapColumn identityColumn)
+    internal static SqlValue CoerceForIdentity(long value, HeapColumn identityColumn)
     {
         try
         {

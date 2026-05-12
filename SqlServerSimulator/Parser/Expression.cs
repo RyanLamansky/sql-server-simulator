@@ -485,6 +485,7 @@ internal abstract class Expression
                 "RADIANS" => new Radians(context),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
+                "TYPE_ID" => new TypeId(context),
                 _ => null
             },
             8 => uppercaseName switch

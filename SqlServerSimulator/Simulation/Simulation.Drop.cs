@@ -37,6 +37,7 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Function } => DropTargetKind.Function,
             ReservedKeyword { Keyword: Keyword.View } => DropTargetKind.View,
             ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => DropTargetKind.Procedure,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Type } => DropTargetKind.Type,
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
@@ -66,6 +67,9 @@ partial class Simulation
                 case DropTargetKind.Procedure:
                     DropOneProcedure(context, name, ifExists);
                     break;
+                case DropTargetKind.Type:
+                    DropOneType(context, name, ifExists);
+                    break;
                 default:
                     DropOneTable(context, name, ifExists);
                     break;
@@ -82,7 +86,46 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View, Procedure }
+    private enum DropTargetKind { None, Table, Function, View, Procedure, Type }
+
+    /// <summary>
+    /// Removes one entry from the target schema's <see cref="Schema.TableTypes"/>
+    /// dict. Probe-confirmed wording on the two failure modes against SQL
+    /// Server 2025: missing without IF EXISTS → Msg 218; referenced by at
+    /// least one procedure → Msg 3732 (the simulator scans every procedure
+    /// in the database and names the first one found — real SQL Server does
+    /// the same, naming a single referencing object even when more than one
+    /// exists). Types don't participate in the undo log (same convention as
+    /// CREATE / DROP regular tables — only temp-table DDL is transactional).
+    /// </summary>
+    private static void DropOneType(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is null || !schema.TableTypes.TryGetValue(name.Leaf, out var tableType))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
+        }
+        // Scan every procedure in every schema of the current database for
+        // a parameter that references this table type. Procedures are the
+        // only object kind that can take a TVP today; views / functions
+        // grow this surface when those features land.
+        foreach (var s in context.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var proc in s.Procedures.Values)
+            {
+                foreach (var param in proc.Parameters)
+                {
+                    if (ReferenceEquals(param.TableType, tableType))
+                        throw SimulatedSqlException.CannotDropTypeBecauseReferenced($"{schema.Name}.{tableType.Name}", proc.Name);
+                }
+            }
+        }
+        _ = schema.TableTypes.TryRemove(name.Leaf, out _);
+    }
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.Procedures"/>

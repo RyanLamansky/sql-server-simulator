@@ -20,11 +20,13 @@ partial class Simulation
 
         return context.Batch.TryResolveView(destinationName, out var destinationView)
             ? ProcessViewInsert(destinationView, context)
-            : context.Batch.TryResolveTable(destinationName, out var destinationTable)
-                ? ProcessHeapInsert(destinationTable, context)
-                : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
+            : !context.Batch.TryResolveTable(destinationName, out var destinationTable)
+                ? throw (BatchContext.IsTableVariableName(destinationName.Leaf)
                     ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
-                    : SimulatedSqlException.InvalidObjectName(destinationName));
+                    : SimulatedSqlException.InvalidObjectName(destinationName))
+                : destinationTable.IsTableValuedParameter
+                    ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf)
+                    : ProcessHeapInsert(destinationTable, context);
     }
 
     /// <summary>
