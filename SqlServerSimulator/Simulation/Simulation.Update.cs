@@ -45,20 +45,34 @@ partial class Simulation
         context.MoveNextRequired();
         var leadingIdent = BatchContext.ParseObjectName(context);
 
-        // A view target would route here in real SQL Server (single-source
-        // updatable views accept UPDATE). The simulator's v1 doesn't model
-        // updatable views; reject with a clear message rather than letting
-        // the view name fall through to the alias-resolution path which
-        // would surface a confusing "could not be bound" error.
-        if (context.Batch.TryResolveView(leadingIdent, out _))
-            throw new NotSupportedException($"UPDATE through a view ('{leadingIdent}') isn't modeled. Updatable-view DML is a deferred feature; target the underlying table directly.");
-
-        // Leading identifier: target table name (single-table form) or an
-        // alias for the FROM clause that follows (multi-table form). Try
-        // table-resolution now; if it fails, the FROM clause must provide
-        // the binding via alias-matching. Aliases are always single-segment,
-        // so a multi-part name that fails to resolve is always Msg 208.
-        _ = context.Batch.TryResolveTable(leadingIdent, out var leadingTable);
+        // View target: route to base table with view-aware column lookups,
+        // visibility filtering, and (optional) WITH CHECK OPTION enforcement.
+        // Joined-source UPDATEs through views (alias-form + FROM clause)
+        // aren't supported — EF Core doesn't emit that shape and it would
+        // require composing the view's visibility predicate with a multi-
+        // source join, which the existing alias-form path can't represent.
+        View? leadingView = null;
+        HeapTable? leadingTable;
+        if (context.Batch.TryResolveView(leadingIdent, out var resolvedView))
+        {
+            if (resolvedView.BaseTable is not { } baseTable)
+            {
+                throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{resolvedView.Schema.Name}.{resolvedView.Name}")
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{resolvedView.Schema.Name}.{resolvedView.Name}");
+            }
+            leadingView = resolvedView;
+            leadingTable = baseTable;
+        }
+        else
+        {
+            // Leading identifier: target table name (single-table form) or an
+            // alias for the FROM clause that follows (multi-table form). Try
+            // table-resolution now; if it fails, the FROM clause must provide
+            // the binding via alias-matching. Aliases are always single-segment,
+            // so a multi-part name that fails to resolve is always Msg 208.
+            _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
+        }
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -103,8 +117,12 @@ partial class Simulation
         // deferring its parse until after FROM has identified the target —
         // not modeled today (EF Core 10 doesn't combine OUTPUT with multi-
         // source ExecuteUpdate, and the simulator raises NotSupportedException
-        // when this combination is attempted).
+        // when this combination is attempted). OUTPUT through a view is
+        // also rejected — the projected INSERTED.* / DELETED.* would need
+        // view-output-column rebinding, which isn't modeled.
         MutationOutputProjection? output = null;
+        if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            throw new NotSupportedException($"UPDATE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
             output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: true, allowDeleted: true);
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
@@ -112,11 +130,13 @@ partial class Simulation
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            return ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output);
+            return leadingView is not null
+                ? throw new NotSupportedException($"Multi-source UPDATE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — the alias-form FROM clause can't compose with the view's visibility predicate. Target the underlying table directly.")
+                : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output);
         }
 
         var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdent);
-        return ExecuteUpdateAgainstTable(context, table, rawAssignments, output);
+        return ExecuteUpdateAgainstTable(context, table, rawAssignments, output, leadingView);
     }
 
     /// <summary>
@@ -128,9 +148,10 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         List<(string ColumnName, Expression Expr)> rawAssignments,
-        MutationOutputProjection? output)
+        MutationOutputProjection? output,
+        View? sourceView = null)
     {
-        var assignments = ResolveSetAssignments(rawAssignments, table);
+        var assignments = ResolveSetAssignments(rawAssignments, table, sourceView);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -148,8 +169,28 @@ partial class Simulation
             var fullValues = DecodeFullRow(table, rowBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
 
+            // View visibility filter: rows not visible in the view aren't
+            // candidates for UPDATE through it. AND-of-WHEREs up the chain
+            // (no-op when sourceView is null or the chain has no WHERE).
+            if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues, context.Batch))
+                continue;
+
             SqlValue ResolveOriginal(MultiPartName name)
             {
+                if (sourceView is not null)
+                {
+                    for (var v = 0; v < sourceView.OutputColumns.Length; v++)
+                    {
+                        if (Collation.Default.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
+                        {
+                            var baseOrd = sourceView.BaseColumnOrdinals[v];
+                            return baseOrd < 0
+                                ? throw SimulatedSqlException.InvalidColumnName(name)
+                                : fullValues[baseOrd];
+                        }
+                    }
+                    throw SimulatedSqlException.InvalidColumnName(name);
+                }
                 for (var k = 0; k < table.Columns.Length; k++)
                 {
                     if (Collation.Default.Equals(table.Columns[k].Name, name.Leaf))
@@ -162,6 +203,13 @@ partial class Simulation
                 continue;
 
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal);
+
+            // WITH CHECK OPTION: the post-update row must satisfy every
+            // CHECK OPTION-bearing WHERE in the chain. Fires before
+            // CommitUpdate so a violating UPDATE leaves the heap unchanged.
+            if (sourceView?.CheckOptionCheck is { } co && !co(newValues, context.Batch))
+                throw SimulatedSqlException.ViewCheckOptionViolation();
+
             var oldSnapshot = output is null ? null : fullValues;
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
@@ -285,22 +333,44 @@ partial class Simulation
     /// </summary>
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
         List<(string ColumnName, Expression Expr)> rawAssignments,
-        HeapTable table)
+        HeapTable table,
+        View? sourceView = null)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
         foreach (var (colName, expr) in rawAssignments)
         {
-            var columnOrdinal = -1;
-            for (var i = 0; i < table.Columns.Length; i++)
+            int columnOrdinal;
+            if (sourceView is not null)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, colName))
+                var viewOrd = -1;
+                for (var i = 0; i < sourceView.OutputColumns.Length; i++)
                 {
-                    columnOrdinal = i;
-                    break;
+                    if (Collation.Default.Equals(sourceView.OutputColumns[i].Name, colName))
+                    {
+                        viewOrd = i;
+                        break;
+                    }
                 }
+                if (viewOrd < 0)
+                    throw SimulatedSqlException.InvalidColumnName(colName);
+                columnOrdinal = sourceView.BaseColumnOrdinals[viewOrd];
+                if (columnOrdinal < 0)
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField($"{sourceView.Schema.Name}.{sourceView.Name}");
             }
-            if (columnOrdinal < 0)
-                throw SimulatedSqlException.InvalidColumnName(colName);
+            else
+            {
+                columnOrdinal = -1;
+                for (var i = 0; i < table.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(table.Columns[i].Name, colName))
+                    {
+                        columnOrdinal = i;
+                        break;
+                    }
+                }
+                if (columnOrdinal < 0)
+                    throw SimulatedSqlException.InvalidColumnName(colName);
+            }
 
             var column = table.Columns[columnOrdinal];
             if (column.Identity is not null)

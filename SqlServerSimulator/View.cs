@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -20,9 +21,13 @@ namespace SqlServerSimulator;
 /// </para>
 /// <para>
 /// At CREATE time the body is parsed once to derive <see cref="OutputColumns"/>
-/// (column names + types). The simulator's v1 implementation is read-only;
-/// INSERT/UPDATE/DELETE on a view raises <see cref="NotSupportedException"/>.
-/// Updatable-view pass-through is a future bundle.
+/// (column names + types) and the updatable-DML metadata
+/// (<see cref="BaseTable"/>, <see cref="BaseColumnOrdinals"/>,
+/// <see cref="RejectionReason"/>, <see cref="VisibilityCheck"/>,
+/// <see cref="CheckOptionCheck"/>). INSERT/UPDATE/DELETE through the view
+/// route to <see cref="BaseTable"/> with the projection's column-to-base
+/// mapping; non-updatable shapes surface <strong>Msg 4403</strong> /
+/// <strong>Msg 4405</strong> / <strong>Msg 4406</strong> at the DML site.
 /// </para>
 /// </remarks>
 internal sealed class View(
@@ -32,7 +37,12 @@ internal sealed class View(
     HeapColumn[] outputColumns,
     string bodyText,
     bool withCheckOption,
-    DateTime createDate)
+    DateTime createDate,
+    HeapTable? baseTable,
+    int[] baseColumnOrdinals,
+    ViewUpdatabilityRejection rejectionReason,
+    Func<SqlValue[], BatchContext, bool>? visibilityCheck,
+    Func<SqlValue[], BatchContext, bool>? checkOptionCheck)
 {
     public readonly Schema Schema = schema;
     public readonly string Name = name;
@@ -61,11 +71,69 @@ internal sealed class View(
     /// True when the view was declared with a trailing <c>WITH CHECK
     /// OPTION</c>. Parsed and surfaced through
     /// <c>sys.views.with_check_option</c> /
-    /// <c>INFORMATION_SCHEMA.VIEWS.CHECK_OPTION</c>, but not enforced —
-    /// CHECK OPTION only affects DML through the view, which the
-    /// simulator's v1 doesn't model.
+    /// <c>INFORMATION_SCHEMA.VIEWS.CHECK_OPTION</c>; enforced at INSERT /
+    /// UPDATE time via <see cref="CheckOptionCheck"/> (Msg 550 on
+    /// violation).
     /// </summary>
     public readonly bool WithCheckOption = withCheckOption;
 
     public readonly DateTime CreateDate = createDate;
+
+    /// <summary>
+    /// Resolved underlying heap table that DML through this view writes to,
+    /// or null when the view is not updatable. Updatable shapes: single FROM
+    /// source (a heap table OR another updatable view, walked transitively
+    /// to a heap), no DISTINCT / aggregates / GROUP BY / HAVING / JOIN /
+    /// set-op / window functions. A non-null value here means DML can
+    /// proceed at the column-modifiability level
+    /// (<see cref="BaseColumnOrdinals"/>); null routes to
+    /// <see cref="RejectionReason"/> → Msg 4403 / 4405.
+    /// </summary>
+    public readonly HeapTable? BaseTable = baseTable;
+
+    /// <summary>
+    /// Per-output-column mapping to <see cref="BaseTable"/>'s
+    /// <see cref="HeapTable.Columns"/> ordinal, or <c>-1</c> when the view
+    /// projection at that index is a derived expression (arithmetic /
+    /// function / literal, etc.). Touching a <c>-1</c> column in an INSERT
+    /// or UPDATE SET list raises <strong>Msg 4406</strong>. Empty when
+    /// <see cref="BaseTable"/> is null. Computed by composing per-level
+    /// projection maps up the view-on-view chain.
+    /// </summary>
+    public readonly int[] BaseColumnOrdinals = baseColumnOrdinals;
+
+    /// <summary>
+    /// Non-<see cref="ViewUpdatabilityRejection.None"/> reason explaining
+    /// why <see cref="BaseTable"/> is null. Drives error number selection
+    /// at the DML site: <c>Aggregate</c> / <c>Distinct</c> / <c>GroupBy</c>
+    /// → Msg 4403; <c>MultipleSources</c> → Msg 4405; <c>UnsupportedShape</c>
+    /// → Msg 4403 (closest available message).
+    /// </summary>
+    public readonly ViewUpdatabilityRejection RejectionReason = rejectionReason;
+
+    /// <summary>
+    /// Pre-bound closure that evaluates the AND of every WHERE clause up
+    /// the view-on-view chain against a base-table row's
+    /// <see cref="SqlValue"/> array (indexed by
+    /// <see cref="HeapTable.Columns"/> ordinal). Returns <c>true</c> iff
+    /// the row is visible through this view. Null when the view isn't
+    /// updatable. UPDATE / DELETE call this to filter the heap scan;
+    /// INSERT doesn't (real SQL Server passes through the view's WHERE
+    /// unless <c>WITH CHECK OPTION</c> is set — that's
+    /// <see cref="CheckOptionCheck"/>).
+    /// </summary>
+    public readonly Func<SqlValue[], BatchContext, bool>? VisibilityCheck = visibilityCheck;
+
+    /// <summary>
+    /// Pre-bound closure that returns <c>true</c> iff a base-table row
+    /// satisfies every <c>WITH CHECK OPTION</c>-bearing WHERE up the chain.
+    /// Null when no level in the chain has <c>WITH CHECK OPTION</c> set.
+    /// INSERT and UPDATE through the view call this on each post-mutation
+    /// row; a <c>false</c> raises <strong>Msg 550</strong>. Distinct from
+    /// <see cref="VisibilityCheck"/> because real SQL Server only enforces
+    /// CHECK OPTION post-write: a view with WHERE but without WITH CHECK
+    /// OPTION freely accepts INSERTs that produce rows outside its WHERE,
+    /// and UPDATEs that move rows out of view (probe-confirmed).
+    /// </summary>
+    public readonly Func<SqlValue[], BatchContext, bool>? CheckOptionCheck = checkOptionCheck;
 }

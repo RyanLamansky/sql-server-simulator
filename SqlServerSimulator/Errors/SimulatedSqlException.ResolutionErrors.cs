@@ -126,4 +126,55 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CreateViewMissingColumnName(int columnPosition) =>
         new($"Create View or Function failed because no column name was specified for column {columnPosition}.", 4511, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4403 — DML through a view whose body has an
+    /// aggregate / DISTINCT / GROUP BY / PIVOT / UNPIVOT, none of which
+    /// preserve a 1:1 row correspondence with the underlying base. The same
+    /// wording fires for INSERT, UPDATE, and DELETE through such a view —
+    /// the simulator collapses these into one factory matching SQL Server's
+    /// uniform message. Probe-confirmed verbatim against SQL Server 2025
+    /// (2026-05-12).
+    /// </summary>
+    internal static SimulatedSqlException CannotUpdateNonUpdatableView(string viewName) =>
+        new($"Cannot update the view or function '{viewName}' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", 4403, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4405 — DML through a view whose body has
+    /// multiple base tables (JOIN form) and the modification affects more
+    /// than one of them. The simulator's v1 of updatable views rejects
+    /// JOIN-bodied views uniformly with this Msg even for single-base-table
+    /// modifications (SQL Server is more permissive — single-base UPDATE
+    /// through a JOIN view works there — but the simpler always-reject
+    /// shape is closer to the common case in real apps). Probe-confirmed
+    /// verbatim wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ViewUpdateAffectsMultipleTables(string viewName) =>
+        new($"View or function '{viewName}' is not updatable because the modification affects multiple base tables.", 4405, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4406 — INSERT or UPDATE through a view
+    /// touched a projection column that's not a direct column reference
+    /// (an arithmetic expression, function call, CAST, etc.). The view as
+    /// a whole may still be updatable (other projections can be direct
+    /// refs), and DELETE through such a view works fine — the rejection
+    /// is per-touched-column. Probe-confirmed verbatim against SQL Server
+    /// 2025.
+    /// </summary>
+    internal static SimulatedSqlException ViewDmlTouchesDerivedField(string viewName) =>
+        new($"Update or insert of view or function '{viewName}' failed because it contains a derived or constant field.", 4406, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 550 — INSERT or UPDATE through a view with
+    /// (or spanning) <c>WITH CHECK OPTION</c> would leave a row not visible
+    /// in the view. Triggers a per-row check after the row is constructed
+    /// (INSERT) or computed (UPDATE) against every CHECK OPTION-bearing
+    /// level in the view chain; any miss raises this. Probe-confirmed
+    /// verbatim against SQL Server 2025; real SQL Server also fires the
+    /// follow-on Msg 3621 "The statement has been terminated" — the
+    /// simulator surfaces Msg 550 alone (Msg 3621 is the wrapper, not
+    /// load-bearing).
+    /// </summary>
+    internal static SimulatedSqlException ViewCheckOptionViolation() =>
+        new("The attempted insert or update failed because the target view either specifies WITH CHECK OPTION or spans a view that specifies WITH CHECK OPTION and one or more rows resulting from the operation did not qualify under the CHECK OPTION constraint.", 550, 16, 1);
 }

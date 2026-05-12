@@ -145,6 +145,9 @@ partial class Simulation
 
         var outputColumns = ComputeViewOutputColumns(bodySelection, renameList, viewName.Leaf);
 
+        var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck) =
+            AnalyzeViewUpdatability(bodySelection, withCheckOption);
+
         var objectId = context.CurrentDatabase.AllocateObjectId();
         var view = new View(
             schema,
@@ -153,7 +156,12 @@ partial class Simulation
             outputColumns,
             bodyText,
             withCheckOption,
-            createDate: context.Batch.CurrentStatement.UtcNow);
+            createDate: context.Batch.CurrentStatement.UtcNow,
+            baseTable: baseTable,
+            baseColumnOrdinals: baseColumnOrdinals,
+            rejectionReason: rejectionReason,
+            visibilityCheck: visibilityCheck,
+            checkOptionCheck: checkOptionCheck);
         schema.Views[viewName.Leaf] = view;
         return true;
     }

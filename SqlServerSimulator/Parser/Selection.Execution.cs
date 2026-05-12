@@ -178,6 +178,14 @@ internal sealed partial class Selection
             ? ComputeIntoDestSchema(target, expressions, outputSchema, outputColumnNames, sources, joins)
             : null;
 
+        // Updatable-view shape capture: single source, no JOINs, no DISTINCT,
+        // no aggregates / windows / GROUP BY / HAVING. TOP / OFFSET / FETCH are
+        // allowed (SQL Server treats TOP views as updatable — probe-confirmed).
+        // ORDER BY allowed too (it only affects reads). View.cs consumes this
+        // to derive Msg 4403 / 4405 / 4406 metadata at CREATE VIEW.
+        var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
+            sources, joins, expressions, fromClause, distinct, aggregates, windows);
+
         return new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
@@ -189,7 +197,45 @@ internal sealed partial class Selection
                     : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),
             isAssignmentOnly,
             intoTarget,
-            destColumnSchema);
+            destColumnSchema,
+            updatabilityProfile,
+            updatabilityRejection);
+    }
+
+    /// <summary>
+    /// Decides whether the FROM-bearing SELECT's shape is eligible to back
+    /// view DML and, if so, captures the projection / WHERE state. Eligible
+    /// shapes — see <see cref="ViewUpdatabilityProfile"/> — also accept
+    /// <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> / <c>ORDER BY</c> (these
+    /// only affect reads). Set-op chains are caught one level up in
+    /// <see cref="CombineSetOps"/> which discards the profile by
+    /// constructing a fresh Selection without one.
+    /// </summary>
+    private static (ViewUpdatabilityProfile?, ViewUpdatabilityRejection) ComputeViewUpdatabilityProfile(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        FromClause fromClause,
+        bool distinct,
+        List<AggregateExpression> aggregates,
+        List<WindowExpression> windows)
+    {
+        if (distinct)
+            return (null, ViewUpdatabilityRejection.Distinct);
+        if (aggregates.Count > 0)
+            return (null, ViewUpdatabilityRejection.Aggregate);
+        if (fromClause.GroupBy.Count > 0 || fromClause.Having is not null)
+            return (null, ViewUpdatabilityRejection.GroupBy);
+        if (sources.Length != 1 || joins.Length > 0)
+            return (null, ViewUpdatabilityRejection.MultipleSources);
+        if (windows.Count > 0)
+            return (null, ViewUpdatabilityRejection.UnsupportedShape);
+
+        var profile = new ViewUpdatabilityProfile(
+            source: sources[0],
+            projections: [.. expressions],
+            excluders: [.. fromClause.Excluders]);
+        return (profile, ViewUpdatabilityRejection.None);
     }
 
     private static IEnumerable<byte[]> ProjectSqlRows(

@@ -18,17 +18,31 @@ partial class Simulation
 
         var destinationName = BatchContext.ParseObjectName(context);
 
-        // A view target would route here in real SQL Server (single-source
-        // updatable views accept INSERT). The simulator's v1 doesn't model
-        // updatable views — surface a clear NotSupportedException instead
-        // of the misleading Msg 208 below. Apps that need DML through a
-        // view should target the underlying table directly.
-        return context.Batch.TryResolveView(destinationName, out _)
-            ? throw new NotSupportedException($"INSERT through a view ('{destinationName}') isn't modeled. Updatable-view DML is a deferred feature; target the underlying table directly.")
+        return context.Batch.TryResolveView(destinationName, out var destinationView)
+            ? ProcessViewInsert(destinationView, context)
             : context.Batch.TryResolveTable(destinationName, out var destinationTable)
                 ? ProcessHeapInsert(destinationTable, context)
                 : throw SimulatedSqlException.InvalidObjectName(destinationName);
     }
+
+    /// <summary>
+    /// INSERT through a view: validates the view's updatability shape
+    /// (raising <strong>Msg 4403</strong> / <strong>Msg 4405</strong> based
+    /// on <see cref="View.RejectionReason"/> when the shape doesn't
+    /// support DML) and routes to <see cref="ProcessHeapInsert"/> against
+    /// the view's <see cref="View.BaseTable"/> with the view passed as
+    /// <paramref name="destinationView"/> so column-name lookups translate
+    /// through <see cref="View.BaseColumnOrdinals"/> and any
+    /// <see cref="View.CheckOptionCheck"/> fires post-row-construction
+    /// (Msg 550). OUTPUT with a view target isn't modeled — raises
+    /// <see cref="NotSupportedException"/>.
+    /// </summary>
+    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context) =>
+        destinationView.BaseTable is { } baseTable
+            ? ProcessHeapInsert(baseTable, context, destinationView)
+            : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
+                : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
 
     /// <summary>
     /// INSERT processor. Parses the column subset, optional <c>OUTPUT</c>
@@ -41,7 +55,7 @@ partial class Simulation
     /// <c>ExecuteReader</c>); otherwise a plain <see cref="SimulatedNonQuery"/>
     /// is returned.
     /// </summary>
-    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context)
+    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, View? destinationView = null)
     {
         var identityOrdinal = destinationTable.IdentityOrdinal;
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
@@ -59,8 +73,7 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 var columnName = column.Value;
-                var tableColumn = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
-                    ?? throw SimulatedSqlException.InvalidColumnName(columnName);
+                var tableColumn = ResolveInsertTargetColumn(columnName, destinationTable, destinationView);
                 if (tableColumn.Computed is not null)
                     throw SimulatedSqlException.ColumnCannotBeModified(tableColumn.Name);
                 if (tableColumn.Type == SqlType.RowVersion)
@@ -83,10 +96,16 @@ partial class Simulation
             // No column list: target every regular column (skip identity when
             // IDENTITY_INSERT is OFF and skip every computed column — neither
             // is a writable destination from the VALUES side; rowversion is
-            // also auto-generated and never accepts explicit values).
-            destinationColumns = (identityColumn is not null && !identityInsertOn)
-                ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null && c.Type != SqlType.RowVersion)]
-                : [.. destinationTable.Columns.Where(c => c.Computed is null && c.Type != SqlType.RowVersion)];
+            // also auto-generated and never accepts explicit values). When
+            // the target is a view, the implicit list is the view's writable
+            // (non-derived) projected columns mapped to their base ordinals;
+            // base columns the view doesn't project pick up their defaults
+            // or implicit-NULL via the standard insert path.
+            destinationColumns = destinationView is not null
+                ? BuildImplicitInsertColumnsForView(destinationView, destinationTable, identityInsertOn)
+                : (identityColumn is not null && !identityInsertOn)
+                    ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null && c.Type != SqlType.RowVersion)]
+                    : [.. destinationTable.Columns.Where(c => c.Computed is null && c.Type != SqlType.RowVersion)];
         }
 
         if (identityColumn is not null)
@@ -97,6 +116,9 @@ partial class Simulation
             if (!identityListed && identityInsertOn)
                 throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
         }
+
+        if (destinationView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            throw new NotSupportedException($"INSERT … OUTPUT through a view ('{destinationView.Schema.Name}.{destinationView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
 
         var output = TryParseOutputClause(context, destinationTable, sourceColumnNames: null);
 
@@ -196,6 +218,14 @@ partial class Simulation
             EnforceNotNull(destinationTable, rowValues);
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
 
+            // WITH CHECK OPTION: the post-row-construction row must satisfy
+            // every CHECK OPTION-bearing WHERE up the view chain. Fires
+            // before the heap write so a violating INSERT leaves the heap
+            // unchanged (matches SQL Server's "the statement has been
+            // terminated" semantic on Msg 550).
+            if (destinationView?.CheckOptionCheck is { } checkOption && !checkOption(rowValues, context.Batch))
+                throw SimulatedSqlException.ViewCheckOptionViolation();
+
             if (!context.Batch.IsSkipping)
             {
                 var storedValues = ProjectStoredValues(destinationTable, rowValues);
@@ -265,5 +295,64 @@ partial class Simulation
         foreach (var rowBytes in resultSet.RowBytes)
             rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
         return rows;
+    }
+
+    /// <summary>
+    /// Looks up an INSERT column reference: against <paramref name="destinationTable"/>'s
+    /// columns directly for a regular table target, or against
+    /// <paramref name="destinationView"/>'s <see cref="View.OutputColumns"/>
+    /// (translated through <see cref="View.BaseColumnOrdinals"/> to a base
+    /// column) for a view target. A view-side reference that maps to a
+    /// derived projection (ordinal <c>-1</c>) raises <strong>Msg 4406</strong>
+    /// — the per-touched-column gate matching SQL Server's "INSERT through
+    /// view with a derived field touched" rejection.
+    /// </summary>
+    private static HeapColumn ResolveInsertTargetColumn(string columnName, HeapTable destinationTable, View? destinationView)
+    {
+        if (destinationView is null)
+        {
+            return destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
+                ?? throw SimulatedSqlException.InvalidColumnName(columnName);
+        }
+        for (var i = 0; i < destinationView.OutputColumns.Length; i++)
+        {
+            if (Collation.Default.Equals(destinationView.OutputColumns[i].Name, columnName))
+            {
+                var baseOrd = destinationView.BaseColumnOrdinals[i];
+                return baseOrd < 0
+                    ? throw SimulatedSqlException.ViewDmlTouchesDerivedField($"{destinationView.Schema.Name}.{destinationView.Name}")
+                    : destinationTable.Columns[baseOrd];
+            }
+        }
+        throw SimulatedSqlException.InvalidColumnName(columnName);
+    }
+
+    /// <summary>
+    /// Implicit-column-list expansion for an INSERT through a view (no
+    /// explicit <c>(col, …)</c> list after the view name). The implicit
+    /// list is the view's projected columns mapped to their base ordinals,
+    /// filtered to writable shape (skip computed, skip rowversion, skip
+    /// identity unless <c>SET IDENTITY_INSERT ON</c> is active on the base
+    /// table). Derived view columns drop out of the implicit list since
+    /// they can't be written anyway — INSERTs that omit them are valid
+    /// (only an explicit name reference to a derived column would raise
+    /// Msg 4406).
+    /// </summary>
+    private static HeapColumn[] BuildImplicitInsertColumnsForView(View destinationView, HeapTable baseTable, bool identityInsertOn)
+    {
+        var implicitList = new List<HeapColumn>();
+        for (var i = 0; i < destinationView.OutputColumns.Length; i++)
+        {
+            var baseOrd = destinationView.BaseColumnOrdinals[i];
+            if (baseOrd < 0)
+                continue;
+            var col = baseTable.Columns[baseOrd];
+            if (col.Computed is not null || col.Type == SqlType.RowVersion)
+                continue;
+            if (col.Identity is not null && !identityInsertOn)
+                continue;
+            implicitList.Add(col);
+        }
+        return [.. implicitList];
     }
 }

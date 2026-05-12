@@ -539,10 +539,44 @@ Per-connection `Dictionary<string, HeapTable> TempTables` on `SimulatedDbConnect
 - **EF Core integration**: `ToView()` mapping works end-to-end. Keyless entities (`HasNoKey().ToView("name")`) project rows from CREATE VIEW-produced views; the simulator's per-call body re-parse handles correlated LINQ-emitted WHERE clauses against the view's projection.
 
 **Fidelity gaps**:
-- **No updatable views** — INSERT / UPDATE / DELETE on a view raises `NotSupportedException` regardless of view shape. Real SQL Server supports DML against single-source views (with column-name rebinding to the backing table and Msg 4406 rejection for aggregate / derived-field views). Apps target the underlying table directly. Deferred to a follow-up bundle.
 - **No SCHEMABINDING enforcement** — DROP TABLE on a view-referenced table succeeds (real SQL Server raises Msg 3729); the view later fails at call time when re-parsing against the missing name.
 - **`VIEW_DEFINITION` always surfaces body text** even for WITH ENCRYPTION views (real SQL Server returns NULL for ENCRYPTION views).
 - **`is_nullable` always True** in `sys.columns` for view output — same gap as inline TVFs.
+
+### Updatable views (DML through views)
+INSERT / UPDATE / DELETE through a view route to the view's eventual base `HeapTable` with view-aware column-name translation, visibility filtering, and (optional) WITH CHECK OPTION enforcement. Captured at CREATE VIEW time via `AnalyzeViewUpdatability` (in `Simulation.CreateView.Updatability.cs`) onto five `View` fields: `BaseTable` / `BaseColumnOrdinals` / `RejectionReason` / `VisibilityCheck` / `CheckOptionCheck`. Probed against SQL Server 2025 (2026-05-12).
+
+**Eligible shape** (each level in a view-on-view chain must satisfy all):
+- Exactly one FROM source (a heap table OR another updatable view).
+- No JOINs, no DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain. TOP / OFFSET / FETCH / ORDER BY are allowed (they only affect reads).
+- Every column referenced in any WHERE clause up the chain maps to a real base-table column (no WHERE that references an upstream derived projection).
+
+Selection-side capture is `Selection.UpdatabilityProfile` (set in `BuildSqlProjection` when shape-eligible) + `Selection.UpdatabilityRejection` (drives Msg 4403 vs Msg 4405 vs Msg 4406 at the DML site). `FromSource.BackingView` mirrors `FromSource.BackingTable` so the chained-view analyzer can recurse to find the eventual base.
+
+**Per-output-column updatability**: `View.BaseColumnOrdinals[i]` is the base-table ordinal for column `i`, or `-1` when the projection is a derived expression (anything other than a `Reference` possibly wrapped in `NamedExpression` from `AS alias`). The map composes through view-on-view chains so a renamed column at level 1 referenced through level 2 still resolves to its base ordinal.
+
+**DML routing**:
+- **INSERT**: `ProcessViewInsert` validates `BaseTable` is non-null (else Msg 4403 / Msg 4405 by `RejectionReason`), then routes to `ProcessHeapInsert(baseTable, context, destinationView)`. Column-name lookups in the explicit list translate through `BaseColumnOrdinals`; touching a `-1` ordinal raises **Msg 4406**. Implicit column list (no `(cols)` after view name) expands to the view's writable projection columns mapped to base ordinals — derived columns and computed/identity/rowversion base columns drop out, defaults fire normally for unlisted base columns.
+- **UPDATE**: `ParseUpdate` resolves the leading identifier as a view, threads `leadingView` into `ResolveSetAssignments` (view-name → base-ordinal translation, same Msg 4406 path) and `ExecuteUpdateAgainstTable`. The heap scan gates `VisibilityCheck` before the user's WHERE — UPDATE through a filtered view only affects rows visible through the view. WHERE column references resolve against view's output columns first (so an UPDATE against a renamed view uses the rename, not the base name).
+- **DELETE**: `ParseDelete` mirrors the same shape. Same visibility filter + column-name remap.
+
+**WITH CHECK OPTION** (Msg 550): a per-row post-construction check that fires after row construction (INSERT) or post-update value computation (UPDATE) and before the heap write. The closure on `View.CheckOptionCheck` AND's together every CHECK OPTION-bearing level's visibility (= that level's WHERE composed with all upstream WHEREs) up the chain — so a chained view-on-view with CHECK OPTION at one or both levels enforces both correctly. Cascade behavior: a CHECK OPTION at any level "spans" the upstream views, matching SQL Server's `"or spans a view that specifies WITH CHECK OPTION"` wording. DELETE never fires Msg 550 (a row leaving the view is fine).
+
+**Errors** (all probe-confirmed verbatim against SQL Server 2025):
+- **Msg 4403**: INSERT / UPDATE / DELETE through a view with aggregate / DISTINCT / GROUP BY. Body of the message names the view (`"Cannot update the view or function 'dbo.v' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator."`).
+- **Msg 4405**: INSERT / UPDATE / DELETE through a JOIN view. **Simulator divergence**: real SQL Server allows single-base-table UPDATEs through JOIN views; the simulator rejects uniformly here (deferred to a follow-up bundle).
+- **Msg 4406**: INSERT or UPDATE touched a derived projection column. Per-column gate — a view with mixed direct + derived columns accepts INSERT/UPDATE on the direct columns and DELETE through it works fine.
+- **Msg 550**: WITH CHECK OPTION violation (covers chain spans).
+
+**Catalog surface**: unchanged — `INFORMATION_SCHEMA.VIEWS.IS_UPDATABLE` stays hardcoded `'NO'` (probe-confirmed real SQL Server always reports `'NO'` here regardless of actual updatability, so the existing surface is correct).
+
+**No-WITH-CHECK-OPTION quirk** (probe-confirmed): a filtered view without WITH CHECK OPTION accepts INSERTs that produce rows outside its WHERE, and UPDATEs that move rows out of view. The row lands in the base; the view's WHERE only filters reads. The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row selection* (which rows to mutate), not INSERT acceptance.
+
+**Fidelity gaps**:
+- **JOIN-view single-base UPDATE/DELETE** rejected with Msg 4405 — real SQL Server permits these when the modification affects exactly one base table. EF Core doesn't emit this shape; apps that hand-write it surface Msg 4405 prematurely.
+- **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE. Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
+- **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
+- **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML. Real SQL Server's behavior on this specific niche shape isn't probe-confirmed; the simulator errs on the side of rejection.
 
 ### `text` / `ntext` / `image` restrictions
 Comparison (Msg 402), ORDER BY/DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) all enforced.
@@ -576,7 +610,7 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 - **CREATE SCHEMA's `<schema_element>` greedy form** — real SQL Server consumes trailing CREATE TABLE / VIEW / GRANT as part of the same CREATE SCHEMA statement (and requires CREATE SCHEMA to be the first statement in the batch as a result). The simulator instead dispatches the trailing tokens as their own statements — same end state for the common idiom, but mismatched-grammar trailers (e.g. anything that isn't a recognized statement start) raise `NotSupportedException`.
 - **`CREATE SCHEMA sys` / `INFORMATION_SCHEMA`** — raises Msg 2760 (matching real SQL Server). The schemas themselves exist as catalog-view hosts (`select * from sys.tables` / `select * from INFORMATION_SCHEMA.COLUMNS` work); legacy bare 1-part system-table access (`select * from systypes`) also still works.
 - T-SQL `GOTO` / labels — `IF` / `BEGIN…END` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` (bare + UDF-body value form) ship; unconditional jumps don't.
-- `RAISERROR`, stored procedures, multi-statement table-valued functions (`RETURNS @t TABLE (...) AS BEGIN ... END`), CLR functions, triggers, sequences. Scalar UDFs, inline TVFs, and views ship — see the matching sections above. **DML through views** (INSERT / UPDATE / DELETE) isn't modeled; the parser raises `NotSupportedException`, deferred to a follow-up bundle. `BEGIN ATOMIC` / `BEGIN DISTRIBUTED TRANSACTION` raise `NotSupportedException` at dispatch. Value-form `RETURN N` is legal inside a scalar-UDF body and raises Msg 178 elsewhere (stored-proc scope where it would also be legal isn't modeled). TRY/CATCH + THROW + live `@@ERROR` + `ERROR_*()` functions ship — see the TRY/CATCH section.
+- `RAISERROR`, stored procedures, multi-statement table-valued functions (`RETURNS @t TABLE (...) AS BEGIN ... END`), CLR functions, triggers, sequences. Scalar UDFs, inline TVFs, views, and DML-through-views (single-source updatable shape) ship — see the matching sections above. JOIN-view single-base-table UPDATE/DELETE, OUTPUT through views, and multi-source alias-form UPDATE/DELETE through views are deferred (Msg 4405 or `NotSupportedException` at the DML site). `BEGIN ATOMIC` / `BEGIN DISTRIBUTED TRANSACTION` raise `NotSupportedException` at dispatch. Value-form `RETURN N` is legal inside a scalar-UDF body and raises Msg 178 elsewhere (stored-proc scope where it would also be legal isn't modeled). TRY/CATCH + THROW + live `@@ERROR` + `ERROR_*()` functions ship — see the TRY/CATCH section.
 - **`PRINT` message capture** — the statement parses + evaluates the operand (so operand-side errors like Msg 245 surface), but the message is discarded. `DbConnection` has no `InfoMessage` event (that's a `SqlConnection` extension), so adding a public observability surface would mean a new event on `SimulatedDbConnection`. Defer until an application needs it.
 - `hierarchyid`, `geography`, `geometry`.
 

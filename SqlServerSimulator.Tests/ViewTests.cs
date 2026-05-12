@@ -275,26 +275,263 @@ public sealed class ViewTests
     }
 
     [TestMethod]
-    public void Insert_Through_View_Raises_NotSupported()
+    public void Insert_Through_Simple_View_Writes_To_Base()
     {
-        var ex = Assert.Throws<NotSupportedException>(() => WithT1().ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1;
-            insert dbo.v(label) values ('z')
-            """));
-        Assert.Contains("Updatable-view DML", ex.Message);
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label, tag from dbo.t1;
+            insert dbo.v(label, tag) values ('e','z')
+            """);
+        Assert.AreEqual("e", simulation.ExecuteScalar("select label from dbo.t1 where tag = 'z'"));
     }
 
     [TestMethod]
-    public void Update_Through_View_Raises_NotSupported()
-        => Assert.Throws<NotSupportedException>(() => WithT1().ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1;
-            update dbo.v set label = 'new' where id = 1
-            """));
+    public void Insert_Through_View_Without_ColumnList_UsesImplicitProjection()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label, tag from dbo.t1;
+            insert dbo.v values ('e','z')
+            """);
+        Assert.AreEqual("e", simulation.ExecuteScalar("select label from dbo.t1 where tag = 'z'"));
+    }
 
     [TestMethod]
-    public void Delete_Through_View_Raises_NotSupported()
-        => Assert.Throws<NotSupportedException>(() => WithT1().ExecuteNonQuery("""
+    public void Update_Through_Simple_View_Writes_To_Base()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label from dbo.t1;
+            update dbo.v set label = 'renamed' where id = 1
+            """);
+        Assert.AreEqual("renamed", simulation.ExecuteScalar("select label from dbo.t1 where id = 1"));
+    }
+
+    [TestMethod]
+    public void Delete_Through_Simple_View_Writes_To_Base()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
             create view dbo.v as select id, label from dbo.t1;
             delete dbo.v where id = 1
-            """));
+            """);
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where id = 1"));
+    }
+
+    [TestMethod]
+    public void Filtered_View_Update_Limits_To_Visible_Rows()
+    {
+        var simulation = WithT1();
+        // Filter view to tag='x' rows only. UPDATE through view must affect
+        // only the visible rows (label='a','b'), not the hidden ones.
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label from dbo.t1 where tag = 'x';
+            update dbo.v set label = 'Q'
+            """);
+        using var reader = simulation.ExecuteReader("select label from dbo.t1 order by id");
+        var labels = new List<string>();
+        while (reader.Read())
+            labels.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "Q", "Q", "c", "d" }, labels);
+    }
+
+    [TestMethod]
+    public void Filtered_View_Delete_Limits_To_Visible_Rows()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label from dbo.t1 where tag = 'x';
+            delete dbo.v
+            """);
+        Assert.AreEqual(2, simulation.ExecuteScalar("select count(*) from dbo.t1"));
+    }
+
+    [TestMethod]
+    public void Filtered_View_Insert_Without_CheckOption_Allows_OutOfView_Row()
+    {
+        // Probe-confirmed against SQL Server 2025: a view's WHERE filters
+        // reads but does NOT constrain INSERTs unless WITH CHECK OPTION is
+        // specified. The row is in the base but invisible through the view.
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x';
+            insert dbo.v(label, tag) values ('outsider','z')
+            """);
+        Assert.AreEqual("z", simulation.ExecuteScalar("select tag from dbo.t1 where label = 'outsider'"));
+        Assert.IsNull(simulation.ExecuteScalar("select count(*) from dbo.v where label = 'outsider'") is int n && n > 0 ? (object?)"visible" : null);
+    }
+
+    [TestMethod]
+    public void Insert_Through_CheckOption_View_Violates_Raises_Msg550()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x' with check option");
+        var ex = simulation.AssertSqlError("insert dbo.v(label,tag) values ('bad','z')", 550);
+        Assert.Contains("CHECK OPTION", ex.Message);
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where label = 'bad'"));
+    }
+
+    [TestMethod]
+    public void Insert_Through_CheckOption_View_Honoring_Predicate_Succeeds()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x' with check option;
+            insert dbo.v(label,tag) values ('good','x')
+            """);
+        Assert.AreEqual("good", simulation.ExecuteScalar("select label from dbo.v where label = 'good'"));
+    }
+
+    [TestMethod]
+    public void Update_Through_CheckOption_View_Moving_Row_Out_Raises_Msg550()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x' with check option");
+        _ = simulation.AssertSqlError("update dbo.v set tag = 'z' where id = 1", 550);
+        Assert.AreEqual("x", simulation.ExecuteScalar("select tag from dbo.t1 where id = 1"));
+    }
+
+    [TestMethod]
+    public void Insert_Through_Aggregate_View_Raises_Msg4403()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select tag, count(*) as cnt from dbo.t1 group by tag");
+        var ex = simulation.AssertSqlError("insert dbo.v(tag,cnt) values ('q',1)", 4403);
+        Assert.Contains("'dbo.v'", ex.Message);
+        Assert.Contains("aggregates", ex.Message);
+    }
+
+    [TestMethod]
+    public void Update_Through_Distinct_View_Raises_Msg4403()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select distinct tag from dbo.t1");
+        _ = simulation.AssertSqlError("update dbo.v set tag='q'", 4403);
+    }
+
+    [TestMethod]
+    public void Delete_Through_Aggregate_View_Raises_Msg4403()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select tag, count(*) as cnt from dbo.t1 group by tag");
+        _ = simulation.AssertSqlError("delete dbo.v where tag = 'x'", 4403);
+    }
+
+    [TestMethod]
+    public void Insert_Touching_Derived_Column_Raises_Msg4406()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select id, label, len(label) as label_len from dbo.t1");
+        var ex = simulation.AssertSqlError("insert dbo.v(label, label_len) values ('zz', 99)", 4406);
+        Assert.Contains("'dbo.v'", ex.Message);
+        Assert.Contains("derived or constant field", ex.Message);
+    }
+
+    [TestMethod]
+    public void Insert_OnDerived_View_Touching_Only_Direct_Cols_Succeeds()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label, len(label) as label_len from dbo.t1;
+            insert dbo.v(label) values ('newrow')
+            """);
+        Assert.AreEqual("newrow", simulation.ExecuteScalar("select label from dbo.t1 where label='newrow'"));
+    }
+
+    [TestMethod]
+    public void Update_Setting_Derived_Column_Raises_Msg4406()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select id, label, len(label) as label_len from dbo.t1");
+        _ = simulation.AssertSqlError("update dbo.v set label_len = 7 where id = 1", 4406);
+    }
+
+    [TestMethod]
+    public void Delete_Through_Derived_View_Works()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label, len(label) as label_len from dbo.t1;
+            delete dbo.v where id = 1
+            """);
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where id = 1"));
+    }
+
+    [TestMethod]
+    public void Insert_Through_Join_View_Raises_Msg4405()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create table dbo.t2 (id int, owner varchar(10));
+            create view dbo.v as select a.id, a.label, b.owner from dbo.t1 a inner join dbo.t2 b on a.id = b.id
+            """);
+        var ex = simulation.AssertSqlError("insert dbo.v(id, label) values (99, 'x')", 4405);
+        Assert.Contains("'dbo.v'", ex.Message);
+        Assert.Contains("multiple base tables", ex.Message);
+    }
+
+    [TestMethod]
+    public void Chain_View_On_View_Update_Composes_Visibility()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v1 as select id, label, tag from dbo.t1 where tag = 'x';
+            create view dbo.v2 as select id, label, tag from dbo.v1 where id > 1;
+            update dbo.v2 set label = 'CHAINED'
+            """);
+        // Only the row with tag='x' AND id>1 should be touched. That's id=2, label='b'.
+        Assert.AreEqual("CHAINED", simulation.ExecuteScalar("select label from dbo.t1 where id = 2"));
+        Assert.AreEqual("a", simulation.ExecuteScalar("select label from dbo.t1 where id = 1"));
+        Assert.AreEqual("c", simulation.ExecuteScalar("select label from dbo.t1 where id = 3"));
+    }
+
+    [TestMethod]
+    public void Chain_View_With_CheckOption_Cascades_Up_The_Chain()
+    {
+        var simulation = WithT1();
+        // v_chain1 has CHECK OPTION on tag='x'; v_chain2 has CHECK OPTION on n>1
+        // (where n isn't a column in t1 so use a different table for clarity).
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v1 as select id, label, tag from dbo.t1 where tag = 'x' with check option;
+            create view dbo.v2 as select id, label, tag from dbo.v1 where id > 0 with check option
+            """);
+        // INSERT through v2 with tag='y' violates v1's CHECK OPTION via the chain.
+        _ = simulation.AssertSqlError("insert dbo.v2(label, tag) values ('chk_fail', 'y')", 550);
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where label = 'chk_fail'"));
+        // INSERT honoring the predicate succeeds.
+        _ = simulation.ExecuteNonQuery("insert dbo.v2(label, tag) values ('chk_ok', 'x')");
+        Assert.AreEqual("chk_ok", simulation.ExecuteScalar("select label from dbo.t1 where label = 'chk_ok'"));
+    }
+
+    [TestMethod]
+    public void View_With_ColumnRename_Maps_To_Base_Correctly()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v(my_id, my_label, my_tag) as select id, label, tag from dbo.t1;
+            insert dbo.v(my_label, my_tag) values ('renamed','q');
+            update dbo.v set my_label = 'updated_q' where my_tag = 'q'
+            """);
+        Assert.AreEqual("updated_q", simulation.ExecuteScalar("select label from dbo.t1 where tag = 'q'"));
+    }
+
+    [TestMethod]
+    public void Insert_Through_View_Auto_Generates_Identity()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("""
+            create view dbo.v as select id, label from dbo.t1;
+            insert dbo.v(label) values ('auto')
+            """);
+        // Identity column kicked in: the new row has the next id (5).
+        Assert.AreEqual(5, simulation.ExecuteScalar("select id from dbo.t1 where label = 'auto'"));
+    }
+
+    [TestMethod]
+    public void Update_Through_View_Identity_Column_Raises_Msg8102()
+    {
+        var simulation = WithT1();
+        _ = simulation.ExecuteNonQuery("create view dbo.v as select id, label from dbo.t1");
+        _ = simulation.AssertSqlError("update dbo.v set id = 99 where id = 1", 8102);
+    }
 }

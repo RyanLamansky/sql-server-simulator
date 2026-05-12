@@ -107,9 +107,32 @@ internal sealed partial class Selection
     /// </summary>
     public readonly HeapColumn[]? DestColumnSchema;
 
+    /// <summary>
+    /// Non-null when this Selection is shape-eligible to back an updatable
+    /// view: exactly one FROM source, no JOINs, no DISTINCT, no aggregates,
+    /// no windows, no GROUP BY, no HAVING, no set-op chain. The
+    /// <see cref="ViewUpdatabilityProfile"/> exposes the single source, the
+    /// projection expressions, and the WHERE excluders — enough for
+    /// <see cref="View"/> to derive its base-column map and re-evaluate
+    /// the body's WHERE against a base-table row at DML time. Null for any
+    /// other shape; the DML-through-view path inspects the null+
+    /// <see cref="ViewUpdatabilityRejection"/> to surface
+    /// <strong>Msg 4403</strong> / <strong>Msg 4406</strong> / <strong>Msg
+    /// 4405</strong>.
+    /// </summary>
+    internal readonly ViewUpdatabilityProfile? UpdatabilityProfile;
+
+    /// <summary>
+    /// When <see cref="UpdatabilityProfile"/> is null, the reason — drives
+    /// Msg 4403 (aggregates / DISTINCT / GROUP BY) vs Msg 4406 (derived
+    /// projection) vs Msg 4405 (multi-base-table) at DML time. Always
+    /// <see cref="ViewUpdatabilityRejection.None"/> when the profile is set.
+    /// </summary>
+    internal readonly ViewUpdatabilityRejection UpdatabilityRejection;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
-    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, MultiPartName? intoTarget = null, HeapColumn[]? destColumnSchema = null)
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, MultiPartName? intoTarget = null, HeapColumn[]? destColumnSchema = null, ViewUpdatabilityProfile? updatabilityProfile = null, ViewUpdatabilityRejection updatabilityRejection = ViewUpdatabilityRejection.UnsupportedShape)
     {
         this.Schema = schema;
         this.ColumnNames = columnNames;
@@ -119,6 +142,8 @@ internal sealed partial class Selection
         this.rowSource = rowSource;
         this.IntoTarget = intoTarget;
         this.DestColumnSchema = destColumnSchema;
+        this.UpdatabilityProfile = updatabilityProfile;
+        this.UpdatabilityRejection = updatabilityProfile is null ? updatabilityRejection : ViewUpdatabilityRejection.None;
     }
 
     /// <summary>
@@ -937,7 +962,8 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForView(resolvedView));
+                        lateralPlan: Selection.ForView(resolvedView),
+                        backingView: resolvedView);
                 }
 
                 // Inline TVF call: `FROM schema.fn(args) [alias]`. Detected

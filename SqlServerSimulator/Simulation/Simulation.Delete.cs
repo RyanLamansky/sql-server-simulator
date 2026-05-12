@@ -30,20 +30,33 @@ partial class Simulation
 
         var leadingIdent = BatchContext.ParseObjectName(context);
 
-        // A view target would route here in real SQL Server (single-source
-        // updatable views accept DELETE). Same v1 deferral as INSERT /
-        // UPDATE through a view — surface a clear NotSupportedException.
-        if (context.Batch.TryResolveView(leadingIdent, out _))
-            throw new NotSupportedException($"DELETE through a view ('{leadingIdent}') isn't modeled. Updatable-view DML is a deferred feature; target the underlying table directly.");
-
-        _ = context.Batch.TryResolveTable(leadingIdent, out var leadingTable);
+        View? leadingView = null;
+        HeapTable? leadingTable;
+        if (context.Batch.TryResolveView(leadingIdent, out var resolvedView))
+        {
+            if (resolvedView.BaseTable is not { } baseTable)
+            {
+                throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{resolvedView.Schema.Name}.{resolvedView.Name}")
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{resolvedView.Schema.Name}.{resolvedView.Name}");
+            }
+            leadingView = resolvedView;
+            leadingTable = baseTable;
+        }
+        else
+        {
+            _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
+        }
         context.MoveNextOptional();
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
         // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-
         // source DELETE with OUTPUT isn't modeled — see the matching
-        // limitation in ParseUpdate.
+        // limitation in ParseUpdate. DELETE OUTPUT through a view is also
+        // rejected (the DELETED.* would need view-output-column rebinding).
         MutationOutputProjection? output = null;
+        if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            throw new NotSupportedException($"DELETE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
             output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true);
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
@@ -51,11 +64,13 @@ partial class Simulation
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            return ExecuteJoinedDelete(context, leadingIdent, leadingTable, output);
+            return leadingView is not null
+                ? throw new NotSupportedException($"Multi-source DELETE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — target the underlying table directly.")
+                : ExecuteJoinedDelete(context, leadingIdent, leadingTable, output);
         }
 
         var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdent);
-        return ExecuteDeleteAgainstTable(context, table, output);
+        return ExecuteDeleteAgainstTable(context, table, output, leadingView);
     }
 
     /// <summary>
@@ -65,7 +80,8 @@ partial class Simulation
     private static SimulatedStatementOutcome ExecuteDeleteAgainstTable(
         ParserContext context,
         HeapTable table,
-        MutationOutputProjection? output)
+        MutationOutputProjection? output,
+        View? sourceView = null)
     {
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -81,17 +97,36 @@ partial class Simulation
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             SqlValue[]? fullValues = null;
-            if (where is not null || output is not null)
+            if (where is not null || output is not null || sourceView is not null)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
             }
+
+            // View visibility filter: rows not visible in the view aren't
+            // candidates for DELETE through it. AND-of-WHEREs up the chain.
+            if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues!, context.Batch))
+                continue;
 
             if (where is not null)
             {
                 var localValues = fullValues!;
                 SqlValue Resolve(MultiPartName name)
                 {
+                    if (sourceView is not null)
+                    {
+                        for (var v = 0; v < sourceView.OutputColumns.Length; v++)
+                        {
+                            if (Collation.Default.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
+                            {
+                                var baseOrd = sourceView.BaseColumnOrdinals[v];
+                                return baseOrd < 0
+                                    ? throw SimulatedSqlException.InvalidColumnName(name)
+                                    : localValues[baseOrd];
+                            }
+                        }
+                        throw SimulatedSqlException.InvalidColumnName(name);
+                    }
                     for (var k = 0; k < table.Columns.Length; k++)
                     {
                         if (Collation.Default.Equals(table.Columns[k].Name, name.Leaf))

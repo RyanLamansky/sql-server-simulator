@@ -34,7 +34,8 @@ internal sealed class FromSource(
     Heap? lobStore,
     IEnumerable<byte[]> rows,
     Selection? lateralPlan = null,
-    HeapTable? backingTable = null)
+    HeapTable? backingTable = null,
+    View? backingView = null)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -52,6 +53,16 @@ internal sealed class FromSource(
     /// after FROM parsing has identified which source is the mutation target.
     /// </summary>
     public readonly HeapTable? BackingTable = backingTable;
+
+    /// <summary>
+    /// Back-reference to the <see cref="View"/> when this source is a view
+    /// reference (<c>FROM schema.view</c>); null otherwise. <see cref="LateralPlan"/>
+    /// holds the view's body plan, but consumers that need the view's
+    /// updatability metadata (DML-through-view rewrite) read it from here.
+    /// Both <see cref="BackingTable"/> and <see cref="BackingView"/> are
+    /// mutually exclusive: at most one is non-null.
+    /// </summary>
+    public readonly View? BackingView = backingView;
 
     /// <summary>
     /// When non-null, this source is the right side of a <c>CROSS APPLY</c>
