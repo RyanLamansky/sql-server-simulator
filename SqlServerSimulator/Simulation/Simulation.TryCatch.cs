@@ -49,7 +49,7 @@ partial class Simulation
     /// <item>Parse-time name-resolution errors (Msg 208 / Msg 207) inside a
     /// TRY body propagate out of the batch — the simulator parses the whole
     /// batch eagerly while real SQL Server defers some name resolution.
-    /// Same root cause as the Q15 un-taken-IF gap.</item>
+    /// Same root cause as the un-taken-IF deferred-name-resolution gap.</item>
     /// <item><c>XACT_STATE()</c> and the XACT_ABORT / doomed-transaction
     /// semantics aren't modeled. <c>@@TRANCOUNT</c> behaves correctly
     /// (caught errors don't auto-rollback explicit transactions, matching

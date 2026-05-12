@@ -1,0 +1,34 @@
+# DML — UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / rowversion
+
+## UPDATE / DELETE
+- Bare `UPDATE table SET ... [WHERE]` and `DELETE [FROM] table [WHERE]`.
+- Multi-table syntax (`UPDATE alias SET ... FROM <sources> [WHERE]`, `DELETE FROM alias FROM <sources> [WHERE]`) — the EF7+ `ExecuteUpdate`/`ExecuteDelete` shape. Target identified by leading-identifier match against each source's `FromSource.Qualifier`; missing match → Msg 208.
+- **Joined UPDATE/DELETE: each unique target row processed exactly once.** When the same target matches multiple join tuples, SQL Server uses the *first* matching tuple's RHS for SET. The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map. LEFT JOIN with no right-side match still surfaces the target (RHS sees NULL).
+- **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).
+- **Multi-column SET evaluates RHS against pre-update snapshot** — `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` → `(a=100, b=11)`. Scalar subquery RHS sees pre-update state.
+- Identity update → Msg 8102. Computed update → Msg 271. Rowversion update → Msg 272. Per-row constraint re-validation: NOT NULL → Msg 515 ("UPDATE fails."); CHECK → Msg 547 ("UPDATE statement"); PK/UNIQUE → Msg 2627 (verbatim "Cannot insert duplicate key" wording even on UPDATE — SQL Server quirk). PK/UNIQUE validation runs against the post-update virtual state, so mass-shift on a unique key can false-positive (see Quirks).
+- `OUTPUT INSERTED.<col>` (post-update) / `DELETED.<col>` (pre-update). UPDATE allows both qualifiers; DELETE rejects `INSERTED.<col>` at parse → Msg 4104. Star expansion (`INSERTED.*`/`DELETED.*`) and `OUTPUT INTO @table_var` not modeled.
+
+## `rowversion` (legacy synonym `timestamp`)
+8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one. Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration. Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738. Outbound CAST: `varbinary(N)`/`binary(N)` copy 8 bytes; `bigint` reads big-endian. `Promote(RowVersion, Varbinary) → Varbinary` so EF's `WHERE [rv] = @originalRv` parameter works directly. EF `[Timestamp]` SaveChanges round-trips end-to-end.
+
+## INSERT … SELECT
+`INSERT [INTO] target [(cols)] SELECT …` accepts the full Selection grammar — WHERE/JOIN/GROUP BY/aggregates/ORDER BY/TOP/OFFSET-FETCH/UNION/INTERSECT/EXCEPT all work source-side.
+
+Source-kind dispatch after the OUTPUT-clause parse: `Values` token → existing tuple-parsing path; `Select` token → `Selection.Parse(…).Execute()`. Both funnel into one shared per-row encode loop (defaults / identity / rowversion / computed / constraints / OUTPUT).
+
+**Full buffering**: source materializes to `List<SqlValue[]>` before any destination write — makes self-insert (`INSERT t SELECT … FROM t`) safe.
+
+Projection-count mismatch fires at parse time: too few SELECT columns → Msg 120 St 1 Cls 15; too many → Msg 121. Empty source → silent success, rows-affected 0. Mid-source constraint violations trigger statement-level rollback. EF doesn't emit `INSERT…SELECT` from SaveChanges; reachable from raw SQL and bulk-copy patterns. CTE-prefix INSERTs not modeled.
+
+## `SELECT … INTO target`
+Creates a destination table from the projection's inferred schema, then copies rows in. Target routes by `#`-prefix: `#foo` lands in the per-connection `TempTables` dict (same as `CREATE TABLE #foo`); regular names land in the current database's `HeapTables`. Probe-confirmed schema-inference rules (2026-05-11):
+
+- **Nullability**: direct column refs preserve source nullability. Integer arithmetic, `CAST`, `COALESCE`, aggregates (incl. `COUNT`), and bare `NULL` literal all project as **nullable**. `ISNULL(x, y)` is **non-null when either arg is non-null** (asymmetric with COALESCE). `CASE` is non-null when every `THEN` branch is non-null AND the `ELSE` branch is non-null (no-`ELSE` = implicit `ELSE NULL` = nullable). Non-NULL literals are non-null. String `+` should also project non-null when both operands non-null, but the simulator's runtime-dispatch design (Add can be arithmetic or concat depending on operand types) makes static analysis impractical — projects as nullable (minor fidelity gap; staging tables rarely depend on this).
+- **Identity propagation**: only when the projection is a *direct column ref* (a `Reference`, possibly wrapped in `NamedExpression` for `AS alias`) AND the FROM clause is exactly one source with a `BackingTable` (a real heap, not a derived table / CTE / OPENJSON) AND no joins. WHERE/TOP/ORDER BY preserve. Any join, set-op, expression wrapping, or CTE drops it. Destination's `IdentityState` starts fresh with the source's seed+increment and tracks the copied values via `ObserveExplicit`.
+- **Implementation**: `Selection.IntoTarget` + `Selection.DestColumnSchema` (a `HeapColumn[]`) are captured at parse time inside `ParseInner` and propagated through `CombineSetOps` / `ApplyTopLevelOrderBy`. `Simulation.SelectInto.cs:ExecuteSelectInto` creates the heap table, runs the Selection, encodes each row through `RowEncoder.EncodeRow`, appends to the dest's heap, and tracks the active transaction's undo log so a `ROLLBACK` unwinds both the table creation (for temp tables) and the row writes.
+- **Schema rules + validation** live in `Selection.SelectInto.cs:ComputeIntoDestSchema`. Nullability uses `Expression.ResultIsNullable` (a new virtual override on `Value` / `Reference` / `NamedExpression` / `IsNullExpression` / `CaseExpression`; default `true` for everything else). Identity uses `UnwrapDirectRef` to drill through `NamedExpression` layers.
+- **Errors**: unnamed projection → **Msg 1038 Cl 15 St 5** (`SelectIntoMissingColumnName`); duplicate column name in projection → **Msg 2705 Cl 16 St 3** (`DuplicateColumnInSelectInto`, names the target table); target already exists → **Msg 2714** (reused factory); `##` global target → `NotSupportedException`.
+- **INTO + UNION**: real SQL Server allows `SELECT … INTO #t FROM a UNION ALL SELECT … FROM b` (INTO on first branch). The simulator parses this, propagates `IntoTarget` from the left branch through `CombineSetOps`, and strips identity on the combined dest schema. A right branch carrying its own INTO → Msg 156 (`Incorrect syntax near the keyword 'into'.`).
+- **INTO without FROM** works (`SELECT 1 AS x INTO #t`) — synthesized-row path threads `IntoTarget` through.
+- **Quirk**: CTE-wrapped single-heap source drops identity and nullability — the simulator's CTE bindings synthesize `HeapColumn` entries with `nullable: true` and no identity, so the analyzer can't peer through. Real SQL Server propagates both. Fix would require propagating column metadata through CTE bindings; future bundle.

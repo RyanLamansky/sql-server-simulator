@@ -67,7 +67,8 @@ internal sealed class BatchContext
     /// itself is in skip mode), decremented on exit. BREAK / CONTINUE check
     /// this at parse time: when zero, raise Msg 135 / 136 (matches real SQL
     /// Server's compile-time loop-scope check — fires even from un-taken IF
-    /// branches, distinct from the Q15 deferred-name-resolution gap).
+    /// branches, distinct from the un-taken-branch deferred-name-resolution
+    /// gap).
     /// </summary>
     public int LoopDepth;
 

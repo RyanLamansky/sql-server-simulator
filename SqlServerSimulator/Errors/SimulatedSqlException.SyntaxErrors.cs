@@ -101,8 +101,9 @@ partial class SimulatedSqlException
     /// any enclosing <c>WHILE</c>. Probe-confirmed against SQL Server 2025
     /// (2026-05-11): Class 15, State 1, exact wording verbatim. Fires even
     /// from un-taken IF branches — SQL Server applies the loop-scope check
-    /// at compile time, so the simulator does too (distinct from the Q15
-    /// deferred-name-resolution gap, where un-taken branches escape Msg 208).
+    /// at compile time, so the simulator does too (distinct from the
+    /// un-taken-branch deferred-name-resolution gap, where un-taken branches
+    /// escape Msg 208).
     /// </summary>
     internal static SimulatedSqlException BreakOutsideLoop() =>
         new("Cannot use a BREAK statement outside the scope of a WHILE statement.", 135, 15, 1);
