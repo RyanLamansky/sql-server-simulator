@@ -302,6 +302,11 @@ internal sealed partial class Selection
                 if (!include)
                     continue;
 
+                // Per-row stamp bump so NEXT VALUE FOR in the projection
+                // advances per output row (and dedupes across same-row
+                // instances). Bump only on rows that pass WHERE — excluded
+                // rows shouldn't burn sequence values.
+                batch.BumpRowStamp();
                 var projected = new SqlValue[expressions.Count];
                 for (var i = 0; i < expressions.Count; i++)
                     projected[i] = expressions[i].Run(new RuntimeContext(ResolveColumn, batch));
@@ -344,6 +349,9 @@ internal sealed partial class Selection
             if (!include)
                 continue;
 
+            // Per-row stamp bump — same rule as the streaming path: only
+            // for rows that pass WHERE.
+            batch.BumpRowStamp();
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
                 projected[i] = expressions[i].Run(new RuntimeContext(ResolveSource, batch));

@@ -1316,12 +1316,14 @@ internal sealed partial class Selection
     /// </remarks>
     private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy)
     {
-        // WHERE / GROUP BY / HAVING reject windowed functions (Msg 4108).
-        // Toggle the parser-context flag for the duration of those parses;
-        // ORDER BY (which DOES allow windows) is parsed below outside the
-        // toggle.
+        // WHERE / GROUP BY / HAVING reject windowed functions (Msg 4108) and
+        // NEXT VALUE FOR (Msg 11720). Toggle the parser-context flags for the
+        // duration of those parses; ORDER BY (which DOES allow windows but
+        // rejects NEXT VALUE FOR) handled separately below.
         var savedAllowsWindows = context.AllowsWindowExpressions;
+        var savedRejectNextValueFor = context.RejectNextValueFor;
         context.AllowsWindowExpressions = false;
+        context.RejectNextValueFor = true;
         try
         {
             while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -1348,6 +1350,7 @@ internal sealed partial class Selection
         finally
         {
             context.AllowsWindowExpressions = savedAllowsWindows;
+            context.RejectNextValueFor = savedRejectNextValueFor;
         }
 
         // Skip ORDER BY when this branch is part of a set-op chain — the
@@ -1358,7 +1361,17 @@ internal sealed partial class Selection
         {
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            ParseOrderByItems(context, fromClause.OrderBy);
+            // ORDER BY rejects NEXT VALUE FOR (Msg 11720), but allows windowed
+            // functions. Toggle just the sequence flag for the duration.
+            context.RejectNextValueFor = true;
+            try
+            {
+                ParseOrderByItems(context, fromClause.OrderBy);
+            }
+            finally
+            {
+                context.RejectNextValueFor = savedRejectNextValueFor;
+            }
             ConsumeOffsetFetch(context, fromClause);
         }
     }

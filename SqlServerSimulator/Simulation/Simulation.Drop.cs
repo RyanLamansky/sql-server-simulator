@@ -38,6 +38,7 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.View } => DropTargetKind.View,
             ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => DropTargetKind.Procedure,
             UnquotedString { ContextualKeyword: ContextualKeyword.Type } => DropTargetKind.Type,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Sequence } => DropTargetKind.Sequence,
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
@@ -70,6 +71,9 @@ partial class Simulation
                 case DropTargetKind.Type:
                     DropOneType(context, name, ifExists);
                     break;
+                case DropTargetKind.Sequence:
+                    DropOneSequence(context, name, ifExists);
+                    break;
                 default:
                     DropOneTable(context, name, ifExists);
                     break;
@@ -86,7 +90,25 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View, Procedure, Type }
+    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence }
+
+    /// <summary>
+    /// Removes one entry from the target schema's <see cref="Schema.Sequences"/>
+    /// dict. Missing sequence → Msg 3701 (sequence variant) unless
+    /// <paramref name="ifExists"/> is set.
+    /// </summary>
+    private static void DropOneSequence(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is null || !schema.Sequences.TryRemove(name.Leaf, out _))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
+        }
+    }
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.TableTypes"/>

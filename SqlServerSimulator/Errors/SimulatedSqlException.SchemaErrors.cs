@@ -97,6 +97,65 @@ partial class SimulatedSqlException
         new($"Cannot drop the procedure '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>sequence</c> wording variant.
+    /// Probe-confirmed verbatim against SQL Server 2025: same number / class /
+    /// state as DROP TABLE / FUNCTION / VIEW / PROCEDURE; the object-type
+    /// noun is the only difference.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropSequenceDoesNotExist(string name) =>
+        new($"Cannot drop the sequence '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
+    /// Mimics SQL Server error 11700: <c>CREATE SEQUENCE</c> declared
+    /// <c>INCREMENT BY 0</c>. Probe-confirmed verbatim wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException SequenceIncrementCannotBeZero(string fullName) =>
+        new($"The increment for sequence object '{fullName}' cannot be zero.", 11700, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11702: <c>CREATE SEQUENCE</c> declared a
+    /// type that isn't one of the integer family or <c>decimal(p, 0)</c> /
+    /// <c>numeric(p, 0)</c>. Probe-confirmed verbatim wording against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException SequenceInvalidType(string fullName) =>
+        new($"The sequence object '{fullName}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, or any user-defined data type that is based on one of the above integer data types.", 11702, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 11703: <c>CREATE SEQUENCE</c> declared a
+    /// <c>START WITH</c> outside the <c>[MINVALUE, MAXVALUE]</c> range
+    /// (either explicit values, or one explicit and the other defaulted).
+    /// Probe-confirmed verbatim wording.
+    /// </summary>
+    internal static SimulatedSqlException SequenceStartOutOfRange(string fullName) =>
+        new($"The start value for sequence object '{fullName}' must be between the minimum and maximum value of the sequence object.", 11703, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11720: <c>NEXT VALUE FOR</c> was used in a
+    /// clause that disallows it (TOP / OVER / OUTPUT / ON / WHERE / GROUP BY
+    /// / HAVING / ORDER BY). Probe-confirmed verbatim wording.
+    /// </summary>
+    internal static SimulatedSqlException NextValueForNotAllowedHere() =>
+        new("NEXT VALUE FOR function is not allowed in the TOP, OVER, OUTPUT, ON, WHERE, GROUP BY, HAVING, or ORDER BY clauses.", 11720, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11726: <c>NEXT VALUE FOR</c> resolved to an
+    /// object that isn't a sequence. Probe-confirmed: real SQL Server uses
+    /// the qualified <c>schema.name</c> form in the message.
+    /// </summary>
+    internal static SimulatedSqlException ObjectIsNotASequence(string fullName) =>
+        new($"Object '{fullName}' is not a sequence object.", 11726, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11728: a no-cycle sequence reached its
+    /// boundary and a further <c>NEXT VALUE FOR</c> tried to advance past
+    /// it. Probe-confirmed verbatim wording.
+    /// </summary>
+    internal static SimulatedSqlException SequenceExhausted(string fullName) =>
+        new($"The sequence object '{fullName}' has reached its minimum or maximum value. Restart the sequence object to allow new values to be generated.", 11728, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 219: <c>CREATE TYPE</c> targeted a name that
     /// already exists in the schema's type namespace. Probe-confirmed verbatim
     /// against SQL Server 2025 (2026-05-12) — the wording's

@@ -27,6 +27,8 @@ partial class Simulation
                 return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
                 return TryParseCreateType(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
+                return TryParseCreateSequence(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER PROCEDURE — modern upsert syntax. The only
                 // ALTER-able object that ships in the simulator today is the

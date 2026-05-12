@@ -69,4 +69,12 @@ internal sealed class Schema(string name, int schemaId)
     /// only).
     /// </summary>
     public readonly ConcurrentDictionary<string, TableType> TableTypes = new(Collation.Default);
+
+    /// <summary>
+    /// Sequence objects hosted by this schema. Created via <c>CREATE
+    /// SEQUENCE schema.name ...</c>, consumed via <c>NEXT VALUE FOR
+    /// schema.name</c>. Shares the object-name namespace with tables /
+    /// views / functions / procs (Msg 2714 on collision).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Sequence> Sequences = new(Collation.Default);
 }

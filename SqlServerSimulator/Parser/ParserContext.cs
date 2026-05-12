@@ -98,6 +98,17 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool AllowsWindowExpressions = true;
 
     /// <summary>
+    /// True when expression parsing is inside a clause where SQL Server
+    /// rejects <c>NEXT VALUE FOR</c> (probe-confirmed: WHERE / GROUP BY /
+    /// HAVING / ORDER BY / TOP / OVER / OUTPUT / ON all raise Msg 11720).
+    /// Set by the Selection parser around the affected clauses and consumed
+    /// by the <c>NEXT VALUE FOR</c> expression constructor; outside those
+    /// scopes (projection / DEFAULT / INSERT VALUES / SET / etc.) the flag
+    /// stays false and <c>NEXT VALUE FOR</c> is legal.
+    /// </summary>
+    public bool RejectNextValueFor;
+
+    /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
     /// the output schema of a correlated subquery whose projection references
     /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s

@@ -247,6 +247,43 @@ internal sealed class BatchContext
     /// </summary>
     public readonly Dictionary<string, HeapTable> TableVariables = new(StringComparer.InvariantCultureIgnoreCase);
 
+    /// <summary>
+    /// Monotonically-increasing per-row stamp consumed by
+    /// <c>NEXT VALUE FOR</c>. The per-row iterator at each DML / SELECT
+    /// site bumps this just before evaluating row expressions, so multiple
+    /// <c>NEXT VALUE FOR seq</c> calls within one row of one statement
+    /// share a cache entry and emit the same value (probe-confirmed against
+    /// SQL Server 2025: <c>INSERT VALUES (next, next)</c> writes the same
+    /// value into both columns; <c>SELECT next, next FROM 3-row-table</c>
+    /// advances per row but pairs columns per-row). Non-iterating expressions
+    /// (one-shot <c>SET @v = next value for seq</c>, scalar <c>SELECT</c>)
+    /// bump exactly once via the helper. Wraparound at <see cref="long.MaxValue"/>
+    /// isn't a concern — 2^63 row iterations per batch is unreachable.
+    /// </summary>
+    public long CurrentRowStamp;
+
+    /// <summary>
+    /// Per-batch cache of last-emitted sequence values, keyed by sequence
+    /// reference. <c>NEXT VALUE FOR seq</c> first consults this dict: if the
+    /// stored stamp matches <see cref="CurrentRowStamp"/>, the cached value
+    /// is reused (same-row dedup); otherwise the sequence is advanced and
+    /// the cache slot updated. Cleared via dictionary turnover rather than
+    /// per-statement reset because the stamp-equality check makes stale
+    /// entries automatically invalid.
+    /// </summary>
+    public readonly Dictionary<Sequence, (long Stamp, SqlValue Value)> SequenceRowCache = [];
+
+    /// <summary>
+    /// Bumps <see cref="CurrentRowStamp"/> to start a new per-row evaluation
+    /// scope. Called by per-row iterators (SELECT projection, INSERT VALUES,
+    /// INSERT SELECT, UPDATE / DELETE, DEFAULT-clause evaluation during
+    /// INSERT) and by one-shot expression sites (DECLARE @v initializer,
+    /// SET @v assignment, RETURN expression) before evaluating any expression
+    /// in the new scope. All <c>NEXT VALUE FOR</c> calls within the bump
+    /// boundary that target the same sequence return the same value.
+    /// </summary>
+    public void BumpRowStamp() => this.CurrentRowStamp++;
+
     public BatchContext(SimulatedDbCommand command)
     {
         this.Variables = SeedVariables(command);
@@ -636,6 +673,21 @@ internal sealed class BatchContext
         tableType = null;
         return this.TryResolveSchema(name, out var schema)
             && schema.TableTypes.TryGetValue(name.Leaf, out tableType);
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to a registered <see cref="Sequence"/>.
+    /// Accepts 1-part names (probe-confirmed: <c>NEXT VALUE FOR seq1</c> finds
+    /// <c>dbo.seq1</c>) with fallback to <see cref="Database.DefaultSchemaName"/>;
+    /// 2-part / 3-part qualified routes through the named schema. Returns false
+    /// on miss (caller routes to Msg 208 for unknown name or Msg 11726 if the
+    /// name resolves to a non-sequence object).
+    /// </summary>
+    public bool TryResolveSequence(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Sequence? sequence)
+    {
+        sequence = null;
+        return this.TryResolveSchema(name, out var schema)
+            && schema.Sequences.TryGetValue(name.Leaf, out sequence);
     }
 
     /// <summary>

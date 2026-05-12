@@ -84,6 +84,7 @@ internal abstract class Expression
             // by '(' — the surrounding loop hands the call shape off to
             // ResolveBuiltIn.
             ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => new Reference(reserved.ToString()),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? new Reference(nextToken),
             Name name => new Reference(name),
             Operator { Character: '(' } => ParseGroupedExpression(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -595,5 +596,61 @@ internal abstract class Expression
             },
             _ => (Expression?)null
         } ?? throw SimulatedSqlException.UnrecognizedBuiltInFunction(name);
+    }
+
+    /// <summary>
+    /// Handles the <c>NEXT VALUE FOR [schema.]sequence [OVER (ORDER BY ...)]</c>
+    /// shape when the current token is the contextual keyword <c>NEXT</c>.
+    /// Returns the constructed <see cref="NextValueFor"/> when the full
+    /// <c>NEXT VALUE FOR &lt;name&gt;</c> shape is present, or <c>null</c> when
+    /// the <c>NEXT</c> is just a column / identifier (e.g. a user column
+    /// named <c>next</c>) — caller falls back to <see cref="Reference"/>.
+    /// Uses <see cref="ParserContext.SaveCheckpoint"/> / restore to roll back
+    /// the lookahead on the non-match path so the column-reference fallback
+    /// resumes at the original <c>NEXT</c> token.
+    /// </summary>
+    private static NextValueFor? TryParseNextValueForOrFallback(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var valueToken = context.GetNextOptional();
+        var forToken = context.GetNextOptional();
+        var nameToken = context.GetNextOptional();
+        if (valueToken is not UnquotedString { ContextualKeyword: ContextualKeyword.Value }
+            || forToken is not ReservedKeyword { Keyword: Keyword.For }
+            || nameToken is not Tokens.Name)
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return null;
+        }
+        var sequenceName = BatchContext.ParseObjectName(context);
+        var nvf = new NextValueFor(context, sequenceName);
+
+        // Optional OVER (ORDER BY ...) — parsed and discarded. The simulator
+        // iterates rows in one deterministic order regardless of the OVER
+        // hint; the sequence-advance pattern across rows is unchanged. Peek
+        // for OVER via a save/restore so the outer loop's GetNextOptional
+        // resumes at the correct token whether OVER is present or not.
+        var overCheckpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.Over })
+        {
+            context.RestoreCheckpoint(overCheckpoint);
+            return nvf;
+        }
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var depth = 1;
+        while (depth > 0)
+        {
+            switch (context.GetNextRequired())
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+            }
+        }
+        return nvf;
     }
 }

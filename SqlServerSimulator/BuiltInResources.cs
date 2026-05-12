@@ -463,6 +463,37 @@ internal static class BuiltInResources
         };
         var tableTypesView = new CatalogView("table_types", tableTypesColumns, EnumerateSysTableTypes);
 
+        // sys.sequences: per-database list of user-defined sequence objects.
+        // Probe-confirmed shipped subset: name / object_id / schema_id /
+        // start_value / increment / minimum_value / maximum_value /
+        // is_cycling / is_cached / cache_size / current_value /
+        // system_type_id / user_type_id / is_exhausted. cache_size is NULL
+        // when no explicit CACHE n was given (real SQL Server behavior;
+        // the simulator never tracks an explicit value so this is always
+        // NULL). Values widen to decimal(38, 0) to match SQL Server's
+        // sql_variant-typed columns in real sys.sequences, but the simulator
+        // emits bigint here since all sequence state is tracked as long
+        // (a minor projection-schema divergence; SqlClient surfaces these
+        // as long, which matches what HiLo-style apps assert on).
+        var sequencesColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("start_value", SqlType.BigInt, null, false),
+            new("increment", SqlType.BigInt, null, false),
+            new("minimum_value", SqlType.BigInt, null, false),
+            new("maximum_value", SqlType.BigInt, null, false),
+            new("is_cycling", SqlType.Bit, null, false),
+            new("is_cached", SqlType.Bit, null, false),
+            new("cache_size", SqlType.Int32, null, true),
+            new("current_value", SqlType.BigInt, null, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+            new("is_exhausted", SqlType.Bit, null, false),
+        };
+        var sequencesView = new CatalogView("sequences", sequencesColumns, EnumerateSysSequences);
+
         // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
         // emits a row for every user-defined type (scalar UDTs surface their
         // base type; table types surface 'table type' as the data_type
@@ -490,6 +521,7 @@ internal static class BuiltInResources
             ["sys.procedures"] = proceduresView,
             ["sys.types"] = typesView,
             ["sys.table_types"] = tableTypesView,
+            ["sys.sequences"] = sequencesView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -569,6 +601,61 @@ internal static class BuiltInResources
             }
         }
     }
+
+    /// <summary>
+    /// Rows for <c>sys.sequences</c>: one per registered sequence object,
+    /// schema-ordered. <c>cache_size</c> is always NULL (the simulator
+    /// doesn't model the batched-allocation cache; real SQL Server returns
+    /// NULL when no explicit <c>CACHE n</c> was given anyway). Type-id
+    /// columns derive from the declared type via <see cref="SystypesRowData"/>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch)
+    {
+        var nullCache = SqlValue.Null(SqlType.Int32);
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var seq in schema.Sequences.Values.OrderBy(s => s.ObjectId))
+            {
+                var (systemTypeId, userTypeId) = SequenceTypeIds(seq.DeclaredType);
+                yield return [
+                    SqlValue.FromSystemName(seq.Name),
+                    SqlValue.FromInt32(seq.ObjectId),
+                    schemaId,
+                    SqlValue.FromInt64(seq.StartValue),
+                    SqlValue.FromInt64(seq.Increment),
+                    SqlValue.FromInt64(seq.MinValue),
+                    SqlValue.FromInt64(seq.MaxValue),
+                    seq.Cycle ? trueBit : falseBit,
+                    trueBit,
+                    nullCache,
+                    SqlValue.FromInt64(seq.CurrentValue),
+                    SqlValue.FromByte(systemTypeId),
+                    SqlValue.FromInt32(userTypeId),
+                    seq.IsExhausted ? trueBit : falseBit,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Maps a sequence's declared scalar type to the <c>(system_type_id,
+    /// user_type_id)</c> pair surfaced in <c>sys.sequences</c>. The values
+    /// match SQL Server's documented system-type IDs (tinyint=48, smallint=52,
+    /// int=56, bigint=127, decimal=106). System types use the same id for
+    /// both columns.
+    /// </summary>
+    private static (byte SystemTypeId, int UserTypeId) SequenceTypeIds(SqlType type) => type switch
+    {
+        TinyIntSqlType => (48, 48),
+        SmallIntSqlType => (52, 52),
+        Int32SqlType => (56, 56),
+        BigIntSqlType => (127, 127),
+        DecimalSqlType => (106, 106),
+        _ => (0, 0),
+    };
 
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, SqlValue tableTypeDataType)
     {

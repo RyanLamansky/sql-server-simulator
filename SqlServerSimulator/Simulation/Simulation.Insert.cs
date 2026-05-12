@@ -137,6 +137,13 @@ partial class Simulation
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
         foreach (var sourceRow in sourceRows)
         {
+            // Per-row stamp bump for DEFAULT-clause expression evaluation
+            // below — NEXT VALUE FOR in a DEFAULT advances per row inserted
+            // (probe-confirmed against SQL Server 2025). VALUES tuples were
+            // already evaluated with their own bumps in EvaluateValuesTuples
+            // so they each saw a distinct stamp; SELECT-source rows likewise
+            // pick up Selection's per-row bump.
+            context.Batch.BumpRowStamp();
             var rowValues = new SqlValue[destinationTable.Columns.Length];
             for (var i = 0; i < rowValues.Length; i++)
                 rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
@@ -275,6 +282,10 @@ partial class Simulation
         var rows = new List<SqlValue[]>(tuples.Count);
         foreach (var tuple in tuples)
         {
+            // Per-row stamp bump so NEXT VALUE FOR advances on the next
+            // tuple (and dedupes across multiple NEXT VALUE FOR instances
+            // within one tuple). See BatchContext.CurrentRowStamp.
+            context.Batch.BumpRowStamp();
             var values = new SqlValue[tuple.Length];
             for (var i = 0; i < tuple.Length; i++)
                 values[i] = tuple[i].Run(runtime);

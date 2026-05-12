@@ -217,6 +217,8 @@ partial class Simulation
             if (where is not null && where.Run(new RuntimeContext(ResolveOriginal, context.Batch)) != true)
                 continue;
 
+            // Per-row stamp bump for NEXT VALUE FOR in the SET-list expressions.
+            context.Batch.BumpRowStamp();
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal);
 
             // WITH CHECK OPTION: the post-update row must satisfy every
@@ -299,6 +301,8 @@ partial class Simulation
             var fullValues = DecodeFullRow(table, targetBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
 
+            // Per-row stamp bump for NEXT VALUE FOR in the SET-list.
+            context.Batch.BumpRowStamp();
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple);
             var oldSnapshot = output is null ? null : fullValues;
             affected.Add((addr.Page, addr.Slot, newValues, oldSnapshot));

@@ -311,6 +311,12 @@ public sealed partial class Simulation
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.SuppressErrorReset = false;
+        // Per-statement stamp bump — establishes a fresh "row" context for
+        // NEXT VALUE FOR caching at the statement boundary. Multi-row DML
+        // and SELECT iterators bump again per-row, but one-shot statements
+        // (SET, DECLARE init, RETURN, scalar SELECT) inherit this baseline
+        // bump and don't need to advance the stamp themselves.
+        batch.BumpRowStamp();
 
         // Two-phase dispatch: the core iterator runs the statement body
         // (parser + execution); the wrapper materializes its outcomes and
