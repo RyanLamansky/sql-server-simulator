@@ -157,19 +157,99 @@ public sealed class TableVariableTests
             134);
 
     [TestMethod]
-    public void Identity_NotSupported_v1()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "declare @t table (id int identity, v int)"));
+    public void Identity_AutoIncrements()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "declare @t table (id int identity(1,1), name nvarchar(10)); insert @t (name) values ('a'), ('b'), ('c'); select id, name from @t order by id");
+        IsTrue(reader.Read()); AreEqual(1, reader.GetInt32(0)); AreEqual("a", reader.GetString(1));
+        IsTrue(reader.Read()); AreEqual(2, reader.GetInt32(0)); AreEqual("b", reader.GetString(1));
+        IsTrue(reader.Read()); AreEqual(3, reader.GetInt32(0)); AreEqual("c", reader.GetString(1));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// Probe-confirmed: real SQL Server rejects SET IDENTITY_INSERT @t at
+    /// parse with Msg 102 — there's no way to force a specific value into
+    /// an identity column of a table variable.
+    /// </summary>
+    [TestMethod]
+    public void Identity_SetIdentityInsert_RaisesMsg102()
+        => new Simulation().AssertSqlError(
+            "declare @t table (id int identity, v int); set identity_insert @t on",
+            102);
 
     [TestMethod]
-    public void Unique_NotSupported_v1()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "declare @t table (id int unique)"));
+    public void Identity_ScopeIdentityObserves()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "declare @t table (id int identity(100,5), v int); insert @t (v) values (1); insert @t (v) values (2); select scope_identity()");
+        IsTrue(reader.Read());
+        AreEqual(105m, reader.GetDecimal(0));
+    }
 
     [TestMethod]
-    public void Check_NotSupported_v1()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "declare @t table (id int check (id > 0))"));
+    public void Unique_InlineViolation_RaisesMsg2627()
+        => new Simulation().AssertSqlError(
+            "declare @t table (id int, code nvarchar(10) unique); insert @t values (1, 'a'); insert @t values (2, 'a')",
+            2627);
+
+    [TestMethod]
+    public void Unique_TableLevelViolation_RaisesMsg2627()
+        => new Simulation().AssertSqlError(
+            "declare @t table (id int, code nvarchar(10), unique (code)); insert @t values (1, 'a'), (2, 'a')",
+            2627);
+
+    [TestMethod]
+    public void Check_InlineViolation_RaisesMsg547()
+        => new Simulation().AssertSqlError(
+            "declare @t table (val int check (val > 0)); insert @t values (-1)",
+            547);
+
+    [TestMethod]
+    public void Check_TableLevelViolation_RaisesMsg547()
+        => new Simulation().AssertSqlError(
+            "declare @t table (a int, b int, check (a < b)); insert @t values (5, 2)",
+            547);
+
+    [TestMethod]
+    public void Computed_NonPersistedFromTwoColumns()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "declare @t table (a int, b int, c as a + b); insert @t (a, b) values (1, 2), (3, 4); select a, b, c from @t order by a");
+        IsTrue(reader.Read()); AreEqual(1, reader.GetInt32(0)); AreEqual(2, reader.GetInt32(1)); AreEqual(3, reader.GetInt32(2));
+        IsTrue(reader.Read()); AreEqual(3, reader.GetInt32(0)); AreEqual(4, reader.GetInt32(1)); AreEqual(7, reader.GetInt32(2));
+    }
+
+    [TestMethod]
+    public void Computed_Persisted_Works()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "declare @t table (a int, b int, c as a + b persisted); insert @t (a, b) values (10, 20); select c from @t");
+        IsTrue(reader.Read());
+        AreEqual(30, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void RowVersion_AdvancesAcrossInserts()
+    {
+        // Two inserts into a @t with a rowversion column should produce
+        // strictly increasing 8-byte rv values (the simulator's database-
+        // scoped counter advances on every row).
+        using var reader = new Simulation().ExecuteReader(
+            "declare @t table (id int, rv rowversion); insert @t (id) values (1); insert @t (id) values (2); select id, rv from @t order by id");
+        IsTrue(reader.Read());
+        var rv1 = (byte[])reader.GetValue(1);
+        IsTrue(reader.Read());
+        var rv2 = (byte[])reader.GetValue(1);
+        // rv2 > rv1 lexicographically (big-endian monotonic).
+        var greater = false;
+        for (var i = 0; i < 8; i++)
+        {
+            if (rv2[i] > rv1[i]) { greater = true; break; }
+            if (rv2[i] < rv1[i]) break;
+        }
+        IsTrue(greater);
+    }
 
     // ---- routing ----
 
@@ -380,4 +460,124 @@ public sealed class TableVariableTests
             create table t (id int identity primary key, v int);
             insert t output inserted.id into @undeclared values (42)
             """, 1087);
+
+    [TestMethod]
+    public void Output_Into_TableVariable_AppliesDefaultsForUnfilled()
+    {
+        // Probe-confirmed: target columns not covered by the OUTPUT
+        // projection receive their declared DEFAULT — not NULL.
+        using var reader = new Simulation().ExecuteReader("""
+            create table t (id int);
+            declare @out table (id int, msg nvarchar(50) default 'defaulted');
+            insert t output inserted.id into @out (id) values (1), (2);
+            select id, msg from @out order by id
+            """);
+        IsTrue(reader.Read()); AreEqual(1, reader.GetInt32(0)); AreEqual("defaulted", reader.GetString(1));
+        IsTrue(reader.Read()); AreEqual(2, reader.GetInt32(0)); AreEqual("defaulted", reader.GetString(1));
+    }
+
+    // ---- OUTPUT INTO regular table ----
+
+    [TestMethod]
+    public void Output_Into_RegularTable_CapturesRows()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            create table audit_t (id int, val int);
+            create table src_t (id int identity, val int);
+            insert src_t (val) output inserted.id, inserted.val into audit_t values (100), (200);
+            select id, val from audit_t order by id
+            """);
+        IsTrue(reader.Read()); AreEqual(1, reader.GetInt32(0)); AreEqual(100, reader.GetInt32(1));
+        IsTrue(reader.Read()); AreEqual(2, reader.GetInt32(0)); AreEqual(200, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void Output_Into_RegularTable_AppliesDefaultsForUnfilled()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            create table audit_t (id int, msg nvarchar(50) default 'audit_default');
+            create table src_t (id int);
+            insert src_t output inserted.id into audit_t (id) values (1), (2);
+            select id, msg from audit_t order by id
+            """);
+        IsTrue(reader.Read()); AreEqual(1, reader.GetInt32(0)); AreEqual("audit_default", reader.GetString(1));
+        IsTrue(reader.Read()); AreEqual(2, reader.GetInt32(0)); AreEqual("audit_default", reader.GetString(1));
+    }
+
+    [TestMethod]
+    public void Output_Into_RegularTable_MissingTable_RaisesMsg208()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            insert t output inserted.id into nonexistent_audit values (1)
+            """, 208);
+
+    // ---- statement-level atomicity ----
+
+    [TestMethod]
+    public void StatementAtomic_MultiRowInsert_NotNullFails_RollsBackAllRows()
+    {
+        // Probe-confirmed: a multi-row INSERT into @t that hits a NOT NULL
+        // violation mid-batch leaves @t empty (the failed row plus any
+        // earlier-in-batch row are both rolled back). Real SQL Server's
+        // table-variable mutations are statement-atomic even though they
+        // ignore BEGIN TRAN / ROLLBACK.
+        var count = new Simulation().ExecuteScalar("""
+            declare @t table (id int not null, val nvarchar(20));
+            begin try
+                insert @t values (1, 'a'), (null, 'b'), (3, 'c');
+            end try
+            begin catch
+            end catch;
+            select count(*) from @t
+            """);
+        AreEqual(0, count);
+    }
+
+    [TestMethod]
+    public void StatementAtomic_MultiRowInsert_PkViolation_RollsBackAllRows()
+    {
+        var count = new Simulation().ExecuteScalar("""
+            declare @t table (id int primary key);
+            begin try
+                insert @t values (1), (2), (1), (3);
+            end try
+            begin catch
+            end catch;
+            select count(*) from @t
+            """);
+        AreEqual(0, count);
+    }
+
+    [TestMethod]
+    public void StatementAtomic_MultiRowInsert_CheckViolation_RollsBackAllRows()
+    {
+        var count = new Simulation().ExecuteScalar("""
+            declare @t table (val int check (val > 0));
+            begin try
+                insert @t values (1), (2), (-1), (3);
+            end try
+            begin catch
+            end catch;
+            select count(*) from @t
+            """);
+        AreEqual(0, count);
+    }
+
+    [TestMethod]
+    public void StatementAtomic_PriorSuccessfulInserts_Preserved()
+    {
+        // A failed statement rolls back its own rows but earlier successful
+        // statements are preserved (verifies the per-statement scope).
+        var count = new Simulation().ExecuteScalar("""
+            declare @t table (id int primary key);
+            insert @t values (10);
+            begin try
+                insert @t values (20), (30), (10);  -- 4th row violates PK
+            end try
+            begin catch
+            end catch;
+            select count(*) from @t
+            """);
+        AreEqual(1, count);
+    }
 }

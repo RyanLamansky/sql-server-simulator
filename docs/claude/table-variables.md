@@ -1,6 +1,6 @@
 # Table variables (`DECLARE @t TABLE (...)`)
 
-A per-batch heap table referenced via `@`-prefixed names. Probed against SQL Server 2025 (2026-05-12); the simulator's coverage centers on the EF / app-compat surface (`OUTPUT INTO @t` for SaveChanges, simple error-log staging, multi-row capture from DML).
+A per-batch heap table referenced via `@`-prefixed names. Probed against SQL Server 2025 (2026-05-12, gap-bundle 2026-05-12). The column-list parser is shared with CREATE TABLE (see `Simulation.ParseColumnList`); table-variable-only restrictions (CONSTRAINT-named, REFERENCES) are gated on an `isTableVariable` flag.
 
 ## Storage scope
 
@@ -9,36 +9,32 @@ Backed by a `HeapTable` with `IsTableVariable = true` stored on `BatchContext.Ta
 Variable names live in a shared namespace with scalar variables: `DECLARE @t int; DECLARE @t TABLE (...)` raises Msg 134 ("variable name '@t' has already been declared"). Probe-confirmed both directions (scalar-then-table and table-then-scalar).
 
 `HeapTable.IsTableVariable` routes a few behavioral exceptions from regular heap tables:
-- DML mutations (INSERT / UPDATE / DELETE / OUTPUT INTO @t) bypass the undo log. ROLLBACK doesn't undo @t mutations (probe-confirmed: `INSERT @t inside BEGIN TRAN; ROLLBACK` leaves the row intact). The classic error-log pattern (`INSERT @errors ... ; ROLLBACK; SELECT * FROM @errors` inside CATCH) works.
+- DML mutations (INSERT / UPDATE / DELETE / OUTPUT INTO @t) log to `BatchContext.CurrentTableVarUndoLog` (per-statement scope), not `CurrentUndoLog` (connection-tx scope). The per-statement log is dropped on statement success and replayed on statement failure — preserves statement-level atomicity while keeping `ROLLBACK TRAN` blind to `@t` writes (probe-confirmed). The classic error-log pattern (`INSERT @errors ... ; ROLLBACK; SELECT * FROM @errors` inside CATCH) works.
 - The table never appears in `sys.tables` / `INFORMATION_SCHEMA.TABLES` (the row generators only walk schema heap-table dicts, not per-batch table-variable dicts).
-- Constraint / NOT-NULL error messages render the bare `@t` name (probe-confirmed: `table '@t'` wording, no schema qualifier).
+- Constraint / NOT-NULL error messages render the bare `@t` name (probe-confirmed: `table '@t'` wording for PK/UNIQUE; `table "@t"` for CHECK, no schema qualifier).
 
-## Grammar (v1 scope)
+## Grammar
 
 ```
-DECLARE @t TABLE ( col_def_or_table_pk [, col_def_or_table_pk]... )
+DECLARE @t TABLE ( column_or_table_constraint [, column_or_table_constraint]... )
 ```
 
-Coverage in v1:
+Coverage:
 - **Columns**: type + optional `(N)` / `(p, s)` length-or-scale spec.
 - **`NULL` / `NOT NULL`** column nullability.
 - **`DEFAULT expr`** column default.
-- **Inline anonymous `PRIMARY KEY`** on a single column. Promotes the column to `NOT NULL` if not declared (`DECLARE @t TABLE (id int PRIMARY KEY)` works; the column is implicitly NOT NULL). Explicit `NULL` + inline PK raises Msg 8111.
-- **Table-level anonymous `PRIMARY KEY (col_list)`** — promotes referenced columns to NOT NULL if not declared. Multiple PKs on one @t raise Msg 8110.
+- **`IDENTITY [(seed, increment)]`** — `SCOPE_IDENTITY()` / `@@IDENTITY` observe @t inserts (probe-confirmed). `SET IDENTITY_INSERT @t ON` raises Msg 102 — real SQL Server's grammar forbids it for table variables, so there's no way to force a value into an @t identity column.
+- **Inline anonymous `PRIMARY KEY`** on a single column. Promotes the column to `NOT NULL` if not declared. Explicit `NULL` + inline PK raises Msg 8111.
+- **Table-level anonymous `PRIMARY KEY (col_list)`** — promotes bare-nullable referenced columns to NOT NULL (probe-confirmed: `DECLARE @t TABLE (a int, b int, PRIMARY KEY (a, b))` works and rejects NULL inserts with Msg 515). Explicit-NULL columns referenced by a table-level PK raise Msg 8111. Multiple PKs on one @t raise Msg 8110.
+- **Inline `UNIQUE`** and **table-level `UNIQUE (col_list)`** — violations raise Msg 2627.
+- **Inline `CHECK (predicate)`** and **table-level `CHECK (predicate)`** — violations raise Msg 547. Inline-CHECK peer-column refs raise Msg 8141 (same structural walk as CREATE TABLE).
+- **Computed columns (`col AS expr [PERSISTED [NOT NULL]]`)** — non-persisted columns evaluate per-read; the PERSISTED keyword is accepted but functionally a no-op for table variables (no on-disk store, so the storage distinction doesn't matter).
+- **`rowversion` / `timestamp`** — backed by the database-scoped 8-byte counter, same as regular tables. Two rowversion columns in one `@t` raise Msg 2738.
 
-Rejected at parse time:
-- **`CONSTRAINT name`** (named constraints, inline or table-level) → Msg 102 ("Incorrect syntax near 'CONSTRAINT'") matching probe-confirmed real SQL Server behavior. Real SQL Server's grammar doesn't allow named constraints inside `DECLARE @t TABLE`.
-- **`REFERENCES`** (foreign keys) → Msg 102 (probe-confirmed).
-
-Rejected as `NotSupportedException` (deferred to v2 — real SQL Server accepts these in table variables, but the simulator's v1 surfaces a loud feature-named error rather than silently dropping):
-- `IDENTITY` columns
-- `UNIQUE` constraints
-- Inline `CHECK` constraints
-- Computed columns (`col AS expr`)
-- `rowversion` columns
-
-Rejected because real SQL Server also rejects:
-- **Multi-variable DECLARE with a table variable** (`DECLARE @t1 TABLE (...), @t2 TABLE (...)`) → Msg 102. Only one table variable per DECLARE statement. Mixed scalar + table (`DECLARE @x int = 5, @t TABLE (...)`) also rejected (Msg 156 / Msg 102 in the simulator — the probe shows Msg 156 first then a cascading 1087, the simulator surfaces the parse-rejection path directly).
+Rejected at parse time (probe-confirmed against real SQL Server's grammar):
+- **`CONSTRAINT name`** (named constraints, inline or table-level) → Msg 102 ("Incorrect syntax near 'CONSTRAINT'"). Real SQL Server's grammar doesn't allow named constraints inside `DECLARE @t TABLE`.
+- **`REFERENCES`** (foreign keys) → Msg 102.
+- **Multi-variable DECLARE with a table variable** (`DECLARE @t1 TABLE (...), @t2 TABLE (...)`) → Msg 102. Only one table variable per DECLARE statement. Mixed scalar + table (`DECLARE @x int = 5, @t TABLE (...)`) also rejected.
 
 ## DML routing
 
@@ -58,9 +54,15 @@ Missing `@t` (not declared) raises Msg 1087 (`"Must declare the table variable \
 
 `@t` in expression position (e.g. `SET @x = @t`) raises Msg 137 ("Must declare the scalar variable '@t'") — probe-confirmed: real SQL Server treats `@t` in expression context as a scalar-variable reference and fails to find it (since `@t` is registered as a table variable, not a scalar).
 
-## Non-transactional semantics
+## Non-transactional semantics + statement-level atomicity
 
-Probe-confirmed: table variables aren't affected by `ROLLBACK`. INSERT / UPDATE / DELETE against `@t` skip the undo log (`destinationTable.IsTableVariable ? null : context.Batch.CurrentUndoLog` at every heap-mutation call site). The pattern:
+Probe-confirmed against real SQL Server:
+- `@t` mutations are NOT affected by `ROLLBACK TRAN` (writes survive a tx-scoped rollback).
+- `@t` mutations ARE statement-atomic — a multi-row INSERT that hits a NOT NULL / PK / UNIQUE / CHECK violation mid-batch leaves zero rows from that statement.
+
+Implementation: every heap-mutation site routes `@t` writes to `BatchContext.CurrentTableVarUndoLog` (allocated fresh per-statement by `RunMutation`) instead of `CurrentUndoLog` (the per-connection-tx log). On statement success the per-statement log is discarded; on statement failure it's fully rolled back inside the same `catch` block that handles regular-table rollback. The per-statement scope means `ROLLBACK TRAN` (which only walks the tx-scoped log) never sees `@t` entries — preserving the non-transactional invariant — while replay-on-exception covers the atomic-statement invariant.
+
+The classic error-log pattern still works:
 
 ```sql
 DECLARE @errors TABLE (msg nvarchar(200));
@@ -75,30 +77,29 @@ END CATCH;
 SELECT * FROM @errors;  -- captures the rolled-back error
 ```
 
-This is the load-bearing pattern for many error-logging idioms in legacy T-SQL. Statement-level atomicity (multi-row INSERT failing mid-statement) isn't modeled for table variables — partial rows from a failed multi-row INSERT into `@t` stay. Fidelity gap; document if an app surfaces it.
+## `OUTPUT … INTO <target> [(cols)]`
 
-## `OUTPUT … INTO @t [(cols)]`
+Extends the OUTPUT clause on INSERT / UPDATE / DELETE / MERGE to direct rows to a `@t` or regular-table target instead of the result set. Probe-confirmed: when `INTO target` is present, the rows go to the target only — nothing surfaces to the client. The dispatch returns `SimulatedNonQuery` (matching the probe where `INSERT t OUTPUT … INTO target VALUES (...)` showed no result rows; a subsequent `SELECT * FROM target` showed the captured rows).
 
-Extends the OUTPUT clause on INSERT / UPDATE / DELETE / MERGE to direct rows to a table-variable target instead of the result set. Probe-confirmed: when `INTO @t` is present, the rows go to the target only — nothing surfaces to the client. The dispatch returns `SimulatedNonQuery` (matching the probe where `INSERT t OUTPUT … INTO @out VALUES (...)` showed no result rows; a subsequent `SELECT * FROM @out` showed the captured rows).
+Target shapes (both probe-confirmed):
+- **Table variable** (`@t`): writes route through the per-statement `@t` undo log; missing `@t` declaration raises Msg 1087.
+- **Regular table**: writes route through the connection's main undo log (and participate in `ROLLBACK TRAN`); missing table raises Msg 208.
 
 Column mapping resolves at parse time:
-- **No column list** (`OUTPUT col1, col2 INTO @t`): positional fill — projection column 0 → target column 0, etc. Counts must match (Msg 213 on mismatch).
-- **Explicit column list** (`OUTPUT col1, col2 INTO @t (insid, insname)`): projection column 0 → target column named `insid`, etc. Column names must exist in target (Msg 207); counts must match (Msg 213).
+- **No column list** (`OUTPUT col1, col2 INTO target`): positional fill — projection column 0 → target column 0, etc. Counts must match the target's full column count (Msg 213 on mismatch).
+- **Explicit column list** (`OUTPUT col1, col2 INTO target (insid, insname)`): projection column 0 → target column named `insid`, etc. Column names must exist in target (Msg 207); counts must match the list (Msg 213).
 
-Target columns not covered by the projection receive NULL. Real SQL Server applies the column's DEFAULT (if any) for unfilled targets — the simulator's v1 always writes NULL. Apps using OUTPUT INTO @t typically project every non-default target column, so this gap is mostly theoretical.
+Target columns not covered by the projection evaluate the column's `DEFAULT` expression if declared (probe-confirmed: real SQL Server applies the DEFAULT, not NULL, for unfilled OUTPUT-INTO target columns); columns with no DEFAULT receive NULL. The defaulted value is coerced into the target column's type via the same `CoerceForInsert` path INSERT uses.
 
-`OUTPUT … INTO <regular_table>` raises `NotSupportedException`. Real SQL Server accepts both targets; EF / app patterns center on table variables, so the simulator's v1 covers @t only.
+## Fidelity gaps remaining
 
-## Fidelity gaps documented in this bundle
-
-- Per-statement atomicity for `@t` mutations is not preserved (mid-statement multi-row INSERT failure leaves partial rows in `@t`). Real SQL Server's statement-level rollback covers @t too.
-- `OUTPUT … INTO <regular_table>` not supported (NotSupportedException).
-- `IDENTITY`, `UNIQUE`, inline `CHECK`, computed columns, `rowversion` in `@t` raise NotSupportedException — real SQL Server accepts all of these.
-- Target columns not filled by `OUTPUT INTO` receive NULL (not the column's DEFAULT).
-- `@t` doesn't appear in `sys.tables` / `INFORMATION_SCHEMA.TABLES` (real SQL Server doesn't either, so this is fidelity-aligned but worth noting).
+- `@t` doesn't appear in `sys.tables` / `INFORMATION_SCHEMA.TABLES`. Real SQL Server doesn't surface table variables there either, so this is fidelity-aligned.
+- Auto-generated constraint names follow the simulator's convention (`PK__@t__<16hex>` / `UQ__@t__<16hex>` / `CK__@t__<col>__<8hex>`) — same shape as regular tables. Real SQL Server uses a tempdb-derived 8-char hex for the table portion (`PK__#A292BB6__…`), so the suffixes won't byte-match. This is the documented general constraint-name quirk applied to `@t` specifically.
 
 ## Architecture notes
 
+- **Shared column-list parser**: `Simulation.ParseColumnList` handles both CREATE TABLE and DECLARE @t TABLE column-list bodies. The `isTableVariable` flag gates the two restrictions (CONSTRAINT-named → Msg 102, REFERENCES → Msg 102); everything else (IDENTITY / UNIQUE / CHECK / computed / rowversion) is shared. The shared parser also handles table-level PK promotion of bare-nullable columns to NOT NULL, fixing a pre-existing CREATE TABLE fidelity bug as a side effect.
 - **Where the dict lives**: `BatchContext.TableVariables` is the natural per-batch home. Variables share the same scope and the duplicate-name check (Msg 134) is one resolution.
-- **Why `HeapTable.IsTableVariable` instead of a separate type**: table variables reuse 90% of `HeapTable`'s storage / encoding / constraint enforcement. The behavioral exceptions (non-transactional, no catalog visibility, name-wording) are narrow enough to gate on a flag rather than fork into a new type.
-- **Why `OutputTarget` lives inside `Simulation.Output.cs`**: the OUTPUT projection class already owned per-row encoding; INTO-target is one more option on the same path. The nullable return from `ProjectRow` signals "consumed by target" vs "produced for result set" — the caller branches on `HasTarget` to suppress the result-set construction.
+- **Why `HeapTable.IsTableVariable` instead of a separate type**: table variables reuse most of `HeapTable`'s storage / encoding / constraint enforcement. The behavioral exceptions (per-statement undo log instead of tx-scoped, no catalog visibility, name-wording, no `SET IDENTITY_INSERT`) are narrow enough to gate on a flag rather than fork into a new type.
+- **Why two parallel undo logs**: `CurrentUndoLog` is per-connection-tx (lifetime extended by `BEGIN TRAN`); `CurrentTableVarUndoLog` is always per-statement. Routing on `IsTableVariable` keeps the two invariants (tx-rollback skips @t, statement-rollback covers @t) disjoint without requiring a new transaction model.
+- **Why `OutputTarget` lives inside `Simulation.Output.cs`**: the OUTPUT projection class already owned per-row encoding; INTO-target is one more option on the same path. The nullable return from `ProjectRow` signals "consumed by target" vs "produced for result set" — the caller branches on `HasTarget` to suppress the result-set construction. The target's `Append` method handles default-eval for unfilled columns and routes through the appropriate undo log based on the target's `IsTableVariable` flag.

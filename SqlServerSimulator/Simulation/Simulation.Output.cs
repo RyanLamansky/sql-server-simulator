@@ -93,11 +93,11 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses an optional <c>INTO @t [(col_list)]</c> suffix on an OUTPUT
-    /// clause. Returns <see langword="null"/> when no INTO keyword is
-    /// present. The target must be a table variable (v1 scope —
-    /// <c>OUTPUT INTO &lt;regular_table&gt;</c> isn't modeled; real SQL Server
-    /// accepts both but the bundle's coverage is just table variables).
+    /// Parses an optional <c>INTO &lt;target&gt; [(col_list)]</c> suffix on an
+    /// OUTPUT clause. Returns <see langword="null"/> when no INTO keyword is
+    /// present. The target can be either a table variable (<c>@t</c>) or a
+    /// regular heap table — probe-confirmed against SQL Server 2025
+    /// (2026-05-12) that both shapes accept the same column-mapping rules.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -107,10 +107,13 @@ partial class Simulation
     /// the target column whose name matches list[i].
     /// </para>
     /// <para>
-    /// Probe-confirmed against SQL Server 2025 (2026-05-12): a table variable
-    /// must already be declared (Msg 1087 otherwise); the column-list count
-    /// must match the projection count (Msg 213); columns named in the list
-    /// must exist in the target (Msg 207).
+    /// Probe-confirmed: a table variable must already be declared (Msg 1087
+    /// otherwise); regular table targets surface Msg 208; the column-list
+    /// count must match the projection count (Msg 213); columns named in
+    /// the list must exist in the target (Msg 207). Target columns not
+    /// covered by the projection receive their column-level
+    /// <c>DEFAULT</c> (or NULL when none is declared) — see
+    /// <see cref="OutputTarget.Append"/>.
     /// </para>
     /// </remarks>
     private static OutputTarget? TryParseOutputIntoTarget(ParserContext context, int projectionColumnCount)
@@ -119,14 +122,17 @@ partial class Simulation
             return null;
         context.MoveNextRequired();
 
-        // v1 scope: only table-variable targets. Regular-table INTO targets
-        // are deferred (NotSupportedException at the @t-only check below).
-        if (context.Token is not AtPrefixedString)
-            throw new NotSupportedException("OUTPUT INTO with a regular-table target isn't modeled in v1; use a table variable (@t) instead.");
-
+        // Accept both @t (table variable) and regular heap-table targets. The
+        // resolver's failure mode differs by leaf prefix: @t -> Msg 1087
+        // ("must declare the table variable"), regular -> Msg 208 ("invalid
+        // object name") — same convention the DML routing uses.
         var targetName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         if (!context.Batch.TryResolveTable(targetName, out var targetTable))
-            throw SimulatedSqlException.MustDeclareTableVariable(targetName.Leaf);
+        {
+            throw BatchContext.IsTableVariableName(targetName.Leaf)
+                ? SimulatedSqlException.MustDeclareTableVariable(targetName.Leaf)
+                : SimulatedSqlException.InvalidObjectName(targetName);
+        }
         context.MoveNextOptional();
 
         int[] columnOrdinals;
@@ -169,39 +175,57 @@ partial class Simulation
                 columnOrdinals[i] = i;
         }
 
-        return new OutputTarget(targetTable, columnOrdinals);
+        return new OutputTarget(targetTable, columnOrdinals, context.Batch);
     }
 
     /// <summary>
     /// Resolved <c>OUTPUT … INTO &lt;target&gt;</c> binding. <see cref="Target"/>
-    /// is the table variable the projection appends rows to;
-    /// <see cref="ProjectionToTargetOrdinal"/> maps projection column index
-    /// to target table column ordinal (positional fill if INTO had no
-    /// explicit column list).
+    /// is the heap table the projection appends rows to (table variable or
+    /// regular table); <see cref="ProjectionToTargetOrdinal"/> maps projection
+    /// column index to target table column ordinal (positional fill if INTO
+    /// had no explicit column list).
     /// </summary>
-    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal)
+    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal, BatchContext batch)
     {
         public readonly HeapTable Target = target;
         public readonly int[] ProjectionToTargetOrdinal = projectionToTargetOrdinal;
+        private readonly BatchContext batch = batch;
 
         /// <summary>
         /// Appends one row to <see cref="Target"/>. Columns named in the
         /// projection map by ordinal via <see cref="ProjectionToTargetOrdinal"/>;
-        /// any target column not covered receives a NULL (real SQL Server
-        /// would also apply a DEFAULT for unfilled columns — that path isn't
-        /// modeled in v1 since EF / app patterns always project every
-        /// non-default target column).
+        /// any target column not covered evaluates the column's
+        /// <c>DEFAULT</c> expression if declared, else falls through to
+        /// NULL (probe-confirmed against SQL Server 2025: unfilled OUTPUT-INTO
+        /// target columns receive the target's DEFAULT, not NULL). Mutations
+        /// route through the same undo log as direct DML on the target:
+        /// table variables use the per-statement
+        /// <see cref="BatchContext.CurrentTableVarUndoLog"/>; regular tables
+        /// use the connection's
+        /// <see cref="BatchContext.CurrentUndoLog"/>.
         /// </summary>
         public void Append(SqlValue[] projectedValues)
         {
             var targetValues = new SqlValue[this.Target.Columns.Length];
-            for (var i = 0; i < targetValues.Length; i++)
-                targetValues[i] = SqlValue.Null(this.Target.Columns[i].Type);
+            var covered = new bool[this.Target.Columns.Length];
             for (var i = 0; i < projectedValues.Length; i++)
+            {
                 targetValues[this.ProjectionToTargetOrdinal[i]] = projectedValues[i];
+                covered[this.ProjectionToTargetOrdinal[i]] = true;
+            }
+            for (var i = 0; i < targetValues.Length; i++)
+            {
+                if (covered[i])
+                    continue;
+                var column = this.Target.Columns[i];
+                targetValues[i] = column.Default is { } defaultExpression
+                    ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column.Type)
+                    : SqlValue.Null(column.Type);
+            }
+            var undoLog = this.Target.IsTableVariable ? this.batch.CurrentTableVarUndoLog : this.batch.CurrentUndoLog;
             this.Target.Heap.Insert(
                 RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
-                undoLog: null);
+                undoLog);
         }
     }
 

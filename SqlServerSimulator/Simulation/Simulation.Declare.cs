@@ -152,25 +152,26 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// <para>
-    /// v1 coverage: column type (with <c>(N)</c>/<c>(p, s)</c> spec) +
-    /// <c>NOT NULL</c> / <c>NULL</c> + <c>DEFAULT expr</c> + inline anonymous
-    /// <c>PRIMARY KEY</c> + table-level anonymous <c>PRIMARY KEY (cols)</c>.
-    /// Probe-confirmed against SQL Server 2025 (2026-05-12) that named
-    /// constraints (<c>CONSTRAINT pk1 PRIMARY KEY</c>) and <c>REFERENCES</c>
-    /// raise Msg 156 — the simulator surfaces those via
-    /// <see cref="SimulatedSqlException.SyntaxErrorNear(ParserContext)"/>. Real SQL Server
-    /// accepts <c>UNIQUE</c> / inline <c>CHECK</c> / <c>IDENTITY</c> /
-    /// computed columns / <c>rowversion</c> inside table-variable declarations;
-    /// the simulator's v1 surfaces those as <see cref="NotSupportedException"/>
-    /// with the feature name so the gap is loud rather than silent.
+    /// Reuses the CREATE TABLE column-list parser via the shared
+    /// <c>ParseColumnList(..., isTableVariable: true)</c> entry point. Two
+    /// shapes are gated off for <c>@t</c> via the flag (Msg 102, probe-
+    /// confirmed against SQL Server 2025): <c>CONSTRAINT name</c> (real SQL
+    /// Server's grammar disallows named constraints in table-variable
+    /// declarations) and <c>REFERENCES</c> (foreign keys). All other column
+    /// shapes work: IDENTITY, NOT NULL/NULL, DEFAULT, inline + table-level
+    /// PRIMARY KEY / UNIQUE / CHECK, computed columns (with optional PERSISTED),
+    /// rowversion. Statement-level atomicity for <c>@t</c> mutations is
+    /// modeled via the per-statement <see cref="BatchContext.CurrentTableVarUndoLog"/>;
+    /// transaction-scoped <c>ROLLBACK</c> does NOT undo <c>@t</c> writes
+    /// (probe-confirmed: real SQL Server's table variables are
+    /// non-transactional).
     /// </para>
     /// <para>
     /// Storage: builds a <see cref="HeapTable"/> with
     /// <see cref="HeapTable.IsTableVariable"/> set so DML routes through the
-    /// non-transactional mutation path (probe-confirmed: INSERT @t inside
-    /// <c>BEGIN TRAN; ROLLBACK</c> leaves rows intact). The table's name is
-    /// <c>"@t"</c> with the leading <c>@</c> kept so error wording for NOT
-    /// NULL / PK violations renders as <c>table '@t'</c> matching real SQL
+    /// non-transactional mutation path. The table's name is <c>"@t"</c> with
+    /// the leading <c>@</c> kept so error wording for NOT NULL / PK / UNIQUE
+    /// / CHECK violations renders as <c>table '@t'</c> matching real SQL
     /// Server. The dict key on <see cref="BatchContext.TableVariables"/>
     /// strips the <c>@</c> (matching the
     /// <see cref="BatchContext.Variables"/> dict's convention).
@@ -183,209 +184,91 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var fullName = "@" + variableName;
-        var columns = new List<HeapColumn>();
-        var pendingKeys = new List<(KeyConstraintKind Kind, int[] Ordinals)>();
+        var heapColumns = new List<HeapColumn?>();
+        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
+        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
+        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
 
-        do
-        {
-            context.MoveNextRequired();
-
-            // Table-level constraint position — only anonymous PRIMARY KEY
-            // ships in v1. CONSTRAINT-named forms raise a syntax error
-            // matching probe-confirmed Msg 156; other constraint kinds are
-            // accepted by real SQL Server in table-variable declarations but
-            // not modeled in v1 — surface as NotSupportedException so the
-            // gap is loud.
-            switch (context.Token)
-            {
-                case ReservedKeyword { Keyword: Keyword.Primary }:
-                    pendingKeys.Add((KeyConstraintKind.PrimaryKey, ParseTableLevelKeyColumns(context, columns, fullName)));
-                    continue;
-                case ReservedKeyword { Keyword: Keyword.Constraint }:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                case ReservedKeyword { Keyword: var unsupportedKind and (Keyword.Unique or Keyword.Check) }:
-                    throw new NotSupportedException($"DECLARE @t TABLE with {unsupportedKind} constraint isn't modeled (deferred from v1; ship in a follow-on).");
-            }
-
-            if (context.Token is not Name columnNameToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var columnName = columnNameToken.Value;
-            context.MoveNextRequired();
-
-            // Computed column (`col AS expr`) — not in v1.
-            if (context.Token is ReservedKeyword { Keyword: Keyword.As })
-                throw new NotSupportedException($"DECLARE @t TABLE with computed columns isn't modeled (deferred from v1; ship in a follow-on).");
-
-            if (context.Token is not Name typeName)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-
-            int? declaredMaxLength = null;
-            int? declaredScale = null;
-            if (context.Token is Operator { Character: '(' })
-            {
-                var lengthToken = context.GetNextRequired();
-                declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
-                    ? numericValue.AsInt32
-                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
-                        ? SqlType.MaxLengthSentinel
-                        : throw SimulatedSqlException.SyntaxErrorNear(context);
-                switch (context.GetNextRequired())
-                {
-                    case Operator { Character: ',' }:
-                        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        declaredScale = scaleValue.AsInt32;
-                        if (context.GetNextRequired() is not Operator { Character: ')' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        break;
-                    case Operator { Character: ')' }:
-                        break;
-                    default:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
-                context.MoveNextRequired();
-            }
-
-            bool? nullable = null;
-            Expression? defaultExpression = null;
-            var inlinePk = false;
-            while (true)
-            {
-                switch (context.Token)
-                {
-                    case ReservedKeyword { Keyword: Keyword.Not } when !nullable.HasValue:
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        nullable = false;
-                        context.MoveNextRequired();
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
-                        nullable = true;
-                        context.MoveNextRequired();
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
-                        context.MoveNextRequired();
-                        context.InDefaultClause = true;
-                        try { defaultExpression = Expression.Parse(context); }
-                        finally { context.InDefaultClause = false; }
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Primary } when !inlinePk:
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Key })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        context.MoveNextRequired();
-                        inlinePk = true;
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Identity }:
-                        throw new NotSupportedException("DECLARE @t TABLE with IDENTITY columns isn't modeled (deferred from v1; ship in a follow-on).");
-                    case ReservedKeyword { Keyword: Keyword.Unique }:
-                        throw new NotSupportedException("DECLARE @t TABLE with UNIQUE constraints isn't modeled (deferred from v1; ship in a follow-on).");
-                    case ReservedKeyword { Keyword: Keyword.Check }:
-                        throw new NotSupportedException("DECLARE @t TABLE with CHECK constraints isn't modeled (deferred from v1; ship in a follow-on).");
-                    case ReservedKeyword { Keyword: Keyword.Constraint }:
-                    case ReservedKeyword { Keyword: Keyword.References }:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
-                break;
-            }
-
-            if (inlinePk)
-            {
-                if (nullable == true)
-                    throw SimulatedSqlException.PrimaryKeyOnNullableColumn(fullName);
-                nullable = false;
-            }
-            var actualNullable = nullable ?? true;
-            var (resolvedType, maxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, columns.Count + 1, columnName);
-            if (resolvedType == SqlType.RowVersion)
-                throw new NotSupportedException("DECLARE @t TABLE with rowversion columns isn't modeled (deferred from v1; ship in a follow-on).");
-            columns.Add(new HeapColumn(columnName, resolvedType, maxLength, actualNullable, identity: null, defaultExpression));
-            if (inlinePk)
-                pendingKeys.Add((KeyConstraintKind.PrimaryKey, [columns.Count - 1]));
-        } while (context.Token is Operator { Character: ',' });
-
-        if (context.Token is not Operator { Character: ')' })
+        if (!ParseColumnList(context, fullName, isTableVariable: true, heapColumns, pendingKeys, pendingChecks, pendingComputed))
             throw SimulatedSqlException.SyntaxErrorNear(context);
+
         context.MoveNextOptional();
+
+        // Pass 2: resolve computed columns now that every column name has
+        // been seen. Same two-pass discipline CREATE TABLE uses — pulls the
+        // declared length off the resolved type for var-length string/binary
+        // families so EnforceMaxLength sees the same cap that GetSqlType
+        // inferred.
+        SqlType ResolveComputedReference(MultiPartName reference)
+        {
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, reference.Leaf))
+                {
+                    return existing.Computed is not null
+                        ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, fullName)
+                        : existing.Type;
+                }
+                if (heapColumns[i] is null)
+                {
+                    foreach (var pending in pendingComputed)
+                    {
+                        if (pending.Index == i && Collation.Default.Equals(pending.Name, reference.Leaf))
+                            throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, fullName);
+                    }
+                }
+            }
+            throw SimulatedSqlException.InvalidColumnName(reference);
+        }
+
+        foreach (var pending in pendingComputed)
+        {
+            var resolvedType = pending.Expression.GetSqlType(ResolveComputedReference);
+            int? computedMaxLength = resolvedType switch
+            {
+                VarcharSqlType v when v.length > 0 => v.length,
+                NVarcharSqlType nv when nv.length > 0 => nv.length,
+                VarbinarySqlType vb when vb.length > 0 => vb.length,
+                _ => null,
+            };
+            heapColumns[pending.Index] = new HeapColumn(
+                pending.Name,
+                resolvedType,
+                maxLength: computedMaxLength,
+                nullable: pending.Nullable,
+                computedExpression: pending.Expression,
+                isPersisted: pending.Persisted);
+        }
+
+        // Inline column-level CHECK predicates may only reference their
+        // owning column — Msg 8141. Same structural walk as CREATE TABLE.
+        foreach (var pending in pendingChecks)
+        {
+            if (pending.InlineColumn is not { } owningColumn)
+                continue;
+            pending.Predicate.VisitOperandExpressions(op =>
+                op.VisitColumnReferences(name =>
+                {
+                    if (!Collation.Default.Equals(name.Leaf, owningColumn))
+                        throw SimulatedSqlException.InlineCheckReferencesAnotherColumn(owningColumn, fullName);
+                }));
+        }
 
         if (context.Batch.IsSkipping)
             return;
 
-        var resolvedKeys = new List<KeyConstraint>(pendingKeys.Count);
-        var sawPk = false;
-        foreach (var (kind, ordinals) in pendingKeys)
-        {
-            if (kind == KeyConstraintKind.PrimaryKey)
-            {
-                if (sawPk)
-                    throw SimulatedSqlException.MultiplePrimaryKey(fullName);
-                sawPk = true;
-                foreach (var ord in ordinals)
-                {
-                    if (columns[ord].Nullable)
-                        throw SimulatedSqlException.PrimaryKeyOnNullableColumn(fullName);
-                }
-            }
-            // v1 table-variable columns are all stored (no computed / no
-            // non-persisted), so declaration ordinals match storage ordinals.
-            resolvedKeys.Add(new KeyConstraint(
-                kind,
-                $"PK_TV_{context.CurrentDatabase.AllocateObjectId():X8}",
-                ordinals,
-                context.CurrentDatabase.AllocateObjectId()));
-        }
+        var keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase);
+        var checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase);
 
         var heapTable = new HeapTable(
             fullName,
-            [.. columns],
+            [.. heapColumns!],
             context.CurrentDatabase.AllocateObjectId(),
             schemaId: Database.DboSchemaId,
             createDate: context.Batch.CurrentStatement.UtcNow,
-            keyConstraints: [.. resolvedKeys],
-            checkConstraints: null,
+            keyConstraints: keyConstraints,
+            checkConstraints: checkConstraints,
             isTableVariable: true);
         context.Batch.TableVariables[variableName] = heapTable;
-    }
-
-    /// <summary>
-    /// Parses the column list of a table-level <c>PRIMARY KEY (col1, col2)</c>
-    /// constraint inside <c>DECLARE @t TABLE</c>. Cursor on entry: the
-    /// <c>PRIMARY</c> keyword; cursor on exit: one past the closing <c>)</c>.
-    /// </summary>
-    private static int[] ParseTableLevelKeyColumns(ParserContext context, List<HeapColumn> columns, string tableName)
-    {
-        // Consume PRIMARY KEY.
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Key })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var ordinals = new List<int>();
-        do
-        {
-            if (context.GetNextRequired() is not Name columnNameToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var found = -1;
-            for (var i = 0; i < columns.Count; i++)
-            {
-                if (Collation.Default.Equals(columns[i].Name, columnNameToken.Value))
-                {
-                    found = i;
-                    break;
-                }
-            }
-            if (found < 0)
-                throw SimulatedSqlException.InvalidColumnName(new MultiPartName(columnNameToken.Value));
-            // Promote to NOT NULL — matches probe-confirmed behavior of inline
-            // PRIMARY KEY on a column declared without explicit NULL/NOT NULL.
-            if (columns[found].Nullable)
-                columns[found] = new HeapColumn(columns[found].Name, columns[found].Type, columns[found].MaxLength, nullable: false, identity: columns[found].Identity, defaultExpression: columns[found].Default);
-            ordinals.Add(found);
-            context.MoveNextRequired();
-        } while (context.Token is Operator { Character: ',' });
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        _ = tableName; // reserved for future error wording
-        return [.. ordinals];
     }
 }

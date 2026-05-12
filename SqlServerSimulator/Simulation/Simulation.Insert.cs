@@ -232,7 +232,7 @@ partial class Simulation
             {
                 var storedValues = ProjectStoredValues(destinationTable, rowValues);
                 EnforceKeyConstraints(destinationTable, storedValues);
-                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? null : context.Batch.CurrentUndoLog);
+                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
 
                 if (output is { } o)
                 {

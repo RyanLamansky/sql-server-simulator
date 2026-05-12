@@ -822,9 +822,18 @@ public sealed partial class Simulation
     {
         var log = context.Connection.CurrentTransaction?.UndoLog ?? new UndoLog();
         var marker = log.Position;
+        // Table variables get a parallel per-statement undo log so multi-row
+        // mutations roll back atomically on mid-statement failure (probe-
+        // confirmed: real SQL Server rolls back partial @t writes on row-
+        // level errors). The log is dropped on statement success, so
+        // ROLLBACK TRAN never sees these entries — matches the non-
+        // transactional invariant.
+        var tableVarLog = new UndoLog();
 
         var savedLog = context.Batch.CurrentUndoLog;
+        var savedTableVarLog = context.Batch.CurrentTableVarUndoLog;
         context.Batch.CurrentUndoLog = log;
+        context.Batch.CurrentTableVarUndoLog = tableVarLog;
         try
         {
             return body(context);
@@ -832,11 +841,13 @@ public sealed partial class Simulation
         catch
         {
             log.RollbackTo(marker);
+            tableVarLog.Rollback();
             throw;
         }
         finally
         {
             context.Batch.CurrentUndoLog = savedLog;
+            context.Batch.CurrentTableVarUndoLog = savedTableVarLog;
         }
     }
 }

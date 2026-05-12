@@ -227,7 +227,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        var undoLog = table.IsTableVariable ? null : context.Batch.CurrentUndoLog;
+        var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         foreach (var (pageIndex, slotIndex, _) in deleted)
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
 

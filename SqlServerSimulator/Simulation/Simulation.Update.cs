@@ -313,7 +313,7 @@ partial class Simulation
 
         EnforceKeyConstraintsForUpdate(table, affected);
 
-        var undoLog = table.IsTableVariable ? null : context.Batch.CurrentUndoLog;
+        var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         foreach (var (pageIndex, slotIndex, _, _) in affected)
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
         foreach (var (_, _, fullNew, _) in affected)

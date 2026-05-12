@@ -33,6 +33,22 @@ internal sealed class BatchContext
     public UndoLog? CurrentUndoLog;
 
     /// <summary>
+    /// Per-statement undo log dedicated to <c>@t</c> table-variable mutations.
+    /// Allocated fresh by <c>RunMutation</c> at the top of each DML statement
+    /// and discarded on statement success; rolled back on statement failure.
+    /// Probe-confirmed against SQL Server 2025: real SQL Server's table
+    /// variables are non-transactional with respect to <c>BEGIN TRAN</c> /
+    /// <c>ROLLBACK</c> (writes survive a tx-scoped rollback) but ARE
+    /// statement-atomic — a multi-row INSERT into <c>@t</c> that fails on the
+    /// third row leaves the first two rows undone. Routing @t mutations
+    /// here instead of <see cref="CurrentUndoLog"/> preserves both invariants:
+    /// the per-statement scope means tx-level rollback never sees these
+    /// entries, and the replay-on-exception path inside <c>RunMutation</c>
+    /// covers the statement-atomic case.
+    /// </summary>
+    public UndoLog? CurrentTableVarUndoLog;
+
+    /// <summary>
     /// Per-statement scratch frame, allocated once per batch and overwritten
     /// in place by the dispatch loop at the top of each statement iteration.
     /// See <see cref="StatementContext"/> for the fields it carries.

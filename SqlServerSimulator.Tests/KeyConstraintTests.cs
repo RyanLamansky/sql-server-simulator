@@ -122,9 +122,20 @@ public sealed class KeyConstraintTests
     }
 
     [TestMethod]
-    public void PrimaryKey_TableLevel_OnNullableColumn_RaisesMsg8111()
-        => new Simulation().AssertSqlError("create table t (a int, b int, constraint pk_t primary key (a, b))", 8111,
+    public void PrimaryKey_TableLevel_OnExplicitNullColumn_RaisesMsg8111()
+        => new Simulation().AssertSqlError("create table t (a int null, b int, constraint pk_t primary key (a, b))", 8111,
             "Cannot define PRIMARY KEY constraint on nullable column in table 't'.");
+
+    [TestMethod]
+    public void PrimaryKey_TableLevel_BareColumns_PromoteToNotNull()
+    {
+        // Probe-confirmed against SQL Server 2025: table-level PK promotes
+        // bare-int columns (no explicit NULL/NOT NULL) to NOT NULL —
+        // inserting NULL surfaces Msg 515 rather than ignoring the PK.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int, b int, constraint pk_t primary key (a, b))");
+        _ = simulation.AssertSqlError("insert t values (null, 2)", 515);
+    }
 
     [TestMethod]
     public void PrimaryKey_Multiple_RaisesMsg8110()
