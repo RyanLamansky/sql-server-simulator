@@ -17,7 +17,7 @@ Variable references resolve at runtime via a captured `VariableSlot` — require
 
 **`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `SimulatedDbConnection.LastStatementRowCount`. SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
 
-**`@@ERROR`**: error number of the most-recently-completed statement; `int`. Backed by `SimulatedDbConnection.LastErrorNumber`, which the per-statement TRY/CATCH dispatch wrapper sets to the caught error's number on failure and resets to 0 on successful completion. See the TRY/CATCH section for the live tracking details. Outside any TRY/CATCH the value stays 0 (uncaught errors terminate the batch, so no path reads @@ERROR after a failure there).
+**`@@ERROR`**: error number of the most-recently-completed statement; `int`. Backed by `SimulatedDbConnection.LastErrorNumber`, which the per-statement TRY/CATCH dispatch wrapper sets to the caught error's number on failure and resets to 0 on successful completion. See the TRY/CATCH section for the live tracking details. Outside any TRY/CATCH the value stays 0 except after a `RAISERROR(..., sev ≤ 10, ...) WITH SETERROR` (which forces 50000 — the only path that surfaces a non-zero `@@ERROR` to the batch without entering CATCH; `StatementContext.SuppressErrorReset` skips the wrapper's reset for that one statement). Uncaught errors terminate the batch, so no path reads @@ERROR after a failure there.
 
 **Compound assignment** (`SET @v += expr` etc.) and **table variables** (`DECLARE @t TABLE (...)`) aren't modeled — rewrite as `SET @v = @v + expr` for the former; the latter is a separate bundle.
 
@@ -67,7 +67,7 @@ Each statement parser still runs its full parse — the cursor advances normally
 - **`THROW;`** (no args) — re-raise current error from enclosing CATCH. Reconstructs the exception from `InFlightError` (number / message / state). Outside CATCH → **Msg 10704** verbatim. Compile-time check: fires even from un-taken IF branches (same pattern as Msg 178 / Msg 135).
 - **`THROW <number>, <message>, <state>;`** — raise new error. Each arg is a full `Expression` (so literals, `@variables`, casts, etc. all work). Severity is fixed at class 16 regardless of number — probe-confirmed (`THROW 50001, 'custom', 7` reports Class 16, State 7). NULL on any arg surfaces a generic raised error; real SQL Server has more specific paths but apps rarely hit them.
 
-**Live @@ERROR.** `LastErrorExpression` now reads `runtime.Batch.Connection.LastErrorNumber` instead of hardcoded 0. The wrap maintains the value: caught error → `LastErrorNumber = ex.Number`, successful statement → reset to 0. Outside any TRY/CATCH this stays 0 because uncaught errors tear down the batch (no path to a follow-up @@ERROR read).
+**Live @@ERROR.** `LastErrorExpression` now reads `runtime.Batch.Connection.LastErrorNumber` instead of hardcoded 0. The wrap maintains the value: caught error → `LastErrorNumber = ex.Number`, successful statement → reset to 0, with `StatementContext.SuppressErrorReset` as the one opt-out (used by `RAISERROR ... WITH SETERROR` at sev ≤ 10 to land 50000 into the next statement's read). Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear down the batch.
 
 **Grammar edges.**
 - Empty TRY body (`BEGIN TRY END TRY ...`) → **Msg 102** ("Incorrect syntax near 'try'") — probe-confirmed wording. Empty CATCH body is legal.
@@ -81,7 +81,42 @@ Each statement parser still runs its full parse — the cursor advances normally
 - **Divide-by-zero raises raw `DivideByZeroException`** (not `SimulatedSqlException` Msg 8134), so TRY/CATCH doesn't catch it. Pre-existing gap independent of TRY/CATCH; will close when the arithmetic error path is converted to factory-emitted Msg 8134.
 - **ERROR_LINE() approximation**: uses the dispatching statement's start-line token. For errors that fire at expression-evaluation time inside a constant-foldable subexpression, the line surfaced may be the SELECT's line rather than the inner expression's. `SimulatedSqlException` doesn't carry a line field — closing this gap would require threading line numbers through every factory's call site.
 - **No XACT_STATE() / XACT_ABORT / doomed-transaction semantics**: deferred. `@@TRANCOUNT` is correct (caught errors don't auto-rollback), so the common idiom works; apps relying on `XACT_STATE() = -1` to detect doomed transactions won't.
-- **No RAISERROR**: deferred to a follow-on bundle (its printf-style formatter `%s`/`%d` is the real work and warrants its own session). Apps emitting custom-numbered errors can use `THROW 50000, 'msg', 1;` as a substitute. Severity-10 informational `RAISERROR` (the warning that TRY ignores) isn't reachable today since no factory emits severity ≤ 10.
+
+## `RAISERROR`
+`RAISERROR (msg, severity, state [, arg]…) [WITH option[, option]…]` — fires an error of the supplied severity / state, or surfaces an informational message at severity ≤ 10. `msg` is either an inline format string (`varchar`/`nvarchar` literal or `@variable`) or a numeric `msg_id`; the per-arg substitution machinery is a C-runtime-style printf subset shipped via `Parser/MessageFormatter.cs`.
+
+**Severity routing** (probe-confirmed against SQL Server 2025, 2026-05-12):
+- Severity 0-10 → informational. Doesn't throw; doesn't enter TRY/CATCH; doesn't update `@@ERROR` unless `WITH SETERROR` forces it to 50000. NULL / negative severity treated as 0.
+- Severity 11-18 → catchable error. Throws `SimulatedSqlException` with `Number=50000`, `Class=severity`, `State=state`. Caught by enclosing TRY/CATCH; outside TRY/CATCH, propagates out of the batch.
+- Severity 19-25 → Msg 2754 ("Error severity levels greater than 18 can only be specified by members of the sysadmin role, using the WITH LOG option"). The simulator has no principal model and uniformly applies the non-sysadmin gate here — apps connecting as non-sysadmin service accounts see the same wall on real SQL Server.
+- Severity > 25 → Msg 2754 (same path).
+
+**State clamping**: state values outside `0..255` (including NULL and negative) silently clamp to 0 (probe-confirmed; real SQL Server doesn't raise here).
+
+**Format-specifier coverage** (`%[-][0][width][.precision][length]type`):
+- Types: `%s` (string), `%d` / `%i` (signed int), `%u` (unsigned int — negative int32 renders as uint32), `%o` (octal), `%x` / `%X` (hex lower/upper), `%%` (literal `%`).
+- Length modifiers: `l` (no-op — SQL Server's long is 32-bit), `I64` (bigint; bare `%d` with a bigint arg raises Msg 2786).
+- Width / precision / flags: right-align (default), `-` left-align, `0` zero-pad, `.N` for string precision (max chars from source) — all probe-confirmed.
+- NULL substitution: renders the literal text `(null)` regardless of specifier; same for missing args (more specifiers than supplied args). Extra args beyond the specifier count are silently ignored.
+- Unsupported specifier letters (`%c`, `%p`, `%f`, trailing lone `%`) raise Msg 2787 with the offending spec text echoed. Real SQL Server's `%c` rejection was a probe surprise — it's documented in older references but not in SQL Server 2025's runtime.
+- Arg-type mismatch raises Msg 2786 with the 1-based parameter index ("The data type of substitution parameter N does not match the expected type of the format specification").
+- More than 20 substitution args raises Msg 2747 ("Too many substitution parameters for RAISERROR. Cannot exceed 20 substitution parameters") — applied even when the format string has no specifiers.
+
+**msg_id matrix**: the simulator hasn't modeled the `sys.messages` registry or `sp_addmessage`, so every numeric `msg_id` falls into one of two error paths:
+- `msg_id = 50000` (the reserved synthesized id for the inline-string form) or `msg_id < 13000` → Msg 2732 ("Error number N is invalid. The number must be from 13000 through 2147483647 and it cannot be 50000").
+- Any other numeric id, including system message ids like 13001 that exist in real SQL Server's `sys.messages` → Msg 18054 ("Error N, severity S, state T was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage").
+- Inline-string form (`RAISERROR('text', …)`) always uses msg id 50000.
+
+**WITH options**: comma-separated list after the closing `)`. `LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") uniformly — probe-confirmed against the non-sysadmin reference connection. `NOWAIT` is accepted and ignored (no streaming model). `SETERROR` is the load-bearing option for severity ≤ 10: it forces `@@ERROR` to 50000 for the next statement to read; without it, sev ≤ 10 leaves `@@ERROR` untouched.
+
+**Grammar restriction**: `msg` / severity / state / sub args accept only literals, signed numeric literals, `@variable` references, and `NULL` — arbitrary expressions (`CAST(...)`, function calls, arithmetic) raise Msg 102 at parse time. Matches real SQL Server's grammar (probe-confirmed).
+
+**Fidelity gaps** (modeled deviations):
+- Severity ≥ 20 is uniformly rejected via Msg 2754; the simulator has no principal model to distinguish sysadmin from non-sysadmin callers. Apps running as sysadmin on real SQL Server would see different behavior — but the simulator's non-sysadmin posture matches the typical production posture.
+- `WITH LOG` is uniformly rejected via Msg 2778 for the same reason. Apps that depend on the message being logged (real SQL Server writes to the Windows event log + SQL Server error log) get neither logging nor the implicit sysadmin permission grant.
+- System-message ids registered in real SQL Server's `sys.messages` (e.g. `RAISERROR(13001, 16, 1)` surfaces the system "file name" message text) fall through to Msg 18054 here.
+- Severity ≤ 10 messages are discarded — same as PRINT, for the same reason (no `InfoMessage` event on `SimulatedDbConnection`). The behavioral effects (TRY/CATCH skip, `@@ERROR` via SETERROR) are preserved; only the text is lost.
+- `NOWAIT` is structurally ignored (no streaming model); real SQL Server flushes the buffer immediately.
 
 ## `PRINT`
 `PRINT <expression>` parses + evaluates the operand and **discards the result** — no `InfoMessage` event on `SimulatedDbConnection` (DbConnection doesn't define one, and no application has needed PRINT output observation yet). The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=' + 5` raises Msg 245 because the `+` operator's int-side promotion tries to parse `'val='` as int (probe-confirmed against SQL Server 2025).

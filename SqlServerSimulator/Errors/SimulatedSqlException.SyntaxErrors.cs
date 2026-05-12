@@ -153,4 +153,105 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ThrowRaised(int number, string message, byte state) =>
         new(message, number, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 2787: a <c>RAISERROR</c> format string contains
+    /// a specifier the runtime doesn't accept. Real SQL Server's RAISERROR
+    /// printf-style formatter supports a fixed subset of C runtime specifiers
+    /// (<c>%s %d %i %u %o %x %X %ld %li %I64d %I64i</c>); anything else (e.g.
+    /// <c>%c</c>, <c>%p</c>, a trailing lone <c>%</c>) raises this. The
+    /// <paramref name="spec"/> argument is the offending token verbatim, with
+    /// the leading <c>%</c> included (probe-confirmed wording: <c>"Invalid
+    /// format specification: '%c'."</c>). Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorInvalidFormatSpec(string spec) =>
+        new($"Invalid format specification: '{spec}'.", 2787, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2786: a <c>RAISERROR</c> substitution argument's
+    /// runtime type doesn't match the corresponding format specifier (e.g.
+    /// <c>%d</c> with a string-typed arg, <c>%s</c> with an int, <c>%d</c>
+    /// with a bigint — <c>%I64d</c> is the bigint specifier). Real SQL Server
+    /// reports the 1-based <paramref name="paramIndex"/> in the message text
+    /// (probe-confirmed: <c>"The data type of substitution parameter 1 does not
+    /// match the expected type of the format specification."</c>). Class 16
+    /// State 1.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorTypeMismatch(int paramIndex) =>
+        new($"The data type of substitution parameter {paramIndex} does not match the expected type of the format specification.", 2786, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2747: a <c>RAISERROR</c> call supplied more
+    /// than 20 substitution arguments. Probe-confirmed wording verbatim
+    /// (<c>"Too many substitution parameters for RAISERROR. Cannot exceed 20
+    /// substitution parameters."</c>). Class 16 State 1. The cap applies to
+    /// arguments passed even when the format string has no specifiers — the
+    /// 20-arg limit is structural, not driven by the specifier count.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorTooManySubstitutionParameters() =>
+        new("Too many substitution parameters for RAISERROR. Cannot exceed 20 substitution parameters.", 2747, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2732: a <c>RAISERROR</c> call passed a numeric
+    /// <c>msg_id</c> outside the valid user-defined range (must be 13000
+    /// through 2147483647) or used the reserved value <c>50000</c> as a
+    /// literal id (real SQL Server reserves 50000 for the synthesized id of
+    /// the inline-message-string form, so passing it literally fails). Real
+    /// SQL Server's text echoes the rejected id (probe-confirmed: <c>"Error
+    /// number 50000 is invalid. The number must be from 13000 through
+    /// 2147483647 and it cannot be 50000."</c>). Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorMsgIdInvalid(int msgId) =>
+        new($"Error number {msgId} is invalid. The number must be from 13000 through 2147483647 and it cannot be 50000.", 2732, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 18054: a <c>RAISERROR</c> call passed a numeric
+    /// <c>msg_id</c> in the valid user-defined range (13000-2147483647 excluding
+    /// 50000) but no row matching that id exists in <c>sys.messages</c>. The
+    /// simulator hasn't modeled the <c>sys.messages</c> registry or
+    /// <c>sp_addmessage</c>, so every non-50000 numeric msg_id surfaces this
+    /// (probe-confirmed against SQL Server 2025 with the same wording for
+    /// unregistered ids: <c>"Error 60000, severity 16, state 1 was raised, but
+    /// no message with that error number was found in sys.messages. If error
+    /// is larger than 50000, make sure the user-defined message is added using
+    /// sp_addmessage."</c>). Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorMsgIdNotFound(int msgId, byte severity, byte state) =>
+        new($"Error {msgId}, severity {severity}, state {state} was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage.", 18054, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2754: a <c>RAISERROR</c> call specified
+    /// severity &gt; 18 from a non-sysadmin connection (real SQL Server gates
+    /// the high-severity range behind sysadmin role + <c>WITH LOG</c>). The
+    /// simulator has no principal model and matches the probe's non-sysadmin
+    /// behavior here — apps targeting real SQL Server from a non-sysadmin
+    /// connection see the same wall. Probe-confirmed wording verbatim
+    /// (<c>"Error severity levels greater than 18 can only be specified by
+    /// members of the sysadmin role, using the WITH LOG option."</c>). Class
+    /// 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorSeverityRequiresSysadmin() =>
+        new("Error severity levels greater than 18 can only be specified by members of the sysadmin role, using the WITH LOG option.", 2754, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2778: a <c>RAISERROR</c> call used the
+    /// <c>WITH LOG</c> option from a non-sysadmin connection. Probe-confirmed
+    /// wording verbatim (<c>"Only System Administrator can specify WITH LOG
+    /// option for RAISERROR command."</c>). Class 16 State 2 — note the
+    /// state is 2, not 1 like its severity-gated sibling (Msg 2754).
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorLogRequiresSysadmin() =>
+        new("Only System Administrator can specify WITH LOG option for RAISERROR command.", 2778, 16, 2);
+
+    /// <summary>
+    /// Constructs the <see cref="SimulatedSqlException"/> a successful
+    /// <c>RAISERROR</c> raises for severities ≥ 11 (catchable by TRY/CATCH).
+    /// Always uses error number <c>50000</c> (the inline-message-string form's
+    /// synthesized id). Class is the supplied severity; state is the supplied
+    /// state. Sev ≤ 10 is the informational path — those don't throw; the
+    /// caller writes <c>@@ERROR</c> directly when <c>WITH SETERROR</c> is set
+    /// and discards the message otherwise.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorRaised(string message, byte severity, byte state) =>
+        new(message, 50000, severity, state);
 }

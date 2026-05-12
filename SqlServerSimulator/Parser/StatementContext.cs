@@ -46,4 +46,16 @@ internal sealed class StatementContext
     /// the statement-start line is the closest approximation available.
     /// </summary>
     public int StartLine;
+
+    /// <summary>
+    /// Set true by a statement whose end-of-dispatch <c>@@ERROR</c> value
+    /// should survive the dispatch wrapper's "successful statement clears
+    /// <c>@@ERROR</c> to 0" rule. Used by <c>RAISERROR ... WITH SETERROR</c>
+    /// at severities ≤ 10: the statement didn't throw (informational
+    /// severities don't raise), but <c>WITH SETERROR</c> still forces
+    /// <c>@@ERROR</c> to <c>50000</c> for the next statement to observe
+    /// (probe-confirmed against SQL Server 2025). Reset to false at the
+    /// start of each statement iteration by the dispatch loop.
+    /// </summary>
+    public bool SuppressErrorReset;
 }

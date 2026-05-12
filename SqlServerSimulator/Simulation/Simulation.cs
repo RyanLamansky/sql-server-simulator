@@ -310,6 +310,7 @@ public sealed partial class Simulation
         // Snapshot the statement-start line before parser advance — used as
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
+        batch.CurrentStatement.SuppressErrorReset = false;
 
         // Two-phase dispatch: the core iterator runs the statement body
         // (parser + execution); the wrapper materializes its outcomes and
@@ -365,8 +366,10 @@ public sealed partial class Simulation
 
         // Skip-mode statements don't count toward @@ERROR reset (skip-mode
         // dispatch is conceptually "didn't run" — the surrounding scope owns
-        // @@ERROR). Successful real statements clear @@ERROR to 0.
-        if (!batch.IsSkipping)
+        // @@ERROR). Successful real statements clear @@ERROR to 0 unless the
+        // statement explicitly opted out (RAISERROR sev ≤ 10 WITH SETERROR
+        // wrote its own number and asked us not to clobber it).
+        if (!batch.IsSkipping && !batch.CurrentStatement.SuppressErrorReset)
             connection.LastErrorNumber = 0;
 
         foreach (var o in outcomes!)
@@ -514,6 +517,12 @@ public sealed partial class Simulation
                     connection.LastStatementRowCount = 0;
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.RaisError }:
+                ParseRaiserrorStatement(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
+
             case ReservedKeyword { Keyword: Keyword.WaitFor }:
                 ParseWaitForStatement(batch);
                 if (!batch.IsSkipping)
@@ -619,7 +628,8 @@ public sealed partial class Simulation
                 or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
                 or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
                 or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
-                or Keyword.Return or Keyword.Print or Keyword.WaitFor or Keyword.Truncate
+                or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
+                or Keyword.Truncate
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.
