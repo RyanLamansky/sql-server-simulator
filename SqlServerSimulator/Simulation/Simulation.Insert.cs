@@ -18,9 +18,16 @@ partial class Simulation
 
         var destinationName = BatchContext.ParseObjectName(context);
 
-        return context.Batch.TryResolveTable(destinationName, out var destinationTable)
-            ? ProcessHeapInsert(destinationTable, context)
-            : throw SimulatedSqlException.InvalidObjectName(destinationName);
+        // A view target would route here in real SQL Server (single-source
+        // updatable views accept INSERT). The simulator's v1 doesn't model
+        // updatable views — surface a clear NotSupportedException instead
+        // of the misleading Msg 208 below. Apps that need DML through a
+        // view should target the underlying table directly.
+        return context.Batch.TryResolveView(destinationName, out _)
+            ? throw new NotSupportedException($"INSERT through a view ('{destinationName}') isn't modeled. Updatable-view DML is a deferred feature; target the underlying table directly.")
+            : context.Batch.TryResolveTable(destinationName, out var destinationTable)
+                ? ProcessHeapInsert(destinationTable, context)
+                : throw SimulatedSqlException.InvalidObjectName(destinationName);
     }
 
     /// <summary>

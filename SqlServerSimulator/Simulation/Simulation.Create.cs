@@ -21,6 +21,8 @@ partial class Simulation
                 return TryParseCreateSchema(context);
             case ReservedKeyword { Keyword: Keyword.Function }:
                 return TryParseCreateFunction(context);
+            case ReservedKeyword { Keyword: Keyword.View }:
+                return TryParseCreateView(context);
             case ReservedKeyword { Keyword: Keyword.Table }:
                 break;
             default:

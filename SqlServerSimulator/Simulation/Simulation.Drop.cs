@@ -31,18 +31,15 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseDrop(ParserContext context)
     {
-        bool isFunction;
-        switch (context.GetNextRequired())
+        var targetKind = context.GetNextRequired() switch
         {
-            case ReservedKeyword { Keyword: Keyword.Table }:
-                isFunction = false;
-                break;
-            case ReservedKeyword { Keyword: Keyword.Function }:
-                isFunction = true;
-                break;
-            default:
-                return false;
-        }
+            ReservedKeyword { Keyword: Keyword.Table } => DropTargetKind.Table,
+            ReservedKeyword { Keyword: Keyword.Function } => DropTargetKind.Function,
+            ReservedKeyword { Keyword: Keyword.View } => DropTargetKind.View,
+            _ => DropTargetKind.None,
+        };
+        if (targetKind == DropTargetKind.None)
+            return false;
 
         context.MoveNextRequired();
         var ifExists = false;
@@ -57,10 +54,18 @@ partial class Simulation
         while (true)
         {
             var name = BatchContext.ParseObjectName(context);
-            if (isFunction)
-                DropOneFunction(context, name, ifExists);
-            else
-                DropOneTable(context, name, ifExists);
+            switch (targetKind)
+            {
+                case DropTargetKind.Function:
+                    DropOneFunction(context, name, ifExists);
+                    break;
+                case DropTargetKind.View:
+                    DropOneView(context, name, ifExists);
+                    break;
+                default:
+                    DropOneTable(context, name, ifExists);
+                    break;
+            }
 
             // ParseObjectName leaves the cursor on the last name segment;
             // peek for the comma list separator without permanently advancing
@@ -71,6 +76,26 @@ partial class Simulation
             context.MoveNextRequired();
         }
         return true;
+    }
+
+    private enum DropTargetKind { None, Table, Function, View }
+
+    /// <summary>
+    /// Removes one entry from the target schema's <see cref="Schema.Views"/>
+    /// dict. Missing view → Msg 3701 (view variant) unless
+    /// <paramref name="ifExists"/> is set.
+    /// </summary>
+    private static void DropOneView(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is null || !schema.Views.TryRemove(name.Leaf, out _))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
+        }
     }
 
     /// <summary>

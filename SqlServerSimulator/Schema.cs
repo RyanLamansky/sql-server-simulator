@@ -32,12 +32,19 @@ internal sealed class Schema(string name, int schemaId)
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
 
     /// <summary>
-    /// Scalar user-defined functions hosted by this schema. <c>CREATE FUNCTION
-    /// schema.name(...) RETURNS ... AS BEGIN ... END</c> adds entries here;
-    /// 2-part-name call sites (<c>SELECT schema.fn(x)</c>) resolve through
-    /// this dict. Inline / multi-statement table-valued functions and CLR
-    /// functions aren't modeled — only scalar UDFs (<c>sys.objects.type='FN'</c>,
-    /// <c>type_desc='SQL_SCALAR_FUNCTION'</c>).
+    /// User-defined functions hosted by this schema — either scalar
+    /// (<see cref="ScalarFunction"/>) or inline TVF
+    /// (<see cref="InlineTableValuedFunction"/>) under the
+    /// <see cref="UserDefinedFunction"/> base.
     /// </summary>
     public readonly ConcurrentDictionary<string, UserDefinedFunction> Functions = new(Collation.Default);
+
+    /// <summary>
+    /// Views hosted by this schema. <c>CREATE VIEW schema.name AS SELECT
+    /// ...</c> adds entries here; FROM-clause references resolve through
+    /// this dict before falling through to the heap-table lookup. Views
+    /// share the same name namespace as tables (Msg 2714 on collision),
+    /// so a view's leaf name is unique across both dicts within the schema.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, View> Views = new(Collation.Default);
 }

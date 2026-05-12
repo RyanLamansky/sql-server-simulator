@@ -65,11 +65,13 @@ internal sealed class ObjectId : Expression
             // Probe-confirmed: real SQL Server is whitespace-sensitive on the
             // type filter (' U ' returns NULL) but case-insensitive ('u' works).
             // Modeled codes today: 'U' (user table), 'FN' (scalar UDF),
-            // 'IF' (inline table-valued function). Other documented codes
-            // (V / P / TF / ...) return NULL pending those features.
+            // 'IF' (inline table-valued function), 'V' (view). Other
+            // documented codes (P / TF / ...) return NULL pending those
+            // features.
             if (!Collation.Default.Equals(typeFilter, "U")
                 && !Collation.Default.Equals(typeFilter, "FN")
-                && !Collation.Default.Equals(typeFilter, "IF"))
+                && !Collation.Default.Equals(typeFilter, "IF")
+                && !Collation.Default.Equals(typeFilter, "V"))
             {
                 return SqlValue.Null(SqlType.Int32);
             }
@@ -96,6 +98,16 @@ internal sealed class ObjectId : Expression
                 if (kindMatches)
                     return SqlValue.FromInt32(function.ObjectId);
             }
+            if (typeFilter is not null)
+                return SqlValue.Null(SqlType.Int32);
+        }
+
+        // 'V' / no filter: try view resolution before falling through to
+        // tables. With a specific 'V' filter, a table miss returns NULL.
+        if (typeFilter is null || Collation.Default.Equals(typeFilter, "V"))
+        {
+            if (runtime.Batch.TryResolveView(parsed, out var view))
+                return SqlValue.FromInt32(view.ObjectId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }

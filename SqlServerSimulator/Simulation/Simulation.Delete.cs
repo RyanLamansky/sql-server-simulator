@@ -29,6 +29,13 @@ partial class Simulation
             context.MoveNextRequired();
 
         var leadingIdent = BatchContext.ParseObjectName(context);
+
+        // A view target would route here in real SQL Server (single-source
+        // updatable views accept DELETE). Same v1 deferral as INSERT /
+        // UPDATE through a view — surface a clear NotSupportedException.
+        if (context.Batch.TryResolveView(leadingIdent, out _))
+            throw new NotSupportedException($"DELETE through a view ('{leadingIdent}') isn't modeled. Updatable-view DML is a deferred feature; target the underlying table directly.");
+
         _ = context.Batch.TryResolveTable(leadingIdent, out var leadingTable);
         context.MoveNextOptional();
 

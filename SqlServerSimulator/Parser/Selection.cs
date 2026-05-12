@@ -914,6 +914,32 @@ internal sealed partial class Selection
                         lateralPlan: Selection.ForCatalogView(catalogView));
                 }
 
+                // View resolution: `FROM schema.view [alias]` or
+                // `FROM view [alias]` (unqualified). Routes before table
+                // lookup so a view with the same name as a table (rare —
+                // collisions raise Msg 2714 at CREATE) wins; in practice
+                // the name namespace is shared, so either resolver finds
+                // the right object. Views are re-parsed and executed per
+                // call via Selection.ForView (a lateral plan); the body's
+                // own FROM sources resolve in a child batch isolated from
+                // the caller's parser cursor.
+                if (context.Batch.TryResolveView(objectName, out var resolvedView))
+                {
+                    var viewColumnNames = new string[resolvedView.OutputColumns.Length];
+                    for (var ci = 0; ci < viewColumnNames.Length; ci++)
+                        viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
+                    var viewAlias = ConsumeOptionalAlias(context);
+                    return new FromSource(
+                        qualifier: viewAlias ?? resolvedView.Name,
+                        columnNames: viewColumnNames,
+                        columns: resolvedView.OutputColumns,
+                        storedSchema: resolvedView.OutputColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: Selection.ForView(resolvedView));
+                }
+
                 // Inline TVF call: `FROM schema.fn(args) [alias]`. Detected
                 // when the resolved function is a TVF AND `(` follows the
                 // name (cursor is on the name leaf post-ParseObjectName; peek

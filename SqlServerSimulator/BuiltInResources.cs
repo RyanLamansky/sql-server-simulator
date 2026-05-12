@@ -182,6 +182,8 @@ internal static class BuiltInResources
         var fnTypeDesc = SqlValue.FromNVarchar("SQL_SCALAR_FUNCTION");
         var inlineTvfType = SqlValue.FromChar(charTwo, "IF");
         var inlineTvfTypeDesc = SqlValue.FromNVarchar("SQL_INLINE_TABLE_VALUED_FUNCTION");
+        var viewType = SqlValue.FromChar(charTwo, "V ");
+        var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
         var zeroParent = SqlValue.FromInt32(0);
         var objectsColumns = new HeapColumn[]
         {
@@ -196,7 +198,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
         var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, viewType, viewTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -230,6 +232,7 @@ internal static class BuiltInResources
         // is 'BASE TABLE' for every user table; 'VIEW' (not modeled) would be
         // the other shipped value.
         var baseTable = SqlValue.FromVarchar("BASE TABLE");
+        var viewTableType = SqlValue.FromVarchar("VIEW");
         var isTablesColumns = new HeapColumn[]
         {
             new("TABLE_CATALOG", SqlType.SystemName, 128, true),
@@ -238,7 +241,7 @@ internal static class BuiltInResources
             new("TABLE_TYPE", SqlType.Varchar, 10, true),
         };
         var isTablesView = new CatalogView("TABLES", isTablesColumns, batch =>
-            EnumerateInformationSchemaTables(batch, baseTable));
+            EnumerateInformationSchemaTables(batch, baseTable, viewTableType));
 
         // INFORMATION_SCHEMA.COLUMNS: ISO-standard 23-column shape. Tooling
         // does SELECT * here so the full column set ships even though many
@@ -328,6 +331,41 @@ internal static class BuiltInResources
         };
         var parametersView = new CatalogView("parameters", parametersColumns, EnumerateParameters);
 
+        // sys.views: per-view rows. Load-bearing subset of real SQL Server's
+        // sys.views shape — object_id / name / schema_id / with_check_option /
+        // is_date_correlation_view. Other documented columns (principal_id,
+        // is_replicated, has_replication_filter, etc.) aren't modeled.
+        var viewsColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("with_check_option", SqlType.Bit, null, false),
+            new("is_date_correlation_view", SqlType.Bit, null, false),
+        };
+        var viewsCatalogView = new CatalogView("views", viewsColumns, EnumerateViews);
+
+        // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
+        // confirmed: VIEW_DEFINITION is NULL only for WITH ENCRYPTION views
+        // (the simulator parses ENCRYPTION but doesn't track it — minor
+        // fidelity gap, the body text always surfaces). IS_UPDATABLE is
+        // probe-confirmed to always report 'NO' in real SQL Server even for
+        // views that are actually updatable — matching that by hardcoding.
+        var checkOptionNone = SqlValue.FromVarchar("NONE");
+        var checkOptionCascade = SqlValue.FromVarchar("CASCADE");
+        var isUpdatableNo = SqlValue.FromVarchar("NO");
+        var isViewsColumns = new HeapColumn[]
+        {
+            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
+            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, false),
+            new("VIEW_DEFINITION", SqlType.NVarchar, 4000, true),
+            new("CHECK_OPTION", SqlType.Varchar, 7, true),
+            new("IS_UPDATABLE", SqlType.Varchar, 2, true),
+        };
+        var isViewsView = new CatalogView("VIEWS", isViewsColumns, batch =>
+            EnumerateInformationSchemaViews(batch, checkOptionNone, checkOptionCascade, isUpdatableNo));
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -335,10 +373,68 @@ internal static class BuiltInResources
             ["sys.objects"] = objectsView,
             ["sys.columns"] = columnsView,
             ["sys.parameters"] = parametersView,
+            ["sys.views"] = viewsCatalogView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
+            ["INFORMATION_SCHEMA.VIEWS"] = isViewsView,
         };
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.views</c>: one row per <see cref="View"/> in every
+    /// schema. <c>is_date_correlation_view</c> is always False (the feature
+    /// isn't modeled).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateViews(Parser.BatchContext batch)
+    {
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromInt32(view.ObjectId),
+                    SqlValue.FromSystemName(view.Name),
+                    SqlValue.FromInt32(view.Schema.SchemaId),
+                    SqlValue.FromBoolean(view.WithCheckOption),
+                    falseBit,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.VIEWS</c>: per-view ISO-shape entries.
+    /// VIEW_DEFINITION surfaces the stored body text (real SQL Server
+    /// returns NULL for WITH ENCRYPTION views; the simulator currently
+    /// always surfaces it — minor fidelity gap). CHECK_OPTION is 'CASCADE'
+    /// when WITH CHECK OPTION was specified, 'NONE' otherwise. IS_UPDATABLE
+    /// is hardcoded 'NO' (probe-confirmed: real SQL Server reports 'NO'
+    /// even for actually-updatable views).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaViews(
+        Parser.BatchContext batch,
+        SqlValue checkOptionNone,
+        SqlValue checkOptionCascade,
+        SqlValue isUpdatableNo)
+    {
+        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            {
+                yield return [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(view.Name),
+                    SqlValue.FromNVarchar(view.BodyText),
+                    view.WithCheckOption ? checkOptionCascade : checkOptionNone,
+                    isUpdatableNo,
+                ];
+            }
+        }
     }
 
     /// <summary>
@@ -457,10 +553,36 @@ internal static class BuiltInResources
                     ];
                 }
             }
+            // Views surface their output projection through sys.columns —
+            // same shape as inline TVFs (is_identity / is_computed always
+            // false; nullability conservatively True).
+            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            {
+                var viewObjectId = SqlValue.FromInt32(view.ObjectId);
+                for (var i = 0; i < view.OutputColumns.Length; i++)
+                {
+                    var col = view.OutputColumns[i];
+                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
+                    yield return [
+                        viewObjectId,
+                        SqlValue.FromSystemName(col.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromByte(col.Type.SystemTypeId),
+                        SqlValue.FromInt32(col.Type.UserTypeId),
+                        SqlValue.FromInt16(maxLength),
+                        SqlValue.FromByte(precision),
+                        SqlValue.FromByte(scale),
+                        SqlValue.FromBoolean(col.Nullable),
+                        falseBit,
+                        falseBit,
+                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                    ];
+                }
+            }
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaTables(Parser.BatchContext batch, SqlValue baseTable)
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaTables(Parser.BatchContext batch, SqlValue baseTable, SqlValue viewTableType)
     {
         var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
@@ -473,6 +595,15 @@ internal static class BuiltInResources
                     schemaName,
                     SqlValue.FromSystemName(t.Name),
                     baseTable,
+                ];
+            }
+            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            {
+                yield return [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(view.Name),
+                    viewTableType,
                 ];
             }
         }
@@ -667,6 +798,7 @@ internal static class BuiltInResources
         SqlValue checkType, SqlValue checkTypeDesc,
         SqlValue fnType, SqlValue fnTypeDesc,
         SqlValue inlineTvfType, SqlValue inlineTvfTypeDesc,
+        SqlValue viewType, SqlValue viewTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
@@ -687,6 +819,20 @@ internal static class BuiltInResources
                     typeDesc,
                     SqlValue.FromDateTime(fn.CreateDate),
                     SqlValue.FromDateTime(fn.CreateDate),
+                    notMsShipped,
+                ];
+            }
+            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromInt32(view.ObjectId),
+                    SqlValue.FromSystemName(view.Name),
+                    SqlValue.FromInt32(view.Schema.SchemaId),
+                    zeroParent,
+                    viewType,
+                    viewTypeDesc,
+                    SqlValue.FromDateTime(view.CreateDate),
+                    SqlValue.FromDateTime(view.CreateDate),
                     notMsShipped,
                 ];
             }

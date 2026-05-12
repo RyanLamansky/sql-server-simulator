@@ -53,6 +53,7 @@ enum ContextualKeyword
     Try,
     Using,
     Verbose_Truncation_Warnings,
+    View_Metadata,
     Within,
     Work,
     Zone,

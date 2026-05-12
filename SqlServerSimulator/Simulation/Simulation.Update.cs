@@ -45,6 +45,14 @@ partial class Simulation
         context.MoveNextRequired();
         var leadingIdent = BatchContext.ParseObjectName(context);
 
+        // A view target would route here in real SQL Server (single-source
+        // updatable views accept UPDATE). The simulator's v1 doesn't model
+        // updatable views; reject with a clear message rather than letting
+        // the view name fall through to the alias-resolution path which
+        // would surface a confusing "could not be bound" error.
+        if (context.Batch.TryResolveView(leadingIdent, out _))
+            throw new NotSupportedException($"UPDATE through a view ('{leadingIdent}') isn't modeled. Updatable-view DML is a deferred feature; target the underlying table directly.");
+
         // Leading identifier: target table name (single-table form) or an
         // alias for the FROM clause that follows (multi-table form). Try
         // table-resolution now; if it fails, the FROM clause must provide

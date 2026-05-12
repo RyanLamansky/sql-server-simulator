@@ -107,13 +107,23 @@ partial class SimulatedSqlException
         new($"CREATE FUNCTION failed because a column name is not specified for column {columnPosition}.", 4514, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 4506 — fired at <c>CREATE FUNCTION</c> when an
-    /// inline TVF's body projects two columns with the same name. Probe-
-    /// confirmed wording embeds both the column name and the function name
-    /// (the literal "view or function" text in the message comes verbatim
+    /// Mimics SQL Server's Msg 4506 — fired at <c>CREATE VIEW</c> /
+    /// <c>CREATE FUNCTION</c> when the body projects two columns with the
+    /// same name. Probe-confirmed wording embeds both the column name and
+    /// the object name (the literal "view or function" text comes verbatim
     /// from SQL Server since views and inline TVFs share the projection-
     /// uniqueness rule).
     /// </summary>
-    internal static SimulatedSqlException DuplicateColumnInViewOrFunction(string columnName, string functionName) =>
-        new($"Column names in each view or function must be unique. Column name '{columnName}' in view or function '{functionName}' is specified more than once.", 4506, 16, 1);
+    internal static SimulatedSqlException DuplicateColumnInViewOrFunction(string columnName, string objectName) =>
+        new($"Column names in each view or function must be unique. Column name '{columnName}' in view or function '{objectName}' is specified more than once.", 4506, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4511 — fired at <c>CREATE VIEW</c> when the
+    /// body projects an unnamed column (an expression without an <c>AS</c>
+    /// alias). Distinct from inline TVF's Msg 4514 ("CREATE FUNCTION
+    /// failed...") and SELECT INTO's Msg 1038. The 1-based column position
+    /// is embedded in the message.
+    /// </summary>
+    internal static SimulatedSqlException CreateViewMissingColumnName(int columnPosition) =>
+        new($"Create View or Function failed because no column name was specified for column {columnPosition}.", 4511, 16, 1);
 }

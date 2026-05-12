@@ -378,6 +378,21 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Resolves <paramref name="name"/> to a registered <see cref="View"/>.
+    /// Unlike scalar UDFs, views accept 1-part names too (probe-confirmed:
+    /// <c>FROM v1</c> works the same as <c>FROM dbo.v1</c>) — the lookup
+    /// falls back to <see cref="Database.DefaultSchemaName"/> for the
+    /// unqualified case. Schema-qualified misses return false; the caller
+    /// is responsible for routing those to Msg 208.
+    /// </summary>
+    public bool TryResolveView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
+    {
+        view = null;
+        return this.TryResolveSchema(name, out var schema)
+            && schema.Views.TryGetValue(name.Leaf, out view);
+    }
+
+    /// <summary>
     /// Resolves <paramref name="name"/> to a <see cref="CatalogView"/> in
     /// either the <c>sys</c> or <c>INFORMATION_SCHEMA</c> schema. Returns
     /// true for 2-part names <c>{sys|INFORMATION_SCHEMA}.&lt;view&gt;</c>
