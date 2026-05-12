@@ -46,7 +46,7 @@ Layout: `Storage/` (pages, types, row encoder/decoder, heap, constraints), `Pars
 `Selection.cs` + `Selection.Execution.cs` are a partial-class pair. `Parse → Selection`, `Execute → SimulatedSqlResultSet`. Correlated subqueries re-run the same plan per outer row via `outerResolver: Func<MultiPartName, SqlValue>?` (execute) and `outerTypeResolver: Func<MultiPartName, SqlType>?` (parse). Both walk arbitrary nesting depth via `ParserContext.OuterTypeResolver` + the runtime arg. **Derived tables in FROM are always deferred** (`FromSource.LateralPlan` is re-executed per outer row), matching SQL Server's "any FROM derived table can correlate" rule — required because outer references in WHERE/ON resolve through `Run`, not `GetSqlType`.
 
 ### Multi-source rows
-`FromSource[]`; rows during enumeration are `byte[]?[]`, one slot per source, null = unmatched LEFT JOIN right side. Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTuple`; ambiguous unqualified name → Msg 209.
+`FromSource[]`; rows during enumeration are `byte[]?[]`, one slot per source, null = NULL-filled outer-join side (LEFT/RIGHT/FULL/OUTER APPLY). Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTuple`; ambiguous unqualified name → Msg 209.
 
 ### `MultiPartName`
 Readonly struct, up to 4 inline slots (SQL Server's grammar limit). API: `Leaf`, `ImmediateQualifier` (null when unqualified — pair with `Collation.Default.Equals(name.ImmediateQualifier, "INSERTED")`, the equality folds null into `false`), `Count`, `ToString()`. 5th segment → Msg 4104.
@@ -95,7 +95,9 @@ Five scopes, one home each. **Add new state to whichever class matches its true 
 The `*.Tests` and `*.Tests.EFCore` suites are the authoritative behavior contract. Notes below cover only probe-confirmed quirks, deviations from SQL Server, and non-obvious implementation rules. Per-feature deep-dives live under `docs/claude/` (see [Feature reference](#feature-reference) for the trigger-phrased index); short cross-cutting sections stay inline below.
 
 ### JOINs / APPLY
-INNER / bare JOIN / LEFT [OUTER] / CROSS / CROSS APPLY / OUTER APPLY. Multi-table chains compose left-to-right. ON-predicate UNKNOWN excludes. APPLY = lateral form (right side re-executed per outer row, no ON clause).
+INNER / bare JOIN / LEFT [OUTER] / RIGHT [OUTER] / FULL [OUTER] / CROSS / CROSS APPLY / OUTER APPLY. Multi-table chains compose left-to-right. ON-predicate UNKNOWN excludes. APPLY = lateral form (right side re-executed per outer row, no ON clause).
+
+`JoinDriver` is a fold over `joins[]`: leftmost rowset → wrap with each join's operator → final enumerator (`Selection.Execution.Joins.cs`). INNER / CROSS / LEFT / CROSS APPLY / OUTER APPLY stream one upstream tuple at a time; RIGHT / FULL materialize `sources[level].Rows` into a list and track a `matched[]` bitmap across the entire upstream iteration so unmatched right rows can be emitted (with all prior slots NULL-filled) after upstream is exhausted. **RIGHT / FULL with a derived-table or lateral right side raise `NotSupportedException`** — every derived table is deferred regardless of actual correlation, and real SQL Server rejects correlated subqueries on the right of RIGHT/FULL with Msg 4104. EF Core 10's LINQ `LeftJoin` / `RightJoin` operators translate to LEFT / RIGHT JOIN respectively and route through this pipeline; .NET 10 LINQ doesn't expose a `FullJoin` operator, so FULL OUTER JOIN is reachable only via raw SQL.
 
 ### Subqueries
 `EXISTS` / `NOT EXISTS` (multi-column inner allowed); `expr [NOT] IN (SELECT ...)` (single inner column, Msg 116); scalar `(SELECT col FROM ...)` (single column, single-row Msg 512 per outer row, empty → typed NULL). All forms work correlated and non-correlated, arbitrary nesting depth.
@@ -151,7 +153,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 ## Not modeled
 
 - Locks / MVCC / isolation levels (single-Simulation, single-thread-at-a-time). `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `XACT_ABORT`, `SET TRANSACTION ISOLATION LEVEL` not parsed.
-- `RIGHT JOIN` (rewrite as LEFT with sources swapped) and `FULL OUTER JOIN` — both raise `NotSupportedException` at parse.
+- `RIGHT JOIN` / `FULL OUTER JOIN` with a derived-table or lateral right side — base tables / views / system tables on the right ship (see JOINs / APPLY); a derived-table right (always-deferred in this simulator) raises `NotSupportedException` since real SQL Server's Msg 4104 rejection of correlated subqueries on the right of RIGHT/FULL can't be statically distinguished from non-correlated ones.
 - Comma-separated FROM (legacy ANSI-89 join syntax).
 - `ANY` / `SOME` / `ALL` quantifiers.
 - `UNION` / `UNION ALL` inside a subquery body.

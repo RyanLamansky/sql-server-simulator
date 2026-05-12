@@ -4,17 +4,21 @@ namespace SqlServerSimulator.Parser;
 
 /// <summary>
 /// Multi-source FROM enumeration: cross-product / join row stream and the
-/// per-row column resolver. Lateral plans (CROSS APPLY / OUTER APPLY and
-/// always-deferred derived tables) flow through the same driver.
+/// per-row column resolver. INNER / LEFT / CROSS / CROSS APPLY / OUTER
+/// APPLY stream through the same operator pipeline; RIGHT / FULL
+/// materialize the right source and track a matched bitmap to emit
+/// unmatched-right rows after upstream is exhausted.
 /// </summary>
 internal sealed partial class Selection
 {
     /// <summary>
     /// Resolves a column reference against a row tuple of byte[] slots
-    /// (one per FROM source; null slots indicate unmatched LEFT-JOIN
-    /// rows, which expose NULL of the source's declared column type).
-    /// Falls through to the outer-scope resolver when no local source
-    /// matches.
+    /// (one per FROM source). A null slot indicates a NULL-filled side
+    /// of an outer join — LEFT-fill at <c>tuple[s]==null</c> when
+    /// <c>s</c> is the right of a LEFT JOIN, RIGHT-fill / FULL-fill at
+    /// any prior slot when emitting an unmatched-right row — and the
+    /// reference reads as a typed NULL.
+    /// Falls through to the outer-scope resolver when no local source matches.
     /// </summary>
     private static SqlValue ResolveAcrossTuple(
         FromSource[] sources,
@@ -40,145 +44,257 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Yields the cross-product / join row stream as a sequence of
-    /// <c>byte[]?[]</c> tuples, one byte[] per source (null in slots
-    /// representing the unmatched right side of a LEFT JOIN). Single-source
-    /// FROM produces a one-slot tuple per heap row. The same array
-    /// instance is reused across yields for efficiency — consumers must
-    /// finish reading each tuple (typically by projecting / encoding the
-    /// row) before advancing the enumerator.
+    /// <c>byte[]?[]</c> tuples, one byte[] per source (null slots
+    /// indicate NULL-filled outer-join sides). The same array instance
+    /// is reused across yields for efficiency — consumers must finish
+    /// reading each tuple (typically by projecting / encoding the row)
+    /// before advancing the enumerator.
     /// </summary>
+    /// <remarks>
+    /// The driver is a fold over <paramref name="joins"/>: a leftmost
+    /// rowset enumerator is constructed for <c>sources[0]</c>, then each
+    /// join wraps the rowset in an operator that fills its slot per
+    /// upstream tuple. INNER / LEFT / CROSS / CROSS APPLY / OUTER APPLY
+    /// stream one upstream tuple at a time; RIGHT / FULL materialize
+    /// <c>sources[level].Rows</c> and track a matched bitmap across the
+    /// entire upstream iteration so unmatched right rows can be emitted
+    /// (with NULL-filled left slots) after upstream is exhausted.
+    /// </remarks>
     internal static IEnumerable<byte[]?[]> EnumerateJoinedRows(
         FromSource[] sources,
         JoinSpec[] joins,
-        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
         var tuple = new byte[]?[sources.Length];
 
-        if (joins.Length == 0)
+        SqlValue Resolve(MultiPartName name) =>
+            ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, Resolve);
+
+        var rowset = EnumerateLeftmost(sources[0], tuple, batch, outerResolver);
+        for (var level = 1; level < sources.Length; level++)
         {
-            // Single FROM source. A correlated derived table here carries a
-            // LateralPlan whose execution depends on the enclosing scope's
-            // resolver (no per-row tuple to feed yet — we're at the outermost
-            // level of this Selection). Run it once with the outer resolver
-            // and stream its rows; eager (non-correlated) sources iterate
-            // their pre-evaluated row bytes the same way as before.
-            var rows = sources[0].LateralPlan is { } leftmostLateralPlan
-                ? leftmostLateralPlan.Execute(batch, outerResolver).RowBytes
-                : sources[0].Rows;
-            foreach (var row in rows)
-            {
-                tuple[0] = row;
-                yield return tuple;
-            }
-            yield break;
+            rowset = ApplyJoin(rowset, sources[level], joins[level - 1], tuple, level, batch, Resolve);
         }
-
-        SqlValue Resolve(byte[]?[] currentTuple, MultiPartName name) =>
-            ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, n => Resolve(currentTuple, n));
-
-        // Leftmost-source lateral plan in a multi-source FROM: same as the
-        // joins.Length==0 case — drive it from the outer resolver, then let
-        // the join driver chain through the remaining sources. The level==0
-        // branch in JoinDriver handles non-lateral leftmost sources; we
-        // pre-feed the lateral row stream via a temporary FromSource swap.
-        if (sources[0].LateralPlan is { } leadLateralPlan)
-        {
-            foreach (var row in leadLateralPlan.Execute(batch, outerResolver).RowBytes)
-            {
-                tuple[0] = row;
-                foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 1, batch))
-                    yield return t;
-            }
-            yield break;
-        }
-
-        foreach (var t in JoinDriver(sources, joins, tuple, Resolve, level: 0, batch))
-            yield return t;
+        return rowset;
     }
 
     /// <summary>
-    /// Recursive join driver. At each level, iterates the source's rows,
-    /// places the current row into the tuple at that source's slot, and
-    /// recurses to the next level. INNER and CROSS only emit when the
-    /// ON predicate (if any) passes; LEFT NULL-fills the right side when
-    /// no row at that level matched the predicate against the partial
-    /// tuple. The tuple array is reused across yields.
+    /// Drives <c>sources[0]</c>: its rows directly for a base / view /
+    /// system table, or its <see cref="FromSource.LateralPlan"/> executed
+    /// once with the enclosing-scope <paramref name="outerResolver"/>
+    /// (the only correlation available at the outermost FROM level).
+    /// Writes slot 0 of the shared buffer on each yield.
     /// </summary>
-    private static IEnumerable<byte[]?[]> JoinDriver(
-        FromSource[] sources,
-        JoinSpec[] joins,
+    private static IEnumerable<byte[]?[]> EnumerateLeftmost(
+        FromSource source,
         byte[]?[] tuple,
-        Func<byte[]?[], MultiPartName, SqlValue> resolve,
-        int level,
-        BatchContext batch)
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
-        if (level == sources.Length)
+        var rows = source.LateralPlan is { } plan
+            ? plan.Execute(batch, outerResolver).RowBytes
+            : source.Rows;
+        foreach (var row in rows)
         {
+            tuple[0] = row;
             yield return tuple;
-            yield break;
         }
+        tuple[0] = null;
+    }
 
-        // The leftmost source has no incoming join (joins[0] is the join
-        // for sources[1], etc.). For levels beyond 0, joins[level - 1]
-        // describes how this source attaches.
-        if (level == 0)
+    private static IEnumerable<byte[]?[]> ApplyJoin(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve) => join.Kind switch
         {
-            foreach (var row in sources[0].Rows)
-            {
-                tuple[0] = row;
-                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
-                    yield return t;
-            }
-            yield break;
-        }
+            JoinKind.Inner or JoinKind.Cross or JoinKind.CrossApply
+                => InnerOrCross(left, right, join, tuple, level, batch, resolve),
+            JoinKind.Left or JoinKind.OuterApply
+                => LeftOrOuterApply(left, right, join, tuple, level, batch, resolve),
+            JoinKind.Right
+                => RightOuterJoin(left, right, join, tuple, level, batch, resolve),
+            JoinKind.Full
+                => FullOuterJoin(left, right, join, tuple, level, batch, resolve),
+            _ => throw new NotSupportedException($"Unknown JoinKind {join.Kind}"),
+        };
 
-        var join = joins[level - 1];
-        var matched = false;
-
-        // Lateral source: any source backed by a deferred plan. APPLY brings
-        // its own join kind (CrossApply / OuterApply, no ON predicate) and
-        // correlates via the inner WHERE; ordinary derived tables in INNER /
-        // LEFT / CROSS JOIN slots also flow here since
-        // <see cref="ParseSingleFromSource"/> always defers (correlation isn't
-        // statically detectable). Apply the ON predicate when the join has
-        // one, and null-fill for both LEFT and OUTER APPLY when nothing
-        // matched.
-        if (sources[level].LateralPlan is { } lateralPlan)
+    /// <summary>
+    /// INNER JOIN (with ON), CROSS JOIN (no ON), and CROSS APPLY (no ON,
+    /// lateral right): for each upstream tuple iterate right rows (or
+    /// re-execute the lateral plan), check ON when present, yield matches.
+    /// Upstream tuples with no match are silently dropped.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> InnerOrCross(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve)
+    {
+        foreach (var _ in left)
         {
-            foreach (var row in lateralPlan.Execute(batch, name => resolve(tuple, name)).RowBytes)
+            var rows = right.LateralPlan is { } plan
+                ? plan.Execute(batch, resolve).RowBytes
+                : right.Rows;
+            foreach (var row in rows)
             {
                 tuple[level] = row;
-                if (join.OnPredicate is not null && join.OnPredicate.Run(new RuntimeContext(name => resolve(tuple, name), batch)) != true)
-                    continue;
-                matched = true;
-                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
-                    yield return t;
+                if (join.OnPredicate is null || join.OnPredicate.Run(new RuntimeContext(resolve, batch)) == true)
+                    yield return tuple;
             }
             tuple[level] = null;
-            if (!matched && join.Kind is JoinKind.OuterApply or JoinKind.Left)
+        }
+    }
+
+    /// <summary>
+    /// LEFT JOIN (with ON; right side may be a base table or a deferred
+    /// derived table) and OUTER APPLY (no ON, lateral right): for each
+    /// upstream tuple iterate right rows, check ON when present, yield
+    /// matches; if no row matched, NULL-fill the level slot and yield
+    /// once with the unmatched upstream tuple.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> LeftOrOuterApply(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve)
+    {
+        foreach (var _ in left)
+        {
+            var rows = right.LateralPlan is { } plan
+                ? plan.Execute(batch, resolve).RowBytes
+                : right.Rows;
+            var matched = false;
+            foreach (var row in rows)
             {
-                foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
-                    yield return t;
+                tuple[level] = row;
+                if (join.OnPredicate is null || join.OnPredicate.Run(new RuntimeContext(resolve, batch)) == true)
+                {
+                    matched = true;
+                    yield return tuple;
+                }
             }
-            yield break;
+            tuple[level] = null;
+            if (!matched)
+                yield return tuple;
+        }
+    }
+
+    /// <summary>
+    /// RIGHT [OUTER] JOIN: materializes the right source's rows up front
+    /// and tracks a matched bitmap across the whole upstream iteration.
+    /// For each upstream tuple, sweeps the right list, marks matches,
+    /// yields matched pairs (upstream tuples without any matching right
+    /// are silently dropped — that's the asymmetric flip of LEFT JOIN).
+    /// After upstream is exhausted, walks the bitmap and emits each
+    /// unmatched right row with all left-side slots NULL-filled. The
+    /// lateral / derived-table right side is rejected — real SQL Server
+    /// raises Msg 4104 on correlated subqueries to the right of
+    /// RIGHT / FULL, and the simulator defers every derived table
+    /// regardless of actual correlation, so the safe rule is to reject
+    /// every <see cref="FromSource.LateralPlan"/>-bearing right.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> RightOuterJoin(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve)
+    {
+        if (right.LateralPlan is not null)
+            throw new NotSupportedException("RIGHT JOIN with a derived-table right side isn't modeled.");
+
+        var rightRows = right.Rows.ToList();
+        var matched = new bool[rightRows.Count];
+
+        foreach (var _ in left)
+        {
+            for (var i = 0; i < rightRows.Count; i++)
+            {
+                tuple[level] = rightRows[i];
+                if (join.OnPredicate is null || join.OnPredicate.Run(new RuntimeContext(resolve, batch)) == true)
+                {
+                    matched[i] = true;
+                    yield return tuple;
+                }
+            }
+            tuple[level] = null;
         }
 
-        foreach (var row in sources[level].Rows)
+        for (var j = 0; j < level; j++)
+            tuple[j] = null;
+        for (var i = 0; i < rightRows.Count; i++)
         {
-            tuple[level] = row;
-            var passes = join.OnPredicate is null || join.OnPredicate.Run(new RuntimeContext(name => resolve(tuple, name), batch)) == true;
-            if (!passes)
+            if (matched[i])
                 continue;
-            matched = true;
-            foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
-                yield return t;
+            tuple[level] = rightRows[i];
+            yield return tuple;
         }
         tuple[level] = null;
-        if (!matched && join.Kind == JoinKind.Left)
+    }
+
+    /// <summary>
+    /// FULL [OUTER] JOIN: matched pairs emit normally; unmatched upstream
+    /// tuples emit with the level slot NULL-filled; unmatched right rows
+    /// (tracked across the whole upstream iteration) emit at the end with
+    /// all left-side slots NULL-filled. Same lateral-right restriction as
+    /// <see cref="RightOuterJoin"/>.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> FullOuterJoin(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve)
+    {
+        if (right.LateralPlan is not null)
+            throw new NotSupportedException("FULL OUTER JOIN with a derived-table right side isn't modeled.");
+
+        var rightRows = right.Rows.ToList();
+        var matched = new bool[rightRows.Count];
+
+        foreach (var _ in left)
         {
-            foreach (var t in JoinDriver(sources, joins, tuple, resolve, level + 1, batch))
-                yield return t;
+            var leftMatched = false;
+            for (var i = 0; i < rightRows.Count; i++)
+            {
+                tuple[level] = rightRows[i];
+                if (join.OnPredicate is null || join.OnPredicate.Run(new RuntimeContext(resolve, batch)) == true)
+                {
+                    matched[i] = true;
+                    leftMatched = true;
+                    yield return tuple;
+                }
+            }
+            tuple[level] = null;
+            if (!leftMatched)
+                yield return tuple;
         }
+
+        for (var j = 0; j < level; j++)
+            tuple[j] = null;
+        for (var i = 0; i < rightRows.Count; i++)
+        {
+            if (matched[i])
+                continue;
+            tuple[level] = rightRows[i];
+            yield return tuple;
+        }
+        tuple[level] = null;
     }
 
     /// <summary>

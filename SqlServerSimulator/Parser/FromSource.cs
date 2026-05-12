@@ -95,16 +95,34 @@ internal enum SetOpKind
 /// <summary>
 /// The variants of JOIN the simulator parses. <c>Inner</c> includes the
 /// bare <c>JOIN</c> keyword (which SQL Server treats as INNER) and the
-/// explicit <c>INNER JOIN</c>. <c>Left</c> covers <c>LEFT [OUTER] JOIN</c>.
-/// <c>Cross</c> is the unconditional Cartesian product (and rejects ON).
-/// <c>RIGHT JOIN</c> and <c>FULL OUTER JOIN</c> aren't modeled — the
-/// parser raises <see cref="NotSupportedException"/>; rewrite RIGHT as
-/// LEFT with sources reversed.
+/// explicit <c>INNER JOIN</c>. <c>Left</c> covers <c>LEFT [OUTER] JOIN</c>,
+/// <c>Right</c> covers <c>RIGHT [OUTER] JOIN</c>, <c>Full</c> covers
+/// <c>FULL [OUTER] JOIN</c>. <c>Cross</c> is the unconditional Cartesian
+/// product (and rejects ON).
 /// </summary>
 internal enum JoinKind
 {
     Inner,
     Left,
+
+    /// <summary>
+    /// <c>RIGHT [OUTER] JOIN</c>: right rows missing a left match emit
+    /// with the left side null-filled; left rows missing a right match
+    /// are dropped. Executed by materializing the right source and
+    /// tracking a matched bitmap across the entire left iteration —
+    /// requires a non-lateral right side (probe-confirmed: real SQL
+    /// Server rejects correlated derived tables on the right of
+    /// RIGHT / FULL with Msg 4104).
+    /// </summary>
+    Right,
+
+    /// <summary>
+    /// <c>FULL [OUTER] JOIN</c>: matched pairs emit normally; unmatched
+    /// left rows emit with the right side null-filled; unmatched right
+    /// rows emit with the left side null-filled. Same lateral-right
+    /// restriction as <see cref="Right"/>.
+    /// </summary>
+    Full,
     Cross,
 
     /// <summary>

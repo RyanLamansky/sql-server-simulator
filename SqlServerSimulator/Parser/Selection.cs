@@ -1099,13 +1099,11 @@ internal sealed partial class Selection
 
     /// <summary>
     /// If <see cref="ParserContext.Token"/> is one of the JOIN-introducing
-    /// keywords (<c>INNER</c> / <c>LEFT</c> / <c>CROSS</c> / bare
-    /// <c>JOIN</c>), consumes it (plus an optional <c>OUTER</c> after LEFT
-    /// and the required <c>JOIN</c> after the inner/left/cross keyword)
-    /// and returns the join kind. Returns false otherwise (no
-    /// advancement). <c>RIGHT</c> and <c>FULL</c> raise
-    /// <see cref="NotSupportedException"/> — RIGHT can be rewritten as
-    /// LEFT with the source order swapped, and FULL OUTER isn't modeled.
+    /// keywords (<c>INNER</c> / <c>LEFT</c> / <c>RIGHT</c> / <c>FULL</c> /
+    /// <c>CROSS</c> / bare <c>JOIN</c>), consumes it (plus an optional
+    /// <c>OUTER</c> after LEFT/RIGHT/FULL and the required <c>JOIN</c>
+    /// keyword) and returns the join kind. Returns false otherwise (no
+    /// advancement).
     /// </summary>
     private static bool TryParseJoinKeyword(ParserContext context, out JoinKind kind)
     {
@@ -1136,10 +1134,22 @@ internal sealed partial class Selection
                 return true;
 
             case Keyword.Right:
-                throw new NotSupportedException("RIGHT JOIN isn't modeled yet; rewrite as LEFT JOIN with the source order swapped.");
+                context.MoveNextRequired();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
+                    context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                kind = JoinKind.Right;
+                return true;
 
             case Keyword.Full:
-                throw new NotSupportedException("FULL OUTER JOIN isn't modeled yet.");
+                context.MoveNextRequired();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
+                    context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                kind = JoinKind.Full;
+                return true;
 
             case Keyword.Cross:
                 context.MoveNextRequired();

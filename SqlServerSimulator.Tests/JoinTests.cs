@@ -5,9 +5,9 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Behavioral tests for SQL Server's JOIN forms: INNER / bare JOIN / LEFT [OUTER] /
-/// CROSS, multi-table chains, self-joins via alias. Shared rules: qualifier-aware
-/// resolution (Msg 209 on ambiguity), ON-predicate 3VL semantics, parser rejections.
-/// RIGHT JOIN intentionally not modeled.
+/// RIGHT [OUTER] / FULL [OUTER] / CROSS, multi-table chains, self-joins via alias.
+/// Shared rules: qualifier-aware resolution (Msg 209 on ambiguity), ON-predicate 3VL
+/// semantics, parser rejections. RIGHT / FULL reject a derived-table right side.
 /// </summary>
 [TestClass]
 public sealed class JoinTests
@@ -29,7 +29,10 @@ public sealed class JoinTests
         using var reader = command.ExecuteReader();
         var rows = new List<(int, int)>();
         while (reader.Read())
-            rows.Add((reader.GetInt32(0), reader.IsDBNull(1) ? -1 : reader.GetInt32(1)));
+        {
+            rows.Add((reader.IsDBNull(0) ? -1 : reader.GetInt32(0),
+                      reader.IsDBNull(1) ? -1 : reader.GetInt32(1)));
+        }
         return rows;
     }
 
@@ -184,11 +187,173 @@ public sealed class JoinTests
         CollectionAssert.AreEqual(new[] { (1, 1) }, rows);
     }
 
+    /// <summary>
+    /// Seed asymmetric x/y tables where left has an unmatched row (x=3 → no y) and
+    /// right has an unmatched row (y=4 → no x). Shared by all RIGHT / FULL tests so the
+    /// asymmetric paths actually exercise the unmatched-side NULL fill.
+    /// </summary>
+    private static DbConnection SeededXY()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table x (id int);
+            create table y (x_id int);
+            insert x values (1), (2), (3);
+            insert y values (1), (2), (4)
+            """).ExecuteNonQuery();
+        return connection;
+    }
+
     [TestMethod]
-    public void RightJoin_NotSupported()
+    public void RightJoin_BasicMatchAndOrphanRight()
+    {
+        using var connection = SeededXY();
+        var rows = ReadIntPairs(connection.CreateCommand("select x.id, y.x_id from x right join y on x.id = y.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (-1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void RightOuterJoin_KeywordSpelling_Equivalent()
+    {
+        using var connection = SeededXY();
+        var rows = ReadIntPairs(connection.CreateCommand("select x.id, y.x_id from x right outer join y on x.id = y.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (-1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void FullJoin_EmitsBothUnmatchedSides()
+    {
+        using var connection = SeededXY();
+        var rows = ReadIntPairs(connection.CreateCommand("select x.id, y.x_id from x full join y on x.id = y.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (3, -1), (-1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void FullOuterJoin_KeywordSpelling_Equivalent()
+    {
+        using var connection = SeededXY();
+        var rows = ReadIntPairs(connection.CreateCommand("select x.id, y.x_id from x full outer join y on x.id = y.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (3, -1), (-1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void RightJoin_NullKey_DoesNotMatch()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table a (id int);
+            create table b (a_id int);
+            insert a values (1), (null);
+            insert b values (1), (null)
+            """).ExecuteNonQuery();
+
+        // ON uses three-valued equality: NULL = NULL is UNKNOWN, so the NULL rows
+        // never match and both pair as their respective outer-side row.
+        var rows = ReadIntPairs(connection.CreateCommand("select a.id, b.a_id from a right join b on a.id = b.a_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (-1, -1) }, rows);
+    }
+
+    [TestMethod]
+    public void RightJoin_NoLeftRows_AllRightEmittedNullLeft()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table a (id int);
+            create table b (id int);
+            insert b values (10), (20)
+            """).ExecuteNonQuery();
+
+        var rows = ReadIntPairs(connection.CreateCommand("select a.id, b.id from a right join b on a.id = b.id"));
+        CollectionAssert.AreEquivalent(new[] { (-1, 10), (-1, 20) }, rows);
+    }
+
+    [TestMethod]
+    public void RightJoin_NoRightRows_EmitsNothing()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table a (id int);
+            create table b (id int);
+            insert a values (1), (2)
+            """).ExecuteNonQuery();
+
+        using var reader = connection.CreateCommand("select a.id, b.id from a right join b on a.id = b.id").ExecuteReader();
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void RightJoin_ChainedAfterInnerJoin()
+    {
+        // Three-table chain: (x INNER JOIN z) RIGHT JOIN y. The RIGHT JOIN's
+        // left side is the materialized (x,z) rowset; unmatched y rows emit
+        // with both x and z slots NULL-filled.
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table x (id int);
+            create table y (x_id int);
+            create table z (id int);
+            insert x values (1), (2);
+            insert y values (1), (2), (4);
+            insert z values (1), (2)
+            """).ExecuteNonQuery();
+
+        var rows = new List<(int, int, int)>();
+        using var reader = connection.CreateCommand(
+            "select x.id, z.id, y.x_id from x inner join z on x.id = z.id right join y on x.id = y.x_id").ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add((reader.IsDBNull(0) ? -1 : reader.GetInt32(0),
+                      reader.IsDBNull(1) ? -1 : reader.GetInt32(1),
+                      reader.GetInt32(2)));
+        }
+        CollectionAssert.AreEquivalent(new[] { (1, 1, 1), (2, 2, 2), (-1, -1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void FullJoin_ChainedAfterLeftJoin()
+    {
+        // (a LEFT JOIN b) FULL JOIN c: tests that left-side NULL slots from
+        // the upstream LEFT JOIN don't poison the FULL JOIN's matched-bitmap
+        // tracking, and that FULL's unmatched-right phase clears all prior slots.
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table a (id int);
+            create table b (a_id int);
+            create table c (id int);
+            insert a values (1), (2);
+            insert b values (1);
+            insert c values (1), (3)
+            """).ExecuteNonQuery();
+
+        var rows = new List<(int, int, int)>();
+        using var reader = connection.CreateCommand(
+            "select a.id, b.a_id, c.id from a left join b on a.id = b.a_id full join c on a.id = c.id").ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add((reader.IsDBNull(0) ? -1 : reader.GetInt32(0),
+                      reader.IsDBNull(1) ? -1 : reader.GetInt32(1),
+                      reader.IsDBNull(2) ? -1 : reader.GetInt32(2)));
+        }
+        // a=1 LEFT b → (1,1); a=2 LEFT b → (2,NULL). FULL c on a.id=c.id:
+        //   (1,1) matches c=1 → (1,1,1);
+        //   (2,NULL) no c match → (2,NULL,NULL);
+        //   c=3 unmatched → (NULL,NULL,3).
+        CollectionAssert.AreEquivalent(new[] { (1, 1, 1), (2, -1, -1), (-1, -1, 3) }, rows);
+    }
+
+    [TestMethod]
+    public void RightJoin_DerivedTableRightSide_NotSupported()
         => _ = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar("""
             create table a (id int);
             create table b (id int);
-            select 1 from a right join b on a.id = b.id
+            select 1 from a right join (select id from b) bx on a.id = bx.id
+            """));
+
+    [TestMethod]
+    public void FullJoin_DerivedTableRightSide_NotSupported()
+        => _ = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar("""
+            create table a (id int);
+            create table b (id int);
+            select 1 from a full join (select id from b) bx on a.id = bx.id
             """));
 }
