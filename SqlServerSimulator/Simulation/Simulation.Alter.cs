@@ -15,9 +15,24 @@ partial class Simulation
     /// </summary>
     private static bool TryParseAlter(ParserContext context)
     {
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Database })
-            return false;
+        switch (context.GetNextRequired())
+        {
+            case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:
+                // ALTER PROCEDURE is identical in shape to CREATE PROCEDURE —
+                // same parameter grammar, same options, same body capture —
+                // differing only in the existence-check direction (must exist
+                // vs must not). Reuse the CREATE PROCEDURE parser with the
+                // isAlter flag set.
+                return TryParseCreateProcedure(context, isAlter: true, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.Database }:
+                break;
+            default:
+                return false;
+        }
 
+        // Cursor is on DATABASE; advance to the token after it (a db name, the
+        // CURRENT keyword, or the SCOPED contextual keyword routing to the
+        // database-scoped-configuration path).
         var afterDatabase = context.GetNextRequired();
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Scoped })
             return TryParseAlterDatabaseScopedConfiguration(context);

@@ -1,6 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
+using System.Data;
 using System.Data.Common;
 using System.Security.Cryptography;
 
@@ -143,12 +144,109 @@ public sealed partial class Simulation
     /// </remarks>
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
     {
+        // CommandType.StoredProcedure: CommandText is the procedure name and
+        // Parameters maps by name to the proc's declared parameters. Bypass
+        // the SQL-text parser and route directly to InvokeProcedure with the
+        // parameter collection translated into ProcArguments. The procedure-
+        // call entrypoint that hand-rolled SqlClient code uses.
+        if (command.CommandType == CommandType.StoredProcedure)
+        {
+            foreach (var outcome in InvokeFromCommandTypeStoredProcedure(command))
+                yield return outcome;
+            yield break;
+        }
+
         var batch = new BatchContext(command);
         var context = batch.Parser;
         context.MoveNextOptional();
         foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
             yield return outcome;
         WriteBackOutputParameters(batch);
+    }
+
+    /// <summary>
+    /// Procedure-call entrypoint for <see cref="CommandType.StoredProcedure"/>:
+    /// resolves <see cref="DbCommand.CommandText"/> as a procedure name,
+    /// binds each <see cref="DbCommand.Parameters"/> entry to a declared
+    /// parameter by name (or by direction for
+    /// <see cref="ParameterDirection.ReturnValue"/>), and invokes
+    /// the procedure. Output / InputOutput parameter values write back to
+    /// <c>DbParameter.Value</c> at exit (mirroring SqlClient); the ReturnValue
+    /// parameter captures the procedure's <c>RETURN</c> code (default 0).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeFromCommandTypeStoredProcedure(SimulatedDbCommand command)
+    {
+        // Build a transient outer batch to host the call. This batch's
+        // variable dict isn't used for parameter binding (procs read from
+        // their child batch's own variable dict, seeded from boundValues);
+        // but it's the home for the temporary writeback slots.
+        var batch = new BatchContext(command);
+        var context = batch.Parser;
+        context.MoveNextOptional();
+        if (context.Token is not Name)
+            throw SimulatedSqlException.CouldNotFindStoredProcedure(command.CommandText);
+        var procName = BatchContext.ParseObjectName(context);
+        if (!batch.TryResolveProcedure(procName, out var procedure))
+            throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
+
+        // Translate each non-ReturnValue parameter into a ProcArgument. The
+        // ReturnValue-direction parameter (at most one) gets pulled out and
+        // its writeback happens after the call completes.
+        var arguments = new List<ProcArgument>();
+        var returnValueWriteback = (DbParameter?)null;
+        foreach (DbParameter parameter in command.Parameters)
+        {
+            if (parameter.Direction is ParameterDirection.ReturnValue)
+            {
+                returnValueWriteback = parameter;
+                continue;
+            }
+
+            var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
+            var dbType = SqlType.GetByDbType(parameter.DbType);
+            var value = parameter.Value is null or DBNull
+                ? SqlValue.Null(dbType)
+                : dbType.ConvertParameter(parameter.Value);
+            // For OUTPUT-direction parameters we need a live VariableSlot in
+            // the outer batch so InvokeProcedure can write back through it.
+            // The slot's DeclaredType drives the coercion on writeback.
+            VariableSlot? outputSlot = null;
+            if (parameter.Direction is ParameterDirection.Output or ParameterDirection.InputOutput)
+            {
+                outputSlot = new VariableSlot(dbType, declaredMaxLength: null, value, parameter);
+                batch.Variables[pname] = outputSlot;
+            }
+            arguments.Add(new ProcArgument(pname, isDefault: false, value, outputSlot));
+        }
+
+        // ReturnValue slot: lives in the outer batch's Variables under an
+        // internal name so the InvokeProcedure writeback path can target it.
+        // The dot prefix means user @-variables can't collide.
+        string? returnCodeVarName = null;
+        if (returnValueWriteback is not null)
+        {
+            returnCodeVarName = ".rc";
+            batch.Variables[returnCodeVarName] = new VariableSlot(SqlType.Int32, declaredMaxLength: null, SqlValue.FromInt32(0), returnValueWriteback);
+        }
+
+        foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName))
+            yield return outcome;
+
+        // Output param writeback: the per-argument OutputSlot.Value was
+        // updated by InvokeProcedure. Copy back to each DbParameter.Value.
+        foreach (DbParameter parameter in command.Parameters)
+        {
+            if (parameter.Direction is ParameterDirection.Output or ParameterDirection.InputOutput)
+            {
+                var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
+                if (batch.Variables.TryGetValue(pname, out var slot))
+                    parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
+            }
+        }
+
+        // ReturnValue writeback: the .rc slot was written by InvokeProcedure.
+        if (returnValueWriteback is not null && batch.Variables.TryGetValue(".rc", out var rcSlot))
+            returnValueWriteback.Value = rcSlot.Value.IsNull ? DBNull.Value : rcSlot.Value.ToObject();
     }
 
     /// <summary>
@@ -399,6 +497,11 @@ public sealed partial class Simulation
                 ParseReturnStatement(batch);
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute }:
+                foreach (var o in ParseExec(batch))
+                    yield return o;
+                break;
+
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
                 ParseThrowStatement(batch);
                 if (!batch.IsSkipping)
@@ -538,7 +641,7 @@ public sealed partial class Simulation
         foreach (var slot in batch.Variables.Values)
         {
             if (slot.Parameter is { } parameter
-                && parameter.Direction is System.Data.ParameterDirection.InputOutput or System.Data.ParameterDirection.Output)
+                && parameter.Direction is ParameterDirection.InputOutput or ParameterDirection.Output)
             {
                 parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
             }

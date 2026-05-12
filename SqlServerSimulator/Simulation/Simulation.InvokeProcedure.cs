@@ -1,0 +1,190 @@
+using SqlServerSimulator.Parser;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator;
+
+partial class Simulation
+{
+    /// <summary>
+    /// Invokes a stored procedure: binds <paramref name="arguments"/> to the
+    /// procedure's declared parameters, allocates a child
+    /// <see cref="BatchContext"/> seeded with the bound values, dispatches
+    /// the body (yielding its result sets to the caller's iterator), and on
+    /// exit writes back to OUTPUT-marked caller variables and the optional
+    /// return-code variable. Mirrors the <see cref="InvokeScalarFunction"/>
+    /// structure with three differences: result sets propagate up
+    /// (UDF bodies discard); a return-code slot replaces the typed return
+    /// value; OUTPUT parameters write back to caller variable slots.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed argument-binding semantics (SQL Server 2025,
+    /// 2026-05-12):
+    /// <list type="bullet">
+    /// <item>Positional args bind by index; named args bind by lookup.</item>
+    /// <item>Once any positional bind happens, named args may follow (mixed
+    /// is fine going positional → named); the reverse fires Msg 119 at
+    /// parse.</item>
+    /// <item>Unknown parameter name in a named-arg fires Msg 201 ("expects
+    /// parameter '@X'").</item>
+    /// <item>Missing required parameter (no default) fires Msg 201.</item>
+    /// <item>Too many positional args fires Msg 8144.</item>
+    /// <item>Duplicate named arg fires Msg 8143 (at parse, not here).</item>
+    /// <item>Recursion past 32 fires Msg 217.</item>
+    /// </list>
+    /// </remarks>
+    internal IEnumerable<SimulatedStatementOutcome> InvokeProcedure(
+        BatchContext outerBatch,
+        Procedure procedure,
+        IReadOnlyList<ProcArgument> arguments,
+        string? returnCodeVariableName)
+    {
+        var connection = outerBatch.Connection;
+        if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
+            throw SimulatedSqlException.MaximumNestingLevelExceeded();
+
+        // Bind arguments to parameters. Positional args fill from the left;
+        // named args do per-name lookup. Track which parameters are bound
+        // so we can apply defaults / raise Msg 201 for unbound required.
+        var boundValues = new SqlValue?[procedure.Parameters.Length];
+        var boundOutputSlots = new VariableSlot?[procedure.Parameters.Length];
+        var boundIsDefault = new bool[procedure.Parameters.Length];
+        var positionalIndex = 0;
+        foreach (var arg in arguments)
+        {
+            int paramIndex;
+            if (arg.Name is null)
+            {
+                paramIndex = positionalIndex++;
+                if (paramIndex >= procedure.Parameters.Length)
+                    throw SimulatedSqlException.TooManyArgumentsToFunction(procedure.Name);
+            }
+            else
+            {
+                paramIndex = -1;
+                for (var i = 0; i < procedure.Parameters.Length; i++)
+                {
+                    if (Collation.Default.Equals(procedure.Parameters[i].Name, arg.Name))
+                    {
+                        paramIndex = i;
+                        break;
+                    }
+                }
+                if (paramIndex < 0)
+                {
+                    // Unknown named arg — Msg 201 names the first
+                    // unsatisfied required parameter (real SQL Server's
+                    // wording references the first missing one). Since we
+                    // don't know which is unsatisfied yet, surface the
+                    // procedure's first parameter as the placeholder.
+                    throw SimulatedSqlException.ProcedureExpectsParameter(procedure.Name, procedure.Parameters[0].Name);
+                }
+            }
+            boundValues[paramIndex] = arg.Value;
+            boundOutputSlots[paramIndex] = arg.OutputSlot;
+            boundIsDefault[paramIndex] = arg.IsDefault;
+        }
+
+        // Apply defaults for unbound parameters; raise Msg 201 for any
+        // still-unbound parameter without a default.
+        for (var i = 0; i < procedure.Parameters.Length; i++)
+        {
+            if (boundValues[i] is not null && !boundIsDefault[i])
+                continue;
+            var param = procedure.Parameters[i];
+            if (param.Default is null)
+                throw SimulatedSqlException.ProcedureExpectsParameter(procedure.Name, param.Name);
+            // Defaults are re-evaluated per call in the outer batch's
+            // expression-evaluation context (mirrors scalar-UDF behavior).
+            // Column refs inside a default would be invalid here; the
+            // resolver throws Msg 137 for an unbound name.
+            var defaultValue = param.Default.Run(
+                new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch));
+            boundValues[i] = defaultValue.CoerceTo(param.Type);
+        }
+
+        // Seed the child batch's variable dictionary with the bound values,
+        // coerced to each parameter's declared type.
+        var variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        for (var i = 0; i < procedure.Parameters.Length; i++)
+        {
+            var param = procedure.Parameters[i];
+            var coerced = boundValues[i]!.Value.CoerceTo(param.Type);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null);
+        }
+
+        // Synthesize a command wrapping the proc body and a child batch.
+        // The connection is the caller's, so database / transaction state
+        // is shared. Result sets yielded by the body's dispatch propagate
+        // through this iterator to the outer caller.
+        //
+        // Empty body short-circuit: `CREATE PROC p AS` (with nothing after
+        // AS) is legal in real SQL Server. ParserContext rejects an empty
+        // CommandText, so we skip the dispatch entirely — the proc behaves
+        // as if a no-op body ran (default RETURN code 0, no result sets,
+        // no output-param mutations).
+        var procFrame = new ProcFrame(procedure.Name);
+        List<SimulatedStatementOutcome> outcomes;
+        if (string.IsNullOrEmpty(procedure.BodyText))
+        {
+            outcomes = [];
+        }
+        else
+        {
+            using var bodyCommand = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // procedure.BodyText is the simulator's own captured body span
+            bodyCommand.CommandText = procedure.BodyText;
+#pragma warning restore CA2100
+
+            var innerBatch = new BatchContext(bodyCommand, variables, procFrame);
+            connection.NestingLevel++;
+            // Materialize outcomes to a list so the try/finally cleanup
+            // (NestingLevel decrement, OUTPUT param writeback, return-code
+            // assignment) runs even when the iterator is partially consumed.
+            try
+            {
+                var parser = innerBatch.Parser;
+                parser.MoveNextOptional();
+                outcomes = [.. DispatchStatementsUntil(innerBatch, endKeyword: null)];
+            }
+            finally
+            {
+                connection.NestingLevel--;
+            }
+        }
+
+        // Writeback: any OUTPUT-marked argument copies the child batch's
+        // final parameter value back to the caller's slot. Param.IsOutput
+        // gating means a non-OUTPUT param doesn't write back even if the
+        // caller passed OUTPUT — and an OUTPUT-declared param doesn't write
+        // back unless the caller actually passed OUTPUT (probe-confirmed:
+        // the caller's var retains its original value if OUTPUT keyword
+        // was omitted on the call site).
+        for (var i = 0; i < procedure.Parameters.Length; i++)
+        {
+            var param = procedure.Parameters[i];
+            if (param.IsOutput && boundOutputSlots[i] is { } callerSlot)
+            {
+                var finalValue = variables[param.Name].Value;
+                callerSlot.Value = finalValue.CoerceTo(callerSlot.DeclaredType);
+            }
+        }
+
+        // Return code: coerce the proc's RETURN value (or default 0) to
+        // int and store into the caller's `@rc` slot. Probe-confirmed:
+        // RETURN NULL coerces to 0 (NULL doesn't propagate to the return
+        // code), so the CoerceTo handles the NULL→0 fall-through via the
+        // standard coercion path… except CoerceTo turns NULL-of-X into
+        // NULL-of-int. Explicit fallback to 0 keeps that fidelity.
+        if (returnCodeVariableName is not null)
+        {
+            var rcSlot = outerBatch.GetVariableSlot(returnCodeVariableName);
+            var rc = procFrame.ReturnCode.IsNull
+                ? SqlValue.FromInt32(0)
+                : procFrame.ReturnCode.CoerceTo(SqlType.Int32);
+            rcSlot.Value = rc.CoerceTo(rcSlot.DeclaredType);
+        }
+
+        foreach (var outcome in outcomes)
+            yield return outcome;
+    }
+}

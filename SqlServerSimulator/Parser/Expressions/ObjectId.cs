@@ -65,13 +65,14 @@ internal sealed class ObjectId : Expression
             // Probe-confirmed: real SQL Server is whitespace-sensitive on the
             // type filter (' U ' returns NULL) but case-insensitive ('u' works).
             // Modeled codes today: 'U' (user table), 'FN' (scalar UDF),
-            // 'IF' (inline table-valued function), 'V' (view). Other
-            // documented codes (P / TF / ...) return NULL pending those
-            // features.
+            // 'IF' (inline table-valued function), 'V' (view), 'P' (stored
+            // procedure). Other documented codes (TF / TR / ...) return
+            // NULL pending those features.
             if (!Collation.Default.Equals(typeFilter, "U")
                 && !Collation.Default.Equals(typeFilter, "FN")
                 && !Collation.Default.Equals(typeFilter, "IF")
-                && !Collation.Default.Equals(typeFilter, "V"))
+                && !Collation.Default.Equals(typeFilter, "V")
+                && !Collation.Default.Equals(typeFilter, "P"))
             {
                 return SqlValue.Null(SqlType.Int32);
             }
@@ -108,6 +109,17 @@ internal sealed class ObjectId : Expression
         {
             if (runtime.Batch.TryResolveView(parsed, out var view))
                 return SqlValue.FromInt32(view.ObjectId);
+            if (typeFilter is not null)
+                return SqlValue.Null(SqlType.Int32);
+        }
+
+        // 'P' / no filter: try procedure resolution. Procs share the
+        // object-name namespace with tables / views / functions, so the
+        // no-filter form falls through here too.
+        if (typeFilter is null || Collation.Default.Equals(typeFilter, "P"))
+        {
+            if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
+                return SqlValue.FromInt32(procedure.ObjectId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }

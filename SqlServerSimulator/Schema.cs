@@ -47,4 +47,15 @@ internal sealed class Schema(string name, int schemaId)
     /// so a view's leaf name is unique across both dicts within the schema.
     /// </summary>
     public readonly ConcurrentDictionary<string, View> Views = new(Collation.Default);
+
+    /// <summary>
+    /// Stored procedures hosted by this schema. <c>CREATE PROCEDURE
+    /// schema.name AS ...</c> adds entries; <c>EXEC schema.name ...</c>
+    /// resolves through this dict. Procedures share the object-name
+    /// namespace with tables / views / functions (Msg 2714 on collision).
+    /// <c>ALTER PROCEDURE</c> replaces the entry while preserving the
+    /// existing <see cref="Procedure.ObjectId"/>; <c>DROP PROCEDURE</c>
+    /// removes it.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Procedure> Procedures = new(Collation.Default);
 }

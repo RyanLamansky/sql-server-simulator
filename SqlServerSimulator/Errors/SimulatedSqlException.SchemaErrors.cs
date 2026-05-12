@@ -88,6 +88,15 @@ partial class SimulatedSqlException
         new($"Cannot drop the view '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>procedure</c> wording variant.
+    /// Probe-confirmed verbatim against SQL Server 2025 (2026-05-12): same
+    /// number / class / state as DROP TABLE / FUNCTION / VIEW, with only the
+    /// object-type noun changed.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropProcedureDoesNotExist(string name) =>
+        new($"Cannot drop the procedure '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 302: <c>newsequentialid()</c> appeared anywhere
     /// other than as the entire DEFAULT expression of a <c>uniqueidentifier</c>
     /// column. Wording verified against SQL Server 2025 — the simulator

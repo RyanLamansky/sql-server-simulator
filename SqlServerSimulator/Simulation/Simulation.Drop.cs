@@ -36,6 +36,7 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Table } => DropTargetKind.Table,
             ReservedKeyword { Keyword: Keyword.Function } => DropTargetKind.Function,
             ReservedKeyword { Keyword: Keyword.View } => DropTargetKind.View,
+            ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => DropTargetKind.Procedure,
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
@@ -62,6 +63,9 @@ partial class Simulation
                 case DropTargetKind.View:
                     DropOneView(context, name, ifExists);
                     break;
+                case DropTargetKind.Procedure:
+                    DropOneProcedure(context, name, ifExists);
+                    break;
                 default:
                     DropOneTable(context, name, ifExists);
                     break;
@@ -78,7 +82,27 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View }
+    private enum DropTargetKind { None, Table, Function, View, Procedure }
+
+    /// <summary>
+    /// Removes one entry from the target schema's <see cref="Schema.Procedures"/>
+    /// dict. Missing procedure → Msg 3701 (procedure variant) unless
+    /// <paramref name="ifExists"/> is set. Same shape as
+    /// <see cref="DropOneFunction"/> / <see cref="DropOneView"/> —
+    /// procedures don't participate in the undo log either.
+    /// </summary>
+    private static void DropOneProcedure(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is null || !schema.Procedures.TryRemove(name.Leaf, out _))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
+        }
+    }
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.Views"/>

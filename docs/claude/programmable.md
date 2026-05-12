@@ -97,3 +97,81 @@ Selection-side capture is `Selection.UpdatabilityProfile` (set in `BuildSqlProje
 - **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE. Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
 - **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML. Real SQL Server's behavior on this specific niche shape isn't probe-confirmed; the simulator errs on the side of rejection.
+
+## Stored procedures
+`CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`. Body source captured from `AS` to end-of-batch (BEGIN/END is optional — probe-confirmed), re-tokenized per call inside a child `BatchContext` with parameters seeded as variables and a `ProcFrame` carrying the return-code slot. EXEC's result sets propagate to the outer caller (distinct from scalar UDFs, which discard). Same 32-level recursion cap (Msg 217) shared with UDFs / views via `SimulatedDbConnection.NestingLevel`. Probed against SQL Server 2025 (2026-05-12).
+
+**Grammar**:
+- **Body capture**: from the first token after `AS` to end-of-batch, with empty bodies legal (`CREATE PROC p AS` with nothing after `AS` succeeds — probe-confirmed; the per-call invocation short-circuits when `BodyText` is empty so the parser doesn't reject empty `CommandText`).
+- **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
+- **WITH options** (`RECOMPILE`, `ENCRYPTION`, `EXECUTE AS CALLER|SELF|OWNER|'name'`, `FOR REPLICATION`) parse-and-ignore — the simulator doesn't model query-planner / security / replication semantics.
+- **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present (preserving `Procedure.ObjectId`).
+- **Bare `CREATE PROC` on existing name** raises **Msg 2714** (same factory as duplicate CREATE TABLE).
+- **Bare `ALTER PROC` on missing name** raises **Msg 208** (NOT Msg 3701 — distinct from DROP).
+- **`DROP PROCEDURE [IF EXISTS] schema.name[, name...]`**: comma-list form; missing target → **Msg 3701** with `"Cannot drop the procedure 'X', …"` wording variant (`CannotDropProcedureDoesNotExist` factory).
+- **No Msg 111 batch-first enforcement** — real SQL Server requires CREATE/ALTER PROCEDURE to be the first statement in a query batch; the simulator (no `GO` support) doesn't enforce, matching the UDF / view stance.
+
+**EXEC statement grammar** (`Simulation.Exec.cs`):
+- **`EXEC [@rc =] target [args]`** where `target` is a procedure name (or `( <string-expr> )` for dynamic SQL). The optional `[@rc = ]` between EXEC and the proc name captures the return code into a caller variable — probe-confirmed position (NOT `@rc = EXEC ...` at statement start).
+- **Argument forms**: positional / named (`@p = value`) / mixed positional-then-named. Once any named arg appears, every following arg must also be named (Msg 119). Each argument value must be a literal (numeric / string / NULL), an `@variable` (with optional `OUTPUT`/`OUT` suffix), or the `DEFAULT` keyword — probe-confirmed: arithmetic expressions like `EXEC p @x - 1` raise Msg 102 at parse.
+- **Unqualified names work**: `EXEC p1` resolves to `dbo.p1` (probe-confirmed; matches view-routing relaxation).
+- **EXEC missing proc** → **Msg 2812** (`"Could not find stored procedure 'X'."`) — distinct error from Msg 208 / 3701; State 62 verbatim.
+- **EXEC in expression position** (`SELECT EXEC p`) → Msg 156 via the standard non-statement-start path.
+
+**Error matrix at EXEC**:
+- **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for an unknown named arg OR a missing required parameter (no default). State 4.
+- **Msg 8143** (`"Parameter '@X' was supplied multiple times."`) for duplicate named args.
+- **Msg 8144** (`"Procedure or function X has too many arguments specified."`) for too many positional args (same factory as scalar UDFs, but the proc name renders without single-quote wrapping in real SQL Server; the simulator's existing factory is close enough).
+- **Msg 119** (mixing named-then-positional) — verbatim wording probe-confirmed.
+
+**OUTPUT parameters**:
+- Procedure parameters declared with `OUTPUT` / `OUT` get `ProcedureParameter.IsOutput = true`; the EXEC argument's optional `OUTPUT` keyword binds the caller's `@variable` slot (captured live, not by value) into `ProcArgument.OutputSlot`.
+- At proc exit, OUTPUT-declared params whose call-site also passed OUTPUT copy the child batch's final variable value back to the caller's slot. **Probe-confirmed quirks**:
+  - Caller that omits `OUTPUT` on an OUTPUT-declared parameter: writeback is suppressed (caller's variable retains its pre-EXEC value).
+  - Output param when proc throws after writing: the partial write is preserved (caller sees the mid-proc value).
+- For `CommandType.StoredProcedure` callers (`SimulatedDbCommand.CommandType = StoredProcedure`), parameters with `ParameterDirection.Output` / `InputOutput` writeback to `DbParameter.Value` at end-of-call; `ParameterDirection.ReturnValue` captures the proc's return code (default 0).
+
+**RETURN semantics**:
+- Bare `RETURN` exits the procedure early; subsequent statements in the body don't execute (propagates through `IF` / `BEGIN…END` / `WHILE` via `BatchContext.ReturnSignaled`, same plumbing as bare-batch RETURN).
+- `RETURN <expr>` evaluates the expression, coerces to `int`, lands in `ProcFrame.ReturnCode`. **Probe-confirmed: `RETURN NULL` yields 0 in the caller's `@rc`** — NULL coerces to 0 in this slot specifically (NOT propagated as `DBNull`), distinct from how NULL flows through other expression contexts.
+- `RETURN 'abc'` (non-coercible string) raises **Msg 245** at the proc body's RETURN statement.
+- Default return code (no explicit RETURN) is **0**.
+- Value-form RETURN is also legal inside scalar UDF bodies (existing); the parse-time check now accepts either `BatchContext.UdfFrame` or `BatchContext.ProcFrame` being non-null.
+
+**Multi-result-set forwarding**: a procedure body's `SELECT` statements yield result sets through the outer caller's iterator (`ExecuteReader().NextResult()` walks them). Unlike UDF bodies, the proc invocation iterates `DispatchStatementsUntil` and yields each outcome. Output parameter values populate AFTER reader close — probe-confirmed: real SQL Server holds OUTPUT param values until the response stream's done message, which `SimulatedDbDataReader` mirrors via the standard ADO.NET timing.
+
+**Recursion**: each proc call increments `SimulatedDbConnection.NestingLevel`; entering a body at the cap raises Msg 217 (verbatim same wording as scalar UDFs / views). `@@NESTLEVEL` reads the counter as int.
+
+**`CommandType.StoredProcedure` entrypoint**: `SimulatedDbCommand.CommandType` accepts `StoredProcedure`; on execute, `CreateResultSetsForCommand` short-circuits the parser path and routes directly to `InvokeProcedure` with arguments translated from `DbParameterCollection`. Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped if present); `ParameterDirection.Output` / `InputOutput` writeback paths and the optional `ParameterDirection.ReturnValue` capture mirror the EXEC-text behavior.
+
+**Catalog surface**:
+- `sys.objects` `type='P '` (char(2) trailing-space padded) / `type_desc='SQL_STORED_PROCEDURE'`.
+- `sys.procedures` (load-bearing subset): `object_id`, `name`, `schema_id`, `type`, `type_desc`, `create_date`, `modify_date`, `is_ms_shipped`.
+- `sys.parameters` emits one row per declared parameter (parameter_id 1+); no `parameter_id=0` row (distinct from scalar UDFs — proc has no return-type slot in this view). `is_output` reflects the `OUTPUT`/`OUT` declaration.
+- `INFORMATION_SCHEMA.ROUTINES` (5-col subset): `ROUTINE_TYPE='PROCEDURE'`, `DATA_TYPE=NULL` for procs.
+- `INFORMATION_SCHEMA.PARAMETERS` (8-col subset): `PARAMETER_MODE='IN'`/`'INOUT'` (no `'OUT'`-only — procedures always reflect OUTPUT as INOUT, probe-confirmed).
+- `OBJECT_ID(name, 'P')` resolves procedures only; no-filter form tries function → view → procedure → table in order.
+
+**Fidelity gaps**:
+- **`sys.parameters.has_default_value`** is hardcoded `False` (matches probed real SQL Server behavior: the column reflects CLR-side DEFAULT_VALUE metadata, not the `= value` parameter default — even `@x int = 5` shows `has_default_value=False`).
+- **`sys.procedures.modify_date`** mirrors `create_date` (real SQL Server bumps `modify_date` on each ALTER; the simulator preserves the original create_date through ALTER but doesn't track separate modify timestamps).
+- **No Msg 111 batch-first enforcement** (same gap as scalar UDFs / views).
+- **EXEC argument value-grammar limited to literals + `@var` + `DEFAULT`** — matches real SQL Server (Msg 102 on arithmetic), but the *type* of the literal is taken from the source token, not coerced through any inference like real SQL Server's procedure-call binding.
+- **`@@ROWCOUNT` inside a proc body** isn't isolated from the caller — same gap documented for UDF bodies.
+- **`OUTPUT` parameter timing**: the simulator's `SimulatedDbDataReader` populates output `DbParameter.Value` after the reader closes (via the synthesized `WriteBackOutputParameters` path), matching real SqlClient's general behavior; pre-close access reads the pre-EXEC value.
+- **No `WITH RESULT SETS`** (EXEC option to override result-set schema). Parses fall through to syntax error.
+- **No `INSERT ... EXEC`** wiring through the catalog yet (the `INSERT` parser doesn't recognize `EXEC` as a row source). Apps that emit this surface Msg 102.
+
+## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
+Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`. Both run the dynamic batch inside its own child `BatchContext` (`ProcFrame` set for `RETURN` legality but the return code is discarded), share the outer connection's database / transaction state, and forward result sets to the outer caller. **Outer `@`-variables are NOT visible** — probe-confirmed: a dynamic batch referencing an undeclared `@x` raises Msg 137.
+
+**`EXEC (<string-expr>)`**:
+- Operand evaluates in the outer batch's context (so `EXEC ('SELECT ' + @col + ' FROM t')` works), then the resulting string is dispatched as a fresh batch.
+- NULL string operand → silent no-op (matches real SQL Server's permissive handling).
+- The dynamic-SQL form doesn't expose a meaningful return code; `@rc = EXEC ('...')` writes 0 unconditionally.
+
+**`EXEC sp_executesql N'sql', N'@p1 type [OUTPUT], ...', @p1 = value, @p2 = @callervar OUTPUT, ...`**:
+- First argument is the SQL text; second (optional) is a parameter-declaration string parsed by `ParseSpExecuteSqlParamDefinitions` (mini-parser: `@name type [OUTPUT]` entries, comma-separated).
+- Remaining arguments bind values to declared params (positional or named); `OUTPUT` keyword on an `@variable`-valued arg writes the dynamic batch's final variable value back to the caller's slot at exit.
+- The pre-declared `@`-variables exist as the dynamic batch's own `Variables` dict — they don't leak into the outer scope.
+- Probe-confirmed: `sp_executesql` works with no parameters (`EXEC sp_executesql N'SELECT 42'`).

@@ -89,6 +89,40 @@ partial class SimulatedSqlException
         new("Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32).", 217, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 2812 — EXEC named a stored procedure that
+    /// doesn't exist. Distinct error number from Msg 208 / 3701; the State
+    /// (62) is probe-confirmed. Wording mirrors real SQL Server verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CouldNotFindStoredProcedure(string name) =>
+        new($"Could not find stored procedure '{name}'.", 2812, 16, 62);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 201 — EXEC failed to supply a required
+    /// parameter (either a named argument referenced an unknown parameter,
+    /// leaving a required one un-supplied, or the call simply omitted a
+    /// parameter that has no default). The State (4) and verbatim wording
+    /// were probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ProcedureExpectsParameter(string procedureName, string parameterName) =>
+        new($"Procedure or function '{procedureName}' expects parameter '@{parameterName}', which was not supplied.", 201, 16, 4);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8143 — a single EXEC supplied the same named
+    /// argument twice. State 1, exact wording probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException ParameterSuppliedMultipleTimes(string parameterName) =>
+        new($"Parameter '@{parameterName}' was supplied multiple times.", 8143, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 119 — an EXEC mixed positional and named
+    /// arguments incorrectly: once a <c>@name = value</c> appeared, every
+    /// following argument must also be in that form. State 1 / class 15;
+    /// verbatim wording probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException MustPassParameterAsNamed() =>
+        new("Must pass parameter number 2 and subsequent parameters as '@name = value'. After the form '@name = value' has been used, all subsequent parameters must be passed in the form '@name = value'.", 119, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 487 — fired by <c>CREATE FUNCTION</c> when an
     /// invalid option appears in the <c>WITH</c> clause (e.g. <c>WITH RETURNS
     /// NULL ON NULL INPUT</c> on an inline TVF — that option is scalar-only).

@@ -1,0 +1,115 @@
+using SqlServerSimulator.Parser;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator;
+
+/// <summary>
+/// One user-defined stored procedure. Created via <c>CREATE [OR ALTER]
+/// PROCEDURE schema.name [(@p type [=default] [OUTPUT], ...)] [WITH options]
+/// AS [body]</c>, dropped via <c>DROP PROCEDURE</c>, invoked via
+/// <c>EXEC schema.name ...</c> or <see cref="System.Data.CommandType.StoredProcedure"/>.
+/// Lives in its owning <see cref="Schema"/>'s <see cref="Schema.Procedures"/>
+/// dict; the name namespace is shared with tables / views / functions
+/// (Msg 2714 on collision).
+/// </summary>
+/// <remarks>
+/// <para>
+/// Body source is captured at CREATE time between the <c>AS</c> keyword
+/// (exclusive) and end-of-batch (or the trailing statement boundary), then
+/// re-tokenized per call inside a fresh child <see cref="BatchContext"/>.
+/// Unlike scalar UDFs, BEGIN/END is optional — real SQL Server accepts
+/// <c>CREATE PROCEDURE p AS SELECT 1</c> and the multi-statement form
+/// without an outer block (probe-confirmed against SQL Server 2025).
+/// </para>
+/// <para>
+/// Per-call execution allocates a child <see cref="BatchContext"/> via the
+/// procedure-body constructor: parameters pre-seed <c>Variables</c>; a
+/// <see cref="ProcFrame"/> gates value-form <c>RETURN N</c> and
+/// captures the return code; result sets from <c>SELECT</c> statements in
+/// the body propagate to the outer caller's iterator (distinct from scalar
+/// UDF bodies, which discard).
+/// </para>
+/// </remarks>
+internal sealed class Procedure(
+    Schema schema,
+    string name,
+    int objectId,
+    ProcedureParameter[] parameters,
+    string bodyText,
+    DateTime createDate)
+{
+    public readonly Schema Schema = schema;
+    public readonly string Name = name;
+
+    /// <summary>
+    /// Stable per-database identifier; preserved across <c>ALTER PROCEDURE</c>
+    /// (probe-confirmed: real SQL Server's ALTER keeps the same object_id, so
+    /// foreign refs in <c>sys.objects</c> stay consistent). Allocated at
+    /// CREATE PROCEDURE time from <see cref="Database.AllocateObjectId"/>;
+    /// stored mutable-by-ALTER on the procedure record. Replaced wholesale on
+    /// each ALTER because parameter list / body text both swap; the field is
+    /// readonly because the ALTER path constructs a fresh <see cref="Procedure"/>
+    /// instance carrying the preserved id.
+    /// </summary>
+    public readonly int ObjectId = objectId;
+
+    /// <summary>
+    /// Declared parameters in source order. Each carries name, type, optional
+    /// default expression, and an <c>IsOutput</c> flag for <c>OUTPUT</c> /
+    /// <c>OUT</c>-declared params (which writeback to the caller's argument
+    /// variable at proc exit).
+    /// </summary>
+    public readonly ProcedureParameter[] Parameters = parameters;
+
+    /// <summary>
+    /// Raw source text of the body — everything between the <c>AS</c> keyword
+    /// (exclusive) and the trailing statement boundary that terminated the
+    /// CREATE/ALTER PROCEDURE statement. Re-tokenized and re-parsed per call.
+    /// Empty bodies are legal (probe-confirmed: <c>CREATE PROC p AS</c> with
+    /// nothing after <c>AS</c> succeeds and yields one empty result set when
+    /// invoked).
+    /// </summary>
+    public readonly string BodyText = bodyText;
+
+    public readonly DateTime CreateDate = createDate;
+}
+
+/// <summary>
+/// One declared parameter on a <see cref="Procedure"/>. The <see cref="Name"/>
+/// is stored with the leading <c>@</c> stripped (matching the
+/// <see cref="BatchContext.Variables"/> keying convention).
+/// </summary>
+internal sealed class ProcedureParameter(string name, SqlType type, int? declaredMaxLength, Expression? defaultExpression, bool isOutput)
+{
+    public readonly string Name = name;
+    public readonly SqlType Type = type;
+
+    /// <summary>
+    /// The declared <c>(N)</c> on a variable-length string/binary type, kept
+    /// alongside <see cref="Type"/> for catalog-view fidelity
+    /// (<c>INFORMATION_SCHEMA.PARAMETERS.CHARACTER_MAXIMUM_LENGTH</c>).
+    /// Null when not applicable.
+    /// </summary>
+    public readonly int? DeclaredMaxLength = declaredMaxLength;
+
+    /// <summary>
+    /// The <c>= expr</c> default, parsed once at CREATE PROCEDURE time and
+    /// evaluated in the per-call <see cref="BatchContext"/> when the caller
+    /// omits the argument or passes the <c>DEFAULT</c> keyword.
+    /// <see langword="null"/> when no default was declared — calls must
+    /// supply the argument or raise Msg 201 (probe-confirmed).
+    /// </summary>
+    public readonly Expression? Default = defaultExpression;
+
+    /// <summary>
+    /// True when the parameter was declared with <c>OUTPUT</c> or <c>OUT</c>.
+    /// Surfaces in <c>sys.parameters.is_output</c> and gates EXEC-time
+    /// writeback to the caller's argument variable: only OUTPUT-declared
+    /// params, AND only when the caller passed <c>OUTPUT</c> on the
+    /// corresponding argument, write back at proc exit. Probe-confirmed: a
+    /// caller that omits <c>OUTPUT</c> on an OUTPUT-declared param silently
+    /// suppresses the writeback (the caller's variable retains its
+    /// pre-EXEC value).
+    /// </summary>
+    public readonly bool IsOutput = isOutput;
+}

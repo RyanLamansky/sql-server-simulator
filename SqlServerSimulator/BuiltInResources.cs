@@ -184,6 +184,8 @@ internal static class BuiltInResources
         var inlineTvfTypeDesc = SqlValue.FromNVarchar("SQL_INLINE_TABLE_VALUED_FUNCTION");
         var viewType = SqlValue.FromChar(charTwo, "V ");
         var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
+        var procType = SqlValue.FromChar(charTwo, "P ");
+        var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
         var zeroParent = SqlValue.FromInt32(0);
         var objectsColumns = new HeapColumn[]
         {
@@ -198,7 +200,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
         var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, viewType, viewTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, viewType, viewTypeDesc, procType, procTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -345,6 +347,69 @@ internal static class BuiltInResources
         };
         var viewsCatalogView = new CatalogView("views", viewsColumns, EnumerateViews);
 
+        // sys.procedures: per-procedure rows. Shipped column subset matches
+        // the load-bearing surface — object_id / name / schema_id /
+        // create_date / modify_date / is_ms_shipped. Other documented
+        // columns (principal_id, is_auto_executed, is_execution_replicated,
+        // etc.) aren't modeled.
+        var proceduresColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+        };
+        var proceduresView = new CatalogView("procedures", proceduresColumns, batch =>
+            EnumerateProcedures(batch, procType, procTypeDesc, notMsShipped));
+
+        // INFORMATION_SCHEMA.ROUTINES: ISO-shape view listing both procedures
+        // and functions. The simulator ships the load-bearing column subset:
+        // ROUTINE_CATALOG / SCHEMA / NAME / TYPE / DATA_TYPE. For procedures
+        // DATA_TYPE is NULL (procs have no scalar return type); for scalar
+        // UDFs it carries the return type's family name; for inline TVFs it
+        // is 'TABLE'. Real SQL Server ships dozens of additional columns
+        // (CREATED, LAST_ALTERED, ROUTINE_DEFINITION, etc.) that aren't
+        // modeled.
+        var procedureRoutineType = SqlValue.FromVarchar("PROCEDURE");
+        var functionRoutineType = SqlValue.FromVarchar("FUNCTION");
+        var tableDataType = SqlValue.FromSystemName("TABLE");
+        var isRoutinesColumns = new HeapColumn[]
+        {
+            new("ROUTINE_CATALOG", SqlType.SystemName, 128, true),
+            new("ROUTINE_SCHEMA", SqlType.SystemName, 128, true),
+            new("ROUTINE_NAME", SqlType.SystemName, 128, false),
+            new("ROUTINE_TYPE", SqlType.Varchar, 9, true),
+            new("DATA_TYPE", SqlType.SystemName, 128, true),
+        };
+        var isRoutinesView = new CatalogView("ROUTINES", isRoutinesColumns, batch =>
+            EnumerateInformationSchemaRoutines(batch, procedureRoutineType, functionRoutineType, tableDataType));
+
+        // INFORMATION_SCHEMA.PARAMETERS: ISO-shape view listing parameters
+        // for procedures and functions. PARAMETER_MODE is 'IN' / 'OUT' /
+        // 'INOUT'; the simulator emits 'IN' for non-output params, 'INOUT'
+        // for OUTPUT-declared params (probe-confirmed: real SQL Server uses
+        // INOUT for OUTPUT in procedures). CHARACTER_MAXIMUM_LENGTH is set
+        // only for string types.
+        var modeIn = SqlValue.FromVarchar("IN");
+        var modeInOut = SqlValue.FromVarchar("INOUT");
+        var isParametersColumns = new HeapColumn[]
+        {
+            new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
+            new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
+            new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
+            new("ORDINAL_POSITION", SqlType.Int32, null, true),
+            new("PARAMETER_MODE", SqlType.Varchar, 10, true),
+            new("PARAMETER_NAME", SqlType.SystemName, 128, true),
+            new("DATA_TYPE", SqlType.SystemName, 128, true),
+            new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
+        };
+        var isParametersView = new CatalogView("PARAMETERS", isParametersColumns, batch =>
+            EnumerateInformationSchemaParameters(batch, modeIn, modeInOut));
+
         // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
         // confirmed: VIEW_DEFINITION is NULL only for WITH ENCRYPTION views
         // (the simulator parses ENCRYPTION but doesn't track it — minor
@@ -374,11 +439,148 @@ internal static class BuiltInResources
             ["sys.columns"] = columnsView,
             ["sys.parameters"] = parametersView,
             ["sys.views"] = viewsCatalogView,
+            ["sys.procedures"] = proceduresView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
             ["INFORMATION_SCHEMA.VIEWS"] = isViewsView,
+            ["INFORMATION_SCHEMA.ROUTINES"] = isRoutinesView,
+            ["INFORMATION_SCHEMA.PARAMETERS"] = isParametersView,
         };
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.procedures</c>: one row per <see cref="Procedure"/> in
+    /// every schema. The full <c>create_date</c> / <c>modify_date</c> story
+    /// in real SQL Server tracks ALTER PROCEDURE separately; the simulator
+    /// uses the ALTER-preserving <see cref="Procedure.CreateDate"/> for both
+    /// columns (the original create date survives ALTER, matching the way
+    /// <see cref="Procedure.ObjectId"/> survives — minor fidelity gap on
+    /// modify_date which would shift on each ALTER in real SQL Server).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateProcedures(
+        Parser.BatchContext batch,
+        SqlValue procType,
+        SqlValue procTypeDesc,
+        SqlValue notMsShipped)
+    {
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            {
+                var createDate = SqlValue.FromDateTime(proc.CreateDate);
+                yield return [
+                    SqlValue.FromInt32(proc.ObjectId),
+                    SqlValue.FromSystemName(proc.Name),
+                    SqlValue.FromInt32(proc.Schema.SchemaId),
+                    procType,
+                    procTypeDesc,
+                    createDate,
+                    createDate,
+                    notMsShipped,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.ROUTINES</c>: procedures plus functions.
+    /// ROUTINE_TYPE distinguishes PROCEDURE vs FUNCTION; DATA_TYPE carries
+    /// the return-type family for scalar UDFs, 'TABLE' for inline TVFs, NULL
+    /// for procedures.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaRoutines(
+        Parser.BatchContext batch,
+        SqlValue procedureRoutineType,
+        SqlValue functionRoutineType,
+        SqlValue tableDataType)
+    {
+        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        var nullDataType = SqlValue.Null(SqlType.SystemName);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            {
+                yield return [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(proc.Name),
+                    procedureRoutineType,
+                    nullDataType,
+                ];
+            }
+            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            {
+                var dataType = fn is ScalarFunction scalarFn
+                    ? SqlValue.FromSystemName(scalarFn.ReturnType.SqlServerName)
+                    : tableDataType;
+                yield return [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(fn.Name),
+                    functionRoutineType,
+                    dataType,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.PARAMETERS</c>: per-parameter entries
+    /// for procedures plus functions. ORDINAL_POSITION is 1-based for
+    /// declared parameters; CHARACTER_MAXIMUM_LENGTH is set only for string
+    /// types. PARAMETER_MODE is 'IN' for non-OUTPUT params, 'INOUT' for
+    /// OUTPUT-declared procedure params (probe-confirmed); functions have
+    /// no OUTPUT semantics so all UDF params project as 'IN'.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaParameters(
+        Parser.BatchContext batch,
+        SqlValue modeIn,
+        SqlValue modeInOut)
+    {
+        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            {
+                for (var i = 0; i < proc.Parameters.Length; i++)
+                {
+                    var param = proc.Parameters[i];
+                    yield return [
+                        catalog,
+                        schemaName,
+                        SqlValue.FromSystemName(proc.Name),
+                        SqlValue.FromInt32(i + 1),
+                        param.IsOutput ? modeInOut : modeIn,
+                        SqlValue.FromSystemName("@" + param.Name),
+                        SqlValue.FromSystemName(param.Type.SqlServerName),
+                        param.Type.Category == SqlTypeCategory.String && param.DeclaredMaxLength is int len && len > 0
+                            ? SqlValue.FromInt32(len)
+                            : nullInt,
+                    ];
+                }
+            }
+            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            {
+                for (var i = 0; i < fn.Parameters.Length; i++)
+                {
+                    var param = fn.Parameters[i];
+                    yield return [
+                        catalog,
+                        schemaName,
+                        SqlValue.FromSystemName(fn.Name),
+                        SqlValue.FromInt32(i + 1),
+                        modeIn,
+                        SqlValue.FromSystemName("@" + param.Name),
+                        SqlValue.FromSystemName(param.Type.SqlServerName),
+                        nullInt,
+                    ];
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -454,6 +656,26 @@ internal static class BuiltInResources
         var zeroByte = SqlValue.FromByte(0);
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
+            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            {
+                var procObjectId = SqlValue.FromInt32(proc.ObjectId);
+                for (var i = 0; i < proc.Parameters.Length; i++)
+                {
+                    var param = proc.Parameters[i];
+                    yield return [
+                        procObjectId,
+                        SqlValue.FromSystemName("@" + param.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromByte(param.Type.SystemTypeId),
+                        SqlValue.FromInt32(param.Type.UserTypeId),
+                        SqlValue.FromInt16(0),
+                        zeroByte,
+                        zeroByte,
+                        SqlValue.FromBoolean(param.IsOutput),
+                        trueBit,
+                    ];
+                }
+            }
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
@@ -799,6 +1021,7 @@ internal static class BuiltInResources
         SqlValue fnType, SqlValue fnTypeDesc,
         SqlValue inlineTvfType, SqlValue inlineTvfTypeDesc,
         SqlValue viewType, SqlValue viewTypeDesc,
+        SqlValue procType, SqlValue procTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
@@ -833,6 +1056,20 @@ internal static class BuiltInResources
                     viewTypeDesc,
                     SqlValue.FromDateTime(view.CreateDate),
                     SqlValue.FromDateTime(view.CreateDate),
+                    notMsShipped,
+                ];
+            }
+            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromInt32(proc.ObjectId),
+                    SqlValue.FromSystemName(proc.Name),
+                    SqlValue.FromInt32(proc.Schema.SchemaId),
+                    zeroParent,
+                    procType,
+                    procTypeDesc,
+                    SqlValue.FromDateTime(proc.CreateDate),
+                    SqlValue.FromDateTime(proc.CreateDate),
                     notMsShipped,
                 ];
             }

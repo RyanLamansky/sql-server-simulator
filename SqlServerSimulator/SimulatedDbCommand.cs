@@ -33,7 +33,11 @@ sealed class SimulatedDbCommand : DbCommand
     public override CommandType CommandType
     {
         get;
-        set => throw (Enum.IsDefined(value) ? new NotSupportedException() : new ArgumentOutOfRangeException(nameof(CommandType), value, null));
+        set => field = value is CommandType.Text or CommandType.StoredProcedure
+            ? value
+            : Enum.IsDefined(value)
+                ? throw new NotSupportedException()
+                : throw new ArgumentOutOfRangeException(nameof(CommandType), value, null);
     } = CommandType.Text;
 
     public override bool DesignTimeVisible { get; set; } = true;

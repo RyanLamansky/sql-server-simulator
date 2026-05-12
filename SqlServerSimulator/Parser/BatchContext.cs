@@ -177,9 +177,22 @@ internal sealed class BatchContext
     /// at the body's RETURN statement) and the return-value slot the call
     /// site reads after dispatch completes. The presence of this frame is
     /// also the "value-form RETURN is legal" gate — outside a UDF body,
-    /// <c>RETURN &lt;expr&gt;</c> raises Msg 178 at parse time.
+    /// <c>RETURN &lt;expr&gt;</c> raises Msg 178 at parse time (except inside
+    /// a procedure body, where <see cref="ProcFrame"/> takes over).
     /// </summary>
     public UdfFrame? UdfFrame;
+
+    /// <summary>
+    /// Non-null when this batch is executing a stored-procedure body. Holds
+    /// the return-code slot (int) and the procedure name for diagnostic
+    /// attribution. Like <see cref="UdfFrame"/>, the presence of this frame
+    /// is one of the "value-form RETURN is legal" gates. Unlike a UDF, a
+    /// procedure body's SELECT result sets propagate to the outer caller —
+    /// the difference is enforced at the call site (the UDF invocation
+    /// drains yielded outcomes; the procedure invocation yields them
+    /// through).
+    /// </summary>
+    public ProcFrame? ProcFrame;
 
     public bool IsSkipping =>
         this.SkipModeFlag
@@ -219,13 +232,32 @@ internal sealed class BatchContext
     /// connection / database / transaction state as the caller. Variables are
     /// pre-seeded with the function's argument values; the
     /// <paramref name="udfFrame"/> gates value-form <c>RETURN</c> inside the
-    /// body and lands the return value for the caller to read.
+    /// body and lands the return value for the caller to read. The call
+    /// site drains yielded result sets (Msg 444 territory in real SQL
+    /// Server — UDF bodies aren't allowed to surface result sets).
     /// </summary>
     public BatchContext(SimulatedDbCommand udfBodyCommand, Dictionary<string, VariableSlot> variables, UdfFrame udfFrame)
     {
         this.Variables = variables;
         this.UdfFrame = udfFrame;
         this.Parser = new ParserContext(udfBodyCommand, this);
+    }
+
+    /// <summary>
+    /// Constructs a batch for stored-procedure-body re-dispatch. Like the
+    /// UDF body constructor, the <paramref name="procBodyCommand"/> wraps
+    /// the procedure's stored body source and shares the caller's connection
+    /// / database / transaction state. Parameters pre-seed
+    /// <paramref name="variables"/>; the <paramref name="procFrame"/> gates
+    /// value-form <c>RETURN</c> and captures the return code. Result sets
+    /// propagate to the outer caller — the call site yields them through
+    /// (distinct from UDF bodies, where they're discarded).
+    /// </summary>
+    public BatchContext(SimulatedDbCommand procBodyCommand, Dictionary<string, VariableSlot> variables, ProcFrame procFrame)
+    {
+        this.Variables = variables;
+        this.ProcFrame = procFrame;
+        this.Parser = new ParserContext(procBodyCommand, this);
     }
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
@@ -391,6 +423,20 @@ internal sealed class BatchContext
         view = null;
         return this.TryResolveSchema(name, out var schema)
             && schema.Views.TryGetValue(name.Leaf, out view);
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to a registered <see cref="Procedure"/>.
+    /// Like views (and unlike scalar UDFs), procedures accept 1-part names —
+    /// probe-confirmed: <c>EXEC p1</c> finds <c>dbo.p1</c>. The lookup falls
+    /// back to <see cref="Database.DefaultSchemaName"/> for the unqualified
+    /// case; schema-qualified misses return false (caller routes to Msg 2812).
+    /// </summary>
+    public bool TryResolveProcedure(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Procedure? procedure)
+    {
+        procedure = null;
+        return this.TryResolveSchema(name, out var schema)
+            && schema.Procedures.TryGetValue(name.Leaf, out procedure);
     }
 
     /// <summary>

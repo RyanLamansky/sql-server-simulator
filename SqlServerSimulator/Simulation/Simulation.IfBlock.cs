@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -300,13 +301,13 @@ partial class Simulation
         var context = batch.Parser;
         context.MoveNextOptional(); // consume RETURN
 
-        // Value form is legal only inside a UDF body (and, when added, scalar
-        // UDFs / stored-proc-RETURN-N). Outside a UDF the value form raises
-        // Msg 178 at parse time, even from un-taken IF branches (compile-time
-        // check, same pattern as BREAK's Msg 135).
+        // Value form is legal inside a scalar UDF body (UdfFrame non-null)
+        // or a stored procedure body (ProcFrame non-null). Outside either,
+        // it raises Msg 178 at parse time, even from un-taken IF branches
+        // (compile-time check, same pattern as BREAK's Msg 135).
         if (!IsStatementBoundary(context.Token))
         {
-            if (batch.UdfFrame is not { } udfFrame)
+            if (batch.UdfFrame is null && batch.ProcFrame is null)
                 throw SimulatedSqlException.ReturnWithValueNotAllowed();
 
             var valueExpr = Expression.Parse(context);
@@ -315,7 +316,19 @@ partial class Simulation
                 var raw = valueExpr.Run(new RuntimeContext(
                     name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
                     batch));
-                udfFrame.ReturnedValue = raw.CoerceTo(udfFrame.ReturnType);
+                if (batch.UdfFrame is { } udfFrame)
+                {
+                    udfFrame.ReturnedValue = raw.CoerceTo(udfFrame.ReturnType);
+                }
+                else
+                {
+                    // Procedure RETURN: coerce to int with NULL → 0 (probe-
+                    // confirmed against SQL Server 2025: `RETURN NULL` lands
+                    // 0 in the caller's @rc, not NULL). Msg 245 surfaces here
+                    // for non-coercible types like `RETURN 'abc'`.
+                    var coerced = raw.CoerceTo(SqlType.Int32);
+                    batch.ProcFrame!.ReturnCode = coerced.IsNull ? SqlValue.FromInt32(0) : coerced;
+                }
                 batch.ReturnSignaled = true;
             }
             return;

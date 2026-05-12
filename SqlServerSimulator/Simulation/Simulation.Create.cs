@@ -23,6 +23,17 @@ partial class Simulation
                 return TryParseCreateFunction(context);
             case ReservedKeyword { Keyword: Keyword.View }:
                 return TryParseCreateView(context);
+            case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:
+                return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.Or }:
+                // CREATE OR ALTER PROCEDURE — modern upsert syntax. The only
+                // ALTER-able object that ships in the simulator today is the
+                // procedure, so this routes there directly.
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: true);
             case ReservedKeyword { Keyword: Keyword.Table }:
                 break;
             default:
