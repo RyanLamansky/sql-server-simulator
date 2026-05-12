@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable
 {
-    public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null)
+    public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false)
     {
         this.Name = name;
         this.ObjectId = objectId;
@@ -20,6 +20,7 @@ internal sealed class HeapTable
         this.Columns = columns;
         this.KeyConstraints = keyConstraints ?? [];
         this.CheckConstraints = checkConstraints ?? [];
+        this.IsTableVariable = isTableVariable;
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -148,6 +149,18 @@ internal sealed class HeapTable
 
     /// <summary>The page-backed row store. Insert via <see cref="Heap.Insert"/>; iterate via <see cref="Heap.EnumerateRows"/>.</summary>
     public readonly Heap Heap = new();
+
+    /// <summary>
+    /// True for a <c>DECLARE @t TABLE (...)</c>-backed table. Routes a few
+    /// behavioral exceptions from regular heap tables: mutations bypass the
+    /// undo log (table variables are non-transactional — probe-confirmed:
+    /// INSERT @t inside <c>BEGIN TRAN; ROLLBACK</c> leaves the rows intact),
+    /// the table never appears in catalog views (<c>sys.tables</c> /
+    /// <c>INFORMATION_SCHEMA.TABLES</c>), and constraint / NOT-NULL error
+    /// messages render the bare <c>@t</c> name without a schema qualifier
+    /// (matching real SQL Server's <c>table '@t'</c> wording).
+    /// </summary>
+    public readonly bool IsTableVariable;
 
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();

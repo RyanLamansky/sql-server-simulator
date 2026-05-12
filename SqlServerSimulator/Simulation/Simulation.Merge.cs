@@ -26,11 +26,13 @@ partial class Simulation
         if (afterMerge is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        var destinationName = BatchContext.ParseObjectName(context);
+        var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
         var destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
             ? table
-            : throw SimulatedSqlException.InvalidObjectName(destinationName);
+            : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
+                ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
+                : SimulatedSqlException.InvalidObjectName(destinationName));
 
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
@@ -317,14 +319,18 @@ partial class Simulation
                 insertedCount++;
 
                 if (output is { } o)
-                    outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues));
+                {
+                    var projectedBytes = o.ProjectRow(rowValues, sourceRowValues);
+                    if (projectedBytes is not null)
+                        outputRows!.Add(projectedBytes);
+                }
             }
         }
 
         if (!context.Batch.IsSkipping)
             context.Connection.LastIdentity = lastIdentityValue;
 
-        return output is { } o2
+        return output is { HasTarget: false } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)
             : new SimulatedNonQuery(insertedCount);
     }

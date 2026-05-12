@@ -1018,6 +1018,29 @@ internal sealed partial class Selection
                     rows: heapTable.Rows,
                     backingTable: heapTable);
 
+            // Table-variable source: <c>FROM @t [alias]</c>. Routes through
+            // BatchContext.TableVariables instead of the regular schema dict;
+            // missing @t raises Msg 1087 (distinct from regular tables'
+            // Msg 208) since the user's spelling tells us they meant a
+            // table variable, not a missing table.
+            case AtPrefixedString:
+                var tvName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+                if (!context.Batch.TryResolveTable(tvName, out var tvTable))
+                    throw SimulatedSqlException.MustDeclareTableVariable(tvName.Leaf);
+                var tvColumnNames = new string[tvTable.Columns.Length];
+                for (var ci = 0; ci < tvColumnNames.Length; ci++)
+                    tvColumnNames[ci] = tvTable.Columns[ci].Name;
+                var tvAlias = ConsumeOptionalAlias(context);
+                return new FromSource(
+                    qualifier: tvAlias ?? tvName.Leaf,
+                    columnNames: tvColumnNames,
+                    columns: tvTable.Columns,
+                    storedSchema: tvTable.StoredColumns,
+                    storageOrdinals: tvTable.StorageOrdinals,
+                    lobStore: tvTable.Heap,
+                    rows: tvTable.Rows,
+                    backingTable: tvTable);
+
             case Operator { Character: '(' }:
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
                     throw SimulatedSqlException.SyntaxErrorNear(context);

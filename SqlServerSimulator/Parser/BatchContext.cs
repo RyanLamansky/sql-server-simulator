@@ -218,6 +218,19 @@ internal sealed class BatchContext
     /// </summary>
     public readonly Dictionary<string, VariableSlot> Variables;
 
+    /// <summary>
+    /// Per-batch table-variable store keyed by name with the leading <c>@</c>
+    /// stripped (mirrors <see cref="Variables"/>'s keying convention).
+    /// <c>DECLARE @t TABLE (...)</c> adds an entry; the dict is discarded with
+    /// the <see cref="BatchContext"/> at end of batch, providing the
+    /// per-batch lifetime real SQL Server documents. Variable names live in
+    /// a shared namespace with <see cref="Variables"/> — a <c>DECLARE @t int</c>
+    /// followed by <c>DECLARE @t TABLE (...)</c> raises Msg 134
+    /// (probe-confirmed: real SQL Server's name-uniqueness check is per-name,
+    /// not per-kind).
+    /// </summary>
+    public readonly Dictionary<string, HeapTable> TableVariables = new(StringComparer.InvariantCultureIgnoreCase);
+
     public BatchContext(SimulatedDbCommand command)
     {
         this.Variables = SeedVariables(command);
@@ -307,6 +320,14 @@ internal sealed class BatchContext
         name.Length >= 1 && name[0] == '#' && (name.Length == 1 || name[1] != '#');
 
     /// <summary>
+    /// Recognizes a table-variable name (<c>@foo</c>). Used by DML / FROM
+    /// resolution to route 1-part references with a leading <c>@</c> to
+    /// <see cref="TableVariables"/> instead of the regular schema/temp lookup.
+    /// </summary>
+    public static bool IsTableVariableName(string name) =>
+        name.Length >= 2 && name[0] == '@';
+
+    /// <summary>
     /// Resolves <paramref name="name"/> against the right table dictionary —
     /// the connection's <see cref="SimulatedDbConnection.TempTables"/> for
     /// <c>#foo</c> names, otherwise the named schema (or
@@ -343,6 +364,19 @@ internal sealed class BatchContext
     {
         if (IsLocalTempName(name.Leaf))
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
+
+        // Table-variable routing: @-prefixed leaves are per-batch, 1-part-only
+        // (probe-confirmed: dbo.@t raises Msg 102 at parse). Dict key is the
+        // @-stripped name (matches Variables dict convention).
+        if (IsTableVariableName(name.Leaf))
+        {
+            if (name.Count > 1)
+            {
+                table = null;
+                return false;
+            }
+            return this.TableVariables.TryGetValue(name.Leaf[1..], out table);
+        }
 
         if (!this.TryResolveSchema(name, out var schema))
         {
@@ -475,8 +509,28 @@ internal sealed class BatchContext
     /// so the multi-part-name grammar lives in one place. The 5th segment
     /// raises Msg 4104 via <see cref="MultiPartName.WithAddedPart"/>.
     /// </summary>
-    public static MultiPartName ParseObjectName(ParserContext context)
+    public static MultiPartName ParseObjectName(ParserContext context, bool acceptTableVariable = false)
     {
+        // Table-variable references (@t in DML target / FROM-source position
+        // when <paramref name="acceptTableVariable"/> is true): accept as a
+        // 1-part name with the @ kept in the leaf so downstream routing
+        // (TryResolveTable's IsTableVariableName check) can identify it. A
+        // trailing `.` raises a syntax error matching the probe-confirmed
+        // Msg 102 for `dbo.@t` (real SQL Server rejects any dotted form
+        // involving an @-prefixed segment at parse time). Contexts where @t
+        // isn't legal (CREATE TABLE / ALTER TABLE / DROP TABLE / TRUNCATE
+        // TABLE / SELECT INTO) leave <paramref name="acceptTableVariable"/>
+        // false so the @ token falls through to a syntax error — matches
+        // probe-confirmed Msg 102 for those statement shapes.
+        if (acceptTableVariable && context.Token is AtPrefixedString atVar)
+        {
+            var leaf = "@" + atVar.Value;
+            var atCheckpoint = context.SaveCheckpoint();
+            if (context.MoveNext() && context.Token is Operator { Character: '.' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.RestoreCheckpoint(atCheckpoint);
+            return new MultiPartName(leaf);
+        }
         if (context.Token is not Name first)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = new MultiPartName(first.Value);

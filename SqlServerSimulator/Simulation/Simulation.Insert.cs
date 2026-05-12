@@ -16,13 +16,15 @@ partial class Simulation
         if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        var destinationName = BatchContext.ParseObjectName(context);
+        var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
         return context.Batch.TryResolveView(destinationName, out var destinationView)
             ? ProcessViewInsert(destinationView, context)
             : context.Batch.TryResolveTable(destinationName, out var destinationTable)
                 ? ProcessHeapInsert(destinationTable, context)
-                : throw SimulatedSqlException.InvalidObjectName(destinationName);
+                : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
+                    ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
+                    : SimulatedSqlException.InvalidObjectName(destinationName));
     }
 
     /// <summary>
@@ -230,10 +232,14 @@ partial class Simulation
             {
                 var storedValues = ProjectStoredValues(destinationTable, rowValues);
                 EnforceKeyConstraints(destinationTable, storedValues);
-                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), context.Batch.CurrentUndoLog);
+                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? null : context.Batch.CurrentUndoLog);
 
                 if (output is { } o)
-                    outputRows!.Add(o.ProjectRow(rowValues, sourceRowValues: null));
+                {
+                    var projectedBytes = o.ProjectRow(rowValues, sourceRowValues: null);
+                    if (projectedBytes is not null)
+                        outputRows!.Add(projectedBytes);
+                }
             }
         }
 
@@ -245,7 +251,10 @@ partial class Simulation
         if (!context.Batch.IsSkipping)
             context.Connection.LastIdentity = lastIdentityValue;
 
-        return output is { } o2
+        // OUTPUT INTO @t directs rows to the target only — no result set
+        // surfaces to the client (probe-confirmed). When the OUTPUT clause
+        // has no target, the projected rows flow back as a result set.
+        return output is { HasTarget: false } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)
             : new SimulatedNonQuery(sourceRows.Count);
     }

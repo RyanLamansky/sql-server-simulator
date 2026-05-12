@@ -28,7 +28,7 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             context.MoveNextRequired();
 
-        var leadingIdent = BatchContext.ParseObjectName(context);
+        var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
         View? leadingView = null;
         HeapTable? leadingTable;
@@ -69,7 +69,9 @@ partial class Simulation
                 : ExecuteJoinedDelete(context, leadingIdent, leadingTable, output);
         }
 
-        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdent);
+        var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
+            ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
+            : SimulatedSqlException.InvalidObjectName(leadingIdent));
         return ExecuteDeleteAgainstTable(context, table, output, leadingView);
     }
 
@@ -225,15 +227,22 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
+        var undoLog = table.IsTableVariable ? null : context.Batch.CurrentUndoLog;
         foreach (var (pageIndex, slotIndex, _) in deleted)
-            table.Heap.DeleteAt(pageIndex, slotIndex, context.Batch.CurrentUndoLog);
+            table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
 
         if (output is not null)
         {
             var rows = new List<byte[]>(deleted.Count);
             foreach (var (_, _, fullOld) in deleted)
-                rows.Add(output.ProjectRow(insertedValues: null, deletedValues: fullOld));
-            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+            {
+                var projectedBytes = output.ProjectRow(insertedValues: null, deletedValues: fullOld);
+                if (projectedBytes is not null)
+                    rows.Add(projectedBytes);
+            }
+            // OUTPUT INTO @t suppresses the result set (probe-confirmed).
+            if (!output.HasTarget)
+                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
         }
         return new SimulatedNonQuery(deleted.Count);
     }

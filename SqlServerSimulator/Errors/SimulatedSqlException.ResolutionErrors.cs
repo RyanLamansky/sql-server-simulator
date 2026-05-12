@@ -25,6 +25,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1087 — fired when a DML target or FROM source
+    /// references a table-variable name (<c>@t</c>) that hasn't been
+    /// <c>DECLARE</c>d in the current batch. Note the <c>@</c> prefix is
+    /// included in the wording (probe-confirmed: <c>"Must declare the table
+    /// variable \"@t\"."</c>). Class 15 State 2 — mirrors the
+    /// <see cref="MustDeclareScalarVariable"/> shape since both are
+    /// missing-variable errors at parse / bind time.
+    /// </summary>
+    internal static SimulatedSqlException MustDeclareTableVariable(string name) =>
+        new($"Must declare the table variable \"{name}\".", 1087, 15, 2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 213 — fired when an OUTPUT INTO clause's
+    /// projection-column count doesn't match the target's column count
+    /// (probe-confirmed wording: <c>"Column name or number of supplied
+    /// values does not match table definition."</c>). Real SQL Server uses
+    /// the same Msg 213 for column-count / column-name mismatches in
+    /// regular INSERT shapes; the simulator reuses it for OUTPUT INTO
+    /// dispatch consistency.
+    /// </summary>
+    internal static SimulatedSqlException OutputIntoColumnCountMismatch() =>
+        new("Column name or number of supplied values does not match table definition.", 213, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 134 — fired when a <c>DECLARE</c> names a
     /// variable that already exists in the batch (either a previous
     /// <c>DECLARE</c> or a SqlClient parameter of the same name —

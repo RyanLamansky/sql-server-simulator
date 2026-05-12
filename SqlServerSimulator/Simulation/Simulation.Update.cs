@@ -43,7 +43,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ParseUpdate(ParserContext context)
     {
         context.MoveNextRequired();
-        var leadingIdent = BatchContext.ParseObjectName(context);
+        var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
         // View target: route to base table with view-aware column lookups,
         // visibility filtering, and (optional) WITH CHECK OPTION enforcement.
@@ -135,7 +135,9 @@ partial class Simulation
                 : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output);
         }
 
-        var table = leadingTable ?? throw SimulatedSqlException.InvalidObjectName(leadingIdent);
+        var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
+            ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
+            : SimulatedSqlException.InvalidObjectName(leadingIdent));
         return ExecuteUpdateAgainstTable(context, table, rawAssignments, output, leadingView);
     }
 
@@ -311,17 +313,24 @@ partial class Simulation
 
         EnforceKeyConstraintsForUpdate(table, affected);
 
+        var undoLog = table.IsTableVariable ? null : context.Batch.CurrentUndoLog;
         foreach (var (pageIndex, slotIndex, _, _) in affected)
-            table.Heap.DeleteAt(pageIndex, slotIndex, context.Batch.CurrentUndoLog);
+            table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
         foreach (var (_, _, fullNew, _) in affected)
-            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), context.Batch.CurrentUndoLog);
+            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
 
         if (output is not null)
         {
             var rows = new List<byte[]>(affected.Count);
             foreach (var (_, _, fullNew, fullOld) in affected)
-                rows.Add(output.ProjectRow(insertedValues: fullNew, deletedValues: fullOld));
-            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+            {
+                var projectedBytes = output.ProjectRow(insertedValues: fullNew, deletedValues: fullOld);
+                if (projectedBytes is not null)
+                    rows.Add(projectedBytes);
+            }
+            // OUTPUT INTO @t suppresses the result set (probe-confirmed).
+            if (!output.HasTarget)
+                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
         }
         return new SimulatedNonQuery(affected.Count);
     }

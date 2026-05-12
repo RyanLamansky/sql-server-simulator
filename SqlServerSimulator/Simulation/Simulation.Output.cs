@@ -60,6 +60,8 @@ partial class Simulation
             names.Add(expr.Name);
         } while (context.Token is Operator { Character: ',' });
 
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count);
+
         SqlType ResolveOutputType(MultiPartName reference)
         {
             if (reference.Count == 1)
@@ -87,7 +89,120 @@ partial class Simulation
         for (var i = 0; i < expressions.Count; i++)
             schema[i] = expressions[i].GetSqlType(ResolveOutputType);
 
-        return new MutationOutputProjection(table, [.. expressions], [.. names], schema, context.Batch);
+        return new MutationOutputProjection(table, [.. expressions], [.. names], schema, context.Batch, outputTarget);
+    }
+
+    /// <summary>
+    /// Parses an optional <c>INTO @t [(col_list)]</c> suffix on an OUTPUT
+    /// clause. Returns <see langword="null"/> when no INTO keyword is
+    /// present. The target must be a table variable (v1 scope —
+    /// <c>OUTPUT INTO &lt;regular_table&gt;</c> isn't modeled; real SQL Server
+    /// accepts both but the bundle's coverage is just table variables).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Column mapping resolves at parse time: with no column list, projection
+    /// column i maps to target column i (count must match — probe-confirmed
+    /// Msg 213 on mismatch). With a column list, projection column i maps to
+    /// the target column whose name matches list[i].
+    /// </para>
+    /// <para>
+    /// Probe-confirmed against SQL Server 2025 (2026-05-12): a table variable
+    /// must already be declared (Msg 1087 otherwise); the column-list count
+    /// must match the projection count (Msg 213); columns named in the list
+    /// must exist in the target (Msg 207).
+    /// </para>
+    /// </remarks>
+    private static OutputTarget? TryParseOutputIntoTarget(ParserContext context, int projectionColumnCount)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Into })
+            return null;
+        context.MoveNextRequired();
+
+        // v1 scope: only table-variable targets. Regular-table INTO targets
+        // are deferred (NotSupportedException at the @t-only check below).
+        if (context.Token is not AtPrefixedString)
+            throw new NotSupportedException("OUTPUT INTO with a regular-table target isn't modeled in v1; use a table variable (@t) instead.");
+
+        var targetName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        if (!context.Batch.TryResolveTable(targetName, out var targetTable))
+            throw SimulatedSqlException.MustDeclareTableVariable(targetName.Leaf);
+        context.MoveNextOptional();
+
+        int[] columnOrdinals;
+        if (context.Token is Operator { Character: '(' })
+        {
+            var ordinals = new List<int>();
+            do
+            {
+                if (context.GetNextRequired() is not StringToken columnNameTok)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var matched = -1;
+                for (var i = 0; i < targetTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(targetTable.Columns[i].Name, columnNameTok.Value))
+                    {
+                        matched = i;
+                        break;
+                    }
+                }
+                if (matched < 0)
+                    throw SimulatedSqlException.InvalidColumnName(new MultiPartName(columnNameTok.Value));
+                ordinals.Add(matched);
+                context.MoveNextRequired();
+            } while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            if (ordinals.Count != projectionColumnCount)
+                throw SimulatedSqlException.OutputIntoColumnCountMismatch();
+            columnOrdinals = [.. ordinals];
+        }
+        else
+        {
+            // Positional mapping. Count must match the target's full column
+            // count (probe-confirmed Msg 213 on mismatch).
+            if (targetTable.Columns.Length != projectionColumnCount)
+                throw SimulatedSqlException.OutputIntoColumnCountMismatch();
+            columnOrdinals = new int[projectionColumnCount];
+            for (var i = 0; i < projectionColumnCount; i++)
+                columnOrdinals[i] = i;
+        }
+
+        return new OutputTarget(targetTable, columnOrdinals);
+    }
+
+    /// <summary>
+    /// Resolved <c>OUTPUT … INTO &lt;target&gt;</c> binding. <see cref="Target"/>
+    /// is the table variable the projection appends rows to;
+    /// <see cref="ProjectionToTargetOrdinal"/> maps projection column index
+    /// to target table column ordinal (positional fill if INTO had no
+    /// explicit column list).
+    /// </summary>
+    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal)
+    {
+        public readonly HeapTable Target = target;
+        public readonly int[] ProjectionToTargetOrdinal = projectionToTargetOrdinal;
+
+        /// <summary>
+        /// Appends one row to <see cref="Target"/>. Columns named in the
+        /// projection map by ordinal via <see cref="ProjectionToTargetOrdinal"/>;
+        /// any target column not covered receives a NULL (real SQL Server
+        /// would also apply a DEFAULT for unfilled columns — that path isn't
+        /// modeled in v1 since EF / app patterns always project every
+        /// non-default target column).
+        /// </summary>
+        public void Append(SqlValue[] projectedValues)
+        {
+            var targetValues = new SqlValue[this.Target.Columns.Length];
+            for (var i = 0; i < targetValues.Length; i++)
+                targetValues[i] = SqlValue.Null(this.Target.Columns[i].Type);
+            for (var i = 0; i < projectedValues.Length; i++)
+                targetValues[this.ProjectionToTargetOrdinal[i]] = projectedValues[i];
+            this.Target.Heap.Insert(
+                RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
+                undoLog: null);
+        }
     }
 
     /// <summary>
@@ -102,7 +217,8 @@ partial class Simulation
         Expression[] expressions,
         string[] columnNames,
         SqlType[] schema,
-        BatchContext batch)
+        BatchContext batch,
+        OutputTarget? outputTarget)
     {
         private readonly BatchContext batch = batch;
 
@@ -111,15 +227,27 @@ partial class Simulation
         public readonly string[] ColumnNames = columnNames;
 
         /// <summary>
+        /// True when this OUTPUT clause includes an <c>INTO @t</c> target.
+        /// The dispatching caller suppresses the per-row result-set yield in
+        /// this case and surfaces the statement as a non-query (matches real
+        /// SQL Server: <c>OUTPUT … INTO target</c> directs rows to the
+        /// target only, without returning them to the client).
+        /// </summary>
+        public bool HasTarget => outputTarget is not null;
+
+        /// <summary>
         /// Encodes one OUTPUT row by running each parsed expression against
         /// a per-row resolver that dispatches on <c>INSERTED.&lt;col&gt;</c>
         /// (post-update / post-insert values) and <c>DELETED.&lt;col&gt;</c>
         /// (pre-update / pre-delete values). Pass <see langword="null"/>
         /// for whichever side doesn't apply (DELETE has no INSERTED row);
         /// referencing the absent side is a parse-time error, so this
-        /// runtime path doesn't need to defend against it.
+        /// runtime path doesn't need to defend against it. Returns the
+        /// encoded projection-shape bytes when there's no INTO target;
+        /// returns <see langword="null"/> when an INTO target consumed the
+        /// row (caller skips the per-row result-set append in that case).
         /// </summary>
-        public byte[] ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues)
+        public byte[]? ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues)
         {
             SqlValue Resolve(MultiPartName reference)
             {
@@ -138,6 +266,11 @@ partial class Simulation
             var projected = new SqlValue[expressions.Length];
             for (var i = 0; i < expressions.Length; i++)
                 projected[i] = expressions[i].Run(new RuntimeContext(Resolve, this.batch));
+            if (outputTarget is not null)
+            {
+                outputTarget.Append(projected);
+                return null;
+            }
             return RowEncoder.EncodeRow(this.Schema, projected);
         }
     }
@@ -201,11 +334,13 @@ partial class Simulation
         }
         while (context.Token is Operator { Character: ',' });
 
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count);
+
         var schema = new SqlType[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
             schema[i] = expressions[i].GetSqlType(ResolveOutputType);
 
-        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch);
+        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget);
     }
 
     /// <summary>
@@ -220,19 +355,25 @@ partial class Simulation
         SqlType[] schema,
         HeapTable destinationTable,
         (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source,
-        BatchContext batch)
+        BatchContext batch,
+        OutputTarget? outputTarget)
     {
         public readonly SqlType[] Schema = schema;
         public readonly string[] ColumnNames = columnNames;
         private readonly BatchContext batch = batch;
 
+        /// <summary>See <see cref="MutationOutputProjection.HasTarget"/>.</summary>
+        public bool HasTarget => outputTarget is not null;
+
         /// <summary>
         /// Evaluates each projection expression against the just-inserted row
         /// (the <c>INSERTED</c> virtual table) and, for MERGE, the matching
         /// source-row values addressed via the source alias. Returns the
-        /// encoded output row in <see cref="Schema"/> shape.
+        /// encoded projection-shape bytes when there's no INTO target;
+        /// returns <see langword="null"/> when an INTO target consumed the
+        /// row (caller skips the per-row result-set append).
         /// </summary>
-        public byte[] ProjectRow(SqlValue[] insertedRow, SqlValue[]? sourceRowValues)
+        public byte[]? ProjectRow(SqlValue[] insertedRow, SqlValue[]? sourceRowValues)
         {
             SqlValue Resolve(MultiPartName name)
             {
@@ -258,6 +399,11 @@ partial class Simulation
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
                 projected[i] = expressions[i].Run(new RuntimeContext(Resolve, this.batch));
+            if (outputTarget is not null)
+            {
+                outputTarget.Append(projected);
+                return null;
+            }
             return RowEncoder.EncodeRow(this.Schema, projected);
         }
     }
