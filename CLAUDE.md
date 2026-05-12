@@ -157,7 +157,8 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - Comma-separated FROM (legacy ANSI-89 join syntax).
 - `ANY` / `SOME` / `ALL` quantifiers.
 - Row-constructor `IN ((1,2), (3,4))`.
-- Window functions other than `ROW_NUMBER` and the aggregate-OVER family.
+- `LAST_VALUE` window function — implicit-frame semantics return the current row (or last-of-ties under RANGE), not the partition's last value; the intuitive "partition-last" form requires explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, which `RejectFrameSpec` rejects. Frame-spec support is the prerequisite.
+- Explicit window frames (`ROWS BETWEEN` / `RANGE BETWEEN`) — `RejectFrameSpec` raises `NotSupportedException`. The implicit defaults that ROW_NUMBER / RANK / DENSE_RANK / NTILE / LAG / LEAD / FIRST_VALUE / aggregate-OVER use natively are sufficient for EF Core's emit shape; LINQ doesn't reach any of the ranking/value functions other than ROW_NUMBER (via `Skip`/`Take`) and aggregate-OVER, so the simulator's window functions beyond ROW_NUMBER are reachable only via raw SQL.
 - Recursive-part feature restrictions (Msg 460 DISTINCT / 461 TOP / 462 OUTER JOIN / 467 aggregate-or-GROUP-BY / 465 ref-in-subquery) — silently accepted with possibly-incorrect semantics rather than raising. Apps that exercise these in real SQL Server hit rejection there too.
 - `LIKE` with `COLLATE` override (default collation only).
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121`.

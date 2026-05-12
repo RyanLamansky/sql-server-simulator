@@ -295,6 +295,14 @@ partial class SimulatedSqlException
         new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, 4);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 9819 — <c>NTILE(N)</c> requires <c>N</c> to be
+    /// a positive number; raised at runtime when the bucket-count expression
+    /// evaluates to zero or negative.
+    /// </summary>
+    internal static SimulatedSqlException NTileBucketCountMustBePositive() =>
+        new("The function 'NTILE' must have a positive integer value.", 9819, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 10757 — a non-ordered-set aggregate (anything
     /// other than <c>STRING_AGG</c> in this simulator's surface) was given a
     /// <c>WITHIN GROUP (ORDER BY ...)</c> clause. Function name is

@@ -425,6 +425,7 @@ internal abstract class Expression
                 "COT" => new TrigFunction(context, TrigKind.Cot),
                 "EXP" => new Exp(context),
                 "IIF" => new Iif(context),
+                "LAG" => WindowExpression.ParseLag(context),
                 "LEN" => new Length(context),
                 "LOG" => new Log(context),
                 "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
@@ -442,7 +443,9 @@ internal abstract class Expression
                 "ATAN" => new TrigFunction(context, TrigKind.Atan),
                 "ATN2" => new Atn2(context),
                 "CAST" => new Cast(context),
+                "LEAD" => WindowExpression.ParseLead(context),
                 "LEFT" => new Left(context),
+                "RANK" => WindowExpression.ParseRank(context),
                 "SIGN" => new Sign(context),
                 "SQRT" => new Sqrt(context),
                 "TRIM" => new Trim(context),
@@ -457,6 +460,7 @@ internal abstract class Expression
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
                 "NEWID" => new NewId(context),
+                "NTILE" => WindowExpression.ParseNTile(context),
                 "POWER" => new Power(context),
                 "RIGHT" => new Right(context),
                 "ROUND" => new Round(context),
@@ -509,6 +513,7 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                "DENSE_RANK" => WindowExpression.ParseDenseRank(context),
                 "ERROR_LINE" => new ErrorLineFunction(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
                 "JSON_VALUE" => new JsonValue(context),
@@ -519,6 +524,7 @@ internal abstract class Expression
             11 => uppercaseName switch
             {
                 "ERROR_STATE" => new ErrorStateFunction(context),
+                "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
                 "JSON_MODIFY" => new JsonModify(context),
                 "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),

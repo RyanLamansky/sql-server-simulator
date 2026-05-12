@@ -4,11 +4,15 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for <c>ROW_NUMBER() OVER(PARTITION BY ... ORDER BY ...)</c>,
-/// the single shape EF Core 10 emits for <c>Take</c>-per-group / <c>Skip+Take</c>-per-group
-/// patterns. The function's value depends on the entire row stream
-/// (sorted within partition), so the executor buffers post-WHERE tuples
-/// before binding per-row results.
+/// Behavioral tests for ranking windows (<c>ROW_NUMBER</c> / <c>RANK</c> /
+/// <c>DENSE_RANK</c> / <c>NTILE</c>) and value windows (<c>LAG</c> /
+/// <c>LEAD</c> / <c>FIRST_VALUE</c>). All require ORDER BY inside OVER and
+/// share the post-WHERE buffer + per-partition sort path; the ranking
+/// family additionally tracks tie behavior (RANK skips, DENSE_RANK doesn't,
+/// ROW_NUMBER assigns arbitrary order within ties), and value functions
+/// re-resolve the operand against another row's tuple. <c>LAST_VALUE</c>
+/// isn't covered — its implicit-frame semantic (current row, not partition
+/// last) requires explicit-frame support which the simulator doesn't model.
 /// </summary>
 [TestClass]
 public sealed class WindowFunctionTests
@@ -157,5 +161,246 @@ public sealed class WindowFunctionTests
         _ = Throws<NotSupportedException>(() =>
             _ = connection.CreateCommand(
                 "select blog_id, row_number() over(order by blog_id), count(*) from posts group by blog_id").ExecuteScalar());
+    }
+
+    // === RANK / DENSE_RANK ===
+
+    /// <summary>
+    /// Seed for tie-sensitive tests: scores=10,20,20,30 in blog 1; 5,5,50 in blog 2.
+    /// </summary>
+    private static DbConnection SeededTies()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (id int, grp int, v int);
+            insert t values (1, 1, 10), (2, 1, 20), (3, 1, 20), (4, 1, 30), (5, 2, 5), (6, 2, 5), (7, 2, 50)
+            """).ExecuteNonQuery();
+        return connection;
+    }
+
+    [TestMethod]
+    public void Rank_TiesShareRank_NextRankSkipsAhead()
+    {
+        // RANK with ties: 10 → 1, 20 (tie) → 2, 20 (tie) → 2, 30 → 4 (skips 3).
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, rank() over(order by v) from t where grp = 1").ExecuteReader();
+        var byId = new Dictionary<int, long>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt64(1);
+        AreEqual(1L, byId[1]);
+        AreEqual(2L, byId[2]);
+        AreEqual(2L, byId[3]);
+        AreEqual(4L, byId[4]);
+    }
+
+    [TestMethod]
+    public void DenseRank_TiesShareRank_NextRankDoesNotSkip()
+    {
+        // DENSE_RANK with ties: 10 → 1, 20 (tie) → 2, 20 (tie) → 2, 30 → 3 (no gap).
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, dense_rank() over(order by v) from t where grp = 1").ExecuteReader();
+        var byId = new Dictionary<int, long>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt64(1);
+        AreEqual(1L, byId[1]);
+        AreEqual(2L, byId[2]);
+        AreEqual(2L, byId[3]);
+        AreEqual(3L, byId[4]);
+    }
+
+    [TestMethod]
+    public void Rank_PartitionedResetsPerPartition()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, rank() over(partition by grp order by v) from t").ExecuteReader();
+        var byId = new Dictionary<int, long>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt64(1);
+        // Group 1: 1→1, 2→2, 3→2, 4→4. Group 2: 5→1, 6→1, 7→3.
+        AreEqual(1L, byId[5]);
+        AreEqual(1L, byId[6]);
+        AreEqual(3L, byId[7]);
+    }
+
+    [TestMethod]
+    public void Rank_RequiresOrderByInsideOver()
+    {
+        using var connection = SeededTies();
+        _ = Throws<DbException>(() =>
+            _ = connection.CreateCommand("select rank() over() from t").ExecuteScalar());
+    }
+
+    // === NTILE ===
+
+    [TestMethod]
+    public void NTile_DistributesRowsEvenly()
+    {
+        // 6 rows / 3 buckets = 2 rows per bucket.
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, ntile(3) over(order by id) from t where id <= 6").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        AreEqual(1, byId[1]);
+        AreEqual(1, byId[2]);
+        AreEqual(2, byId[3]);
+        AreEqual(2, byId[4]);
+        AreEqual(3, byId[5]);
+        AreEqual(3, byId[6]);
+    }
+
+    [TestMethod]
+    public void NTile_UnevenDistribution_FirstBucketsLarger()
+    {
+        // 7 rows / 3 buckets → smaller=2, remainder=1 → first bucket has 3, rest have 2.
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, ntile(3) over(order by id) from t").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        // Bucket sizes: [3, 2, 2] → IDs 1,2,3 → bucket 1; 4,5 → 2; 6,7 → 3.
+        AreEqual(1, byId[1]);
+        AreEqual(1, byId[2]);
+        AreEqual(1, byId[3]);
+        AreEqual(2, byId[4]);
+        AreEqual(2, byId[5]);
+        AreEqual(3, byId[6]);
+        AreEqual(3, byId[7]);
+    }
+
+    [TestMethod]
+    public void NTile_BucketsExceedRows_OneRowPerBucketThenEmpty()
+    {
+        // 3 rows / 5 buckets → first 3 buckets get 1 row each, last 2 buckets are empty.
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, ntile(5) over(order by id) from t where id <= 3").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        AreEqual(1, byId[1]);
+        AreEqual(2, byId[2]);
+        AreEqual(3, byId[3]);
+    }
+
+    [TestMethod]
+    public void NTile_NonPositiveBucketCount_Raises9819()
+    {
+        using var connection = SeededTies();
+        var ex = Throws<DbException>(() =>
+            _ = connection.CreateCommand("select ntile(0) over(order by id) from t").ExecuteScalar());
+        AreEqual("9819", ex.Data["HelpLink.EvtID"]);
+    }
+
+    // === LAG / LEAD ===
+
+    [TestMethod]
+    public void Lag_DefaultOffsetOne_PartitionBoundaryNull()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, lag(v) over(order by id) from t").ExecuteReader();
+        var byId = new Dictionary<int, int?>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        IsNull(byId[1]); // First row: no predecessor → NULL.
+        AreEqual(10, byId[2]);
+        AreEqual(20, byId[3]);
+        AreEqual(20, byId[4]);
+        AreEqual(30, byId[5]);
+    }
+
+    [TestMethod]
+    public void Lag_ExplicitOffset_LooksBackFurther()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, lag(v, 2) over(order by id) from t").ExecuteReader();
+        var byId = new Dictionary<int, int?>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        IsNull(byId[1]);
+        IsNull(byId[2]);
+        AreEqual(10, byId[3]);
+        AreEqual(20, byId[4]);
+    }
+
+    [TestMethod]
+    public void Lag_WithDefaultExpression_SubstitutesAtBoundary()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, lag(v, 1, -99) over(order by id) from t").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        AreEqual(-99, byId[1]);
+        AreEqual(10, byId[2]);
+    }
+
+    [TestMethod]
+    public void Lead_MirrorsLagInOppositeDirection()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, lead(v) over(order by id) from t").ExecuteReader();
+        var byId = new Dictionary<int, int?>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        AreEqual(20, byId[1]);
+        AreEqual(20, byId[2]);
+        AreEqual(30, byId[3]);
+        IsNull(byId[7]); // Last row: no successor → NULL.
+    }
+
+    [TestMethod]
+    public void Lag_PartitionedDoesNotCrossPartitionBoundary()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, lag(v) over(partition by grp order by id) from t").ExecuteReader();
+        var byId = new Dictionary<int, int?>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        IsNull(byId[1]); // grp 1's first row.
+        IsNull(byId[5]); // grp 2's first row — wouldn't be NULL if partition was ignored.
+    }
+
+    // === FIRST_VALUE ===
+
+    [TestMethod]
+    public void FirstValue_ReturnsPartitionFirstAfterOrderBy()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, first_value(v) over(partition by grp order by v) from t").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        // grp 1: smallest v=10 → broadcast across rows 1,2,3,4.
+        // grp 2: smallest v=5 → broadcast across rows 5,6,7.
+        AreEqual(10, byId[1]);
+        AreEqual(10, byId[4]);
+        AreEqual(5, byId[5]);
+        AreEqual(5, byId[7]);
+    }
+
+    [TestMethod]
+    public void FirstValue_RespectsOrderByDirection()
+    {
+        // DESC ORDER BY → "first" is the max in each partition.
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, first_value(v) over(partition by grp order by v desc) from t").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        AreEqual(30, byId[1]); // grp 1's largest v.
+        AreEqual(50, byId[5]); // grp 2's largest v.
     }
 }
