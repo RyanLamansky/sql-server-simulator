@@ -68,6 +68,17 @@ partial class SimulatedSqlException
         new($"Cannot drop the table '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>function</c> wording variant:
+    /// <c>DROP FUNCTION</c> targeted a name that doesn't exist. Real SQL Server
+    /// reuses Msg 3701 (Class 11, State 5) across DROP TABLE / DROP FUNCTION /
+    /// DROP PROCEDURE / etc., swapping only the object-type noun in the
+    /// message body. Probe-confirmed verbatim against SQL Server 2025 for
+    /// DROP FUNCTION.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropFunctionDoesNotExist(string name) =>
+        new($"Cannot drop the function '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 302: <c>newsequentialid()</c> appeared anywhere
     /// other than as the entire DEFAULT expression of a <c>uniqueidentifier</c>
     /// column. Wording verified against SQL Server 2025 — the simulator

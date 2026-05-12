@@ -152,10 +152,21 @@ internal abstract class Expression
                             break;
 
                         context.MoveNextRequired(); // Move past (
-                        expression = ResolveBuiltIn(reference.Name, context);
-                        // ResolveBuiltIn leaves context.Token at the closing ).
-                        // The next loop iteration's GetNextOptional advances
-                        // past it; advancing here would skip an extra token.
+                        // 2- and 3-part dotted names route to user-defined
+                        // function resolution before falling back to built-ins
+                        // (which are 1-part only). Bare `fn(x)` raises Msg 195
+                        // through ResolveBuiltIn's default arm — probe-confirmed
+                        // that real SQL Server treats unqualified UDF calls as
+                        // built-in misses ("'fn' is not a recognized built-in
+                        // function name."). Schema-qualified miss → Msg 4121.
+                        expression = reference.ReferencedName.Count >= 2
+                            ? context.Batch.TryResolveFunction(reference.ReferencedName, out var function)
+                                ? UserFunctionCall.ParseCall(function, context)
+                                : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName)
+                            : ResolveBuiltIn(reference.Name, context);
+                        // ResolveBuiltIn / ParseCall leave context.Token at the
+                        // closing ). The next loop iteration's GetNextOptional
+                        // advances past it; advancing here would skip an extra token.
                         continue;
                     }
                 // OVER following an aggregate function call promotes the

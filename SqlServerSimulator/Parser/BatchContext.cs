@@ -170,6 +170,16 @@ internal sealed class BatchContext
     /// compile-time check on those statements.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Non-null when this batch is executing a scalar UDF body. Holds the
+    /// declared return type (used to coerce <c>RETURN &lt;expr&gt;</c> values
+    /// at the body's RETURN statement) and the return-value slot the call
+    /// site reads after dispatch completes. The presence of this frame is
+    /// also the "value-form RETURN is legal" gate — outside a UDF body,
+    /// <c>RETURN &lt;expr&gt;</c> raises Msg 178 at parse time.
+    /// </summary>
+    public UdfFrame? UdfFrame;
+
     public bool IsSkipping =>
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None
@@ -198,6 +208,23 @@ internal sealed class BatchContext
     {
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);
+    }
+
+    /// <summary>
+    /// Constructs a batch for scalar-UDF body re-dispatch. The
+    /// <paramref name="udfBodyCommand"/> wraps the UDF's stored body source
+    /// (its <c>CommandText</c>) and is constructed with the outer call site's
+    /// <see cref="SimulatedDbConnection"/>, so the child batch sees the same
+    /// connection / database / transaction state as the caller. Variables are
+    /// pre-seeded with the function's argument values; the
+    /// <paramref name="udfFrame"/> gates value-form <c>RETURN</c> inside the
+    /// body and lands the return value for the caller to read.
+    /// </summary>
+    public BatchContext(SimulatedDbCommand udfBodyCommand, Dictionary<string, VariableSlot> variables, UdfFrame udfFrame)
+    {
+        this.Variables = variables;
+        this.UdfFrame = udfFrame;
+        this.Parser = new ParserContext(udfBodyCommand, this);
     }
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
@@ -330,6 +357,24 @@ internal sealed class BatchContext
         }
         var schemaName = name.Count >= 2 ? name.ImmediateQualifier! : Database.DefaultSchemaName;
         return this.CurrentDatabase.Schemas.TryGetValue(schemaName, out schema);
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to a registered scalar
+    /// <see cref="UserDefinedFunction"/>. Schema-qualified (2- or 3-part)
+    /// references route through <see cref="TryResolveSchema"/>; 1-part names
+    /// fall through to <see langword="false"/> (real SQL Server treats
+    /// unqualified UDF calls as built-in function lookups, raising Msg 195
+    /// when nothing matches — the call site enforces that 2-part minimum by
+    /// only invoking this resolver when <see cref="MultiPartName.Count"/>
+    /// is &gt;= 2).
+    /// </summary>
+    public bool TryResolveFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function)
+    {
+        function = null;
+        return name.Count >= 2
+            && this.TryResolveSchema(name, out var schema)
+            && schema.Functions.TryGetValue(name.Leaf, out function);
     }
 
     /// <summary>

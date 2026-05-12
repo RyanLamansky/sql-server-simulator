@@ -55,22 +55,40 @@ internal sealed class ObjectId : Expression
         if (nameValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
 
+        string? typeFilter = null;
         if (this.typeArg is not null)
         {
             var typeValue = this.typeArg.Run(runtime);
             if (typeValue.IsNull)
                 return SqlValue.Null(SqlType.Int32);
-            var typeStr = typeValue.CoerceTo(SqlType.NVarchar).AsString;
+            typeFilter = typeValue.CoerceTo(SqlType.NVarchar).AsString;
             // Probe-confirmed: real SQL Server is whitespace-sensitive on the
             // type filter (' U ' returns NULL) but case-insensitive ('u' works).
-            // Only 'U' (user table) matches today; other recognized codes
-            // (V/P/F/FN/...) return NULL pending the corresponding features.
-            if (!Collation.Default.Equals(typeStr, "U"))
+            // Modeled codes today: 'U' (user table) and 'FN' (scalar UDF).
+            // Other documented codes (V / P / F / TF / IF / ...) return NULL
+            // pending those features.
+            if (!Collation.Default.Equals(typeFilter, "U")
+                && !Collation.Default.Equals(typeFilter, "FN"))
+            {
                 return SqlValue.Null(SqlType.Int32);
+            }
         }
 
         var nameStr = nameValue.CoerceTo(SqlType.NVarchar).AsString;
-        return TryParseObjectName(nameStr, out var parsed) && runtime.Batch.TryResolveTable(parsed, out var table)
+        if (!TryParseObjectName(nameStr, out var parsed))
+            return SqlValue.Null(SqlType.Int32);
+
+        // 'FN' filter or no filter: try function resolution first.
+        if (typeFilter is null || Collation.Default.Equals(typeFilter, "FN"))
+        {
+            if (runtime.Batch.TryResolveFunction(parsed, out var function))
+                return SqlValue.FromInt32(function.ObjectId);
+            if (typeFilter is not null)
+                return SqlValue.Null(SqlType.Int32);
+        }
+
+        // 'U' filter or no filter: try table resolution.
+        return runtime.Batch.TryResolveTable(parsed, out var table)
             ? SqlValue.FromInt32(table.ObjectId)
             : SqlValue.Null(SqlType.Int32);
     }

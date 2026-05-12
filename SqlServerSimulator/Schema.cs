@@ -30,4 +30,14 @@ internal sealed class Schema(string name, int schemaId)
     public readonly int SchemaId = schemaId;
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
+
+    /// <summary>
+    /// Scalar user-defined functions hosted by this schema. <c>CREATE FUNCTION
+    /// schema.name(...) RETURNS ... AS BEGIN ... END</c> adds entries here;
+    /// 2-part-name call sites (<c>SELECT schema.fn(x)</c>) resolve through
+    /// this dict. Inline / multi-statement table-valued functions and CLR
+    /// functions aren't modeled — only scalar UDFs (<c>sys.objects.type='FN'</c>,
+    /// <c>type_desc='SQL_SCALAR_FUNCTION'</c>).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, UserDefinedFunction> Functions = new(Collation.Default);
 }

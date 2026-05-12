@@ -300,10 +300,26 @@ partial class Simulation
         var context = batch.Parser;
         context.MoveNextOptional(); // consume RETURN
 
-        // Compile-time: any non-boundary token following RETURN is an
-        // expression and value-form RETURN isn't legal at batch scope.
+        // Value form is legal only inside a UDF body (and, when added, scalar
+        // UDFs / stored-proc-RETURN-N). Outside a UDF the value form raises
+        // Msg 178 at parse time, even from un-taken IF branches (compile-time
+        // check, same pattern as BREAK's Msg 135).
         if (!IsStatementBoundary(context.Token))
-            throw SimulatedSqlException.ReturnWithValueNotAllowed();
+        {
+            if (batch.UdfFrame is not { } udfFrame)
+                throw SimulatedSqlException.ReturnWithValueNotAllowed();
+
+            var valueExpr = Expression.Parse(context);
+            if (!batch.IsSkipping)
+            {
+                var raw = valueExpr.Run(new RuntimeContext(
+                    name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
+                    batch));
+                udfFrame.ReturnedValue = raw.CoerceTo(udfFrame.ReturnType);
+                batch.ReturnSignaled = true;
+            }
+            return;
+        }
 
         if (!batch.IsSkipping)
             batch.ReturnSignaled = true;

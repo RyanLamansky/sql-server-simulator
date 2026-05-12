@@ -10,7 +10,15 @@ abstract class Token
     /// </summary>
     private readonly string command;
 
-    private readonly int index, length;
+    /// <summary>
+    /// Start offset of this token in the owning command's source string.
+    /// Used by <c>CREATE FUNCTION</c> to capture the body source span between
+    /// the outer <c>BEGIN</c> and its matching <c>END</c> — the function's
+    /// body is stored as raw text and re-tokenized per call.
+    /// </summary>
+    public readonly int StartIndex;
+
+    private readonly int length;
 
     private protected Token(string command, int index, int length)
     {
@@ -19,14 +27,17 @@ abstract class Token
         System.Diagnostics.Debug.Assert(index + length <= command.Length);
 
         this.command = command;
-        this.index = index;
+        this.StartIndex = index;
         this.length = length;
     }
 
     /// <summary>
     /// Returns a span containing the portion of the original command this token is based upon.
     /// </summary>
-    public ReadOnlySpan<char> Source => command.AsSpan(index, length);
+    public ReadOnlySpan<char> Source => command.AsSpan(StartIndex, length);
+
+    /// <summary>Offset just past the last character of this token in its command source.</summary>
+    public int EndIndex => this.StartIndex + this.length;
 
     /// <summary>
     /// 1-based line number of this token within its source command. Lines are
@@ -39,7 +50,7 @@ abstract class Token
         get
         {
             var line = 1;
-            var prefix = command.AsSpan(0, index);
+            var prefix = command.AsSpan(0, StartIndex);
             foreach (var c in prefix)
             {
                 if (c == '\n')
@@ -50,7 +61,7 @@ abstract class Token
     }
 
     // This is used for various error messages even though tokens are not directly accessible to user code.
-    public sealed override string ToString() => command.Substring(index, length);
+    public sealed override string ToString() => command.Substring(StartIndex, length);
 
 #if DEBUG
     /// <summary>
@@ -60,11 +71,11 @@ abstract class Token
     {
         var command = this.command.AsSpan();
 
-        command[..this.index].CopyTo(result);
-        result[index] = '»';
-        this.Source.CopyTo(result[(index + 1)..]);
-        result[index + 1 + this.length] = '«';
-        command[(index + length)..].CopyTo(result[(index + length + 2)..]);
+        command[..this.StartIndex].CopyTo(result);
+        result[StartIndex] = '»';
+        this.Source.CopyTo(result[(StartIndex + 1)..]);
+        result[StartIndex + 1 + this.length] = '«';
+        command[(StartIndex + length)..].CopyTo(result[(StartIndex + length + 2)..]);
     }
 #endif
 }

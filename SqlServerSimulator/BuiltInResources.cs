@@ -178,6 +178,8 @@ internal static class BuiltInResources
         var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
         var checkType = SqlValue.FromChar(charTwo, "C ");
         var checkTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
+        var fnType = SqlValue.FromChar(charTwo, "FN");
+        var fnTypeDesc = SqlValue.FromNVarchar("SQL_SCALAR_FUNCTION");
         var zeroParent = SqlValue.FromInt32(0);
         var objectsColumns = new HeapColumn[]
         {
@@ -192,7 +194,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
         var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -302,16 +304,96 @@ internal static class BuiltInResources
                 defaultCsName,
             }));
 
+        // sys.parameters: one row per declared parameter + one row with
+        // parameter_id=0 for the return type. The shipped column set covers
+        // what real SQL Server's documented shape exposes: object_id / name /
+        // parameter_id / system_type_id / user_type_id / max_length /
+        // precision / scale / is_output / is_nullable. Probe-confirmed
+        // ordering: return type emits first (parameter_id=0, empty name),
+        // declared params follow in source order.
+        var parametersColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("parameter_id", SqlType.Int32, null, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
+            new("is_output", SqlType.Bit, null, false),
+            new("is_nullable", SqlType.Bit, null, false),
+        };
+        var parametersView = new CatalogView("parameters", parametersColumns, EnumerateParameters);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
             ["sys.tables"] = tablesView,
             ["sys.objects"] = objectsView,
             ["sys.columns"] = columnsView,
+            ["sys.parameters"] = parametersView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
         };
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.parameters</c>: each user-defined function emits a
+    /// row with <c>parameter_id=0</c> for its return type (empty <c>name</c>,
+    /// <c>is_output=1</c>) followed by one row per declared parameter
+    /// (parameter_id starting at 1, name with leading <c>@</c>). Probe-
+    /// confirmed shape against SQL Server 2025.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch)
+    {
+        var emptyName = SqlValue.FromSystemName("");
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var zeroByte = SqlValue.FromByte(0);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            {
+                var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
+                // Return type row (parameter_id=0). max_length is left at 0
+                // for v1 — computing per-type byte width across the SqlType
+                // hierarchy requires the same logic sys.columns uses; the
+                // existing helper takes a HeapColumn, not a bare SqlType.
+                // Fidelity gap acceptable: load-bearing queries against
+                // sys.parameters typically read name / parameter_id /
+                // system_type_id / is_output / is_nullable, not max_length.
+                yield return [
+                    fnObjectId,
+                    emptyName,
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromByte(fn.ReturnType.SystemTypeId),
+                    SqlValue.FromInt32(fn.ReturnType.UserTypeId),
+                    SqlValue.FromInt16(0),
+                    zeroByte,
+                    zeroByte,
+                    trueBit,
+                    trueBit,
+                ];
+                for (var i = 0; i < fn.Parameters.Length; i++)
+                {
+                    var p = fn.Parameters[i];
+                    yield return [
+                        fnObjectId,
+                        SqlValue.FromSystemName("@" + p.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromByte(p.Type.SystemTypeId),
+                        SqlValue.FromInt32(p.Type.UserTypeId),
+                        SqlValue.FromInt16(0),
+                        zeroByte,
+                        zeroByte,
+                        falseBit,
+                        trueBit,
+                    ];
+                }
+            }
+        }
     }
 
     private static IEnumerable<SqlValue[]> EnumerateColumns(
@@ -552,10 +634,25 @@ internal static class BuiltInResources
         SqlValue pkType, SqlValue pkTypeDesc,
         SqlValue uqType, SqlValue uqTypeDesc,
         SqlValue checkType, SqlValue checkTypeDesc,
+        SqlValue fnType, SqlValue fnTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
+            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromInt32(fn.ObjectId),
+                    SqlValue.FromSystemName(fn.Name),
+                    SqlValue.FromInt32(fn.Schema.SchemaId),
+                    zeroParent,
+                    fnType,
+                    fnTypeDesc,
+                    SqlValue.FromDateTime(fn.CreateDate),
+                    SqlValue.FromDateTime(fn.CreateDate),
+                    notMsShipped,
+                ];
+            }
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
             {
                 var schemaId = SqlValue.FromInt32(t.SchemaId);

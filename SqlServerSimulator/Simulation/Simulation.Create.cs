@@ -15,11 +15,17 @@ partial class Simulation
     /// </summary>
     private bool TryParseCreate(ParserContext context)
     {
-        var afterCreate = context.GetNextRequired();
-        if (afterCreate is ReservedKeyword { Keyword: Keyword.Schema })
-            return TryParseCreateSchema(context);
-        if (afterCreate is not ReservedKeyword { Keyword: Keyword.Table })
-            return false;
+        switch (context.GetNextRequired())
+        {
+            case ReservedKeyword { Keyword: Keyword.Schema }:
+                return TryParseCreateSchema(context);
+            case ReservedKeyword { Keyword: Keyword.Function }:
+                return TryParseCreateFunction(context);
+            case ReservedKeyword { Keyword: Keyword.Table }:
+                break;
+            default:
+                return false;
+        }
 
         context.MoveNextRequired();
         if (context.Token is not Name)

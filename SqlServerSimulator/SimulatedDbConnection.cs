@@ -76,6 +76,20 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal int LastErrorNumber;
 
     /// <summary>
+    /// Current nesting depth of in-flight scalar UDF / stored-proc / trigger
+    /// / view calls on this connection. Incremented when
+    /// <c>Simulation.InvokeScalarFunction</c> enters a body, decremented when
+    /// it exits. Real SQL Server caps this combined depth at 32 — exceeding
+    /// raises <c>Msg 217</c> (probe-confirmed verbatim against SQL Server
+    /// 2025). Today only scalar UDFs contribute; stored procs / triggers /
+    /// views will share the same counter when added.
+    /// </summary>
+    internal int NestingLevel;
+
+    /// <summary>Real SQL Server's combined nesting cap (probe-confirmed).</summary>
+    internal const int MaxNestingLevel = 32;
+
+    /// <summary>
     /// Last identity value produced by an INSERT on this connection — the
     /// source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>. SQL
     /// Server scopes these per session/scope; the simulator collapses both

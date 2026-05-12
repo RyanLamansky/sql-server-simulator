@@ -31,8 +31,18 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseDrop(ParserContext context)
     {
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Table })
-            return false;
+        bool isFunction;
+        switch (context.GetNextRequired())
+        {
+            case ReservedKeyword { Keyword: Keyword.Table }:
+                isFunction = false;
+                break;
+            case ReservedKeyword { Keyword: Keyword.Function }:
+                isFunction = true;
+                break;
+            default:
+                return false;
+        }
 
         context.MoveNextRequired();
         var ifExists = false;
@@ -47,7 +57,10 @@ partial class Simulation
         while (true)
         {
             var name = BatchContext.ParseObjectName(context);
-            DropOneTable(context, name, ifExists);
+            if (isFunction)
+                DropOneFunction(context, name, ifExists);
+            else
+                DropOneTable(context, name, ifExists);
 
             // ParseObjectName leaves the cursor on the last name segment;
             // peek for the comma list separator without permanently advancing
@@ -58,6 +71,27 @@ partial class Simulation
             context.MoveNextRequired();
         }
         return true;
+    }
+
+    /// <summary>
+    /// Removes one entry from the target schema's <see cref="Schema.Functions"/>
+    /// dict. Routing mirrors <see cref="DropOneTable"/>'s regular-table branch:
+    /// resolve the schema, lookup the leaf, raise Msg 3701 (function variant)
+    /// on miss unless <paramref name="ifExists"/> is set. Functions don't
+    /// participate in the undo log — same asymmetry as regular CREATE TABLE /
+    /// DROP TABLE (only temp-table DDL is transactional).
+    /// </summary>
+    private static void DropOneFunction(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is null || !schema.Functions.TryRemove(name.Leaf, out _))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
+        }
     }
 
     private static void DropOneTable(ParserContext context, MultiPartName name, bool ifExists)
