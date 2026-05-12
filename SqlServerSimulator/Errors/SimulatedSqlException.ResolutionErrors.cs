@@ -87,4 +87,33 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException MaximumNestingLevelExceeded() =>
         new("Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32).", 217, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 487 — fired by <c>CREATE FUNCTION</c> when an
+    /// invalid option appears in the <c>WITH</c> clause (e.g. <c>WITH RETURNS
+    /// NULL ON NULL INPUT</c> on an inline TVF — that option is scalar-only).
+    /// Verbatim wording probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException InvalidOptionForCreateFunction() =>
+        new("An invalid option was specified for the statement \"CREATE/ALTER FUNCTION\".", 487, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4514 — fired at <c>CREATE FUNCTION</c> when an
+    /// inline TVF's body projects an unnamed column. Distinct from
+    /// <c>SELECT INTO</c>'s Msg 1038 (different wording, different error
+    /// number). The 1-based column position is embedded in the message.
+    /// </summary>
+    internal static SimulatedSqlException InlineTvfMissingColumnName(int columnPosition) =>
+        new($"CREATE FUNCTION failed because a column name is not specified for column {columnPosition}.", 4514, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4506 — fired at <c>CREATE FUNCTION</c> when an
+    /// inline TVF's body projects two columns with the same name. Probe-
+    /// confirmed wording embeds both the column name and the function name
+    /// (the literal "view or function" text in the message comes verbatim
+    /// from SQL Server since views and inline TVFs share the projection-
+    /// uniqueness rule).
+    /// </summary>
+    internal static SimulatedSqlException DuplicateColumnInViewOrFunction(string columnName, string functionName) =>
+        new($"Column names in each view or function must be unique. Column name '{columnName}' in view or function '{functionName}' is specified more than once.", 4506, 16, 1);
 }

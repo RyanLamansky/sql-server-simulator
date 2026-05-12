@@ -31,9 +31,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// path.
 /// </para>
 /// </remarks>
-internal sealed class UserFunctionCall(UserDefinedFunction function, Expression?[] arguments) : Expression
+internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] arguments) : Expression
 {
-    private readonly UserDefinedFunction function = function;
+    private readonly ScalarFunction function = function;
 
     /// <summary>
     /// One per declared parameter. Each entry is either an explicit
@@ -99,7 +99,24 @@ internal sealed class UserFunctionCall(UserDefinedFunction function, Expression?
     /// a parameter without a declared default. Msg 8144 when too many args
     /// are supplied.
     /// </exception>
-    public static UserFunctionCall ParseCall(UserDefinedFunction function, ParserContext context)
+    public static UserFunctionCall ParseCall(ScalarFunction function, ParserContext context) =>
+        new(function, ParseFunctionArguments(function, context));
+
+    /// <summary>
+    /// Parses the comma-separated argument list of a <c>schema.fn(...)</c>
+    /// call against the function's parameter list, returning the per-parameter
+    /// argument slots. Null entries are the <c>DEFAULT</c>-keyword marker (the
+    /// caller materializes the stored default expression at execution time).
+    /// Cursor on entry: the token <em>after</em> the opening <c>(</c>. Cursor
+    /// on exit: the closing <c>)</c>.
+    /// </summary>
+    /// <exception cref="SimulatedSqlException">
+    /// Msg 313 when too few args are supplied (or a parameter has no default
+    /// to back a DEFAULT keyword) or when a <c>DEFAULT</c> keyword lands at
+    /// a parameter without a declared default. Msg 8144 when too many args
+    /// are supplied.
+    /// </exception>
+    public static Expression?[] ParseFunctionArguments(UserDefinedFunction function, ParserContext context)
     {
         var arguments = new List<Expression?>();
         var declaredName = $"{function.Schema.Name}.{function.Name}";
@@ -138,6 +155,6 @@ internal sealed class UserFunctionCall(UserDefinedFunction function, Expression?
             ? throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName)
             : arguments.Count < function.Parameters.Length
                 ? throw SimulatedSqlException.InsufficientArgumentsToFunction(declaredName)
-                : new UserFunctionCall(function, [.. arguments]);
+                : [.. arguments];
     }
 }

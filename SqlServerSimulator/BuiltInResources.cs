@@ -180,6 +180,8 @@ internal static class BuiltInResources
         var checkTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var fnType = SqlValue.FromChar(charTwo, "FN");
         var fnTypeDesc = SqlValue.FromNVarchar("SQL_SCALAR_FUNCTION");
+        var inlineTvfType = SqlValue.FromChar(charTwo, "IF");
+        var inlineTvfTypeDesc = SqlValue.FromNVarchar("SQL_INLINE_TABLE_VALUED_FUNCTION");
         var zeroParent = SqlValue.FromInt32(0);
         var objectsColumns = new HeapColumn[]
         {
@@ -194,7 +196,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
         var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -340,11 +342,13 @@ internal static class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.parameters</c>: each user-defined function emits a
+    /// Rows for <c>sys.parameters</c>. A <see cref="ScalarFunction"/> emits a
     /// row with <c>parameter_id=0</c> for its return type (empty <c>name</c>,
-    /// <c>is_output=1</c>) followed by one row per declared parameter
-    /// (parameter_id starting at 1, name with leading <c>@</c>). Probe-
-    /// confirmed shape against SQL Server 2025.
+    /// <c>is_output=1</c>) followed by one row per declared parameter. An
+    /// <see cref="InlineTableValuedFunction"/> emits one row per declared
+    /// parameter only — no return-row, because the return shape is a TABLE
+    /// (the columns surface in <c>sys.columns</c> instead). Probe-confirmed
+    /// against SQL Server 2025.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch)
     {
@@ -357,25 +361,25 @@ internal static class BuiltInResources
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
-                // Return type row (parameter_id=0). max_length is left at 0
-                // for v1 — computing per-type byte width across the SqlType
-                // hierarchy requires the same logic sys.columns uses; the
-                // existing helper takes a HeapColumn, not a bare SqlType.
-                // Fidelity gap acceptable: load-bearing queries against
-                // sys.parameters typically read name / parameter_id /
-                // system_type_id / is_output / is_nullable, not max_length.
-                yield return [
-                    fnObjectId,
-                    emptyName,
-                    SqlValue.FromInt32(0),
-                    SqlValue.FromByte(fn.ReturnType.SystemTypeId),
-                    SqlValue.FromInt32(fn.ReturnType.UserTypeId),
-                    SqlValue.FromInt16(0),
-                    zeroByte,
-                    zeroByte,
-                    trueBit,
-                    trueBit,
-                ];
+                // Scalar UDFs get a synthetic parameter_id=0 return-type row;
+                // inline TVFs don't (their TABLE shape lives in sys.columns).
+                // max_length stays at 0 for v1 — see scalar-UDF section in
+                // CLAUDE.md.
+                if (fn is ScalarFunction scalarFn)
+                {
+                    yield return [
+                        fnObjectId,
+                        emptyName,
+                        SqlValue.FromInt32(0),
+                        SqlValue.FromByte(scalarFn.ReturnType.SystemTypeId),
+                        SqlValue.FromInt32(scalarFn.ReturnType.UserTypeId),
+                        SqlValue.FromInt16(0),
+                        zeroByte,
+                        zeroByte,
+                        trueBit,
+                        trueBit,
+                    ];
+                }
                 for (var i = 0; i < fn.Parameters.Length; i++)
                 {
                     var p = fn.Parameters[i];
@@ -401,6 +405,7 @@ internal static class BuiltInResources
         SqlValue defaultCollation,
         SqlValue nullCollation)
     {
+        var falseBit = SqlValue.FromBoolean(false);
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
@@ -422,6 +427,32 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Nullable),
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
+                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                    ];
+                }
+            }
+            // Inline TVFs surface their output projection through sys.columns —
+            // is_identity / is_computed always false (TVF output is a SELECT
+            // projection, not a heap).
+            foreach (var fn in schema.Functions.Values.OfType<InlineTableValuedFunction>().OrderBy(f => f.ObjectId))
+            {
+                var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
+                for (var i = 0; i < fn.OutputColumns.Length; i++)
+                {
+                    var col = fn.OutputColumns[i];
+                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
+                    yield return [
+                        fnObjectId,
+                        SqlValue.FromSystemName(col.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromByte(col.Type.SystemTypeId),
+                        SqlValue.FromInt32(col.Type.UserTypeId),
+                        SqlValue.FromInt16(maxLength),
+                        SqlValue.FromByte(precision),
+                        SqlValue.FromByte(scale),
+                        SqlValue.FromBoolean(col.Nullable),
+                        falseBit,
+                        falseBit,
                         col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
                     ];
                 }
@@ -635,19 +666,25 @@ internal static class BuiltInResources
         SqlValue uqType, SqlValue uqTypeDesc,
         SqlValue checkType, SqlValue checkTypeDesc,
         SqlValue fnType, SqlValue fnTypeDesc,
+        SqlValue inlineTvfType, SqlValue inlineTvfTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
+                var (typeCode, typeDesc) = fn switch
+                {
+                    InlineTableValuedFunction => (inlineTvfType, inlineTvfTypeDesc),
+                    _ => (fnType, fnTypeDesc),
+                };
                 yield return [
                     SqlValue.FromInt32(fn.ObjectId),
                     SqlValue.FromSystemName(fn.Name),
                     SqlValue.FromInt32(fn.Schema.SchemaId),
                     zeroParent,
-                    fnType,
-                    fnTypeDesc,
+                    typeCode,
+                    typeDesc,
                     SqlValue.FromDateTime(fn.CreateDate),
                     SqlValue.FromDateTime(fn.CreateDate),
                     notMsShipped,

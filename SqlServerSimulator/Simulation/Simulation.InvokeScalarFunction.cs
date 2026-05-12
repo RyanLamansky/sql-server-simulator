@@ -36,7 +36,7 @@ partial class Simulation
     /// </remarks>
     internal SqlValue InvokeScalarFunction(
         BatchContext outerBatch,
-        UserDefinedFunction function,
+        ScalarFunction function,
         SqlValue[] argValues,
         bool[] isDefault)
     {

@@ -742,7 +742,34 @@ internal sealed partial class Selection
         List<FromSource> leftSources,
         Func<MultiPartName, SqlType>? surroundingOuter)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        // Peek next token. A parenthesized derived table `(SELECT ...)`
+        // stays on the dedicated path so the chained outer-type resolver
+        // can be wired into the inner Selection's parse. A leading Name
+        // routes to ParseSingleFromSource ONLY when it resolves to an
+        // inline TVF — APPLY requires a derived table or a TVF; a bare
+        // table after APPLY is invalid (probe-confirmed via real SQL
+        // Server, guarded by ApplyTests).
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextRequired();
+        if (next is Name)
+        {
+            // Peek the resolved object name to decide between TVF route
+            // and reject-as-syntax-error.
+            var afterNameCheckpoint = context.SaveCheckpoint();
+            var resolvedName = BatchContext.ParseObjectName(context);
+            var resolvedIsTvf = context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
+                && resolvedFn is InlineTableValuedFunction;
+            context.RestoreCheckpoint(afterNameCheckpoint);
+            if (resolvedIsTvf)
+            {
+                context.RestoreCheckpoint(checkpoint);
+                return ParseSingleFromSource(context, depth, surroundingOuter);
+            }
+            // Restore + fall through to the generic syntax-error throw.
+            context.RestoreCheckpoint(checkpoint);
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        if (next is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -885,6 +912,38 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: Selection.ForCatalogView(catalogView));
+                }
+
+                // Inline TVF call: `FROM schema.fn(args) [alias]`. Detected
+                // when the resolved function is a TVF AND `(` follows the
+                // name (cursor is on the name leaf post-ParseObjectName; peek
+                // the next token via a checkpoint). A ScalarFunction here
+                // falls through to the table-lookup branch and surfaces
+                // Msg 208 (probe-confirmed: real SQL Server treats
+                // `FROM dbo.scalar_fn(...)` as a missing-object error, not
+                // a kind-mismatch).
+                if (context.Batch.TryResolveFunction(objectName, out var function)
+                    && function is InlineTableValuedFunction tvf)
+                {
+                    var checkpoint = context.SaveCheckpoint();
+                    context.MoveNextOptional();
+                    if (context.Token is Operator { Character: '(' })
+                    {
+                        context.MoveNextRequired();
+                        var tvfArgs = Expressions.UserFunctionCall.ParseFunctionArguments(tvf, context);
+                        // ParseFunctionArguments leaves the cursor on the closing `)`.
+                        var tvfAlias = ConsumeOptionalAlias(context);
+                        return new FromSource(
+                            qualifier: tvfAlias ?? tvf.Name,
+                            columnNames: [.. tvf.OutputColumns.Select(c => c.Name)],
+                            columns: tvf.OutputColumns,
+                            storedSchema: tvf.OutputColumns,
+                            storageOrdinals: null,
+                            lobStore: null,
+                            rows: [],
+                            lateralPlan: Selection.ForInlineTvf(tvf, tvfArgs));
+                    }
+                    context.RestoreCheckpoint(checkpoint);
                 }
 
                 if (!context.Batch.TryResolveTable(objectName, out var heapTable))

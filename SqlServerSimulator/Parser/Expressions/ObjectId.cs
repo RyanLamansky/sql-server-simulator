@@ -64,11 +64,12 @@ internal sealed class ObjectId : Expression
             typeFilter = typeValue.CoerceTo(SqlType.NVarchar).AsString;
             // Probe-confirmed: real SQL Server is whitespace-sensitive on the
             // type filter (' U ' returns NULL) but case-insensitive ('u' works).
-            // Modeled codes today: 'U' (user table) and 'FN' (scalar UDF).
-            // Other documented codes (V / P / F / TF / IF / ...) return NULL
-            // pending those features.
+            // Modeled codes today: 'U' (user table), 'FN' (scalar UDF),
+            // 'IF' (inline table-valued function). Other documented codes
+            // (V / P / TF / ...) return NULL pending those features.
             if (!Collation.Default.Equals(typeFilter, "U")
-                && !Collation.Default.Equals(typeFilter, "FN"))
+                && !Collation.Default.Equals(typeFilter, "FN")
+                && !Collation.Default.Equals(typeFilter, "IF"))
             {
                 return SqlValue.Null(SqlType.Int32);
             }
@@ -78,11 +79,23 @@ internal sealed class ObjectId : Expression
         if (!TryParseObjectName(nameStr, out var parsed))
             return SqlValue.Null(SqlType.Int32);
 
-        // 'FN' filter or no filter: try function resolution first.
-        if (typeFilter is null || Collation.Default.Equals(typeFilter, "FN"))
+        // 'FN' / 'IF' / no filter: try function resolution. With a specific
+        // filter the function must match that kind (scalar vs. inline TVF);
+        // without a filter, either kind matches.
+        if (typeFilter is null || Collation.Default.Equals(typeFilter, "FN") || Collation.Default.Equals(typeFilter, "IF"))
         {
             if (runtime.Batch.TryResolveFunction(parsed, out var function))
-                return SqlValue.FromInt32(function.ObjectId);
+            {
+                var kindMatches = typeFilter switch
+                {
+                    null => true,
+                    _ when Collation.Default.Equals(typeFilter, "FN") => function is ScalarFunction,
+                    _ when Collation.Default.Equals(typeFilter, "IF") => function is InlineTableValuedFunction,
+                    _ => false,
+                };
+                if (kindMatches)
+                    return SqlValue.FromInt32(function.ObjectId);
+            }
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }

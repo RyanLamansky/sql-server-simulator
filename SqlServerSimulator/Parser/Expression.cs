@@ -159,9 +159,13 @@ internal abstract class Expression
                         // that real SQL Server treats unqualified UDF calls as
                         // built-in misses ("'fn' is not a recognized built-in
                         // function name."). Schema-qualified miss → Msg 4121.
+                        // An inline TVF resolved here also raises Msg 4121 —
+                        // probe-confirmed real SQL Server treats a table-valued
+                        // function used in scalar position as "missing scalar
+                        // UDF or ambiguous" rather than a distinct error.
                         expression = reference.ReferencedName.Count >= 2
-                            ? context.Batch.TryResolveFunction(reference.ReferencedName, out var function)
-                                ? UserFunctionCall.ParseCall(function, context)
+                            ? context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn
+                                ? UserFunctionCall.ParseCall(scalarFn, context)
                                 : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName)
                             : ResolveBuiltIn(reference.Name, context);
                         // ResolveBuiltIn / ParseCall leave context.Token at the
