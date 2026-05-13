@@ -303,6 +303,50 @@ partial class SimulatedSqlException
         new("The function 'NTILE' must have a positive integer value.", 9819, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 10752 — an explicit <c>ROWS</c> / <c>RANGE</c>
+    /// frame specification was supplied for a function that doesn't accept
+    /// one (ranking functions: <c>row_number</c> / <c>rank</c> /
+    /// <c>dense_rank</c> / <c>ntile</c>; offset functions: <c>lag</c> /
+    /// <c>lead</c>). Probe-confirmed against SQL Server 2025 (2026-05-12):
+    /// Class 15, State 1 for LAG/LEAD and State 3 for ranking; the simulator
+    /// uses State 1 uniformly (matching the LAG/LEAD probe; State 3 vs 1
+    /// isn't routed through any caller behavior).
+    /// </summary>
+    internal static SimulatedSqlException FunctionMayNotHaveWindowFrame(string functionLowerName) =>
+        new($"The function '{functionLowerName}' may not have a window frame.", 10752, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10756 — an explicit <c>ROWS</c> or <c>RANGE</c>
+    /// frame was supplied without an <c>ORDER BY</c> clause inside the same
+    /// <c>OVER</c>. Probe-confirmed against SQL Server 2025 (2026-05-12):
+    /// Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException WindowFrameRequiresOrderBy() =>
+        new("Window frame with ROWS or RANGE must have an ORDER BY clause.", 10756, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4193 — the frame's start bound is
+    /// <c>N FOLLOWING</c> and the end bound is <c>N PRECEDING</c> or
+    /// <c>CURRENT ROW</c>, which is semantically invalid (end before start).
+    /// Probe-confirmed against SQL Server 2025 (2026-05-12): Class 16,
+    /// State 1.
+    /// </summary>
+    internal static SimulatedSqlException FrameBetweenFollowingAndPreceding() =>
+        new("'BETWEEN ... FOLLOWING AND ... PRECEDING' is not a valid window frame and cannot be used with the OVER clause.", 4193, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4194 — a <c>RANGE</c> frame used a numeric-
+    /// offset bound (<c>N PRECEDING</c> / <c>N FOLLOWING</c>). Real SQL
+    /// Server restricts <c>RANGE</c> to <c>UNBOUNDED PRECEDING</c> /
+    /// <c>UNBOUNDED FOLLOWING</c> / <c>CURRENT ROW</c> (the value-based
+    /// offset form requires a separately licensed feature surface).
+    /// Probe-confirmed against SQL Server 2025 (2026-05-12): Class 16,
+    /// State 1.
+    /// </summary>
+    internal static SimulatedSqlException RangeFrameOnlySupportsUnboundedAndCurrentRow() =>
+        new("RANGE is only supported with UNBOUNDED and CURRENT ROW window frame delimiters.", 4194, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 10757 — a non-ordered-set aggregate (anything
     /// other than <c>STRING_AGG</c> in this simulator's surface) was given a
     /// <c>WITHIN GROUP (ORDER BY ...)</c> clause. Function name is

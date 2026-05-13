@@ -292,6 +292,10 @@ public sealed class WindowAggregateTests
     [DataRow("select region from sales where sum(amount) over(partition by region) > 100", 4108)]
     [DataRow("select region from sales group by region having sum(amount) over(partition by region) > 100", 4108)]
     [DataRow("select region from sales group by sum(amount) over(partition by region)", 4108)]
+    // Frame without ORDER BY → Msg 10756 (probe-confirmed). Applies to both
+    // ROWS and RANGE.
+    [DataRow("select sum(amount) over(partition by region rows between unbounded preceding and current row) from sales", 10756)]
+    [DataRow("select sum(amount) over(partition by region range between unbounded preceding and current row) from sales", 10756)]
     public void WindowParserRejections(string sql, int errorNumber)
     {
         using var connection = SeededSales();
@@ -300,9 +304,6 @@ public sealed class WindowAggregateTests
     }
 
     [TestMethod]
-    [DataRow("select sum(amount) over(partition by region order by amount) from sales")]
-    [DataRow("select sum(amount) over(partition by region rows between unbounded preceding and current row) from sales")]
-    [DataRow("select sum(amount) over(partition by region range between unbounded preceding and current row) from sales")]
     [DataRow("select region, sum(amount), sum(amount) over() from sales group by region")]
     public void NotSupportedShapes(string sql)
     {

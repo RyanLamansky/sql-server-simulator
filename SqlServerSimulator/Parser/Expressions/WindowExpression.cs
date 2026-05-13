@@ -7,16 +7,16 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Discriminator for the window functions the simulator models.
 /// <see cref="RowNumber"/> / <see cref="Rank"/> / <see cref="DenseRank"/> /
 /// <see cref="NTile"/> are ranking functions (require ORDER BY inside OVER,
-/// emit one value per row based on the sorted partition). <see cref="Lag"/>
-/// / <see cref="Lead"/> / <see cref="FirstValue"/> are value functions that
-/// read another row's projected expression. <see cref="Aggregate"/> wraps an
-/// <see cref="AggregateExpression"/> (<c>SUM/AVG/COUNT/...</c> with
-/// <c>OVER</c>) broadcasting a per-partition total. <c>LAST_VALUE</c>
-/// isn't modeled — its implicit-frame semantics return the current row
-/// (or last-of-ties under RANGE) rather than the partition's last value;
-/// the intuitive "partition last" semantic requires explicit
-/// <c>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</c>, which
-/// the simulator rejects at parse via <c>RejectFrameSpec</c>.
+/// emit one value per row based on the sorted partition; reject explicit
+/// frames). <see cref="Lag"/> / <see cref="Lead"/> are offset functions
+/// (also reject explicit frames). <see cref="FirstValue"/> /
+/// <see cref="LastValue"/> read a specific row's value within the current
+/// frame; their default-frame semantic (<c>RANGE UNBOUNDED PRECEDING TO
+/// CURRENT ROW</c>) means LAST_VALUE returns the current row's value /
+/// peer-tie last unless an explicit frame widens the window.
+/// <see cref="Aggregate"/> wraps an <see cref="AggregateExpression"/>
+/// (<c>SUM/AVG/COUNT/...</c> with <c>OVER</c>) and applies the same per-row
+/// frame extent for running totals + sliding aggregations.
 /// </summary>
 internal enum WindowKind
 {
@@ -28,6 +28,7 @@ internal enum WindowKind
     Lag,
     Lead,
     FirstValue,
+    LastValue,
 }
 
 /// <summary>
@@ -46,15 +47,16 @@ internal enum WindowKind
 /// EF Core 10's emission shape: ROW_NUMBER lives inside an inner SELECT
 /// that's wrapped as a derived table; the outer query filters via
 /// <c>WHERE row &lt;= N</c> (Take) or <c>WHERE 1 &lt; row AND row &lt;= K</c>
-/// (Skip+Take). Aggregate windows broadcast a per-group total to the detail
-/// rows. Frame specifications (<c>ROWS BETWEEN</c> / <c>RANGE BETWEEN</c>)
-/// aren't modeled — they don't apply to ROW_NUMBER and the simulator
-/// accepts only the implicit-frame default for aggregates (whole partition
-/// when no ORDER BY is present in OVER). ORDER BY inside OVER for
-/// aggregates raises <see cref="NotSupportedException"/> rather than
-/// silently picking the wrong frame semantics; the cumulative-running-total
-/// shape that requires it is rare in EF-emitted SQL and can be revisited
-/// when one shows up.
+/// (Skip+Take). Aggregate-OVER broadcasts a per-group result; with
+/// <c>ORDER BY</c> inside OVER the default frame is
+/// <c>RANGE UNBOUNDED PRECEDING TO CURRENT ROW</c> (running total, peer-tie
+/// groups share extents). Explicit <c>ROWS BETWEEN</c> / <c>RANGE BETWEEN</c>
+/// frames are accepted for the value family (FIRST_VALUE / LAST_VALUE) and
+/// for aggregate-OVER; ranking (ROW_NUMBER / RANK / DENSE_RANK / NTILE)
+/// and offset (LAG / LEAD) functions reject explicit frames with Msg 10752.
+/// <c>RANGE</c> is restricted to <c>UNBOUNDED</c> / <c>CURRENT ROW</c>
+/// bounds (Msg 4194 on <c>N PRECEDING</c> / <c>N FOLLOWING</c>) — matches
+/// real SQL Server.
 /// </remarks>
 internal sealed class WindowExpression : Expression
 {
@@ -105,6 +107,19 @@ internal sealed class WindowExpression : Expression
     /// </summary>
     public readonly Expression? BucketCount;
 
+    /// <summary>
+    /// Explicit window frame for the value family
+    /// (<see cref="WindowKind.FirstValue"/> / <see cref="WindowKind.LastValue"/>)
+    /// and aggregate-OVER (<see cref="WindowKind.Aggregate"/>). Null = use the
+    /// default frame: whole partition when no ORDER BY is present;
+    /// <c>RANGE UNBOUNDED PRECEDING TO CURRENT ROW</c> when ORDER BY is
+    /// present (running-total semantic with peer-tie grouping). Ranking
+    /// functions and LAG/LEAD reject explicit frames at parse via Msg 10752,
+    /// so this field stays null for those kinds and the executor short-
+    /// circuits on Kind alone.
+    /// </summary>
+    public readonly FrameSpec? Frame;
+
     private SqlValue cachedResult;
 
     private bool resultBound;
@@ -117,7 +132,8 @@ internal sealed class WindowExpression : Expression
         Expression? operand = null,
         Expression? offsetArg = null,
         Expression? defaultArg = null,
-        Expression? bucketCount = null)
+        Expression? bucketCount = null,
+        FrameSpec? frame = null)
     {
         this.Kind = kind;
         this.PartitionBy = partitionBy;
@@ -127,6 +143,7 @@ internal sealed class WindowExpression : Expression
         this.OffsetArg = offsetArg;
         this.DefaultArg = defaultArg;
         this.BucketCount = bucketCount;
+        this.Frame = frame;
     }
 
     private static WindowExpression Register(ParserContext context, WindowExpression expression)
@@ -160,7 +177,7 @@ internal sealed class WindowExpression : Expression
         WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank => SqlType.BigInt,
         WindowKind.NTile => SqlType.Int32,
         WindowKind.Aggregate => this.AggregateInfo!.GetSqlType(resolveColumnType),
-        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue => this.Operand!.GetSqlType(resolveColumnType),
+        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.GetSqlType(resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown window kind {this.Kind}."),
     };
 
@@ -210,7 +227,13 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = ParseOrderByList(context);
 
-        RejectFrameSpec(context);
+        RejectFrameSpec(context, kind switch
+        {
+            WindowKind.RowNumber => "row_number",
+            WindowKind.Rank => "rank",
+            WindowKind.DenseRank => "dense_rank",
+            _ => throw new InvalidOperationException($"Unexpected kind {kind} in no-arg ranking parser."),
+        });
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -241,7 +264,7 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = ParseOrderByList(context);
 
-        RejectFrameSpec(context);
+        RejectFrameSpec(context, "ntile");
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -291,7 +314,7 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = ParseOrderByList(context);
 
-        RejectFrameSpec(context);
+        RejectFrameSpec(context, kind == WindowKind.Lag ? "lag" : "lead");
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -299,13 +322,29 @@ internal sealed class WindowExpression : Expression
     }
 
     /// <summary>
-    /// Parses <c>FIRST_VALUE(expr) OVER (... ORDER BY ...)</c>. Returns the
-    /// operand evaluated against the first row in the partition (after
-    /// ORDER BY) — matches the default-frame-with-ORDER-BY semantic
-    /// (<c>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</c>, first
-    /// of which is the partition's leading row).
+    /// Parses <c>FIRST_VALUE(expr) OVER (... ORDER BY ... [frame])</c>.
+    /// Default frame (no explicit ROWS/RANGE) — paired with the required
+    /// ORDER BY — is <c>RANGE UNBOUNDED PRECEDING TO CURRENT ROW</c>; under
+    /// that frame FIRST_VALUE returns the operand evaluated at the
+    /// partition's leading row. Explicit frames shift the "first" reference
+    /// to the frame's start.
     /// </summary>
-    public static WindowExpression ParseFirstValue(ParserContext context)
+    public static WindowExpression ParseFirstValue(ParserContext context) =>
+        ParseFirstOrLastValue(context, WindowKind.FirstValue);
+
+    /// <summary>
+    /// Parses <c>LAST_VALUE(expr) OVER (... ORDER BY ... [frame])</c>.
+    /// Default frame is <c>RANGE UNBOUNDED PRECEDING TO CURRENT ROW</c>;
+    /// under that frame LAST_VALUE returns the current row's value (or
+    /// the last of the peer-tie group under RANGE), not the partition's
+    /// last value — for partition-last the caller must supply
+    /// <c>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</c>.
+    /// Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    public static WindowExpression ParseLastValue(ParserContext context) =>
+        ParseFirstOrLastValue(context, WindowKind.LastValue);
+
+    private static WindowExpression ParseFirstOrLastValue(ParserContext context, WindowKind kind)
     {
         var operand = Expression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
@@ -323,11 +362,11 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = ParseOrderByList(context);
 
-        RejectFrameSpec(context);
+        var frame = ParseOptionalFrameSpec(context, orderByPresent: true);
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : Register(context, new WindowExpression(WindowKind.FirstValue, partitionBy, orderBy, aggregateInfo: null, operand: operand));
+            : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, operand: operand, frame: frame));
     }
 
     /// <summary>
@@ -362,14 +401,19 @@ internal sealed class WindowExpression : Expression
 
         var partitionBy = ParseOptionalPartitionBy(context);
 
+        var orderBy = Array.Empty<OrderBySpec>();
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
-            throw new NotSupportedException("ORDER BY inside the OVER clause for an aggregate window function isn't modeled (only the implicit-frame whole-partition default is supported); rewrite without ORDER BY in OVER.");
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            orderBy = ParseOrderByList(context);
+        }
 
-        RejectFrameSpec(context);
+        var frame = ParseOptionalFrameSpec(context, orderByPresent: orderBy.Length > 0);
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : Register(context, new WindowExpression(WindowKind.Aggregate, partitionBy, [], aggregate));
+            : Register(context, new WindowExpression(WindowKind.Aggregate, partitionBy, orderBy, aggregate, frame: frame));
     }
 
     /// <summary>
@@ -386,21 +430,158 @@ internal sealed class WindowExpression : Expression
                 : ParseExpressionList(context);
 
     /// <summary>
-    /// Rejects an explicit frame specification (<c>ROWS BETWEEN</c> /
-    /// <c>RANGE BETWEEN</c>) at the lookahead-after-ORDER-BY position. Frame
-    /// specs aren't modeled by the simulator; EF Core 10 doesn't emit them
-    /// from idiomatic LINQ. Distinct from the implicit defaults that ROW_NUMBER
-    /// (no frame applies) and aggregate windows (whole partition when no
-    /// ORDER BY) use natively.
+    /// Rejects an explicit frame specification for kinds that aren't allowed
+    /// to carry one (ranking + offset functions). Real SQL Server raises
+    /// Msg 10752 ("The function 'X' may not have a window frame.").
     /// </summary>
-    private static void RejectFrameSpec(ParserContext context)
+    private static void RejectFrameSpec(ParserContext context, string functionLowerName)
+    {
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
+            throw SimulatedSqlException.FunctionMayNotHaveWindowFrame(functionLowerName);
+    }
+
+    /// <summary>
+    /// Parses an optional <c>ROWS BETWEEN x AND y</c> / <c>RANGE BETWEEN x AND y</c>
+    /// clause, or its single-bound shorthand <c>ROWS x</c> / <c>RANGE x</c>
+    /// (equivalent to <c>BETWEEN x AND CURRENT ROW</c>). Entered with cursor
+    /// at the lookahead-after-ORDER-BY position; returns null and doesn't
+    /// advance if no frame keyword is present. Frame keyword without ORDER
+    /// BY → Msg 10756.
+    /// </summary>
+    private static FrameSpec? ParseOptionalFrameSpec(ParserContext context, bool orderByPresent)
+    {
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range } frameKw)
+            return null;
+
+        if (!orderByPresent)
+            throw SimulatedSqlException.WindowFrameRequiresOrderBy();
+
+        var isRange = frameKw.ContextualKeyword == ContextualKeyword.Range;
+        context.MoveNextRequired();
+
+        FrameBound start;
+        FrameBound end;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Between })
+        {
+            context.MoveNextRequired();
+            start = ParseFrameBound(context);
+            // Start side can't be UNBOUNDED FOLLOWING — real SQL Server
+            // rejects at parse with Msg 102 ("near 'following'"); the
+            // simulator surfaces the same Msg 102 at the post-bound cursor
+            // position.
+            if (start.Kind == FrameBoundKind.UnboundedFollowing)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            end = ParseFrameBound(context);
+            // End side can't be UNBOUNDED PRECEDING — probe-confirmed Msg 102.
+            if (end.Kind == FrameBoundKind.UnboundedPreceding)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        else
+        {
+            // Single-bound shorthand: ROWS x  ≡  ROWS BETWEEN x AND CURRENT ROW.
+            start = ParseFrameBound(context);
+            if (start.Kind == FrameBoundKind.UnboundedFollowing)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            end = FrameBound.CurrentRow;
+        }
+
+        ValidateFrameBounds(isRange, start, end);
+        return new FrameSpec(isRange, start, end);
+    }
+
+    /// <summary>
+    /// Parses a single frame bound. Recognized shapes:
+    /// <c>UNBOUNDED PRECEDING</c>, <c>UNBOUNDED FOLLOWING</c>, <c>CURRENT ROW</c>,
+    /// <c>N PRECEDING</c>, <c>N FOLLOWING</c>. Bound-pair validation
+    /// (start can't be <c>UNBOUNDED FOLLOWING</c>; end can't be
+    /// <c>UNBOUNDED PRECEDING</c>) happens later in
+    /// <see cref="ValidateFrameBounds"/>. Cursor advances past the bound.
+    /// </summary>
+    private static FrameBound ParseFrameBound(ParserContext context)
     {
         switch (context.Token)
         {
-            case UnquotedString { ContextualKeyword: ContextualKeyword.Rows }:
-                throw new NotSupportedException("Explicit window frame ROWS BETWEEN inside OVER isn't modeled; only the implicit default frame is supported.");
-            case UnquotedString { ContextualKeyword: ContextualKeyword.Range }:
-                throw new NotSupportedException("Explicit window frame RANGE BETWEEN inside OVER isn't modeled; only the implicit default frame is supported.");
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Unbounded }:
+                {
+                    context.MoveNextRequired();
+                    switch (context.Token)
+                    {
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Preceding }:
+                            context.MoveNextOptional();
+                            return FrameBound.UnboundedPreceding;
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Following }:
+                            context.MoveNextOptional();
+                            return FrameBound.UnboundedFollowing;
+                        default:
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                }
+            case ReservedKeyword { Keyword: Keyword.Current }:
+                {
+                    // CURRENT ROW — ROW here is a contextual keyword (the
+                    // identifier "row"). Real SQL Server also accepts the
+                    // form via the contextual classifier.
+                    if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextOptional();
+                    return FrameBound.CurrentRow;
+                }
+            case Numeric { Value: { IsNull: false } numericValue }:
+                {
+                    // Frame offset literals are integers per probe (SQL Server
+                    // rejects non-integer offsets at parse). CoerceTo handles
+                    // the Int32 → BigInt widening for everyday small literals
+                    // and surfaces Msg-equivalent overflow on huge values.
+                    var offset = numericValue.CoerceTo(SqlType.BigInt).AsInt64;
+                    if (offset < 0)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                    return context.Token switch
+                    {
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Preceding } => Advance(context, FrameBound.NPreceding(offset)),
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Following } => Advance(context, FrameBound.NFollowing(offset)),
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    };
+                }
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+
+        static FrameBound Advance(ParserContext context, FrameBound bound)
+        {
+            context.MoveNextOptional();
+            return bound;
+        }
+    }
+
+    /// <summary>
+    /// Cross-validates start + end bounds after both are parsed:
+    /// <c>RANGE</c> rejects <see cref="FrameBoundKind.NPreceding"/> /
+    /// <see cref="FrameBoundKind.NFollowing"/> on either side (Msg 4194);
+    /// <c>BETWEEN N FOLLOWING AND N PRECEDING | CURRENT ROW</c> is
+    /// semantically invalid (Msg 4193); single-side mistakes
+    /// (<c>BETWEEN UNBOUNDED FOLLOWING AND ...</c>,
+    /// <c>BETWEEN ... AND UNBOUNDED PRECEDING</c>) fall through to a generic
+    /// syntax error — real SQL Server's parser rejects those at the
+    /// tokenization level (Msg 102), so they shouldn't reach this point
+    /// with a successful <see cref="ParseFrameBound"/> result, but the
+    /// explicit check guards against asymmetry between the two parsers.
+    /// </summary>
+    private static void ValidateFrameBounds(bool isRange, FrameBound start, FrameBound end)
+    {
+        if (isRange && (start.Kind is FrameBoundKind.NPreceding or FrameBoundKind.NFollowing
+                     || end.Kind is FrameBoundKind.NPreceding or FrameBoundKind.NFollowing))
+        {
+            throw SimulatedSqlException.RangeFrameOnlySupportsUnboundedAndCurrentRow();
+        }
+
+        if (start.Kind == FrameBoundKind.NFollowing
+            && end.Kind is FrameBoundKind.NPreceding or FrameBoundKind.CurrentRow)
+        {
+            throw SimulatedSqlException.FrameBetweenFollowingAndPreceding();
         }
     }
 

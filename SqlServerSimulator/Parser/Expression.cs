@@ -527,6 +527,7 @@ internal abstract class Expression
                 "ERROR_LINE" => new ErrorLineFunction(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
                 "JSON_VALUE" => new JsonValue(context),
+                "LAST_VALUE" => WindowExpression.ParseLastValue(context),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 _ => null

@@ -241,47 +241,93 @@ internal sealed partial class Selection
                     break;
 
                 case WindowKind.FirstValue:
-                    foreach (var (_, indices) in partitions)
+                case WindowKind.LastValue:
                     {
-                        indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                        // After sort, indices[0] is the partition's first row.
-                        // Evaluate the operand against that row's resolver and
-                        // broadcast to every row in the partition (implicit-frame
-                        // semantic: FIRST_VALUE looks back to UNBOUNDED PRECEDING).
-                        var firstTuple = buffered[indices[0]];
-                        SqlValue ResolveFirst(MultiPartName name) => ResolveAcrossTuple(sources, firstTuple, name, batch, outerResolver, ResolveFirst);
-                        var firstValue = win.Operand!.Run(new RuntimeContext(ResolveFirst, batch));
-                        foreach (var idx in indices)
-                            results[idx] = firstValue;
+                        // Both walk a per-row frame extent. FIRST_VALUE returns
+                        // the operand evaluated at the frame start; LAST_VALUE
+                        // at the frame end. Empty-frame extent (start > end)
+                        // emits typed NULL — probe-confirmed against SQL Server
+                        // for both with explicit frames outside partition.
+                        var isLast = win.Kind == WindowKind.LastValue;
+                        var operandType = win.Operand!.GetSqlType(name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
+                        foreach (var (_, indices) in partitions)
+                        {
+                            indices.Sort((a, b) =>
+                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            for (var i = 0; i < indices.Count; i++)
+                            {
+                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                if (frameStart > frameEnd)
+                                {
+                                    results[indices[i]] = SqlValue.Null(operandType);
+                                    continue;
+                                }
+                                var refIdx = isLast ? frameEnd : frameStart;
+                                var refTuple = buffered[indices[refIdx]];
+                                SqlValue ResolveRef(MultiPartName name) => ResolveAcrossTuple(sources, refTuple, name, batch, outerResolver, ResolveRef);
+                                results[indices[i]] = win.Operand.Run(new RuntimeContext(ResolveRef, batch));
+                            }
+                        }
                     }
                     break;
 
                 case WindowKind.Aggregate:
                     {
-                        // Aggregate window: build one Aggregator per partition,
-                        // accumulate across all rows in the partition (insertion
-                        // order — no ORDER BY in OVER for aggregates per Decision
-                        // A), and broadcast the Result to every row. Operand and
-                        // result types were pre-resolved by BuildSqlProjection.
+                        // Aggregate window: per-row Aggregator over the row's
+                        // frame extent. Without ORDER BY (and no explicit frame)
+                        // every row's frame is the whole partition, so the
+                        // result is broadcast — same shape as the pre-frame
+                        // implementation. With ORDER BY, default frame is
+                        // RANGE UNBOUNDED PRECEDING TO CURRENT ROW (running
+                        // total with peer-tie grouping). Operand and result
+                        // types were pre-resolved by BuildSqlProjection.
                         var aggregate = win.AggregateInfo!;
                         var operandType = windowOperandTypes[w];
                         var resultType = windowResultTypes[w];
                         foreach (var (_, indices) in partitions)
                         {
-                            var aggregator = Aggregator.Create(aggregate, operandType, resultType);
-                            foreach (var i in indices)
+                            if (orderByList.Count > 0)
                             {
-                                var localTuple = buffered[i];
-                                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
-                                var operandValue = aggregate.Operand is null
-                                    ? SqlValue.Null(SqlType.Int32)
-                                    : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
-                                aggregator.Add(operandValue);
+                                indices.Sort((a, b) =>
+                                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             }
-                            var result = aggregator.Result();
-                            foreach (var i in indices)
-                                results[i] = result;
+
+                            // Whole-partition fast path: no ORDER BY and no
+                            // explicit frame → compute once + broadcast.
+                            if (orderByList.Count == 0 && win.Frame is null)
+                            {
+                                var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                foreach (var i in indices)
+                                {
+                                    var localTuple = buffered[i];
+                                    SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                                    var operandValue = aggregate.Operand is null
+                                        ? SqlValue.Null(SqlType.Int32)
+                                        : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
+                                    aggregator.Add(operandValue);
+                                }
+                                var partitionResult = aggregator.Result();
+                                foreach (var i in indices)
+                                    results[i] = partitionResult;
+                                continue;
+                            }
+
+                            // Per-row frame path.
+                            for (var i = 0; i < indices.Count; i++)
+                            {
+                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                for (var j = frameStart; j <= frameEnd; j++)
+                                {
+                                    var localTuple = buffered[indices[j]];
+                                    SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                                    var operandValue = aggregate.Operand is null
+                                        ? SqlValue.Null(SqlType.Int32)
+                                        : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
+                                    aggregator.Add(operandValue);
+                                }
+                                results[indices[i]] = aggregator.Result();
+                            }
                         }
                     }
                     break;
@@ -333,6 +379,115 @@ internal sealed partial class Selection
 
         foreach (var (projected, _) in windowed)
             yield return RowEncoder.EncodeRow(outputSchema, projected);
+    }
+
+    /// <summary>
+    /// Computes the per-row frame extent (inclusive <c>[Start, End]</c>
+    /// indices into the partition's sorted <paramref name="indices"/> list)
+    /// for the window function at position <paramref name="i"/>. Returns
+    /// <c>(count, count - 1)</c> — i.e. <c>Start &gt; End</c> — when the
+    /// frame is empty (theoretical bounds outside the partition, or both
+    /// bounds clamped to the same side and inverted). Default-frame logic:
+    /// no <see cref="WindowExpression.Frame"/> + no ORDER BY → whole
+    /// partition; no frame + ORDER BY → <c>RANGE UNBOUNDED PRECEDING TO
+    /// CURRENT ROW</c> (running-total semantic with peer-tie grouping).
+    /// <c>RANGE CURRENT ROW</c> peer extents are computed by scanning
+    /// outward from <paramref name="i"/> while ORDER BY keys compare equal.
+    /// </summary>
+    private static (int Start, int End) ComputeFrameExtent(
+        WindowExpression win,
+        List<int> indices,
+        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
+        int w,
+        List<OrderBySpec> orderByList,
+        int i)
+    {
+        var count = indices.Count;
+        var hasOrderBy = orderByList.Count > 0;
+        var frame = win.Frame;
+
+        if (frame is null && !hasOrderBy)
+            return (0, count - 1);
+
+        // Default with ORDER BY: RANGE UNBOUNDED PRECEDING TO CURRENT ROW.
+        var isRange = frame?.IsRange ?? true;
+        var startBound = frame?.Start ?? FrameBound.UnboundedPreceding;
+        var endBound = frame?.End ?? FrameBound.CurrentRow;
+
+        var startPos = ResolveBoundPosition(startBound, isRange, indices, perWindowKeys, w, orderByList, i, count, isStart: true);
+        var endPos = ResolveBoundPosition(endBound, isRange, indices, perWindowKeys, w, orderByList, i, count, isStart: false);
+
+        var actualStart = Math.Max(0, startPos);
+        var actualEnd = Math.Min(count - 1, endPos);
+        // Empty frame: either start landed past the partition end (frame's
+        // first row doesn't exist) or end landed before partition start (frame's
+        // last row doesn't exist), or the two crossed after clamping.
+        return startPos > count - 1 || endPos < 0 || actualStart > actualEnd
+            ? (count, count - 1)
+            : (actualStart, actualEnd);
+    }
+
+    /// <summary>
+    /// Maps one <see cref="FrameBound"/> to its row position in the sorted
+    /// partition. <c>UNBOUNDED</c> bounds saturate to safe sentinels
+    /// (<c>int.MinValue / 2</c> / <c>int.MaxValue / 2</c>) so the caller's
+    /// <c>Math.Max(0, ...)</c> / <c>Math.Min(count - 1, ...)</c> clamps
+    /// resolve correctly without overflow.
+    /// <c>RANGE CURRENT ROW</c> walks outward from <paramref name="i"/>
+    /// while ORDER BY keys compare equal — that's the peer extent.
+    /// <c>ROWS CURRENT ROW</c> simply returns <paramref name="i"/>.
+    /// </summary>
+    private static int ResolveBoundPosition(
+        FrameBound bound,
+        bool isRange,
+        List<int> indices,
+        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
+        int w,
+        List<OrderBySpec> orderByList,
+        int i,
+        int count,
+        bool isStart)
+    {
+        switch (bound.Kind)
+        {
+            case FrameBoundKind.UnboundedPreceding:
+                return int.MinValue / 2;
+            case FrameBoundKind.UnboundedFollowing:
+                return int.MaxValue / 2;
+            case FrameBoundKind.NPreceding:
+                return i - (int)bound.Offset;
+            case FrameBoundKind.NFollowing:
+                return i + (int)bound.Offset;
+            case FrameBoundKind.CurrentRow:
+                if (!isRange)
+                    return i;
+                if (isStart)
+                {
+                    var j = i;
+                    while (j > 0 && CompareOrderKeys(
+                        perWindowKeys[indices[j]][w].OrderKeys,
+                        perWindowKeys[indices[j - 1]][w].OrderKeys,
+                        orderByList) == 0)
+                    {
+                        j--;
+                    }
+                    return j;
+                }
+                else
+                {
+                    var j = i;
+                    while (j < count - 1 && CompareOrderKeys(
+                        perWindowKeys[indices[j]][w].OrderKeys,
+                        perWindowKeys[indices[j + 1]][w].OrderKeys,
+                        orderByList) == 0)
+                    {
+                        j++;
+                    }
+                    return j;
+                }
+            default:
+                throw new InvalidOperationException($"Unknown frame bound kind {bound.Kind}.");
+        }
     }
 
     /// <summary>
