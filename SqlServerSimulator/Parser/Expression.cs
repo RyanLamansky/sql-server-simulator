@@ -537,6 +537,8 @@ internal abstract class Expression
                 "ERROR_STATE" => new ErrorStateFunction(context),
                 "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
                 "JSON_MODIFY" => new JsonModify(context),
+                "OBJECT_NAME" => new ObjectName(context),
+                "SCHEMA_NAME" => new SchemaName(context),
                 "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
                 _ => null
@@ -579,6 +581,12 @@ internal abstract class Expression
             18 => uppercaseName switch
             {
                 "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
+                "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
+                _ => null
+            },
+            21 => uppercaseName switch
+            {
+                "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct),
                 _ => null
             },
             22 => uppercaseName switch
@@ -589,11 +597,6 @@ internal abstract class Expression
             23 => uppercaseName switch
             {
                 "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
-                _ => null
-            },
-            21 => uppercaseName switch
-            {
-                "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct),
                 _ => null
             },
             _ => (Expression?)null
