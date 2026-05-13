@@ -89,7 +89,6 @@ public class EFCoreExecuteUpdateDelete
     }
 
     [TestMethod]
-    [Ignore("Needs: ExecuteUpdate column-self-reference")]
     public void ExecuteUpdate_SetsComputedExpression()
     {
         using var context = SeededContext();
@@ -97,12 +96,13 @@ public class EFCoreExecuteUpdateDelete
             .Where(u => u.Active)
             .ExecuteUpdate(s => s.SetProperty(u => u.LoginCount, u => u.LoginCount + 1));
         Assert.AreEqual(2, affected);
-        Assert.AreEqual(4, context.Users.Single(u => u.Id == 1).LoginCount);
-        Assert.AreEqual(8, context.Users.Single(u => u.Id == 3).LoginCount);
+        // ExecuteUpdate bypasses the change tracker — verify via AsNoTracking()
+        // so the identity map doesn't return the stale pre-update entity.
+        Assert.AreEqual(4, context.Users.AsNoTracking().Single(u => u.Id == 1).LoginCount);
+        Assert.AreEqual(8, context.Users.AsNoTracking().Single(u => u.Id == 3).LoginCount);
     }
 
     [TestMethod]
-    [Ignore("Needs: ExecuteUpdate column-self-reference")]
     public void ExecuteUpdate_MultipleSetProperty()
     {
         using var context = SeededContext();
@@ -112,7 +112,7 @@ public class EFCoreExecuteUpdateDelete
                 .SetProperty(u => u.Name, u => u.Name + "!")
                 .SetProperty(u => u.LoginCount, u => u.LoginCount + 10));
         Assert.AreEqual(1, affected);
-        var alice = context.Users.Single(u => u.Id == 1);
+        var alice = context.Users.AsNoTracking().Single(u => u.Id == 1);
         Assert.AreEqual("alice!", alice.Name);
         Assert.AreEqual(13, alice.LoginCount);
     }
