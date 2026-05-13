@@ -386,6 +386,28 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Constructs a batch for multi-statement-TVF body re-dispatch. Like the
+    /// UDF / proc body constructors, the
+    /// <paramref name="multiStatementTvfBodyCommand"/> wraps the function's
+    /// stored body source and shares the caller's connection / database /
+    /// transaction state via that command's connection. Parameters pre-seed
+    /// <paramref name="variables"/>. **No frame is set**: MS-TVF bodies
+    /// disallow value-form <c>RETURN N</c> (the existing RETURN-statement
+    /// parser raises Msg 178 when both
+    /// <see cref="UdfFrame"/> and <see cref="ProcFrame"/> are null,
+    /// matching real SQL Server's probe-confirmed CREATE-time rejection).
+    /// Bare <c>RETURN;</c> still sets <see cref="ReturnSignaled"/> the
+    /// usual way. The caller (<see cref="Simulation.InvokeMultiStatementTvf"/>)
+    /// pre-seeds the function's <c>@r</c> return-table variable into
+    /// <see cref="TableVariables"/> after construction.
+    /// </summary>
+    public BatchContext(SimulatedDbCommand multiStatementTvfBodyCommand, Dictionary<string, VariableSlot> variables)
+    {
+        this.Variables = variables;
+        this.Parser = new ParserContext(multiStatementTvfBodyCommand, this);
+    }
+
+    /// <summary>
     /// Constructs a batch for trigger-body re-dispatch. Mirrors the proc
     /// body constructor's shape (re-tokenize body source, share caller's
     /// connection / transaction / undo log via the outer batch's state)

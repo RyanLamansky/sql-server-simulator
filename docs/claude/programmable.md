@@ -12,7 +12,7 @@
 - **WITH RETURNS NULL ON NULL INPUT**: any non-DEFAULT NULL arg short-circuits the body and returns typed NULL.
 - **Recursion cap: 32.** Tracked by `SimulatedDbConnection.NestingLevel`; exceeding → **Msg 217**. Shared with future stored procs / triggers / views.
 - **Catalog surface**: `sys.objects` `type='FN'` / `type_desc='SQL_SCALAR_FUNCTION'`. `sys.parameters` emits one row per declared parameter (parameter_id 1+, `is_output=0`) plus a `parameter_id=0` return-type row (empty name, `is_output=1`). `max_length` is 0 across the board — pending wiring `GetSysColumnMetadata` to bare `SqlType`.
-- **`OBJECT_ID(name, 'FN')`** routes to function resolution; no-filter form tries function then table. Other codes (V / P / TF / ...) return NULL pending those features.
+- **`OBJECT_ID(name, 'FN')`** routes to function resolution; the `'IF'` / `'TF'` filters resolve inline / multi-statement TVFs respectively; no-filter form tries function then table. Other codes (V / P / ...) route to the matching object kind.
 - **DROP FUNCTION [IF EXISTS] schema.name[, ...]**: same shape as DROP TABLE; missing target → **Msg 3701** with "function" wording variant.
 
 **Fidelity gaps**:
@@ -37,7 +37,24 @@
 - **No SCHEMABINDING enforcement** — DROP TABLE on a TVF-referenced table succeeds (real SQL Server raises Msg 3729); the TVF later fails at call time when re-parsing.
 - **No CREATE-time body validation for forward refs** — self-recursive inline TVFs fail at CREATE with Msg 208 (real SQL Server also rejects, different error path).
 - **No Msg 111 batch-first enforcement** (same as scalar UDFs).
-- **Multi-statement TVFs** (`RETURNS @t TABLE ... BEGIN ... END`, `type='TF'`) not modeled.
+
+## Multi-statement table-valued functions
+`CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS @r TABLE (column-list) [WITH SCHEMABINDING | ENCRYPTION] AS BEGIN ... END`, called from a FROM clause exactly like an inline TVF. Stored as `MultiStatementTableValuedFunction` alongside `ScalarFunction` / `InlineTableValuedFunction` under the abstract `UserDefinedFunction` base in `Schema.Functions`. The function class captures parsed `OutputColumns` + `KeyConstraints` + `CheckConstraints` once at CREATE time; the body re-tokenizes per call. Probed against SQL Server 2025 (2026-05-13).
+
+- **Body grammar**: `BEGIN ... END` block; nesting walked at token level (same code path as scalar UDF body capture). Body statements freely `INSERT INTO @r` / `UPDATE @r` / `DELETE @r`, may read other tables, may call other functions. Bare `RETURN;` exits the body and projects the accumulated `@r` rows to the caller; fall-through without `RETURN` also projects.
+- **Return-table column features**: same as `DECLARE @t TABLE` (the column-list parsers share `TryParseTableVariableColumnsAndConstraints`) — typed columns, NULL / NOT NULL, IDENTITY, DEFAULT, computed columns (persisted / non-persisted), inline + table-level CHECK, PRIMARY KEY, UNIQUE. Named constraints (`CONSTRAINT pk PRIMARY KEY`) and FOREIGN KEY are rejected (Msg 102) at parse, inherited from the column-list parser's `isTableVariable: true` branch.
+- **Per-call execution**: `Simulation.InvokeMultiStatementTvf` allocates a child `BatchContext` (no `UdfFrame` / no `ProcFrame`), pre-seeds parameters as variables and constructs a fresh `HeapTable` for `@r` registered in `TableVariables[returnVariableName]`. Constraint instances (`KeyConstraint[]` / `CheckConstraint[]`) are shared across calls — they're immutable, and the simulator runs single-threaded per `Simulation`. After body dispatch, the accumulated `@r` rows yield to the FROM-source driver.
+- **RETURN handling**: bare `RETURN;` sets `BatchContext.ReturnSignaled` (the dispatch loop bails the same way procedure bodies do). Value-form `RETURN N` raises **Msg 178** at invoke time via the existing `ParseReturnStatement` check (both `UdfFrame` and `ProcFrame` are null). Real SQL Server enforces Msg 178 at CREATE time; the simulator defers — same convention scalar UDFs use for body validation.
+- **WITH-clause options**: `SCHEMABINDING` / `ENCRYPTION` parse-and-ignore (shared with inline TVF).
+- **CROSS APPLY / OUTER APPLY**: works through the same `ParseSingleFromSource` branch as inline TVF — both function kinds dispatch through `Selection.ForInlineTvf` / `Selection.ForMultiStatementTvf` returning a `FromSource.LateralPlan`. Arguments evaluate against the outer row scope per call.
+- **Catalog surface**: `sys.objects` `type='TF'` / `type_desc='SQL_TABLE_VALUED_FUNCTION'` (distinct from inline TVF's `'IF'`). `OBJECT_ID(name, 'TF')` resolves multi-statement TVFs only.
+- **EF Core integration**: `HasDbFunction` mapped to an `IQueryable<T>`-returning DbContext method emits `SELECT ... FROM dbo.fn(@p)` through the SqlServer provider; the simulator dispatches the body and yields rows back through the same FROM-source pipeline. LINQ composition (`Where` / `OrderBy` / `Select`) applies to the function's result rows post-dispatch — no pushdown into the body.
+
+**Fidelity gaps**:
+- **No CREATE-time body validation**: Msg 455 (last statement must be RETURN), Msg 443 (side-effecting external DML inside function), Msg 178 (value-form RETURN). Real SQL Server enforces all three at CREATE; the simulator defers to invoke time where applicable (Msg 178 via the existing return-statement parser), and silently accepts the rest. Apps that produce a body real SQL Server would reject can run successfully here.
+- **Constraint enforcement is row-level strict**: PK / UNIQUE / CHECK violations in the body surface as runtime errors (Msg 2627 / Msg 547). Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising. Stricter behavior is defensible since apps that hit it are buggy.
+- **`is_nullable` always True** in `sys.columns` for return-table output (same gap as inline TVFs).
+- **No SCHEMABINDING enforcement** (same as inline TVFs).
 
 ## Views
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`). Stored as `View` in `Schema.Views`. Body re-parsed per call inside a child `BatchContext`, returned as `Selection.ForView` wrapped in a `FromSource.LateralPlan`. Same 32-level recursion cap (Msg 217) as scalar UDFs / inline TVFs. Probed against SQL Server 2025 (2026-05-12).

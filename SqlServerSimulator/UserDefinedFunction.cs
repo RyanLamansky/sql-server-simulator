@@ -131,6 +131,88 @@ internal sealed class InlineTableValuedFunction(
 }
 
 /// <summary>
+/// A multi-statement table-valued function. Body is a multi-statement
+/// <c>BEGIN ... END</c> block that writes into a declared return-table
+/// variable (<c>RETURNS @r TABLE (cols)</c>) — bare <c>RETURN;</c> exits
+/// the body and projects the accumulated <c>@r</c> rows to the caller.
+/// Called from a FROM clause exactly like an inline TVF, but body
+/// execution actually dispatches the body's statements (rather than
+/// inlining a single SELECT).
+/// </summary>
+/// <remarks>
+/// <para>
+/// Per-call execution allocates a fresh <see cref="BatchContext"/> and
+/// pre-seeds the parameters as variables AND the return-table variable
+/// in <see cref="BatchContext.TableVariables"/>. Neither
+/// <see cref="BatchContext.UdfFrame"/> nor
+/// <see cref="BatchContext.ProcFrame"/> is set, so value-form
+/// <c>RETURN N</c> naturally raises Msg 178 (probe-confirmed against
+/// real SQL Server, which enforces this at CREATE time; the simulator
+/// surfaces it at invoke time instead). Bare <c>RETURN;</c> sets
+/// <see cref="BatchContext.ReturnSignaled"/> and the dispatch loop
+/// bails — same path procedures use.
+/// </para>
+/// <para>
+/// The output column schema is captured once at CREATE-FUNCTION time
+/// (so <c>sys.columns</c> and FROM-source binding can resolve names
+/// without re-parsing the body), and the
+/// <see cref="KeyConstraints"/> / <see cref="CheckConstraints"/> arrays
+/// hold the same constraint instances each per-call <see cref="HeapTable"/>
+/// hands off to its constraint enforcer — sharing is safe because
+/// constraint instances are immutable and the simulator runs
+/// single-threaded per <see cref="Simulation"/>.
+/// </para>
+/// </remarks>
+internal sealed class MultiStatementTableValuedFunction(
+    Schema schema,
+    string name,
+    int objectId,
+    UdfParameter[] parameters,
+    string returnVariableName,
+    HeapColumn[] outputColumns,
+    KeyConstraint[] keyConstraints,
+    CheckConstraint[] checkConstraints,
+    string bodyText,
+    DateTime createDate)
+    : UserDefinedFunction(schema, name, objectId, parameters, bodyText, createDate)
+{
+    public override string ObjectTypeCode => "TF";
+    public override string ObjectTypeDescription => "SQL_TABLE_VALUED_FUNCTION";
+
+    /// <summary>
+    /// The declared <c>@</c>-stripped return-table variable name (the
+    /// <c>r</c> in <c>RETURNS @r TABLE (...)</c>). Pre-seeded into the
+    /// per-call child batch's <see cref="BatchContext.TableVariables"/>
+    /// so the body's <c>INSERT INTO @r ...</c> / <c>SELECT FROM @r</c>
+    /// route through the existing table-variable plumbing.
+    /// </summary>
+    public readonly string ReturnVariableName = returnVariableName;
+
+    /// <summary>
+    /// One <see cref="HeapColumn"/> per declared return-table column,
+    /// parsed once at <c>CREATE FUNCTION</c> time. Mirrors
+    /// <see cref="InlineTableValuedFunction.OutputColumns"/> in shape;
+    /// the values are reused as-is when constructing each per-call
+    /// <see cref="HeapTable"/> for <c>@r</c>.
+    /// </summary>
+    public readonly HeapColumn[] OutputColumns = outputColumns;
+
+    /// <summary>
+    /// Key (PRIMARY KEY / UNIQUE) constraints declared on the return
+    /// table. Same instances shared across all per-call invocations —
+    /// constraint state is immutable, the row-level uniqueness check
+    /// reads ordinals + kind only.
+    /// </summary>
+    public readonly KeyConstraint[] KeyConstraints = keyConstraints;
+
+    /// <summary>
+    /// CHECK constraints declared on the return table. Same sharing
+    /// rule as <see cref="KeyConstraints"/>.
+    /// </summary>
+    public readonly CheckConstraint[] CheckConstraints = checkConstraints;
+}
+
+/// <summary>
 /// One declared parameter on a <see cref="UserDefinedFunction"/>. The
 /// <see cref="Name"/> is stored with the leading <c>@</c> stripped (matching
 /// the <see cref="BatchContext.Variables"/> keying convention).

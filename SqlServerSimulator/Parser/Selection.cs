@@ -827,7 +827,7 @@ internal sealed partial class Selection
             var afterNameCheckpoint = context.SaveCheckpoint();
             var resolvedName = BatchContext.ParseObjectName(context);
             var resolvedIsTvf = context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
-                && resolvedFn is InlineTableValuedFunction;
+                && resolvedFn is InlineTableValuedFunction or MultiStatementTableValuedFunction;
             context.RestoreCheckpoint(afterNameCheckpoint);
             if (resolvedIsTvf)
             {
@@ -1034,34 +1034,40 @@ internal sealed partial class Selection
                         backingView: resolvedView);
                 }
 
-                // Inline TVF call: `FROM schema.fn(args) [alias]`. Detected
-                // when the resolved function is a TVF AND `(` follows the
-                // name (cursor is on the name leaf post-ParseObjectName; peek
-                // the next token via a checkpoint). A ScalarFunction here
-                // falls through to the table-lookup branch and surfaces
-                // Msg 208 (probe-confirmed: real SQL Server treats
-                // `FROM dbo.scalar_fn(...)` as a missing-object error, not
-                // a kind-mismatch).
+                // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.
+                // Detected when the resolved function is an inline or
+                // multi-statement TVF AND `(` follows the name (cursor is on
+                // the name leaf post-ParseObjectName; peek the next token via
+                // a checkpoint). A ScalarFunction here falls through to the
+                // table-lookup branch and surfaces Msg 208 (probe-confirmed:
+                // real SQL Server treats `FROM dbo.scalar_fn(...)` as a
+                // missing-object error, not a kind-mismatch).
                 if (context.Batch.TryResolveFunction(objectName, out var function)
-                    && function is InlineTableValuedFunction tvf)
+                    && function is InlineTableValuedFunction or MultiStatementTableValuedFunction)
                 {
                     var checkpoint = context.SaveCheckpoint();
                     context.MoveNextOptional();
                     if (context.Token is Operator { Character: '(' })
                     {
                         context.MoveNextRequired();
-                        var tvfArgs = Expressions.UserFunctionCall.ParseFunctionArguments(tvf, context);
+                        var tvfArgs = Expressions.UserFunctionCall.ParseFunctionArguments(function, context);
                         // ParseFunctionArguments leaves the cursor on the closing `)`.
                         var tvfAlias = ConsumeOptionalAlias(context);
+                        var outputColumns = function is InlineTableValuedFunction inline
+                            ? inline.OutputColumns
+                            : ((MultiStatementTableValuedFunction)function).OutputColumns;
+                        var lateralPlan = function is InlineTableValuedFunction inlineTvf
+                            ? Selection.ForInlineTvf(inlineTvf, tvfArgs)
+                            : Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs);
                         return new FromSource(
-                            qualifier: tvfAlias ?? tvf.Name,
-                            columnNames: [.. tvf.OutputColumns.Select(c => c.Name)],
-                            columns: tvf.OutputColumns,
-                            storedSchema: tvf.OutputColumns,
+                            qualifier: tvfAlias ?? function.Name,
+                            columnNames: [.. outputColumns.Select(c => c.Name)],
+                            columns: outputColumns,
+                            storedSchema: outputColumns,
                             storageOrdinals: null,
                             lobStore: null,
                             rows: [],
-                            lateralPlan: Selection.ForInlineTvf(tvf, tvfArgs));
+                            lateralPlan: lateralPlan);
                     }
                     context.RestoreCheckpoint(checkpoint);
                 }

@@ -82,10 +82,14 @@ internal sealed class ObjectId : Expression
         if (!TryParseObjectName(nameStr, out var parsed))
             return SqlValue.Null(SqlType.Int32);
 
-        // 'FN' / 'IF' / no filter: try function resolution. With a specific
-        // filter the function must match that kind (scalar vs. inline TVF);
-        // without a filter, either kind matches.
-        if (typeFilter is null || Collation.Default.Equals(typeFilter, "FN") || Collation.Default.Equals(typeFilter, "IF"))
+        // 'FN' / 'IF' / 'TF' / no filter: try function resolution. With a
+        // specific filter the function must match that kind (scalar vs.
+        // inline TVF vs. multi-statement TVF); without a filter, any kind
+        // matches.
+        if (typeFilter is null
+            || Collation.Default.Equals(typeFilter, "FN")
+            || Collation.Default.Equals(typeFilter, "IF")
+            || Collation.Default.Equals(typeFilter, "TF"))
         {
             if (runtime.Batch.TryResolveFunction(parsed, out var function))
             {
@@ -94,6 +98,7 @@ internal sealed class ObjectId : Expression
                     null => true,
                     _ when Collation.Default.Equals(typeFilter, "FN") => function is ScalarFunction,
                     _ when Collation.Default.Equals(typeFilter, "IF") => function is InlineTableValuedFunction,
+                    _ when Collation.Default.Equals(typeFilter, "TF") => function is MultiStatementTableValuedFunction,
                     _ => false,
                 };
                 if (kindMatches)

@@ -88,10 +88,120 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        // RETURNS TABLE → inline TVF; otherwise the existing scalar path.
-        return context.Token is ReservedKeyword { Keyword: Keyword.Table }
-            ? ParseInlineTvfTail(context, schema, functionName, parameters)
-            : ParseScalarTail(context, schema, functionName, parameters);
+        // RETURNS @r TABLE (...) → multi-statement TVF; RETURNS TABLE → inline
+        // TVF; otherwise the existing scalar path.
+        return context.Token switch
+        {
+            AtPrefixedString => ParseMultiStatementTvfTail(context, schema, functionName, parameters),
+            ReservedKeyword { Keyword: Keyword.Table } => ParseInlineTvfTail(context, schema, functionName, parameters),
+            _ => ParseScalarTail(context, schema, functionName, parameters),
+        };
+    }
+
+    /// <summary>
+    /// Parses the multi-statement TVF tail: <c>@r TABLE (cols) [WITH option ...]
+    /// AS BEGIN ... END</c>. Cursor on entry: the <c>@variable</c> token after
+    /// <c>RETURNS</c>. The body's contents may freely <c>INSERT</c> into
+    /// <c>@r</c> (registered as a table variable in the per-call child batch),
+    /// and bare <c>RETURN;</c> projects the accumulated rows. Value-form
+    /// <c>RETURN N</c> in the body raises Msg 178 at invoke time (probe-
+    /// confirmed against real SQL Server, which surfaces this at CREATE time;
+    /// the simulator defers to runtime — same convention scalar UDFs use).
+    /// </summary>
+    /// <remarks>
+    /// Column-list parsing reuses
+    /// <see cref="TryParseTableVariableColumnsAndConstraints"/> so the
+    /// <c>RETURNS @r TABLE</c> grammar accepts the same column features as
+    /// <c>DECLARE @t TABLE</c> — typed columns, IDENTITY, computed columns,
+    /// inline / table-level CHECK, PRIMARY KEY / UNIQUE. Named constraints
+    /// (<c>CONSTRAINT pk PRIMARY KEY</c>) and FOREIGN KEY remain rejected
+    /// here too (Msg 102, inherited from the column-list parser's
+    /// <c>isTableVariable: true</c> branch).
+    /// </remarks>
+    private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters)
+    {
+        var returnVariableName = ((AtPrefixedString)context.Token!).Value;
+        context.MoveNextRequired(); // consume @r
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Table })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Note: even in skip mode, the column list must be tokenized so the
+        // cursor advances past the closing `)`. The helper returns false in
+        // skip mode AFTER consuming the column list — the body still needs
+        // to be captured below.
+        var hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
+            context,
+            "@" + returnVariableName,
+            out var outputColumns,
+            out var keyConstraints,
+            out var checkConstraints);
+
+        // Optional WITH-clause (SCHEMABINDING / ENCRYPTION — parse-and-ignore,
+        // matching the inline TVF tail).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            ParseInlineTvfOptions(context);
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // BEGIN/END required for MS-TVF bodies (same shape as scalar UDF).
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Begin })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var commandText = context.Command.CommandText;
+        context.MoveNextRequired(); // step past BEGIN
+        var bodyStart = context.Token.StartIndex;
+        var depth = 1;
+        while (depth > 0)
+        {
+            if (context.Token is null)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Begin }:
+                    {
+                        var checkpoint = context.SaveCheckpoint();
+                        context.MoveNextRequired();
+                        var isTransactionStart = context.Token is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed };
+                        context.RestoreCheckpoint(checkpoint);
+                        if (!isTransactionStart)
+                            depth++;
+                        break;
+                    }
+                case ReservedKeyword { Keyword: Keyword.End }:
+                    depth--;
+                    if (depth == 0)
+                        goto bodyCaptured;
+                    break;
+            }
+            context.MoveNextRequired();
+        }
+    bodyCaptured:
+        var bodyEnd = context.Token.StartIndex;
+        var bodyText = commandText[bodyStart..bodyEnd];
+        context.MoveNextOptional(); // consume END
+
+        if (context.Batch.IsSkipping || !hasResolvedColumns)
+            return true;
+
+        if (schema.HasNameInSharedNamespace(functionName.Leaf))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
+
+        var objectId = context.CurrentDatabase.AllocateObjectId();
+        var function = new MultiStatementTableValuedFunction(
+            schema,
+            functionName.Leaf,
+            objectId,
+            [.. parameters],
+            returnVariableName,
+            outputColumns,
+            keyConstraints,
+            checkConstraints,
+            bodyText,
+            createDate: context.Batch.CurrentStatement.UtcNow);
+        schema.Functions[functionName.Leaf] = function;
+        return true;
     }
 
     /// <summary>

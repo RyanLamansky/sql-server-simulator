@@ -236,11 +236,47 @@ partial class Simulation
     /// </remarks>
     private static void ParseDeclareTableVariable(ParserContext context, string variableName)
     {
+        var fullName = "@" + variableName;
+        if (!TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints))
+            return;
+
+        var heapTable = new HeapTable(
+            fullName,
+            columns,
+            context.CurrentDatabase.AllocateObjectId(),
+            schemaId: Database.DboSchemaId,
+            createDate: context.Batch.CurrentStatement.UtcNow,
+            keyConstraints: keyConstraints,
+            checkConstraints: checkConstraints,
+            isTableVariable: true);
+        context.Batch.TableVariables[variableName] = heapTable;
+    }
+
+    /// <summary>
+    /// Shared <c>TABLE (column-list)</c> parser for <c>DECLARE @t TABLE</c>
+    /// and <c>CREATE FUNCTION ... RETURNS @r TABLE</c>. Cursor on entry: the
+    /// <c>TABLE</c> reserved keyword. Cursor on exit: one token past the
+    /// closing <c>)</c>. <paramref name="fullName"/> is the surface name
+    /// reported in error messages (e.g. <c>"@r"</c>). Returns <see langword="false"/>
+    /// when <see cref="BatchContext.IsSkipping"/> short-circuits the body
+    /// (an un-taken IF branch around the declaration); caller should bail
+    /// without registering anything.
+    /// </summary>
+    private static bool TryParseTableVariableColumnsAndConstraints(
+        ParserContext context,
+        string fullName,
+        out HeapColumn[] resolvedColumns,
+        out KeyConstraint[] keyConstraints,
+        out CheckConstraint[] checkConstraints)
+    {
+        resolvedColumns = [];
+        keyConstraints = [];
+        checkConstraints = [];
+
         context.MoveNextRequired(); // consume TABLE
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var fullName = "@" + variableName;
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
@@ -312,20 +348,11 @@ partial class Simulation
         }
 
         if (context.Batch.IsSkipping)
-            return;
+            return false;
 
-        var keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase);
-        var checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase);
-
-        var heapTable = new HeapTable(
-            fullName,
-            [.. heapColumns!],
-            context.CurrentDatabase.AllocateObjectId(),
-            schemaId: Database.DboSchemaId,
-            createDate: context.Batch.CurrentStatement.UtcNow,
-            keyConstraints: keyConstraints,
-            checkConstraints: checkConstraints,
-            isTableVariable: true);
-        context.Batch.TableVariables[variableName] = heapTable;
+        resolvedColumns = [.. heapColumns!];
+        keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase);
+        checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase);
+        return true;
     }
 }
