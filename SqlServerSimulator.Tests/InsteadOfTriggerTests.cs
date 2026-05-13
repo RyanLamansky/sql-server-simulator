@@ -121,9 +121,11 @@ public sealed class InsteadOfTriggerTests
         using var connection = Seeded();
         _ = connection.CreateCommand("""
             create trigger tr_t_io on t instead of insert
-            as insert audit_log(action) values ('IO');
+            as insert audit_log(action) values ('IO')
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("""
             create trigger tr_t_after on t after insert
-            as insert audit_log(action) values ('AFTER');
+            as insert audit_log(action) values ('AFTER')
             """).ExecuteNonQuery();
         _ = connection.CreateCommand("insert t (v) values (1)").ExecuteNonQuery();
 
@@ -320,9 +322,11 @@ public sealed class InsteadOfTriggerTests
             create table t1 (id int primary key, v int);
             create table t2 (id int primary key, label nvarchar(10));
             create table capture (v int, label nvarchar(10));
-            create view v_join as select t1.id, t1.v, t2.label from t1 join t2 on t1.id = t2.id;
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("create view v_join as select t1.id, t1.v, t2.label from t1 join t2 on t1.id = t2.id").ExecuteNonQuery();
+        _ = connection.CreateCommand("""
             create trigger tr_vj on v_join instead of insert
-            as insert capture(v, label) select v, label from inserted;
+            as insert capture(v, label) select v, label from inserted
             """).ExecuteNonQuery();
 
         _ = connection.CreateCommand("insert v_join (id, v, label) values (1, 100, 'one')").ExecuteNonQuery();
@@ -352,10 +356,10 @@ public sealed class InsteadOfTriggerTests
         _ = connection.CreateCommand("""
             create table t1 (id int primary key, v int);
             create table t2 (id int primary key, label nvarchar(10));
-            create view v_join as select t1.id, t1.v, t2.label from t1 join t2 on t1.id = t2.id;
-            create trigger tr_vj on v_join instead of update as select 1;
-            insert t1 values (1, 10); insert t2 values (1, 'a');
             """).ExecuteNonQuery();
+        _ = connection.CreateCommand("create view v_join as select t1.id, t1.v, t2.label from t1 join t2 on t1.id = t2.id").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr_vj on v_join instead of update as select 1").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t1 values (1, 10); insert t2 values (1, 'a')").ExecuteNonQuery();
         _ = Throws<NotSupportedException>(() =>
             _ = connection.CreateCommand("update v_join set v = 99").ExecuteNonQuery());
     }
@@ -394,9 +398,11 @@ public sealed class InsteadOfTriggerTests
         _ = connection.CreateCommand("insert t (v) values (10)").ExecuteNonQuery();
         _ = connection.CreateCommand("""
             create trigger tr_t_io on t instead of insert
-            as insert audit_log(action) values ('IO_INS');
+            as insert audit_log(action) values ('IO_INS')
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("""
             create trigger tr_t_after on t after update
-            as insert audit_log(action) values ('AFTER_UPD');
+            as insert audit_log(action) values ('AFTER_UPD')
             """).ExecuteNonQuery();
         _ = connection.CreateCommand("""
             merge t using (values (1, 999), (2, 888)) as s(id, v) on t.id = s.id

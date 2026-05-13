@@ -33,6 +33,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 111: the given <paramref name="statementKind"/>
+    /// (e.g. <c>"CREATE/ALTER PROCEDURE"</c>, <c>"CREATE VIEW"</c>) must be
+    /// the first statement in a query batch. Probe-confirmed wording per
+    /// kind against SQL Server 2025 (2026-05-13): PROCEDURE merges CREATE
+    /// and ALTER into one label; VIEW / FUNCTION / TRIGGER / SCHEMA each
+    /// use their separate <c>CREATE</c> / <c>ALTER</c> labels.
+    /// </summary>
+    internal static SimulatedSqlException MustBeFirstStatementInBatch(string statementKind) =>
+        new($"'{statementKind}' must be the first statement in a query batch.", 111, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 189: a built-in function received the wrong
     /// number of arguments. Wording uses the lowercase function name and the
     /// per-function minimum (e.g. <c>"The concat function requires 2 to 254

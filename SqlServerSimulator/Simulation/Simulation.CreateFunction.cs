@@ -55,6 +55,9 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseCreateFunction(ParserContext context)
     {
+        if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
+            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE FUNCTION");
+
         context.MoveNextRequired();
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);

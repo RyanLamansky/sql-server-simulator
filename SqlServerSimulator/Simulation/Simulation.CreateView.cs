@@ -48,6 +48,9 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseCreateView(ParserContext context)
     {
+        if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
+            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE VIEW");
+
         context.MoveNextRequired();
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);

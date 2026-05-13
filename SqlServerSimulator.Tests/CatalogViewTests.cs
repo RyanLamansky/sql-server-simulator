@@ -38,11 +38,11 @@ public sealed class CatalogViewTests
 
     [TestMethod]
     public void SchemaId_TwoUserSchemas_5And6()
-        => AreEqual(11, new Simulation().ExecuteScalar("""
-            create schema audit;
-            create schema staging;
-            select schema_id('audit') + schema_id('staging')
-            """));
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create schema audit", "create schema staging");
+        AreEqual(11, simulation.ExecuteScalar("select schema_id('audit') + schema_id('staging')"));
+    }
 
     [TestMethod]
     public void SchemaId_Missing_ReturnsNull()

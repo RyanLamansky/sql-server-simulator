@@ -47,6 +47,9 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseCreateProcedure(ParserContext context, bool isAlter, bool createOrAlter)
     {
+        if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
+            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE/ALTER PROCEDURE");
+
         context.MoveNextRequired();
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);

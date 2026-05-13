@@ -16,11 +16,12 @@ public sealed class EFCoreViews
     private static ViewDbContext WithOrderSummary()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
+        simulation.ExecuteBatches(
+            """
             create table Orders (Id int primary key, Customer varchar(50), Amount decimal(10,2));
             insert Orders values (1, 'Alice', 100.00), (2, 'Bob', 250.00), (3, 'Alice', 50.00);
-            create view OrderSummary as select Customer, sum(Amount) as TotalAmount, count(*) as OrderCount from Orders group by Customer
-            """);
+            """,
+            "create view OrderSummary as select Customer, sum(Amount) as TotalAmount, count(*) as OrderCount from Orders group by Customer");
         return new ViewDbContext(simulation);
     }
 

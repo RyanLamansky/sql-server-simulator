@@ -65,7 +65,11 @@ public sealed class SchemaNameTests
 
     [TestMethod]
     public void ObjectName_View_Works()
-        => AreEqual("v", new Simulation().ExecuteScalar("create table t (id int); create view v as select id from t; select object_name(object_id('v'))"));
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int)", "create view v as select id from t");
+        AreEqual("v", simulation.ExecuteScalar("select object_name(object_id('v'))"));
+    }
 
     [TestMethod]
     public void ObjectName_TableType_ResolvableViaTypeTableObjectId()

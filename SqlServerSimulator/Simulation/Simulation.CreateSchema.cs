@@ -42,6 +42,9 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseCreateSchema(ParserContext context)
     {
+        if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
+            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE SCHEMA");
+
         if (context.GetNextRequired() is not Name schemaNameToken)
             return false;
         var schemaName = schemaNameToken.Value;

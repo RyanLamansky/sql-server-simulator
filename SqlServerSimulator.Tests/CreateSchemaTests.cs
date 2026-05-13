@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -24,16 +23,22 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void CreateSchema_Duplicate_Msg2714()
-        => new Simulation().AssertSqlError(
-            "create schema audit; create schema audit",
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create schema audit");
+        simulation.AssertSqlError(
+            "create schema audit",
             2714,
             "There is already an object named 'audit' in the database.");
+    }
 
     [TestMethod]
     public void CreateSchema_DuplicateCaseInsensitive_Msg2714()
-        => new Simulation().AssertSqlError(
-            "create schema audit; create schema AUDIT",
-            2714);
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create schema audit");
+        _ = simulation.AssertSqlError("create schema AUDIT", 2714);
+    }
 
     [TestMethod]
     public void CreateSchema_Dbo_Msg2760()
@@ -218,15 +223,18 @@ public sealed class CreateSchemaTests
     [TestMethod]
     public void IsolatedSchemas_SameTableName()
     {
-        using var reader = new Simulation().ExecuteReader("""
-            create schema audit;
-            create schema staging;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema audit",
+            "create schema staging",
+            """
             create table audit.t (id int);
             create table staging.t (id int);
             insert audit.t values (1), (2);
             insert staging.t values (100);
-            select (select count(*) from audit.t) as a, (select count(*) from staging.t) as s
             """);
+        using var reader = simulation.ExecuteReader(
+            "select (select count(*) from audit.t) as a, (select count(*) from staging.t) as s");
         IsTrue(reader.Read());
         AreEqual(2, reader.GetInt32(0));
         AreEqual(1, reader.GetInt32(1));
@@ -326,185 +334,166 @@ public sealed class CreateSchemaTests
     [TestMethod]
     public void AlterSchema_Transfer_TableMoves()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
-            create schema dst;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            """
             create table src.t (id int);
             insert src.t values (1), (2);
             alter schema dst transfer src.t;
-            select s.name from sys.tables t join sys.schemas s on s.schema_id = t.schema_id where t.name = 't'
-            """;
-        AreEqual("dst", cmd.ExecuteScalar());
+            """);
+        AreEqual("dst", simulation.ExecuteScalar(
+            "select s.name from sys.tables t join sys.schemas s on s.schema_id = t.schema_id where t.name = 't'"));
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_ExplicitObjectPrefix()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
-            create schema dst;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            """
             create table src.t (id int);
             alter schema dst transfer object::src.t;
-            select count(*) from dst.t
-            """;
-        AreEqual(0, cmd.ExecuteScalar());
+            """);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from dst.t"));
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_NameCollision_Msg15530()
-        => new Simulation().AssertSqlError(
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
             """
-            create schema src;
-            create schema dst;
             create table src.t (id int);
             create table dst.t (id int);
-            alter schema dst transfer src.t
-            """,
-            15530,
-            "The object with name \"t\" already exists.");
+            """);
+        simulation.AssertSqlError("alter schema dst transfer src.t", 15530, "The object with name \"t\" already exists.");
+    }
 
     [TestMethod]
     public void AlterSchema_Transfer_MissingSource_Msg15151()
-        => new Simulation().AssertSqlError(
-            "create schema src; create schema dst; alter schema dst transfer src.nope",
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create schema src", "create schema dst");
+        simulation.AssertSqlError(
+            "alter schema dst transfer src.nope",
             15151,
             "Cannot find the object 'nope', because it does not exist or you do not have permission.");
+    }
 
     [TestMethod]
     public void AlterSchema_Transfer_MissingDest_Msg15151()
-        => new Simulation().AssertSqlError(
-            "create schema src; create table src.t (id int); alter schema nope transfer src.t",
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create schema src", "create table src.t (id int)");
+        simulation.AssertSqlError(
+            "alter schema nope transfer src.t",
             15151,
             "Cannot alter the schema 'nope', because it does not exist or you do not have permission.");
+    }
 
     [TestMethod]
     public void AlterSchema_Transfer_TypeMoves()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
-            create schema dst;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            """
             create type src.MyType as table (id int);
             alter schema dst transfer type::src.MyType;
-            select s.name from sys.types tt join sys.schemas s on s.schema_id = tt.schema_id where tt.name = 'MyType'
-            """;
-        AreEqual("dst", cmd.ExecuteScalar());
+            """);
+        AreEqual("dst", simulation.ExecuteScalar(
+            "select s.name from sys.types tt join sys.schemas s on s.schema_id = tt.schema_id where tt.name = 'MyType'"));
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_SameSchema_NoOp()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            """
             create table src.t (id int);
             alter schema src transfer src.t;
-            select count(*) from src.t
-            """;
-        AreEqual(0, cmd.ExecuteScalar());
+            """);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from src.t"));
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_TriggerDirect_Msg15347()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using (var setup = conn.CreateCommand())
-        {
-            setup.CommandText = "create schema src; create schema dst; create table src.t (id int)";
-            _ = setup.ExecuteNonQuery();
-        }
-        using (var trg = conn.CreateCommand())
-        {
-            trg.CommandText = "create trigger src.tr on src.t after insert as select 1";
-            _ = trg.ExecuteNonQuery();
-        }
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "alter schema dst transfer src.tr";
-        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("15347", ex.Data["HelpLink.EvtID"]);
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            "create table src.t (id int)",
+            "create trigger src.tr on src.t after insert as select 1");
+        var ex = simulation.AssertSqlError("alter schema dst transfer src.tr", 15347);
         AreEqual("Cannot transfer an object that is owned by a parent object.", ex.Message);
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_TriggerFollowsParent()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using (var setup = conn.CreateCommand())
-        {
-            setup.CommandText = "create schema src; create schema dst; create table src.t (id int)";
-            _ = setup.ExecuteNonQuery();
-        }
-        using (var trg = conn.CreateCommand())
-        {
-            trg.CommandText = "create trigger src.tr on src.t after insert as select 1";
-            _ = trg.ExecuteNonQuery();
-        }
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "alter schema dst transfer src.t; select s.name from sys.triggers t join sys.objects o on o.object_id = t.parent_id join sys.schemas s on s.schema_id = o.schema_id where t.name = 'tr'";
-        AreEqual("dst", cmd.ExecuteScalar());
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            "create table src.t (id int)",
+            "create trigger src.tr on src.t after insert as select 1",
+            "alter schema dst transfer src.t");
+        AreEqual("dst", simulation.ExecuteScalar(
+            "select s.name from sys.triggers t join sys.objects o on o.object_id = t.parent_id join sys.schemas s on s.schema_id = o.schema_id where t.name = 'tr'"));
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_View_Works()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
-            create schema dst;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            """
             create table dbo.base (id int);
             insert dbo.base values (1), (2);
-            """;
-        _ = cmd.ExecuteNonQuery();
-        cmd.CommandText = "create view src.v as select id from dbo.base";
-        _ = cmd.ExecuteNonQuery();
-        cmd.CommandText = "alter schema dst transfer src.v; select count(*) from dst.v";
-        AreEqual(2, cmd.ExecuteScalar());
+            """,
+            "create view src.v as select id from dbo.base",
+            "alter schema dst transfer src.v");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from dst.v"));
     }
 
     [TestMethod]
     public void AlterSchema_Transfer_Sequence_Works()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
-            create schema dst;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            """
             create sequence src.s start with 100;
             alter schema dst transfer src.s;
-            select next value for dst.s
-            """;
-        AreEqual(100L, cmd.ExecuteScalar());
+            """);
+        AreEqual(100L, simulation.ExecuteScalar("select next value for dst.s"));
     }
 
     [TestMethod]
     public void DropSchema_AfterTransferringOut_Succeeds()
     {
-        using var conn = new Simulation().CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            create schema src;
-            create schema dst;
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema src",
+            "create schema dst",
+            """
             create table src.t (id int);
             alter schema dst transfer src.t;
             drop schema src;
-            select schema_id('src')
-            """;
-        AreEqual(DBNull.Value, cmd.ExecuteScalar());
+            """);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select schema_id('src')"));
     }
 }

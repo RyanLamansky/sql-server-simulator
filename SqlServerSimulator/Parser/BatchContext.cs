@@ -100,6 +100,28 @@ internal sealed class BatchContext
     public const long LoopIterationLimit = 100_000;
 
     /// <summary>
+    /// Depth of nested IF / WHILE / BEGIN...END dispatches in this batch.
+    /// Bumped by the body-dispatching parsers, decremented on exit. Used by
+    /// the must-be-first-statement check on CREATE/ALTER
+    /// PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA: zero depth + no prior
+    /// statement = OK; anything else = Msg 111. Inner CommandText-equivalent
+    /// contexts (proc / function / trigger / dynamic-SQL bodies) get a fresh
+    /// <see cref="BatchContext"/> so this counter naturally resets at body
+    /// entry, matching real SQL Server's batch boundary semantics.
+    /// </summary>
+    public int BlockDepth;
+
+    /// <summary>
+    /// Whether the batch's top-level dispatch has consumed at least one
+    /// substantive statement (anything that isn't a bare <c>;</c>). The
+    /// must-be-first-statement check on CREATE/ALTER
+    /// PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA reads this together
+    /// with <see cref="BlockDepth"/>: both zero / false = OK; either set =
+    /// Msg 111.
+    /// </summary>
+    public bool HasDispatchedStatement;
+
+    /// <summary>
     /// Active error context inside a <c>CATCH</c> block — set when the
     /// associated <c>TRY</c> body's dispatch caught a
     /// <see cref="SimulatedSqlException"/>, cleared when the enclosing

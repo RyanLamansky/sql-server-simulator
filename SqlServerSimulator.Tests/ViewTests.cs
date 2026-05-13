@@ -85,12 +85,14 @@ public sealed class ViewTests
     [TestMethod]
     public void View_Body_With_Join()
     {
-        using var reader = WithT1().ExecuteReader("""
+        var simulation = WithT1();
+        simulation.ExecuteBatches(
+            """
             create table dbo.t2 (id int, note varchar(10));
             insert dbo.t2 values (1, 'first'), (2, 'second');
-            create view dbo.v as select a.id, a.label, b.note from dbo.t1 a inner join dbo.t2 b on a.id = b.id;
-            select id, label, note from dbo.v order by id
-            """);
+            """,
+            "create view dbo.v as select a.id, a.label, b.note from dbo.t1 a inner join dbo.t2 b on a.id = b.id");
+        using var reader = simulation.ExecuteReader("select id, label, note from dbo.v order by id");
         var rows = new List<(int, string, string)>();
         while (reader.Read())
             rows.Add((reader.GetInt32(0), reader.GetString(1), reader.GetString(2)));
@@ -134,11 +136,13 @@ public sealed class ViewTests
 
     [TestMethod]
     public void View_On_View()
-        => Assert.AreEqual(1, WithT1().ExecuteScalar("""
-            create view dbo.v1 as select id, label from dbo.t1;
-            create view dbo.v2 as select id as new_id from dbo.v1;
-            select min(new_id) from dbo.v2
-            """));
+    {
+        var simulation = WithT1();
+        simulation.ExecuteBatches(
+            "create view dbo.v1 as select id, label from dbo.t1",
+            "create view dbo.v2 as select id as new_id from dbo.v1");
+        Assert.AreEqual(1, simulation.ExecuteScalar("select min(new_id) from dbo.v2"));
+    }
 
     [TestMethod]
     public void Drop_View_Removes_It()
@@ -198,11 +202,11 @@ public sealed class ViewTests
     [TestMethod]
     public void SysViews_Emits_ViewRows()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v1 as select id from dbo.t1;
-            create view dbo.v_check as select id from dbo.t1 where id > 0 with check option;
-            select name, with_check_option from sys.views where name like 'v%'
-            """);
+        var simulation = WithT1();
+        simulation.ExecuteBatches(
+            "create view dbo.v1 as select id from dbo.t1",
+            "create view dbo.v_check as select id from dbo.t1 where id > 0 with check option");
+        using var reader = simulation.ExecuteReader("select name, with_check_option from sys.views where name like 'v%'");
         var rows = new Dictionary<string, bool>();
         while (reader.Read())
             rows[reader.GetString(0)] = reader.GetBoolean(1);
@@ -461,10 +465,9 @@ public sealed class ViewTests
     public void Insert_Through_Join_View_Raises_Msg4405()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create table dbo.t2 (id int, owner varchar(10));
-            create view dbo.v as select a.id, a.label, b.owner from dbo.t1 a inner join dbo.t2 b on a.id = b.id
-            """);
+        simulation.ExecuteBatches(
+            "create table dbo.t2 (id int, owner varchar(10))",
+            "create view dbo.v as select a.id, a.label, b.owner from dbo.t1 a inner join dbo.t2 b on a.id = b.id");
         var ex = simulation.AssertSqlError("insert dbo.v(id, label) values (99, 'x')", 4405);
         Assert.Contains("'dbo.v'", ex.Message);
         Assert.Contains("multiple base tables", ex.Message);
@@ -474,11 +477,10 @@ public sealed class ViewTests
     public void Chain_View_On_View_Update_Composes_Visibility()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v1 as select id, label, tag from dbo.t1 where tag = 'x';
-            create view dbo.v2 as select id, label, tag from dbo.v1 where id > 1;
-            update dbo.v2 set label = 'CHAINED'
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v1 as select id, label, tag from dbo.t1 where tag = 'x'",
+            "create view dbo.v2 as select id, label, tag from dbo.v1 where id > 1");
+        _ = simulation.ExecuteNonQuery("update dbo.v2 set label = 'CHAINED'");
         // Only the row with tag='x' AND id>1 should be touched. That's id=2, label='b'.
         Assert.AreEqual("CHAINED", simulation.ExecuteScalar("select label from dbo.t1 where id = 2"));
         Assert.AreEqual("a", simulation.ExecuteScalar("select label from dbo.t1 where id = 1"));
@@ -491,10 +493,9 @@ public sealed class ViewTests
         var simulation = WithT1();
         // v_chain1 has CHECK OPTION on tag='x'; v_chain2 has CHECK OPTION on n>1
         // (where n isn't a column in t1 so use a different table for clarity).
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v1 as select id, label, tag from dbo.t1 where tag = 'x' with check option;
-            create view dbo.v2 as select id, label, tag from dbo.v1 where id > 0 with check option
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v1 as select id, label, tag from dbo.t1 where tag = 'x' with check option",
+            "create view dbo.v2 as select id, label, tag from dbo.v1 where id > 0 with check option");
         // INSERT through v2 with tag='y' violates v1's CHECK OPTION via the chain.
         _ = simulation.AssertSqlError("insert dbo.v2(label, tag) values ('chk_fail', 'y')", 550);
         Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where label = 'chk_fail'"));

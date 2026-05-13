@@ -68,10 +68,9 @@ public sealed class TableValuedParameterTests
     public void DropType_Referenced_RaisesMsg3732()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create type dbo.t1 as table (id int);
-            create proc dbo.p1 @rows dbo.t1 readonly as select 1
-            """);
+        simulation.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            "create proc dbo.p1 @rows dbo.t1 readonly as select 1");
         simulation.AssertSqlError(
             "drop type dbo.t1",
             3732,
@@ -147,39 +146,45 @@ public sealed class TableValuedParameterTests
     public void CreateProc_TvpParam_WithReadOnly_Works()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create type dbo.t1 as table (id int);
-            create proc dbo.p1 @rows dbo.t1 readonly as select count(*) c from @rows
-            """);
+        simulation.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            "create proc dbo.p1 @rows dbo.t1 readonly as select count(*) c from @rows");
     }
 
     [TestMethod]
     public void CreateProc_TvpParam_MissingReadOnly_RaisesMsg352()
-        => new Simulation().AssertSqlError(
-            "create type dbo.t1 as table (id int); create proc dbo.p1 @rows dbo.t1 as select 1",
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int)");
+        simulation.AssertSqlError(
+            "create proc dbo.p1 @rows dbo.t1 as select 1",
             352,
             "The table-valued parameter \"@rows\" must be declared with the READONLY option.");
+    }
 
     [TestMethod]
     public void CreateProc_TvpParam_WithDefault_RaisesMsg102()
-        => new Simulation().AssertSqlError(
-            "create type dbo.t1 as table (id int); create proc dbo.p1 @rows dbo.t1 readonly = null as select 1",
-            102);
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int)");
+        _ = simulation.AssertSqlError("create proc dbo.p1 @rows dbo.t1 readonly = null as select 1", 102);
+    }
 
     [TestMethod]
     public void CreateProc_TvpParam_WithOutput_RaisesMsg102()
-        => new Simulation().AssertSqlError(
-            "create type dbo.t1 as table (id int); create proc dbo.p1 @rows dbo.t1 readonly output as select 1",
-            102);
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int)");
+        _ = simulation.AssertSqlError("create proc dbo.p1 @rows dbo.t1 readonly output as select 1", 102);
+    }
 
     [TestMethod]
     public void ProcBody_InsertTvpParam_RaisesMsg10700()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create type dbo.t1 as table (id int);
-            create proc dbo.p1 @rows dbo.t1 readonly as insert @rows values (99)
-            """);
+        simulation.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            "create proc dbo.p1 @rows dbo.t1 readonly as insert @rows values (99)");
         simulation.AssertSqlError(
             "declare @t dbo.t1; exec dbo.p1 @t",
             10700,
@@ -190,10 +195,9 @@ public sealed class TableValuedParameterTests
     public void ProcBody_UpdateTvpParam_RaisesMsg10700()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create type dbo.t1 as table (id int);
-            create proc dbo.p1 @rows dbo.t1 readonly as update @rows set id = 0
-            """);
+        simulation.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            "create proc dbo.p1 @rows dbo.t1 readonly as update @rows set id = 0");
         _ = simulation.AssertSqlError(
             "declare @t dbo.t1; exec dbo.p1 @t",
             10700);
@@ -203,10 +207,9 @@ public sealed class TableValuedParameterTests
     public void ProcBody_DeleteTvpParam_RaisesMsg10700()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create type dbo.t1 as table (id int);
-            create proc dbo.p1 @rows dbo.t1 readonly as delete @rows
-            """);
+        simulation.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            "create proc dbo.p1 @rows dbo.t1 readonly as delete @rows");
         _ = simulation.AssertSqlError(
             "declare @t dbo.t1; exec dbo.p1 @t",
             10700);
@@ -214,17 +217,15 @@ public sealed class TableValuedParameterTests
 
     // ---- EXEC with TVP arg from SQL ----
 
-    // NB: setup statements (CREATE TYPE / CREATE PROC) are split into
-    // separate ExecuteNonQuery calls because the proc-body source capture
-    // greedily eats past `;` to end-of-CommandText (pre-existing limitation;
-    // real SQL Server uses `GO` to bound the batch, which the simulator
-    // doesn't model).
+    // NB: CREATE TYPE / CREATE PROC are split into separate batches because
+    // CREATE PROCEDURE must be the first statement in a batch (Msg 111).
 
     private static Simulation CreateSimWithProc(string procBody)
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create type dbo.t1 as table (id int)");
-        _ = sim.ExecuteNonQuery($"create proc dbo.p1 @rows dbo.t1 readonly as {procBody}");
+        sim.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            $"create proc dbo.p1 @rows dbo.t1 readonly as {procBody}");
         return sim;
     }
 
@@ -536,10 +537,9 @@ public sealed class TableValuedParameterTests
     public void SysParameters_IsReadonlyTrueForTvp()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create type dbo.t1 as table (id int);
-            create proc dbo.p1 @rows dbo.t1 readonly as select 1
-            """);
+        simulation.ExecuteBatches(
+            "create type dbo.t1 as table (id int)",
+            "create proc dbo.p1 @rows dbo.t1 readonly as select 1");
         IsTrue((bool)simulation.ExecuteScalar(
             "select is_readonly from sys.parameters where object_id = object_id('dbo.p1')")!);
     }

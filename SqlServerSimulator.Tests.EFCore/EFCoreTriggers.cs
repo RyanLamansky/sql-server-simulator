@@ -48,7 +48,8 @@ public sealed class EFCoreTriggers
     public void HasTrigger_Insert_FiresAndAuditPopulated()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
+        simulation.ExecuteBatches(
+            """
             create table Products (
                 Id int identity(1,1) primary key,
                 Name nvarchar(50) not null,
@@ -59,10 +60,12 @@ public sealed class EFCoreTriggers
                 NewName nvarchar(50) not null,
                 NewPrice int not null
             );
+            """,
+            """
             create trigger tr_product_audit on Products after insert
             as
                 insert ProductAudit(ProductId, NewName, NewPrice)
-                select Id, Name, Price from inserted;
+                select Id, Name, Price from inserted
             """);
         using var context = new TriggerDbContext(simulation);
         _ = context.Products.Add(new Product { Name = "Widget", Price = 100 });
@@ -94,15 +97,18 @@ public sealed class EFCoreTriggers
         // round-trip — EF reads Id back from the database after the
         // trigger fires, and the in-memory entity reflects it.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
+        simulation.ExecuteBatches(
+            """
             create table Products (
                 Id int identity(1,1) primary key,
                 Name nvarchar(50) not null,
                 Price int not null
-            );
+            )
+            """,
+            """
             create trigger tr_product_audit on Products after insert
             as
-                select 1;  -- no-op body; verify identity round-trip works through trigger-safe shape
+                select 1
             """);
         using var context = new TriggerDbContext(simulation);
         var p1 = new Product { Name = "First", Price = 10 };

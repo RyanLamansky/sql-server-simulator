@@ -58,6 +58,7 @@ partial class Simulation
         var thenSkip = !condResult;
 
         var hadElse = false;
+        batch.BlockDepth++;
         try
         {
             batch.SkipModeFlag = thenSkip;
@@ -83,6 +84,7 @@ partial class Simulation
         finally
         {
             batch.SkipModeFlag = wasSkipModeFlag;
+            batch.BlockDepth--;
         }
 
         // Probe-confirmed: an IF whose cond was false and which has no ELSE
@@ -153,6 +155,7 @@ partial class Simulation
         var outerSkipping = batch.IsSkipping;
 
         batch.LoopDepth++;
+        batch.BlockDepth++;
         try
         {
             if (outerSkipping)
@@ -220,6 +223,7 @@ partial class Simulation
         {
             batch.SkipModeFlag = wasSkipModeFlag;
             batch.LoopDepth--;
+            batch.BlockDepth--;
         }
 
         // Probe-confirmed: every WHILE exit path (cond initially false,

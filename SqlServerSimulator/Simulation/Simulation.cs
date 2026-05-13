@@ -263,31 +263,47 @@ public sealed partial class Simulation
     {
         var context = batch.Parser;
         var requireSemicolonBeforeCte = false;
-
-        while (context.Token is not null)
+        // BEGIN...END block dispatch (endKeyword=End) bumps BlockDepth so the
+        // must-be-first-statement check on CREATE/ALTER
+        // PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA rejects them inside
+        // the block. Top-level (endKeyword=null) doesn't bump — that's the
+        // case where the first statement may legitimately be CREATE PROC.
+        var nestedBlock = endKeyword is not null;
+        if (nestedBlock)
+            batch.BlockDepth++;
+        try
         {
-            // Early-exit on RETURN: stop dispatching once the batch has been
-            // signaled to exit. Any remaining statements (including the END
-            // terminator of an enclosing block) are abandoned — the caller
-            // handles cursor state. Checked here at the top of every iteration
-            // so RETURN inside a block exits the block dispatcher promptly
-            // (the block's "expect END" check has a matching short-circuit).
-            if (batch.ReturnSignaled)
-                yield break;
-
-            if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)
-                yield break;
-
-            if (context.Token is Operator { Character: ';' })
+            while (context.Token is not null)
             {
-                requireSemicolonBeforeCte = false;
-                context.MoveNextOptional();
-                continue;
-            }
+                // Early-exit on RETURN: stop dispatching once the batch has been
+                // signaled to exit. Any remaining statements (including the END
+                // terminator of an enclosing block) are abandoned — the caller
+                // handles cursor state. Checked here at the top of every iteration
+                // so RETURN inside a block exits the block dispatcher promptly
+                // (the block's "expect END" check has a matching short-circuit).
+                if (batch.ReturnSignaled)
+                    yield break;
 
-            foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte))
-                yield return outcome;
-            requireSemicolonBeforeCte = true;
+                if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)
+                    yield break;
+
+                if (context.Token is Operator { Character: ';' })
+                {
+                    requireSemicolonBeforeCte = false;
+                    context.MoveNextOptional();
+                    continue;
+                }
+
+                foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte))
+                    yield return outcome;
+                requireSemicolonBeforeCte = true;
+                batch.HasDispatchedStatement = true;
+            }
+        }
+        finally
+        {
+            if (nestedBlock)
+                batch.BlockDepth--;
         }
     }
 

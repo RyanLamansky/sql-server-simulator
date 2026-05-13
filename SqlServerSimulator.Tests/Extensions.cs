@@ -45,6 +45,24 @@ static class Extensions
         return command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Runs each <paramref name="batches"/> entry as its own ADO.NET command
+    /// on a shared open connection. The split exists because CREATE/ALTER
+    /// PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA must be the first
+    /// statement in a query batch (Msg 111) — passing multiple CREATE
+    /// statements through a single CommandText fails fast, so tests use this
+    /// helper to put each must-be-first statement in its own batch.
+    /// </summary>
+    public static void ExecuteBatches(this Simulation simulation, params ReadOnlySpan<string> batches)
+    {
+        using var connection = simulation.CreateOpenConnection();
+        foreach (var commandText in batches)
+        {
+            using var command = connection.CreateCommand(commandText);
+            _ = command.ExecuteNonQuery();
+        }
+    }
+
     public static object? ExecuteScalar(this Simulation simulation, string commandText)
     {
         using var connection = simulation.CreateOpenConnection();
