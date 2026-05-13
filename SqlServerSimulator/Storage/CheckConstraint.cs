@@ -41,11 +41,19 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
 
     /// <summary>
     /// True iff added via <c>ALTER TABLE … WITH NOCHECK ADD CONSTRAINT</c>
-    /// (existing-row validation bypassed). Surfaces in
-    /// <c>sys.check_constraints.is_not_trusted</c>. False for CREATE-time
-    /// CHECK constraints.
+    /// or disabled via <c>ALTER TABLE … NOCHECK CONSTRAINT</c>. Cleared by
+    /// <c>ALTER TABLE … WITH CHECK CHECK CONSTRAINT name</c> on successful
+    /// re-validation. Surfaces in <c>sys.check_constraints.is_not_trusted</c>.
     /// </summary>
     public bool IsNotTrusted;
+
+    /// <summary>
+    /// True iff the CHECK was disabled via <c>ALTER TABLE … NOCHECK
+    /// CONSTRAINT name</c>. While disabled, INSERT / UPDATE / MERGE skip
+    /// predicate evaluation. Cleared by <c>ALTER TABLE … CHECK CONSTRAINT
+    /// name</c>. Surfaces in <c>sys.check_constraints.is_disabled</c>.
+    /// </summary>
+    public bool IsDisabled;
 
     /// <summary>
     /// Round-trippable text form of <see cref="Predicate"/> for

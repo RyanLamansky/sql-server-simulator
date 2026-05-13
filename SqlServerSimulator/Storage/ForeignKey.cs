@@ -84,13 +84,29 @@ internal sealed class ForeignKey(
 
     /// <summary>
     /// True iff the FK was added via <c>ALTER TABLE … WITH NOCHECK ADD
-    /// CONSTRAINT</c>, which bypasses the existing-row validation pass.
-    /// Surfaces in <c>sys.foreign_keys.is_not_trusted</c>. Mutable so a
-    /// future <c>WITH CHECK CHECK CONSTRAINT name</c> can flip it back (not
-    /// yet wired). False for FKs declared at <c>CREATE TABLE</c> (real SQL
-    /// Server treats CREATE-time FKs as trusted unconditionally).
+    /// CONSTRAINT</c> or disabled via <c>ALTER TABLE … NOCHECK CONSTRAINT</c>,
+    /// either of which bypasses the existing-row validation pass. Cleared by
+    /// <c>ALTER TABLE … WITH CHECK CHECK CONSTRAINT name</c> on successful
+    /// re-validation. Surfaces in <c>sys.foreign_keys.is_not_trusted</c>.
+    /// False for FKs declared at <c>CREATE TABLE</c> (real SQL Server treats
+    /// CREATE-time FKs as trusted unconditionally).
     /// </summary>
     public bool IsNotTrusted;
+
+    /// <summary>
+    /// True iff the FK was disabled via <c>ALTER TABLE … NOCHECK CONSTRAINT
+    /// name</c>. While disabled, INSERT / UPDATE on the child skips FK
+    /// validation, and DELETE / UPDATE on the parent skips both the
+    /// NO-ACTION reject and any CASCADE / SET NULL / SET DEFAULT action
+    /// (probe-confirmed: disabled CASCADE leaves children orphaned when
+    /// parent deletes). Cleared by <c>ALTER TABLE … CHECK CONSTRAINT name</c>.
+    /// Surfaces in <c>sys.foreign_keys.is_disabled</c>. Independent of
+    /// <see cref="IsNotTrusted"/>: re-enabling with bare <c>CHECK
+    /// CONSTRAINT</c> (no <c>WITH CHECK</c> prefix) clears
+    /// <see cref="IsDisabled"/> but leaves <see cref="IsNotTrusted"/>
+    /// untouched.
+    /// </summary>
+    public bool IsDisabled;
 
     /// <summary>
     /// True iff <see cref="ChildTable"/> is the same instance as

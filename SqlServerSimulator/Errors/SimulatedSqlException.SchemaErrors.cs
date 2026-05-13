@@ -731,4 +731,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ConstraintReferencedByForeignKey(string constraintName, string referencingTable, string referencingFkName) =>
         new($"The constraint '{constraintName}' is being referenced by table '{referencingTable}', foreign key constraint '{referencingFkName}'.", 3725, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 4917: <c>ALTER TABLE … (CHECK | NOCHECK)
+    /// CONSTRAINT name</c> named a constraint that doesn't exist on the
+    /// target table. Probe-confirmed verbatim (distinct from Msg 3728's
+    /// <c>'name' is not a constraint.</c> shape — same scope, different
+    /// wording per the action verb).
+    /// </summary>
+    internal static SimulatedSqlException ConstraintDoesNotExist(string name) =>
+        new($"Constraint '{name}' does not exist.", 4917, 16, 0);
 }

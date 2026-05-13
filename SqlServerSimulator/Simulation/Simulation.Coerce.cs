@@ -201,6 +201,8 @@ partial class Simulation
         var runtime = new RuntimeContext(ResolveByName, batch);
         foreach (var check in destinationTable.CheckConstraints)
         {
+            if (check.IsDisabled)
+                continue;
             if (check.Predicate.Run(runtime) == false)
                 throw SimulatedSqlException.CheckConstraintViolation(check.Name, destinationTable.Name, check.InlineColumn, verb);
         }

@@ -150,7 +150,6 @@ The 8-hex suffix is deterministic across runs (FNV-1a over table name + column n
 
 ## Fidelity gaps
 
-- **`WITH CHECK CHECK CONSTRAINT name` (re-trust)** — Not parsed. Once a FK is added `WITH NOCHECK`, `IsNotTrusted = true` is one-way until DROP + re-ADD. Probe-confirmed wording (`ALTER TABLE t WITH CHECK CHECK CONSTRAINT fk_x`) raises `NotSupportedException`.
 - **`key_index_id` in `sys.foreign_keys`** — Always reports `1`. Real SQL Server reports the index id on the parent table that backs the FK's referenced columns; the simulator has no index storage, so 1 is the canonical "the FK is backed by the parent's PK / first UQ" answer.
 - **Composite FK that references a multi-column UNIQUE where the column order differs from the FK column order** — accepted by `ReferencedColumnsFormKey`'s set-equality check; real SQL Server matches the column order as declared. Probe didn't surface this case; the simulator's matching rule is slightly looser.
 - **`OBJECT_ID(name, 'F')`** — Returns NULL. The handful of `F`-filter callers in the wild can use `select object_id from sys.foreign_keys where name = …` instead.

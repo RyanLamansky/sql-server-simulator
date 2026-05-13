@@ -579,6 +579,148 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>
+    /// Parses <c>ALTER TABLE … (CHECK | NOCHECK) CONSTRAINT (ALL | name [,…])</c>.
+    /// Cursor on <c>CHECK</c> or <c>NOCHECK</c> on entry. <paramref name="disable"/>
+    /// flips <see cref="ForeignKey.IsDisabled"/> / <see cref="CheckConstraint.IsDisabled"/>;
+    /// <paramref name="revalidate"/> (only true under <c>WITH CHECK</c>
+    /// prefix) re-runs the existing-row scan and clears <see cref="ForeignKey.IsNotTrusted"/>
+    /// / <see cref="CheckConstraint.IsNotTrusted"/> on success.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Behavior matrix (probe-confirmed against SQL Server 2025):
+    /// </para>
+    /// <list type="bullet">
+    /// <item><c>NOCHECK CONSTRAINT name</c> → IsDisabled = true, IsNotTrusted = true.</item>
+    /// <item><c>CHECK CONSTRAINT name</c> (bare) → IsDisabled = false; IsNotTrusted untouched (stays true if the constraint had been disabled before).</item>
+    /// <item><c>WITH CHECK CHECK CONSTRAINT name</c> → IsDisabled = false; revalidate existing rows. On Msg 547 conflict, raise; on success, IsNotTrusted = false.</item>
+    /// </list>
+    /// <para>
+    /// <c>ALL</c> targets every FK + CHECK on the table. Multi-name
+    /// resolution is atomic: any missing name (Msg 4917) prevents all
+    /// mutations.
+    /// </para>
+    /// </remarks>
+    private static bool TryParseAlterTableTrustToggle(ParserContext context, MultiPartName tableName, bool disable, bool revalidate)
+    {
+        // Cursor on CHECK or NOCHECK; advance to CONSTRAINT.
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Constraint })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        context.MoveNextRequired();
+        var allMode = false;
+        var names = new List<string>();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.All })
+        {
+            allMode = true;
+            context.MoveNextOptional();
+        }
+        else
+        {
+            if (context.Token is not Name firstName)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            names.Add(firstName.Value);
+            context.MoveNextOptional();
+            while (context.Token is Operator { Character: ',' })
+            {
+                if (context.GetNextRequired() is not Name next)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                names.Add(next.Value);
+                context.MoveNextOptional();
+            }
+        }
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+
+        // Two-pass resolve: gather targets first; any miss raises Msg 4917
+        // before any mutation (atomicity).
+        var fkTargets = new List<ForeignKey>();
+        var ckTargets = new List<CheckConstraint>();
+        if (allMode)
+        {
+            fkTargets.AddRange(table.OutgoingForeignKeys);
+            ckTargets.AddRange(table.CheckConstraints);
+        }
+        else
+        {
+            foreach (var name in names)
+            {
+                var matchedFk = false;
+                foreach (var fk in table.OutgoingForeignKeys)
+                {
+                    if (Collation.Default.Equals(fk.Name, name))
+                    {
+                        fkTargets.Add(fk);
+                        matchedFk = true;
+                        break;
+                    }
+                }
+                if (matchedFk)
+                    continue;
+                var matchedCk = false;
+                foreach (var ck in table.CheckConstraints)
+                {
+                    if (Collation.Default.Equals(ck.Name, name))
+                    {
+                        ckTargets.Add(ck);
+                        matchedCk = true;
+                        break;
+                    }
+                }
+                if (!matchedCk)
+                    throw SimulatedSqlException.ConstraintDoesNotExist(name);
+            }
+        }
+
+        // Apply. For revalidate, the scan runs against each target with
+        // IsDisabled cleared so the FK / CHECK enforcement walks would
+        // normally fire — but we use the AlterAdd-bundle's validation
+        // helpers, which scan independently.
+        foreach (var fk in fkTargets)
+        {
+            if (disable)
+            {
+                fk.IsDisabled = true;
+                fk.IsNotTrusted = true;
+            }
+            else
+            {
+                if (revalidate)
+                {
+                    // Temporarily lift IsDisabled so the validation scan
+                    // doesn't accidentally early-exit on the table's other
+                    // disabled constraints (the helper only scans this FK).
+                    ValidateExistingRowsForForeignKey(context, table, fk);
+                    fk.IsNotTrusted = false;
+                }
+                fk.IsDisabled = false;
+            }
+        }
+        foreach (var ck in ckTargets)
+        {
+            if (disable)
+            {
+                ck.IsDisabled = true;
+                ck.IsNotTrusted = true;
+            }
+            else
+            {
+                if (revalidate)
+                {
+                    ValidateExistingRowsForCheckConstraint(context, table, ck);
+                    ck.IsNotTrusted = false;
+                }
+                ck.IsDisabled = false;
+            }
+        }
+        return true;
+    }
+
     private enum DropConstraintFamily { None, Key, Check, ForeignKey, Default }
 
     private sealed record DropConstraintAction(DropConstraintFamily Family, KeyConstraint? Key, CheckConstraint? Check, ForeignKey? ForeignKey, HeapColumn? DefaultColumn);

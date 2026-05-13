@@ -28,6 +28,8 @@ partial class Simulation
             return;
         foreach (var fk in childTable.OutgoingForeignKeys)
         {
+            if (fk.IsDisabled)
+                continue;
             foreach (var newRow in newRows)
             {
                 if (FkTupleHasNull(fk.ChildColumnOrdinals, newRow))
@@ -67,6 +69,11 @@ partial class Simulation
 
         foreach (var fk in parentTable.IncomingForeignKeys)
         {
+            // Disabled FK skips both NO-ACTION reject and cascade actions —
+            // probe-confirmed: DELETE on parent leaves children orphaned even
+            // when the FK declared ON DELETE CASCADE.
+            if (fk.IsDisabled)
+                continue;
             // UPDATE on parent: skip the FK entirely when none of the FK's
             // referenced columns actually changed value. Compares pre/post on
             // the FK's referenced ordinals; an unchanged tuple is a no-op for
@@ -287,6 +294,8 @@ partial class Simulation
 
         foreach (var fk in parentTable.IncomingForeignKeys)
         {
+            if (fk.IsDisabled)
+                continue;
             // Only consider parent rows whose referenced columns actually
             // changed. Identity-PK + non-PK column UPDATEs become a no-op here.
             var changedPairs = new List<(SqlValue[] Old, SqlValue[] New)>(affectedPairs.Count);

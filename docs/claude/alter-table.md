@@ -1,6 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships three modeled shapes: `SET (SYSTEM_VERSIONING = OFF)` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, and `DROP CONSTRAINT [IF EXISTS] name [, …]`. ADD / DROP COLUMN, ALTER COLUMN, REBUILD, SWITCH PARTITION, and the SET-versioning-on direction raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-13.
+`ALTER TABLE` ships four modeled shapes: `SET (SYSTEM_VERSIONING = OFF)` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, and `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling). ADD / DROP COLUMN, ALTER COLUMN, REBUILD, SWITCH PARTITION, and the SET-versioning-on direction raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-13.
 
 ## Grammar
 
@@ -11,6 +11,10 @@ ALTER TABLE [schema.]table
 
 ALTER TABLE [schema.]table
     DROP CONSTRAINT [IF EXISTS] name [, name ...]
+
+ALTER TABLE [schema.]table
+    [WITH CHECK | WITH NOCHECK]
+    (CHECK | NOCHECK) CONSTRAINT (ALL | name [, name ...])
 ```
 
 `<body>` is one of:
@@ -56,6 +60,47 @@ Real SQL Server emits a trailing Msg 1750 / 1753 after the primary failure (`"Co
 
 The Msg 547 verb difference is the only wording variance between INSERT-time CHECK / FK violations and ALTER-time existing-data violations. The constraint name, table reference, and column suffix follow the same format.
 
+## Trust toggling — bulk-import recipe
+
+`NOCHECK CONSTRAINT name` disables enforcement on a specific FK / CHECK and sets both `IsDisabled = true` and `IsNotTrusted = true`. While disabled:
+
+- INSERT / UPDATE / MERGE skip the FK / CHECK validation.
+- DELETE / UPDATE on the parent skips both the NO-ACTION reject **and** any CASCADE / SET NULL / SET DEFAULT action (probe-confirmed: disabled CASCADE FK leaves children orphaned when the parent is deleted).
+
+`CHECK CONSTRAINT name` (bare, no `WITH CHECK` prefix) re-enables enforcement on subsequent rows but does **not** re-validate existing data — `IsDisabled = false` and `IsNotTrusted` stays `true`. Common gotcha.
+
+`WITH CHECK CHECK CONSTRAINT name` re-enables enforcement **and** re-validates existing data — raises Msg 547 with the `"ALTER TABLE statement"` prefix on the first conflicting row; on success, `IsDisabled = false` and `IsNotTrusted = false`.
+
+`ALL` targets every FK + CHECK on the table at once. The same toggle action applies uniformly to every constraint on the target.
+
+| Shape | IsDisabled | IsNotTrusted | Revalidate existing? |
+|-------|------------|--------------|----------------------|
+| `NOCHECK CONSTRAINT name` | → true | → true | No |
+| `CHECK CONSTRAINT name` | → false | unchanged | No |
+| `WITH CHECK CHECK CONSTRAINT name` | → false | → false (on success) | Yes |
+| `WITH NOCHECK CHECK CONSTRAINT name` | → false | unchanged | No |
+
+Probe-confirmed error paths:
+
+| Condition | Behavior |
+|-----------|----------|
+| Constraint name not found | Msg 4917 (`Constraint 'name' does not exist.`) |
+| Multi-name with one missing | Atomic — all names resolved first; Msg 4917 prevents all mutations |
+| Trailing comma | Msg 102 |
+| Revalidation failure (WITH CHECK CHECK) | Msg 547 with `"ALTER TABLE statement"` prefix |
+
+The bulk-import recipe:
+
+```sql
+ALTER TABLE Orders NOCHECK CONSTRAINT ALL;
+-- Push large batch; FK + CHECK ignored, even if rows would have violated.
+ALTER TABLE Orders CHECK CONSTRAINT ALL;
+-- Enforcement back on for subsequent DML; existing data marked is_not_trusted.
+-- Optional: ALTER TABLE Orders WITH CHECK CHECK CONSTRAINT ALL;
+-- if you want the optimizer to trust the data (and accept Msg 547 if any row
+-- violates).
+```
+
 ## DROP CONSTRAINT
 
 ```sql
@@ -86,7 +131,8 @@ First hit wins (collation-insensitive). Probe-confirmed shapes:
 
 - `HeapTable.KeyConstraints` / `CheckConstraints` are `List<>` (the reference is `readonly`, contents mutable) so ADD / DROP can append / remove in place. Inline at CREATE TABLE still goes through the same lists.
 - `HeapTable.OutgoingForeignKeys` / `IncomingForeignKeys` already lists pre-existing (introduced with the FK bundle).
-- `ForeignKey.IsNotTrusted` / `CheckConstraint.IsNotTrusted` are mutable bool fields, false on CREATE-time inline / true on WITH-NOCHECK ALTER ADD.
+- `ForeignKey.IsNotTrusted` / `CheckConstraint.IsNotTrusted` are mutable bool fields, false on CREATE-time inline / true on WITH-NOCHECK ALTER ADD / true after `NOCHECK CONSTRAINT`. Cleared by `WITH CHECK CHECK CONSTRAINT` on successful revalidation.
+- `ForeignKey.IsDisabled` / `CheckConstraint.IsDisabled` are independent mutable bools — true after `NOCHECK CONSTRAINT`, false after either `CHECK CONSTRAINT` form. The enforcement loops (`EnforceCheckConstraints`, `EnforceOutgoingForeignKeys`, `EnforceIncomingForeignKeys`, `EnforceIncomingFkOnUpdate`) skip when `IsDisabled` — including suppressing cascade actions.
 - `CheckConstraint.IsSystemNamed` flags auto-named CHECKs; `KeyConstraint` infers the same from its name prefix (no explicit flag).
 - `HeapColumn.Default` is now mutable (ALTER ADD DEFAULT sets, ALTER DROP CONSTRAINT clears).
 - `HeapColumn.DefaultConstraint` is the named metadata wrapper alongside `Default` — populated at inline DEFAULT (auto-named, `IsSystemNamed = true`) and named ALTER ADD DEFAULT (explicit name, `IsSystemNamed = false`).
@@ -99,14 +145,13 @@ Three new views ship with this bundle:
 - **`sys.key_constraints`** — one row per PRIMARY KEY / UNIQUE constraint, with `type` = `PK` / `UQ`, `type_desc` = `PRIMARY_KEY_CONSTRAINT` / `UNIQUE_CONSTRAINT`, and `is_system_named` inferred from the auto-name prefix.
 - **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id` and `is_system_named`.
 
-`sys.foreign_keys.is_not_trusted` now reads from `ForeignKey.IsNotTrusted` (previously hardcoded `0`).
+`sys.foreign_keys.is_not_trusted` / `is_disabled` now read from `ForeignKey.IsNotTrusted` / `IsDisabled`; `sys.check_constraints.is_not_trusted` / `is_disabled` read from the corresponding `CheckConstraint` flags.
 
 ## Fidelity gaps
 
 - **Single primary error instead of error pair** — real SQL Server emits Msg X + trailing Msg 1750 / 3727 (`"Could not create constraint or index"` / `"Could not drop constraint"`); the simulator emits only Msg X. Test code asserting on the primary error number works unchanged.
 - **`sys.check_constraints.definition` / `sys.default_constraints.definition` return NULL** — the simulator stores parsed Expression trees, not source text. Real SQL Server reformats predicates as e.g. `([qty]>(0))`. Adding source-text capture is straightforward (slice the parser's source between balanced parens) but no probed application reads these columns.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named. Custom names matching the prefix would report `is_system_named = true` incorrectly. Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
-- **`WITH NOCHECK` is one-way** — once `IsNotTrusted = true`, there's no `WITH CHECK CHECK CONSTRAINT name` to flip it back. Probe-confirmed wording (`ALTER TABLE t WITH CHECK CHECK CONSTRAINT fk_x`) raises `NotSupportedException` at parse.
 - **Multi-constraint ADD in one statement** — `ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY (id), CONSTRAINT fk1 FOREIGN KEY (p_id) REFERENCES p(id)` raises `NotSupportedException`. Real SQL Server supports it; EF Migrations doesn't emit it.
 - **`ALTER TABLE … DROP CONSTRAINT name1, , name2`** (empty middle element) — accepted by real SQL Server; the simulator's grammar rejects with Msg 102.
 - **Defaults' parent_column_id for inline-DEFAULT-on-computed-column** — the simulator allows inline DEFAULT on computed columns (which real SQL Server rejects with Msg 8183). Edge case unlikely in practice.

@@ -435,17 +435,17 @@ partial class Simulation
         // Cursor is on the last name segment; advance to the post-name token.
         context.MoveNextRequired();
 
-        // Optional WITH CHECK | WITH NOCHECK preceding ADD. Only meaningful
-        // for FK / CHECK adds; ignored for PK / UQ / DEFAULT (probe-confirmed:
-        // SQL Server accepts the prefix on any ADD but only honors it for
-        // FK / CHECK).
-        var withNoCheck = false;
+        // Optional WITH CHECK | WITH NOCHECK preceding ADD or CHECK / NOCHECK
+        // CONSTRAINT. Default differs by action: ADD defaults to validate
+        // (= WITH CHECK), CHECK CONSTRAINT defaults to skip-validate (= WITH
+        // NOCHECK). Track tri-state so each branch can apply its own default.
+        bool? withCheckExplicit = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            withNoCheck = context.GetNextRequired() switch
+            withCheckExplicit = context.GetNextRequired() switch
             {
-                ReservedKeyword { Keyword: Keyword.Check } => false,
-                ReservedKeyword { Keyword: Keyword.NoCheck } => true,
+                ReservedKeyword { Keyword: Keyword.Check } => true,
+                ReservedKeyword { Keyword: Keyword.NoCheck } => false,
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
             context.MoveNextRequired();
@@ -454,17 +454,29 @@ partial class Simulation
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Set }:
-                if (withNoCheck)
+                if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableSetSystemVersioning(context, tableName);
             case ReservedKeyword { Keyword: Keyword.Add }:
-                return TryParseAlterTableAddConstraint(context, tableName, withNoCheck);
+                // ADD defaults to validate; only explicit WITH NOCHECK skips.
+                return TryParseAlterTableAddConstraint(context, tableName, withNoCheck: withCheckExplicit == false);
             case ReservedKeyword { Keyword: Keyword.Drop }:
-                if (withNoCheck)
+                if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableDropConstraint(context, tableName);
+            case ReservedKeyword { Keyword: Keyword.Check }:
+                // CHECK CONSTRAINT — re-enable enforcement on existing
+                // constraint(s). Default skip-validate; explicit WITH CHECK
+                // revalidates and clears IsNotTrusted on success.
+                return TryParseAlterTableTrustToggle(context, tableName, disable: false, revalidate: withCheckExplicit == true);
+            case ReservedKeyword { Keyword: Keyword.NoCheck }:
+                // NOCHECK CONSTRAINT — disable enforcement. WITH-prefix is
+                // semantically irrelevant (NOCHECK always implies "don't
+                // validate"); probe shows real SQL Server accepts but ignores
+                // the prefix here.
+                return TryParseAlterTableTrustToggle(context, tableName, disable: true, revalidate: false);
             default:
-                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD [CONSTRAINT] …, and DROP CONSTRAINT … shapes.");
+                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD / DROP CONSTRAINT, and CHECK / NOCHECK CONSTRAINT shapes.");
         }
     }
 
