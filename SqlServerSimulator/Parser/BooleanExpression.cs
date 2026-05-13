@@ -121,49 +121,156 @@ internal abstract class BooleanExpression
 
     /// <summary>
     /// Parses a single comparison: equality, inequality, ordered comparison,
-    /// or LIKE/NOT LIKE. Caller must have already parsed the left side.
+    /// LIKE/NOT LIKE, IS [NOT] NULL, [NOT] IN, or a quantified subquery
+    /// comparison (<c>op {ANY|SOME|ALL} (SELECT ...)</c>). Caller must have
+    /// already parsed the left side; on entry <see cref="ParserContext.Token"/>
+    /// is the comparison operator or keyword. On return, the token is the
+    /// first token not consumed by the predicate atom.
     /// </summary>
-    private static BooleanExpression ParseComparison(Expression left, ParserContext context) => context.Token switch
+    private static BooleanExpression ParseComparison(Expression left, ParserContext context)
     {
-        Operator { Character: '=' } => new EqualityExpression(left, context),
-        Operator { Character: '>' } => context.GetNextRequired() switch
+        switch (context.Token)
         {
-            Operator { Character: '=' } => new GreaterThanOrEqualExpression(left, context),
-            _ => new GreaterThanExpression(left, Expression.Parse(context))
-        },
-        Operator { Character: '<' } => context.GetNextRequired() switch
+            case ReservedKeyword { Keyword: Keyword.Like }:
+                return ParseLike(left, context, negated: false);
+            case ReservedKeyword { Keyword: Keyword.Is }:
+                return ParseIsNullSuffix(left, context);
+            case ReservedKeyword { Keyword: Keyword.In }:
+                return ParseInList(left, context, negated: false);
+            case ReservedKeyword { Keyword: Keyword.Not }:
+                return context.GetNextRequired() switch
+                {
+                    ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: true),
+                    ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: true),
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                };
+        }
+
+        // Identify the binary-comparison operator and advance past its 1- or 2-
+        // character form. After the switch, context.Token is positioned on the
+        // first token of the RHS (a value expression, or ANY/SOME/ALL keyword
+        // introducing a quantified-subquery comparison).
+        ComparisonOp op;
+        switch (context.Token)
         {
-            Operator { Character: '=' } => new LessThanOrEqualExpression(left, context),
-            Operator { Character: '>' } => new InequalityExpression(left, context),
-            _ => new LessThanExpression(left, Expression.Parse(context)),
-        },
-        Operator { Character: '!' } => context.GetNextRequired() switch
+            case Operator { Character: '=' }:
+                op = ComparisonOp.Equal;
+                context.MoveNextRequired();
+                break;
+            case Operator { Character: '>' }:
+                context.MoveNextRequired();
+                if (context.Token is Operator { Character: '=' })
+                {
+                    op = ComparisonOp.GreaterOrEqual;
+                    context.MoveNextRequired();
+                }
+                else
+                {
+                    op = ComparisonOp.Greater;
+                }
+                break;
+            case Operator { Character: '<' }:
+                context.MoveNextRequired();
+                switch (context.Token)
+                {
+                    case Operator { Character: '=' }:
+                        op = ComparisonOp.LessOrEqual;
+                        context.MoveNextRequired();
+                        break;
+                    case Operator { Character: '>' }:
+                        op = ComparisonOp.NotEqual;
+                        context.MoveNextRequired();
+                        break;
+                    default:
+                        op = ComparisonOp.Less;
+                        break;
+                }
+                break;
+            case Operator { Character: '!' }:
+                context.MoveNextRequired();
+                op = context.Token switch
+                {
+                    Operator { Character: '=' } => ComparisonOp.NotEqual,
+                    Operator { Character: '>' } => ComparisonOp.LessOrEqual,
+                    Operator { Character: '<' } => ComparisonOp.GreaterOrEqual,
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                };
+                context.MoveNextRequired();
+                break;
+            // No comparison / LIKE / IS / IN / NOT-IN / NOT-LIKE following the LHS:
+            // the user wrote a value-typed expression where a boolean predicate
+            // was expected (IF / WHERE / HAVING / ON / CASE-WHEN / CHECK). Probe-
+            // confirmed (2026-05-11) that real SQL Server raises Msg 4145 here,
+            // not Msg 102 — the wording specifically calls out non-boolean type.
+            // The "near 'X'" suffix is the current token (the one that should have
+            // been a comparison op); for paren-wrapped value cases like
+            // `IF (1) select`, real SQL Server reports the post-paren token where
+            // the simulator reports the in-paren token, a minor positional gap.
+            default:
+                throw SimulatedSqlException.NonBooleanInConditionContext(context.Token);
+        }
+
+        // Quantified comparison: <op> {ANY|SOME|ALL} (SELECT ...). Probe-
+        // confirmed (2026-05-13) that real SQL Server only accepts this form
+        // in predicate position; using it in a SELECT-list expression slot
+        // raises Msg 102 at the operator. The simulator naturally inherits
+        // that restriction because the quantified form is reachable only
+        // through BooleanExpression's ParseAtom path.
+        if (context.Token is ReservedKeyword { Keyword: var quantifier } &&
+            quantifier is Keyword.Any or Keyword.Some or Keyword.All)
         {
-            Operator { Character: '=' } => new InequalityExpression(left, context),
-            Operator { Character: '>' } => new LessThanOrEqualExpression(left, context),
-            Operator { Character: '<' } => new GreaterThanOrEqualExpression(left, context),
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context)
-        },
-        ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: false),
-        ReservedKeyword { Keyword: Keyword.Is } => ParseIsNullSuffix(left, context),
-        ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: false),
-        ReservedKeyword { Keyword: Keyword.Not } => context.GetNextRequired() switch
+            var kind = quantifier == Keyword.All ? QuantifiedKind.All : QuantifiedKind.Any;
+            if (context.GetNextRequired() is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            if (inner.Schema.Length != 1)
+                throw SimulatedSqlException.SubqueryNotIntroducedWithExists();
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            return new QuantifiedComparisonExpression(left, op, kind, inner);
+        }
+
+        // Regular comparison: RHS is a value expression.
+        var right = Expression.Parse(context);
+        return op switch
         {
-            ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: true),
-            ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: true),
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-        },
-        // No comparison / LIKE / IS / IN / NOT-IN / NOT-LIKE following the LHS:
-        // the user wrote a value-typed expression where a boolean predicate
-        // was expected (IF / WHERE / HAVING / ON / CASE-WHEN / CHECK). Probe-
-        // confirmed (2026-05-11) that real SQL Server raises Msg 4145 here,
-        // not Msg 102 — the wording specifically calls out non-boolean type.
-        // The "near 'X'" suffix is the current token (the one that should have
-        // been a comparison op); for paren-wrapped value cases like
-        // `IF (1) select`, real SQL Server reports the post-paren token where
-        // the simulator reports the in-paren token, a minor positional gap.
-        _ => throw SimulatedSqlException.NonBooleanInConditionContext(context.Token),
-    };
+            ComparisonOp.Equal => new EqualityExpression(left, right),
+            ComparisonOp.NotEqual => new InequalityExpression(left, right),
+            ComparisonOp.Less => new LessThanExpression(left, right),
+            ComparisonOp.LessOrEqual => new LessThanOrEqualExpression(left, right),
+            ComparisonOp.Greater => new GreaterThanExpression(left, right),
+            _ => new GreaterThanOrEqualExpression(left, right),
+        };
+    }
+
+    /// <summary>
+    /// The six binary comparison operators, with the T-SQL synonyms (<c>!=</c>,
+    /// <c>!&gt;</c>, <c>!&lt;</c>) folded into their canonical forms at parse
+    /// time (so the runtime only sees six shapes regardless of source spelling).
+    /// </summary>
+    internal enum ComparisonOp
+    {
+        Equal,
+        NotEqual,
+        Less,
+        LessOrEqual,
+        Greater,
+        GreaterOrEqual,
+    }
+
+    /// <summary>
+    /// Direction of a quantified comparison subquery. <c>SOME</c> is a pure
+    /// synonym of <c>ANY</c> in SQL Server, collapsed to <see cref="Any"/> at
+    /// parse time.
+    /// </summary>
+    internal enum QuantifiedKind
+    {
+        Any,
+        All,
+    }
 
     private static LikeExpression ParseLike(Expression left, ParserContext context, bool negated)
     {
@@ -449,6 +556,84 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
+    /// Quantified-subquery comparison: <c>lhs op {ANY|SOME|ALL} (SELECT col FROM ...)</c>.
+    /// Probe-confirmed (2026-05-13) semantics:
+    /// <list type="bullet">
+    /// <item><c>ALL</c> over the empty subquery is vacuously <c>true</c>;
+    /// <c>ANY</c> over the empty subquery is vacuously <c>false</c>. Both ignore
+    /// LHS NULL when the inner is empty.</item>
+    /// <item>Once at least one inner row exists, NULL on either side of any
+    /// per-row comparison turns that row's result into UNKNOWN.</item>
+    /// <item><c>ALL</c>: if any row's comparison is <c>false</c>, result is
+    /// <c>false</c>; otherwise UNKNOWN if any was NULL-tainted, else <c>true</c>.</item>
+    /// <item><c>ANY</c> / <c>SOME</c>: if any row's comparison is <c>true</c>,
+    /// result is <c>true</c>; otherwise UNKNOWN if any was NULL-tainted, else
+    /// <c>false</c>.</item>
+    /// </list>
+    /// </summary>
+    private sealed class QuantifiedComparisonExpression(Expression left, ComparisonOp op, QuantifiedKind kind, Selection inner) : BooleanExpression
+    {
+        public override bool? Run(RuntimeContext runtime)
+        {
+            var lhs = left.Run(runtime);
+            var (operatorName, compare) = GetComparator(op);
+
+            var anyRow = false;
+            var sawUnknown = false;
+            var sawDefinitiveTrue = false;
+            var sawDefinitiveFalse = false;
+
+            var resultSet = inner.Execute(runtime.Batch, runtime.ResolveColumn);
+            foreach (var rowBytes in resultSet.RowBytes)
+            {
+                anyRow = true;
+                var rowValue = RowDecoder.DecodeColumn(resultSet.Schema, rowBytes, 0);
+
+                var perRow = CompareValuesPromoted(lhs, rowValue, operatorName, compare);
+                if (perRow == true)
+                    sawDefinitiveTrue = true;
+                else if (perRow == false)
+                    sawDefinitiveFalse = true;
+                else
+                    sawUnknown = true;
+            }
+
+            return !anyRow
+                ? kind == QuantifiedKind.All
+                : kind == QuantifiedKind.All
+                    ? (sawDefinitiveFalse ? false : sawUnknown ? null : true)
+                    : (sawDefinitiveTrue ? true : sawUnknown ? null : false);
+        }
+
+        internal override string DebugDisplay()
+        {
+            var opText = op switch
+            {
+                ComparisonOp.Equal => "=",
+                ComparisonOp.NotEqual => "<>",
+                ComparisonOp.Less => "<",
+                ComparisonOp.LessOrEqual => "<=",
+                ComparisonOp.Greater => ">",
+                _ => ">=",
+            };
+            var kindText = kind == QuantifiedKind.All ? "ALL" : "ANY";
+            return $"{left.DebugDisplay()} {opText} {kindText} (...)";
+        }
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(left);
+
+        private static (string OperatorName, Func<SqlValue, SqlValue, bool> Compare) GetComparator(ComparisonOp op) => op switch
+        {
+            ComparisonOp.Equal => ("equal to", static (l, r) => l.Equals(r)),
+            ComparisonOp.NotEqual => ("not equal to", static (l, r) => !l.Equals(r)),
+            ComparisonOp.Less => ("less than", static (l, r) => l.CompareTo(r) < 0),
+            ComparisonOp.LessOrEqual => ("less than or equal to", static (l, r) => l.CompareTo(r) <= 0),
+            ComparisonOp.Greater => ("greater than", static (l, r) => l.CompareTo(r) > 0),
+            _ => ("greater than or equal to", static (l, r) => l.CompareTo(r) >= 0),
+        };
+    }
+
+    /// <summary>
     /// Three-valued <c>NOT</c>: <c>NOT true = false</c>, <c>NOT false = true</c>,
     /// <c>NOT NULL = NULL</c>. The NULL pass-through is what makes
     /// <c>WHERE NOT (col = X)</c> exclude NULL rows in SQL Server (NULL
@@ -484,11 +669,6 @@ internal abstract class BooleanExpression
         {
             this.left = left;
             this.right = right;
-        }
-
-        private protected CompareExpression(Expression left, ParserContext context)
-            : this(left, Expression.Parse(context.MoveNextRequiredReturnSelf()))
-        {
         }
 
         /// <summary>
@@ -534,7 +714,7 @@ internal abstract class BooleanExpression
         return compare(l.CoerceTo(common), r.CoerceTo(common));
     }
 
-    private sealed class EqualityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
+    private sealed class EqualityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
             ComparePromoted(left, right, runtime, "equal to", static (l, r) => l.Equals(r));
@@ -542,7 +722,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
     }
 
-    private sealed class InequalityExpression(Expression left, ParserContext context) : CompareExpression(left, context)
+    private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
             ComparePromoted(left, right, runtime, "not equal to", static (l, r) => !l.Equals(r));
@@ -558,7 +738,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
     }
 
-    private sealed class GreaterThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
+    private sealed class GreaterThanOrEqualExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
             ComparePromoted(left, right, runtime, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
@@ -574,7 +754,7 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
     }
 
-    private sealed class LessThanOrEqualExpression(Expression left, ParserContext context) : CompareExpression(left, context)
+    private sealed class LessThanOrEqualExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
             ComparePromoted(left, right, runtime, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
