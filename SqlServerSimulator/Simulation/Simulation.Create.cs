@@ -657,7 +657,21 @@ partial class Simulation
                 actualNullable = false;
             }
 
-            heapColumns.Add(new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden));
+            var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden);
+            if (defaultExpression is not null)
+            {
+                // Inline DEFAULT (with or without an explicit CONSTRAINT name)
+                // surfaces in sys.default_constraints — auto-name when no
+                // CONSTRAINT name was given. Real SQL Server's inline-DEFAULT
+                // names look like DF__<table8>__<col>__<8hex>.
+                newColumn.DefaultConstraint = new DefaultConstraint(
+                    AutoDefaultName(tableName, columnName.Value),
+                    defaultExpression,
+                    context.CurrentDatabase.AllocateObjectId(),
+                    isSystemNamed: true,
+                    definition: null);
+            }
+            heapColumns.Add(newColumn);
             explicitNull.Add(nullable == true);
         } while (context.Token is Operator { Character: ',' });
 
@@ -875,22 +889,61 @@ partial class Simulation
     /// </summary>
     private static string AutoCheckName(string tableName, string? inlineColumn, int declarationIndex)
     {
-        const uint fnvOffset32 = 2166136261;
-        const uint fnvPrime32 = 16777619;
-        var h = fnvOffset32;
-        foreach (var ch in tableName)
-            h = (h ^ ch) * fnvPrime32;
-        h = (h ^ (byte)':') * fnvPrime32;
+        var h = Fnv1a32.Initial;
+        h.MixTableSeed(tableName);
         if (inlineColumn is not null)
+            h.Mix(inlineColumn);
+        h.Mix((byte)declarationIndex);
+        return FormatAutoConstraintName("CK__", tableName, inlineColumn, h.Value);
+    }
+
+    /// <summary>
+    /// Shared FNV-1a 32-bit accumulator for the CK / FK / DF auto-name hash
+    /// suffixes. The PK / UQ variant (see <see cref="AutoConstraintName"/>)
+    /// uses a 64-bit hash with X16 formatting — matching real SQL Server's
+    /// 16-hex suffix for those — and stays separate.
+    /// </summary>
+    internal struct Fnv1a32
+    {
+        private const uint Offset = 2166136261;
+        private const uint Prime = 16777619;
+
+        public uint Value;
+
+        public static Fnv1a32 Initial => new() { Value = Offset };
+
+        public void Mix(string s)
         {
-            foreach (var ch in inlineColumn)
-                h = (h ^ ch) * fnvPrime32;
+            foreach (var ch in s)
+                this.Value = (this.Value ^ ch) * Prime;
         }
-        h = (h ^ (byte)declarationIndex) * fnvPrime32;
-        var truncatedTable = tableName.Length > 8 ? tableName[..8] : tableName;
-        return inlineColumn is null
-            ? $"CK__{truncatedTable}__{h:X8}"
-            : $"CK__{truncatedTable}__{(inlineColumn.Length > 8 ? inlineColumn[..8] : inlineColumn)}__{h:X8}";
+
+        public void Mix(byte b) => this.Value = (this.Value ^ b) * Prime;
+
+        /// <summary>
+        /// Convenience: mix the table-seed prefix (<paramref name="tableName"/>
+        /// followed by a <c>:</c> separator). Every auto-name helper opens
+        /// with this pair.
+        /// </summary>
+        public void MixTableSeed(string tableName)
+        {
+            this.Mix(tableName);
+            this.Mix((byte)':');
+        }
+    }
+
+    /// <summary>
+    /// Shared formatter for the 8-hex-suffix auto-name shape used by CK / FK
+    /// / DF: <c>&lt;prefix&gt;&lt;table8&gt;__&lt;hash:X8&gt;</c>, with an
+    /// optional <c>&lt;column8&gt;__</c> middle segment when
+    /// <paramref name="optionalColumn"/> is non-null.
+    /// </summary>
+    internal static string FormatAutoConstraintName(string prefix, string tableName, string? optionalColumn, uint hash)
+    {
+        var t8 = tableName.Length > 8 ? tableName[..8] : tableName;
+        return optionalColumn is null
+            ? $"{prefix}{t8}__{hash:X8}"
+            : $"{prefix}{t8}__{(optionalColumn.Length > 8 ? optionalColumn[..8] : optionalColumn)}__{hash:X8}";
     }
 
     /// <summary>
@@ -1241,7 +1294,11 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Set } => ParseSetActionTail(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        context.MoveNextRequired();
+        // MoveNextOptional rather than Required: ALTER TABLE ADD CONSTRAINT
+        // can leave the cascade clause as the final token of the batch (no
+        // trailing , or )). CREATE TABLE inline always has a follow-on token
+        // and tolerates this.
+        context.MoveNextOptional();
         return action;
 
         static ReferentialAction CheckNoActionTail(ParserContext context) =>
@@ -1591,22 +1648,15 @@ partial class Simulation
     /// </summary>
     private static string AutoForeignKeyName(string childTableName, string[] childColumnNames, int declarationIndex)
     {
-        const uint fnvOffset32 = 2166136261;
-        const uint fnvPrime32 = 16777619;
-        var h = fnvOffset32;
-        foreach (var ch in childTableName)
-            h = (h ^ ch) * fnvPrime32;
-        h = (h ^ (byte)':') * fnvPrime32;
+        var h = Fnv1a32.Initial;
+        h.MixTableSeed(childTableName);
         foreach (var col in childColumnNames)
         {
-            foreach (var ch in col)
-                h = (h ^ ch) * fnvPrime32;
-            h = (h ^ (byte)',') * fnvPrime32;
+            h.Mix(col);
+            h.Mix((byte)',');
         }
-        h = (h ^ (byte)declarationIndex) * fnvPrime32;
-        var truncated = childTableName.Length > 8 ? childTableName[..8] : childTableName;
-        return childColumnNames.Length == 1
-            ? $"FK__{truncated}__{(childColumnNames[0].Length > 8 ? childColumnNames[0][..8] : childColumnNames[0])}__{h:X8}"
-            : $"FK__{truncated}__{h:X8}";
+        h.Mix((byte)declarationIndex);
+        var singleCol = childColumnNames.Length == 1 ? childColumnNames[0] : null;
+        return FormatAutoConstraintName("FK__", childTableName, singleCol, h.Value);
     }
 }

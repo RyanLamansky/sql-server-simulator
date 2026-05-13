@@ -794,7 +794,7 @@ partial class Simulation
     /// </summary>
     private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
     {
-        if (table.KeyConstraints.Length == 0)
+        if (table.KeyConstraints.Count == 0)
             return;
 
         var affectedAddrs = new HashSet<(int, int)>();

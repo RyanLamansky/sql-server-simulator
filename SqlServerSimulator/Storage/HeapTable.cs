@@ -14,8 +14,8 @@ internal sealed class HeapTable : SchemaObject
         : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {
         this.Columns = columns;
-        this.KeyConstraints = keyConstraints ?? [];
-        this.CheckConstraints = checkConstraints ?? [];
+        this.KeyConstraints = keyConstraints is null ? [] : [.. keyConstraints];
+        this.CheckConstraints = checkConstraints is null ? [] : [.. checkConstraints];
         this.IsTableVariable = isTableVariable;
         this.IsTableValuedParameter = isTableValuedParameter;
         this.PeriodColumns = periodColumns;
@@ -102,19 +102,22 @@ internal sealed class HeapTable : SchemaObject
 
     /// <summary>
     /// PRIMARY KEY and UNIQUE constraints declared in the CREATE TABLE
-    /// statement, in declaration order. Enforced linear-scan at INSERT/MERGE
-    /// by <c>EnforceKeyConstraints</c>; SQL Server's NULLs-equal-for-UNIQUE
-    /// rule applies. Empty when the table declares neither.
+    /// statement (or added later via <c>ALTER TABLE ADD CONSTRAINT</c>), in
+    /// declaration order. Enforced linear-scan at INSERT / MERGE by
+    /// <c>EnforceKeyConstraints</c>; SQL Server's NULLs-equal-for-UNIQUE rule
+    /// applies. The list reference is fixed at construction; entries are
+    /// appended / removed by ALTER TABLE.
     /// </summary>
-    public readonly KeyConstraint[] KeyConstraints;
+    public readonly List<KeyConstraint> KeyConstraints;
 
     /// <summary>
-    /// CHECK constraints declared on the table or its columns, in declaration
-    /// order. Evaluated per-row at INSERT / MERGE; Msg 547 fires on any
-    /// <c>false</c> predicate result. NULL operands flow through as
-    /// UNKNOWN → row passes (SQL Server's standard CHECK semantics).
+    /// CHECK constraints declared on the table or its columns (or added later
+    /// via <c>ALTER TABLE ADD CONSTRAINT</c>), in declaration order. Evaluated
+    /// per-row at INSERT / MERGE; Msg 547 fires on any <c>false</c> predicate
+    /// result. NULL operands flow through as UNKNOWN → row passes (SQL
+    /// Server's standard CHECK semantics).
     /// </summary>
-    public readonly CheckConstraint[] CheckConstraints;
+    public readonly List<CheckConstraint> CheckConstraints;
 
     /// <summary>The page-backed row store. Insert via <see cref="Heap.Insert"/>; iterate via <see cref="Heap.EnumerateRows"/>.</summary>
     public readonly Heap Heap = new();

@@ -580,6 +580,77 @@ internal static class BuiltInResources
         var isDomainsView = new CatalogView("DOMAINS", isDomainsColumns, batch =>
             EnumerateInformationSchemaDomains(batch, tableTypeDataType));
 
+        // sys.check_constraints: probe-confirmed 13-column shape (a subset
+        // of sys.objects + the check-specific columns). Used by EF Migrations'
+        // model snapshot and tooling that introspects existing CHECK rules.
+        var checkConstraintsColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("is_not_for_replication", SqlType.Bit, null, false),
+            new("is_not_trusted", SqlType.Bit, null, false),
+            new("parent_column_id", SqlType.Int32, null, false),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_database_collation", SqlType.Bit, null, false),
+            new("is_system_named", SqlType.Bit, null, false),
+        };
+        var checkConstraintsView = new CatalogView("check_constraints", checkConstraintsColumns, EnumerateSysCheckConstraints);
+
+        // sys.key_constraints: PK + UNIQUE rows, parallel shape to
+        // sys.foreign_keys. Probe-confirmed column set.
+        var keyConstraintsColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("unique_index_id", SqlType.Int32, null, false),
+            new("is_system_named", SqlType.Bit, null, false),
+            new("is_enforced", SqlType.Bit, null, false),
+        };
+        var keyConstraintsView = new CatalogView("key_constraints", keyConstraintsColumns, EnumerateSysKeyConstraints);
+
+        // sys.default_constraints: per-column named DEFAULT bindings. Real
+        // SQL Server emits one row per default (inline or named via ALTER).
+        var defaultConstraintsColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("parent_column_id", SqlType.Int32, null, false),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("is_system_named", SqlType.Bit, null, false),
+        };
+        var defaultConstraintsView = new CatalogView("default_constraints", defaultConstraintsColumns, EnumerateSysDefaultConstraints);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -595,6 +666,9 @@ internal static class BuiltInResources
             ["sys.triggers"] = triggersView,
             ["sys.foreign_keys"] = foreignKeysView,
             ["sys.foreign_key_columns"] = foreignKeyColumnsView,
+            ["sys.check_constraints"] = checkConstraintsView,
+            ["sys.key_constraints"] = keyConstraintsView,
+            ["sys.default_constraints"] = defaultConstraintsView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -735,7 +809,7 @@ internal static class BuiltInResources
                         keyIndexId,
                         falseBit,
                         falseBit,
-                        falseBit,
+                        fk.IsNotTrusted ? trueBit : falseBit,
                         SqlValue.FromByte((byte)fk.DeleteAction),
                         SqlValue.FromNVarchar(ReferentialActionDescription(fk.DeleteAction)),
                         SqlValue.FromByte((byte)fk.UpdateAction),
@@ -784,6 +858,165 @@ internal static class BuiltInResources
         ReferentialAction.SetDefault => "SET_DEFAULT",
         _ => "NO_ACTION",
     };
+
+    /// <summary>
+    /// Rows for <c>sys.check_constraints</c>: one row per CHECK constraint
+    /// across every table in every schema. <c>parent_column_id</c> is the
+    /// 1-based column id when the CHECK is column-attached (inline); 0 for
+    /// table-level. <c>definition</c> is currently null — the simulator
+    /// stores the parsed predicate tree, not source text (documented quirk).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysCheckConstraints(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var ckType = SqlValue.FromChar(CharSqlType.Get(2), "C ");
+        var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
+        var falseDbCollation = SqlValue.FromBoolean(false);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
+                {
+                    var parentColumnId = 0;
+                    if (ck.InlineColumn is { } inlineCol)
+                    {
+                        for (var i = 0; i < table.Columns.Length; i++)
+                        {
+                            if (Collation.Default.Equals(table.Columns[i].Name, inlineCol))
+                            {
+                                parentColumnId = i + 1;
+                                break;
+                            }
+                        }
+                    }
+                    var createDate = SqlValue.FromDateTime(table.CreateDate);
+                    yield return [
+                        SqlValue.FromSystemName(ck.Name),
+                        SqlValue.FromInt32(ck.ObjectId),
+                        nullPrincipal,
+                        schemaId,
+                        SqlValue.FromInt32(table.ObjectId),
+                        ckType,
+                        ckTypeDesc,
+                        createDate,
+                        createDate,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        ck.IsNotTrusted ? trueBit : falseBit,
+                        SqlValue.FromInt32(parentColumnId),
+                        ck.Definition is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(ck.Definition),
+                        falseDbCollation,
+                        ck.IsSystemNamed ? trueBit : falseBit,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.key_constraints</c>: PK + UNIQUE constraints across
+    /// every table. <c>type</c> = <c>PK</c> / <c>UQ</c>;
+    /// <c>type_desc</c> = <c>PRIMARY_KEY_CONSTRAINT</c> / <c>UNIQUE_CONSTRAINT</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysKeyConstraints(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var charTwo = CharSqlType.Get(2);
+        var pkType = SqlValue.FromChar(charTwo, "PK");
+        var uqType = SqlValue.FromChar(charTwo, "UQ");
+        var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
+        var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
+                {
+                    var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
+                    var createDate = SqlValue.FromDateTime(table.CreateDate);
+                    // PK gets a system-named flag iff the name starts with
+                    // "PK__"; UQ similarly. The simulator tracks is_system_named
+                    // on FK / CHECK explicitly; for KeyConstraint we infer from
+                    // the auto-name prefix since the existing storage doesn't
+                    // carry the flag.
+                    var systemNamed = key.Name.StartsWith(isPk ? "PK__" : "UQ__", StringComparison.Ordinal);
+                    yield return [
+                        SqlValue.FromSystemName(key.Name),
+                        SqlValue.FromInt32(key.ObjectId),
+                        nullPrincipal,
+                        schemaId,
+                        SqlValue.FromInt32(table.ObjectId),
+                        isPk ? pkType : uqType,
+                        isPk ? pkTypeDesc : uqTypeDesc,
+                        createDate,
+                        createDate,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        SqlValue.FromInt32(1),
+                        systemNamed ? trueBit : falseBit,
+                        trueBit,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.default_constraints</c>: one row per named DEFAULT
+    /// binding. Inline DEFAULT at CREATE TABLE and ALTER TABLE ADD DEFAULT
+    /// both populate; inline-without-CONSTRAINT-name auto-generates with
+    /// <see cref="DefaultConstraint.IsSystemNamed"/> = true.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDefaultConstraints(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var dfType = SqlValue.FromChar(CharSqlType.Get(2), "D ");
+        var dfTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                for (var i = 0; i < table.Columns.Length; i++)
+                {
+                    var col = table.Columns[i];
+                    if (col.DefaultConstraint is not { } df)
+                        continue;
+                    var createDate = SqlValue.FromDateTime(table.CreateDate);
+                    yield return [
+                        SqlValue.FromSystemName(df.Name),
+                        SqlValue.FromInt32(df.ObjectId),
+                        nullPrincipal,
+                        schemaId,
+                        SqlValue.FromInt32(table.ObjectId),
+                        dfType,
+                        dfTypeDesc,
+                        createDate,
+                        createDate,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        SqlValue.FromInt32(i + 1),
+                        df.Definition is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(df.Definition),
+                        df.IsSystemNamed ? trueBit : falseBit,
+                    ];
+                }
+            }
+        }
+    }
 
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
         Parser.BatchContext batch,

@@ -130,4 +130,34 @@ partial class SimulatedSqlException
             $"The {verb} statement conflicted with the REFERENCE constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{childSchema}.{childTable}\"{columnSuffix}.",
             547, 16, 0);
     }
+
+    /// <summary>
+    /// Mimics SQL Server error 547 in the <c>ALTER TABLE ADD CONSTRAINT</c>
+    /// existing-data-validation variant for a new FOREIGN KEY. Same shape as
+    /// <see cref="ForeignKeyConflictOnChild"/> but with the verb fixed to
+    /// <c>"ALTER TABLE"</c>. Probe-confirmed against SQL Server 2025
+    /// (2026-05-13).
+    /// </summary>
+    internal static SimulatedSqlException AlterForeignKeyConflict(string constraintName, string referencedTableQualified, string? referencedColumn, bool isSelfReferencing)
+    {
+        var keyKindWord = isSelfReferencing ? "FOREIGN KEY SAME TABLE" : "FOREIGN KEY";
+        var columnSuffix = referencedColumn is null ? "" : $", column '{referencedColumn}'";
+        return new(
+            $"The ALTER TABLE statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{referencedTableQualified}\"{columnSuffix}.",
+            547, 16, 0);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 547 in the <c>ALTER TABLE ADD CONSTRAINT</c>
+    /// existing-data-validation variant for a new CHECK constraint. Same
+    /// shape as the runtime CHECK variant but with the verb fixed to
+    /// <c>"ALTER TABLE"</c>. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException AlterCheckConstraintConflict(string constraintName, string tableName, string? inlineColumn)
+    {
+        var columnSuffix = inlineColumn is null ? "" : $", column '{inlineColumn}'";
+        return new(
+            $"The ALTER TABLE statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.",
+            547, 16, 0);
+    }
 }

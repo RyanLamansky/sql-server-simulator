@@ -83,6 +83,16 @@ internal sealed class ForeignKey(
     public readonly bool IsSystemNamed = isSystemNamed;
 
     /// <summary>
+    /// True iff the FK was added via <c>ALTER TABLE … WITH NOCHECK ADD
+    /// CONSTRAINT</c>, which bypasses the existing-row validation pass.
+    /// Surfaces in <c>sys.foreign_keys.is_not_trusted</c>. Mutable so a
+    /// future <c>WITH CHECK CHECK CONSTRAINT name</c> can flip it back (not
+    /// yet wired). False for FKs declared at <c>CREATE TABLE</c> (real SQL
+    /// Server treats CREATE-time FKs as trusted unconditionally).
+    /// </summary>
+    public bool IsNotTrusted;
+
+    /// <summary>
     /// True iff <see cref="ChildTable"/> is the same instance as
     /// <see cref="ReferencedTable"/>. Drives the <c>"FOREIGN KEY SAME TABLE"</c>
     /// substitution in Msg 547 (probe-confirmed wording difference).

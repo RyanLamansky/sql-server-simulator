@@ -31,4 +31,27 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     /// owning table.
     /// </summary>
     public readonly int ObjectId = objectId;
+
+    /// <summary>
+    /// True when the constraint's name was auto-generated rather than
+    /// supplied via <c>CONSTRAINT name</c>. Surfaces in
+    /// <c>sys.check_constraints.is_system_named</c>.
+    /// </summary>
+    public bool IsSystemNamed;
+
+    /// <summary>
+    /// True iff added via <c>ALTER TABLE … WITH NOCHECK ADD CONSTRAINT</c>
+    /// (existing-row validation bypassed). Surfaces in
+    /// <c>sys.check_constraints.is_not_trusted</c>. False for CREATE-time
+    /// CHECK constraints.
+    /// </summary>
+    public bool IsNotTrusted;
+
+    /// <summary>
+    /// Round-trippable text form of <see cref="Predicate"/> for
+    /// <c>sys.check_constraints.definition</c>. Captured from the parser's
+    /// source text at parse time (canonical form `([col]&gt;(0))`) — real
+    /// SQL Server reformats with the same bracket / paren wrapping.
+    /// </summary>
+    public string? Definition;
 }

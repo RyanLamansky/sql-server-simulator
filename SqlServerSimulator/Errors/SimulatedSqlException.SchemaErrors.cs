@@ -1,3 +1,5 @@
+using SqlServerSimulator.Storage;
+
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
@@ -656,4 +658,77 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CascadeCycleOrMultiplePathsRejected(string constraintName, string tableName) =>
         new($"Introducing FOREIGN KEY constraint '{constraintName}' on table '{tableName}' may cause cycles or multiple cascade paths. Specify ON DELETE NO ACTION or ON UPDATE NO ACTION, or modify other FOREIGN KEY constraints.", 1785, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1779: <c>ALTER TABLE … ADD CONSTRAINT … PRIMARY
+    /// KEY</c> attempted to add a second PRIMARY KEY to a table that already
+    /// declares one. Probe-confirmed verbatim wording against SQL Server 2025
+    /// (2026-05-13).
+    /// </summary>
+    internal static SimulatedSqlException PrimaryKeyAlreadyExists(string tableName) =>
+        new($"Table '{tableName}' already has a primary key defined on it.", 1779, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1505: <c>ALTER TABLE … ADD CONSTRAINT …
+    /// PRIMARY KEY / UNIQUE</c> would create a unique index over existing
+    /// data containing duplicate key tuples. Real SQL Server wraps the
+    /// duplicate-on-create message in CREATE-UNIQUE-INDEX framing
+    /// (distinct from the runtime INSERT-time Msg 2627). The simulator
+    /// renders the key tuple via <see cref="SqlValue"/>'s default ToString
+    /// per column, comma-joined inside parens.
+    /// </summary>
+    internal static SimulatedSqlException DuplicateKeyOnCreate(string qualifiedTableName, string indexName, SqlValue[] keyValues)
+    {
+        var rendered = string.Join(", ", keyValues.Select(v => v.IsNull ? "<NULL>" : v.ToString()));
+        return new($"The CREATE UNIQUE INDEX statement terminated because a duplicate key was found for the object name '{qualifiedTableName}' and the index name '{indexName}'. The duplicate key value is ({rendered}).", 1505, 16, 1);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 1781: <c>ALTER TABLE … ADD CONSTRAINT …
+    /// DEFAULT</c> for a column that already has a default constraint.
+    /// Real SQL Server allows at most one default per column.
+    /// </summary>
+    internal static SimulatedSqlException ColumnAlreadyHasDefault() =>
+        new("Column already has a DEFAULT bound to it.", 1781, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1752: <c>ALTER TABLE … ADD CONSTRAINT …
+    /// DEFAULT (…) FOR col</c> named a column that doesn't exist on the
+    /// target table.
+    /// </summary>
+    internal static SimulatedSqlException DefaultColumnInvalid(string columnName, string tableName) =>
+        new($"Column '{columnName}' in table '{tableName}' is invalid for creating a default constraint.", 1752, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1769: <c>ADD CONSTRAINT … FOREIGN KEY (col)
+    /// REFERENCES …</c> named a child column that doesn't exist on the
+    /// referencing table.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyInvalidColumn(string columnName, string tableName, string foreignKeyName) =>
+        new($"Foreign key '{foreignKeyName}' references invalid column '{columnName}' in referencing table '{tableName}'.", 1769, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1911: <c>ADD CONSTRAINT … UNIQUE (col)</c>
+    /// named a column that doesn't exist on the target table. Real SQL
+    /// Server uses this same Msg for any "index-or-key referenced a missing
+    /// column" path.
+    /// </summary>
+    internal static SimulatedSqlException IndexColumnMissing(string columnName) =>
+        new($"Column name '{columnName}' does not exist in the target table, index or view.", 1911, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3728: <c>ALTER TABLE … DROP CONSTRAINT</c>
+    /// named a constraint that doesn't exist on the target table. Probe-
+    /// confirmed wording — name appears single-quoted.
+    /// </summary>
+    internal static SimulatedSqlException NotAConstraint(string name) =>
+        new($"'{name}' is not a constraint.", 3728, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3725: <c>ALTER TABLE … DROP CONSTRAINT</c>
+    /// targeted a PRIMARY KEY / UNIQUE constraint still referenced by an
+    /// incoming FOREIGN KEY. Probe-confirmed wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException ConstraintReferencedByForeignKey(string constraintName, string referencingTable, string referencingFkName) =>
+        new($"The constraint '{constraintName}' is being referenced by table '{referencingTable}', foreign key constraint '{referencingFkName}'.", 3725, 16, 0);
 }

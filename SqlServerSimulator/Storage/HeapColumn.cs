@@ -63,8 +63,21 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// Parsed <c>DEFAULT</c> expression — non-null when the column declared
     /// one. Evaluated per-row in the INSERT path whenever the column is
     /// omitted from the destination list, replacing the implicit-NULL fill.
+    /// Mutable: <c>ALTER TABLE … ADD CONSTRAINT … DEFAULT (expr) FOR col</c>
+    /// sets this in lockstep with <see cref="DefaultConstraint"/>;
+    /// <c>DROP CONSTRAINT</c> clears both.
     /// </summary>
-    public readonly Expression? Default = defaultExpression;
+    public Expression? Default = defaultExpression;
+
+    /// <summary>
+    /// Named <c>DEFAULT</c> constraint metadata wrapper — paired with
+    /// <see cref="Default"/>. Surfaces the constraint identity through
+    /// <c>sys.default_constraints</c> and serves as the lookup target for
+    /// <c>ALTER TABLE DROP CONSTRAINT</c>. Inline <c>DEFAULT</c> at
+    /// <c>CREATE TABLE</c> auto-allocates a system-named entry; explicit
+    /// <c>CONSTRAINT name</c> records the user-supplied name.
+    /// </summary>
+    public DefaultConstraint? DefaultConstraint;
 
     /// <summary>
     /// Parsed computed-column expression (<c>col AS expr</c>); non-null only

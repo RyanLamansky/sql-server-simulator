@@ -185,7 +185,7 @@ partial class Simulation
     /// </summary>
     private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT")
     {
-        if (destinationTable.CheckConstraints.Length == 0)
+        if (destinationTable.CheckConstraints.Count == 0)
             return;
 
         SqlValue ResolveByName(MultiPartName reference)
@@ -222,7 +222,7 @@ partial class Simulation
     /// </summary>
     private static void EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] storedRowValues)
     {
-        if (destinationTable.KeyConstraints.Length == 0)
+        if (destinationTable.KeyConstraints.Count == 0)
             return;
 
         var storedColumns = destinationTable.StoredColumns;
