@@ -610,19 +610,49 @@ partial class Simulation
         do
         {
             context.MoveNextRequired();
-            Expression expr;
             // $action pseudo-column: detected by the tokenizer's $action
             // single-token emission. Synthesize a literal reference that
             // the runtime resolves to the action verb via the row context.
             if (context.Token is UnquotedString u && u.Value.Equals("$action", StringComparison.OrdinalIgnoreCase))
             {
-                expr = new MergeActionReference();
+                Expression actionExpr = new MergeActionReference();
                 context.MoveNextOptional();
+                switch (context.Token)
+                {
+                    case ReservedKeyword { Keyword: Keyword.As }:
+                        actionExpr = Expression.AssignName(actionExpr, context.GetNextRequired<Name>());
+                        context.MoveNextOptional();
+                        break;
+                    case Name actionAlias:
+                        actionExpr = Expression.AssignName(actionExpr, actionAlias);
+                        context.MoveNextOptional();
+                        break;
+                }
+                expressions.Add(actionExpr);
+                columnNames.Add(string.IsNullOrEmpty(actionExpr.Name) ? "$action" : actionExpr.Name);
+                continue;
             }
-            else
+            if (TryDetectStarReference(context, out var starQualifier))
             {
-                expr = Expression.Parse(context);
+                string[]? cols = null;
+                if (Collation.Default.Equals(starQualifier, "INSERTED")
+                    || Collation.Default.Equals(starQualifier, "DELETED"))
+                {
+                    cols = new string[destinationTable.Columns.Length];
+                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                        cols[i] = destinationTable.Columns[i].Name;
+                }
+                else if (Collation.Default.Equals(starQualifier, sourceAlias))
+                {
+                    cols = sourceColumnNames;
+                }
+                if (cols is null)
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");
+                AppendStarExpansion(starQualifier, cols, expressions, columnNames);
+                context.MoveNextOptional();
+                continue;
             }
+            var expr = Expression.Parse(context);
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.As }:
@@ -635,7 +665,7 @@ partial class Simulation
                     break;
             }
             expressions.Add(expr);
-            columnNames.Add(string.IsNullOrEmpty(expr.Name) && IsMergeActionRef(expr) ? "$action" : expr.Name);
+            columnNames.Add(expr.Name);
         }
         while (context.Token is Operator { Character: ',' });
 

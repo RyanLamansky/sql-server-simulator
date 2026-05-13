@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -6,6 +7,72 @@ namespace SqlServerSimulator;
 
 partial class Simulation
 {
+    /// <summary>
+    /// Detects an <c>&lt;qualifier&gt;.*</c> star reference at the current
+    /// cursor position. When present, leaves the cursor on the <c>*</c>
+    /// operator (caller appends the expansion then calls
+    /// <see cref="ParserContext.MoveNextOptional"/>) and returns the
+    /// qualifier name. When absent (the cursor sees a regular expression
+    /// or a qualified non-star reference), restores to the original
+    /// position and returns <see langword="false"/> so the caller can
+    /// fall through to <see cref="Expression.Parse"/>.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025 (2026-05-13): <c>INSERTED.*</c>
+    /// expands to every column of the destination table in storage order
+    /// (including identity / computed / default-bearing columns); <c>DELETED.*</c>
+    /// is the same shape; in MERGE OUTPUT the source-alias <c>s.*</c>
+    /// expands to the source's projected columns. Each expanded column
+    /// takes the underlying column's leaf name (not the qualified form).
+    /// <c>foo.* AS alias</c> isn't a valid shape — real SQL Server raises
+    /// Msg 102 ("Incorrect syntax near 'alias'"); the simulator inherits
+    /// that since star expansion advances past <c>*</c> and the parser
+    /// loop's alias-check sees the next token as either <c>,</c> or
+    /// statement-boundary, never a bare Name.
+    /// </remarks>
+    private static bool TryDetectStarReference(ParserContext context, out string qualifier)
+    {
+        qualifier = string.Empty;
+        if (context.Token is not Name namedToken)
+            return false;
+        var name = namedToken.Value;
+        var checkpoint = context.SaveCheckpoint();
+        if (!context.MoveNext() || context.Token is not Operator { Character: '.' })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return false;
+        }
+        if (!context.MoveNext() || context.Token is not Operator { Character: '*' })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return false;
+        }
+        qualifier = name;
+        return true;
+    }
+
+    /// <summary>
+    /// Appends one synthesized <see cref="Reference"/> per column in
+    /// <paramref name="columnNames"/> qualified by
+    /// <paramref name="qualifier"/>. Used by all three OUTPUT parsers
+    /// (mutation / insert / merge) for <c>INSERTED.* / DELETED.* /
+    /// &lt;source&gt;.*</c> expansion. The qualified Reference resolves
+    /// through the same per-row resolver that handles regular
+    /// <c>INSERTED.col</c> refs — no separate runtime path.
+    /// </summary>
+    private static void AppendStarExpansion(
+        string qualifier,
+        string[] columnNames,
+        List<Expression> expressions,
+        List<string> names)
+    {
+        for (var i = 0; i < columnNames.Length; i++)
+        {
+            expressions.Add(new Reference(qualifier, columnNames[i]));
+            names.Add(columnNames[i]);
+        }
+    }
+
     /// <summary>
     /// OUTPUT-clause parser for UPDATE / DELETE. Supports literal /
     /// parameter expressions and <c>INSERTED.&lt;col&gt;</c> /
@@ -44,6 +111,19 @@ partial class Simulation
         do
         {
             context.MoveNextRequired();
+            if (TryDetectStarReference(context, out var starQualifier))
+            {
+                var insertedRef = Collation.Default.Equals(starQualifier, "INSERTED");
+                var deletedRef = Collation.Default.Equals(starQualifier, "DELETED");
+                if ((insertedRef && !allowInserted) || (deletedRef && !allowDeleted) || (!insertedRef && !deletedRef))
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");
+                var columnNameList = new string[table.Columns.Length];
+                for (var i = 0; i < table.Columns.Length; i++)
+                    columnNameList[i] = table.Columns[i].Name;
+                AppendStarExpansion(starQualifier, columnNameList, expressions, names);
+                context.MoveNextOptional();
+                continue;
+            }
             var expr = Expression.Parse(context);
             switch (context.Token)
             {
@@ -341,6 +421,22 @@ partial class Simulation
         do
         {
             context.MoveNextRequired();
+            if (TryDetectStarReference(context, out var starQualifier))
+            {
+                if (Collation.Default.Equals(starQualifier, "INSERTED"))
+                {
+                    var cols = new string[destinationTable.Columns.Length];
+                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                        cols[i] = destinationTable.Columns[i].Name;
+                    AppendStarExpansion(starQualifier, cols, expressions, columnNames);
+                }
+                else
+                {
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");
+                }
+                context.MoveNextOptional();
+                continue;
+            }
             var expr = Expression.Parse(context);
             switch (context.Token)
             {

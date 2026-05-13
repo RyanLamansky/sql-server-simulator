@@ -163,7 +163,6 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - `LIKE` with `COLLATE` override (default collation only).
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121`.
 - `LEN(ntext)` raising Msg 8116; legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
-- `OUTPUT DELETED.*` / `INSERTED.*` star expansion. (`OUTPUT INTO <target>` ships for both `@t` and regular tables — see Table variables below.)
 - MERGE source as a CTE-headed SELECT (`USING (WITH cte AS … SELECT …)`) — Selection.Parse's CTE entry doesn't reach the USING-clause grammar; wrap the CTE inside a regular SELECT instead. MERGE inside a CTE body, multi-statement MERGE WHEN-clause bodies, and `MERGE INTO <view>` (real SQL Server's updatable-view MERGE) are also deferred.
 - `PRIMARY KEY` / `UNIQUE` on a computed column (`NotSupportedException`).
 - Heap allocation tracking (flat page list, no IAM/PFS).

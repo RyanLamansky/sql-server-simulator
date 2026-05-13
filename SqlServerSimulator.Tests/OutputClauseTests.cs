@@ -230,4 +230,179 @@ public class OutputClauseTests
             when not matched then insert (v) values (i.v);
             select scope_identity()
             """));
+
+    [TestMethod]
+    public void InsertOutput_InsertedStar_ExpandsAllColumns()
+    {
+        using var reader = new Simulation().CreateCommand("""
+            create table t (id int identity, v int, c char(2) default 'AB');
+            insert t (v) output inserted.* values (10), (20)
+            """).ExecuteReader();
+
+        Assert.AreEqual(3, reader.FieldCount);
+        Assert.AreEqual("id", reader.GetName(0));
+        Assert.AreEqual("v", reader.GetName(1));
+        Assert.AreEqual("c", reader.GetName(2));
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.AreEqual(10, reader.GetInt32(1));
+        Assert.AreEqual("AB", reader.GetString(2));
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(2, reader.GetInt32(0));
+        Assert.AreEqual(20, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void InsertOutput_StarMixedWithExtra_AppendsAfter()
+    {
+        using var reader = new Simulation().CreateCommand("""
+            create table t (id int identity, v int);
+            insert t (v) output inserted.*, 'tag' as note values (5)
+            """).ExecuteReader();
+
+        Assert.AreEqual(3, reader.FieldCount);
+        Assert.AreEqual("id", reader.GetName(0));
+        Assert.AreEqual("v", reader.GetName(1));
+        Assert.AreEqual("note", reader.GetName(2));
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.AreEqual(5, reader.GetInt32(1));
+        Assert.AreEqual("tag", reader.GetString(2));
+    }
+
+    [TestMethod]
+    public void UpdateOutput_InsertedAndDeletedStar_BothExpand()
+    {
+        using var reader = new Simulation().CreateCommand("""
+            create table t (id int primary key, v int);
+            insert t values (1, 10), (2, 20);
+            update t set v = v + 100
+            output inserted.*, deleted.*
+            where id = 1
+            """).ExecuteReader();
+
+        Assert.AreEqual(4, reader.FieldCount);
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.AreEqual(110, reader.GetInt32(1));
+        Assert.AreEqual(1, reader.GetInt32(2));
+        Assert.AreEqual(10, reader.GetInt32(3));
+    }
+
+    [TestMethod]
+    public void DeleteOutput_DeletedStar_ExpandsAllColumns()
+    {
+        using var reader = new Simulation().CreateCommand("""
+            create table t (id int primary key, v int, n nvarchar(10));
+            insert t values (1, 10, 'a'), (2, 20, 'b');
+            delete t output deleted.* where id = 1
+            """).ExecuteReader();
+
+        Assert.AreEqual(3, reader.FieldCount);
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.AreEqual(10, reader.GetInt32(1));
+        Assert.AreEqual("a", reader.GetString(2));
+    }
+
+    [TestMethod]
+    public void DeleteOutput_InsertedStar_RaisesMsg4104()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int primary key, v int);
+            delete t output inserted.* where id = 1
+            """, 4104);
+
+    [TestMethod]
+    public void InsertOutput_DeletedStar_RaisesMsg4104()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int primary key, v int);
+            insert t output deleted.* values (1, 10)
+            """, 4104);
+
+    [TestMethod]
+    public void InsertOutput_StarInto_MatchesTargetColumnCount()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using (var setup = conn.CreateCommand())
+        {
+            setup.CommandText = "create table t (id int identity, v int); create table audit (id int, v int)";
+            _ = setup.ExecuteNonQuery();
+        }
+        using (var ins = conn.CreateCommand())
+        {
+            ins.CommandText = "insert t (v) output inserted.* into audit values (50)";
+            _ = ins.ExecuteNonQuery();
+        }
+        using var verify = conn.CreateCommand();
+        verify.CommandText = "select id, v from audit";
+        using var reader = verify.ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.AreEqual(50, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void MergeOutput_InsertedAndDeletedStar_NullForUnmatchedSide()
+    {
+        using var reader = new Simulation().CreateCommand("""
+            create table t (id int primary key, v int);
+            insert t values (1, 10);
+            merge t as tg
+            using (values (1, 100), (2, 200)) as s (id, v) on tg.id = s.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v)
+            output $action, inserted.*, deleted.*;
+            """).ExecuteReader();
+
+        Assert.AreEqual(5, reader.FieldCount);
+        var rows = new List<(string action, int? insId, int? insV, int? delId, int? delV)>();
+        while (reader.Read())
+        {
+            rows.Add((
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4)));
+        }
+        rows.Sort((a, b) => (a.insId ?? 0).CompareTo(b.insId ?? 0));
+        Assert.HasCount(2, rows);
+        Assert.AreEqual("UPDATE", rows[0].action);
+        Assert.AreEqual(1, rows[0].insId);
+        Assert.AreEqual(100, rows[0].insV);
+        Assert.AreEqual(1, rows[0].delId);
+        Assert.AreEqual(10, rows[0].delV);
+        Assert.AreEqual("INSERT", rows[1].action);
+        Assert.AreEqual(2, rows[1].insId);
+        Assert.AreEqual(200, rows[1].insV);
+        Assert.IsNull(rows[1].delId);
+        Assert.IsNull(rows[1].delV);
+    }
+
+    [TestMethod]
+    public void MergeOutput_SourceAliasStar_ExpandsSourceColumns()
+    {
+        using var reader = new Simulation().CreateCommand("""
+            create table t (id int primary key, v int);
+            merge t
+            using (values (5, 50)) as s (id, v) on t.id = s.id
+            when not matched by target then insert (id, v) values (s.id, s.v)
+            output s.*;
+            """).ExecuteReader();
+
+        Assert.AreEqual(2, reader.FieldCount);
+        Assert.AreEqual("id", reader.GetName(0));
+        Assert.AreEqual("v", reader.GetName(1));
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(5, reader.GetInt32(0));
+        Assert.AreEqual(50, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void Output_StarWithUnknownQualifier_Msg4104()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int primary key, v int);
+            insert t output foo.* values (1, 10)
+            """, 4104);
 }
