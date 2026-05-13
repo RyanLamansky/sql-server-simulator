@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable : SchemaObject
 {
-    public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false)
+    public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false, (int StartOrdinal, int EndOrdinal)? periodColumns = null)
         : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {
         this.Columns = columns;
@@ -18,6 +18,7 @@ internal sealed class HeapTable : SchemaObject
         this.CheckConstraints = checkConstraints ?? [];
         this.IsTableVariable = isTableVariable;
         this.IsTableValuedParameter = isTableValuedParameter;
+        this.PeriodColumns = periodColumns;
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -142,6 +143,31 @@ internal sealed class HeapTable : SchemaObject
     /// UPDATE / DELETE / MERGE.
     /// </summary>
     public readonly bool IsTableValuedParameter;
+
+    /// <summary>
+    /// Non-null when the table declared <c>PERIOD FOR SYSTEM_TIME (startCol, endCol)</c>.
+    /// Carries the ordinals of the two <c>GENERATED ALWAYS AS ROW START / END</c>
+    /// columns that bound each row's system-versioned validity range. The
+    /// history table (when <c>SYSTEM_VERSIONING = ON</c>) mirrors these columns
+    /// at the same ordinals as the parent.
+    /// </summary>
+    public readonly (int StartOrdinal, int EndOrdinal)? PeriodColumns;
+
+    /// <summary>
+    /// Non-null on the parent of a system-versioned temporal table —
+    /// references the sibling history <see cref="HeapTable"/> auto-created at
+    /// <c>CREATE TABLE … WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))</c>
+    /// time. The history table itself has <see cref="SystemVersioning"/> =
+    /// <c>null</c> and <see cref="IsHistoryTable"/> = true.
+    /// </summary>
+    public HeapTable? SystemVersioning;
+
+    /// <summary>
+    /// True when this table is the history sibling of a system-versioned
+    /// temporal parent. Surfaces in <c>sys.tables.temporal_type</c> as 1; the
+    /// parent surfaces as 2.
+    /// </summary>
+    public bool IsHistoryTable;
 
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();

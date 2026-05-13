@@ -508,4 +508,97 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotTransferObjectOwnedByParent() =>
         new("Cannot transfer an object that is owned by a parent object.", 15347, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13501: a column declared <c>GENERATED ALWAYS
+    /// AS ROW START / END</c> must be typed <c>datetime2</c>. Probe-confirmed
+    /// wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException TemporalGeneratedColumnInvalidType(string columnName) =>
+        new($"Temporal generated always column '{columnName}' has invalid data type.", 13501, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13504: <c>PERIOD FOR SYSTEM_TIME (startCol, endCol)</c>
+    /// was declared but no column was declared <c>GENERATED ALWAYS AS ROW
+    /// START</c> to back it (or the start name didn't match any such column).
+    /// Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException TemporalRowStartMissing() =>
+        new("Temporal 'GENERATED ALWAYS AS ROW START' column definition missing.", 13504, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13505: symmetric to <see cref="TemporalRowStartMissing"/>
+    /// — no <c>GENERATED ALWAYS AS ROW END</c> column matched the period
+    /// definition's end name. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException TemporalRowEndMissing() =>
+        new("Temporal 'GENERATED ALWAYS AS ROW END' column definition missing.", 13505, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13506: <c>PERIOD FOR SYSTEM_TIME (start, end)</c>
+    /// names <c>start</c>, but the column either doesn't exist or isn't a
+    /// <c>GENERATED ALWAYS AS ROW START</c> column. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException TemporalPeriodStartNotMatching() =>
+        new("System-versioned table SYSTEM_TIME period definition start column name not matching 'GENERATED ALWAYS AS ROW START' column name.", 13506, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13507: symmetric to <see cref="TemporalPeriodStartNotMatching"/>
+    /// — the period's end column name doesn't match any <c>GENERATED ALWAYS
+    /// AS ROW END</c> column. Probe-confirmed wording (raised both when the
+    /// referenced column doesn't exist and when it exists but isn't
+    /// generated-as-row-end).
+    /// </summary>
+    internal static SimulatedSqlException TemporalPeriodEndNotMatching() =>
+        new("System-versioned table SYSTEM_TIME period definition end column name not matching 'GENERATED ALWAYS AS ROW END' column name.", 13507, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13509: at least one column is declared
+    /// <c>GENERATED ALWAYS AS ROW START / END</c> but the table has no
+    /// <c>PERIOD FOR SYSTEM_TIME</c> declaration backing it. Probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException TemporalGeneratedColumnWithoutPeriod() =>
+        new("Cannot create generated always column when SYSTEM_TIME period is not defined.", 13509, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13587: a period column on a system-versioned
+    /// temporal table was declared with explicit <c>NULL</c>. Probe-confirmed
+    /// wording (the implicit <c>NOT NULL</c> form is required).
+    /// </summary>
+    internal static SimulatedSqlException TemporalPeriodColumnNullable(string columnName) =>
+        new($"Period column '{columnName}' in a system-versioned temporal table cannot be nullable.", 13587, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13536: <c>INSERT</c> supplied an explicit
+    /// value for a column declared <c>GENERATED ALWAYS AS ROW START / END</c>.
+    /// Period columns are engine-populated and not user-writable. Probe-
+    /// confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotInsertExplicitGeneratedAlways(string qualifiedTableName) =>
+        new($"Cannot insert an explicit value into a GENERATED ALWAYS column in table '{qualifiedTableName}'. Use INSERT with a column list to exclude the GENERATED ALWAYS column, or insert a DEFAULT into GENERATED ALWAYS column.", 13536, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13537: <c>UPDATE</c> set a value on a column
+    /// declared <c>GENERATED ALWAYS AS ROW START / END</c>. Probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException CannotUpdateGeneratedAlways(string qualifiedTableName) =>
+        new($"Cannot update GENERATED ALWAYS columns in table '{qualifiedTableName}'.", 13537, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13559: a direct <c>INSERT</c> targeted the
+    /// history sibling of a system-versioned temporal table. History rows
+    /// are populated by the engine via UPDATE / DELETE on the parent.
+    /// Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotInsertIntoTemporalHistoryTable(string qualifiedTableName) =>
+        new($"Cannot insert rows in a temporal history table '{qualifiedTableName}'.", 13559, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13552: <c>DROP TABLE</c> rejected because the
+    /// target is a system-versioned temporal table (parent or history). The
+    /// caller must first <c>ALTER TABLE … SET (SYSTEM_VERSIONING = OFF)</c>.
+    /// Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropTemporalTable(string qualifiedTableName) =>
+        new($"Drop table operation failed on table '{qualifiedTableName}' because it is not a supported operation on system-versioned temporal tables.", 13552, 16, 1);
 }

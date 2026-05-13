@@ -149,6 +149,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Touching `CREATE TYPE … AS TABLE`, `DECLARE @t MyType`, TVP procedure parameters / `READONLY`, or the ADO.NET `DbParameter.TypeName` extension (DataTable / IDataReader as a TVP value source)** → [`docs/claude/table-valued-parameters.md`](docs/claude/table-valued-parameters.md).
 - **Touching `CREATE SEQUENCE` / `ALTER SEQUENCE` / `DROP SEQUENCE`, `NEXT VALUE FOR`, the per-row dedup mechanism (`BatchContext.CurrentRowStamp` / `SequenceRowCache`), or `sys.sequences`** → [`docs/claude/sequences.md`](docs/claude/sequences.md).
 - **Touching `CREATE TRIGGER` / `ALTER TRIGGER` / `DROP TRIGGER` / `DISABLE`/`ENABLE TRIGGER`, the `INSERTED` / `DELETED` pseudo-table materialization, the `TriggerFrame` / `FiringTriggerIds` recursion guard, `TRIGGER_NESTLEVEL()`, or `sys.triggers`** → [`docs/claude/triggers.md`](docs/claude/triggers.md).
+- **Touching `PERIOD FOR SYSTEM_TIME` / `GENERATED ALWAYS AS ROW START / END [HIDDEN]` / `WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))` DDL, the auto-created history sibling, `FOR SYSTEM_TIME ALL / AS OF` query syntax, or `HeapTable.PeriodColumns` / `HeapTable.SystemVersioning` / `HeapColumn.GeneratedAs` / `HeapColumn.IsHidden`** → [`docs/claude/temporal-tables.md`](docs/claude/temporal-tables.md).
 - **Adding a new top-level statement parser or changing the dispatch loop's statement-separator rules** → [`docs/claude/grammar.md`](docs/claude/grammar.md) + [`docs/claude/control-flow.md`](docs/claude/control-flow.md).
 
 ## Not modeled

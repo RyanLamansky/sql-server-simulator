@@ -191,6 +191,17 @@ internal readonly partial struct SqlValue
         "yyyy-MM-ddTHH:mm:ss.fffff",
         "yyyy-MM-ddTHH:mm:ss.ffffff",
         "yyyy-MM-ddTHH:mm:ss.fffffff",
+        // ISO 8601 with trailing 'Z' for UTC. EF Core 10 emits this form
+        // inline in FOR SYSTEM_TIME AS OF predicates. Real SQL Server
+        // accepts the Z marker and treats the value as UTC stored as-is.
+        "yyyy-MM-ddTHH:mm:ssZ",
+        "yyyy-MM-ddTHH:mm:ss.fZ",
+        "yyyy-MM-ddTHH:mm:ss.ffZ",
+        "yyyy-MM-ddTHH:mm:ss.fffZ",
+        "yyyy-MM-ddTHH:mm:ss.ffffZ",
+        "yyyy-MM-ddTHH:mm:ss.fffffZ",
+        "yyyy-MM-ddTHH:mm:ss.ffffffZ",
+        "yyyy-MM-ddTHH:mm:ss.fffffffZ",
     ];
 
     /// <summary>

@@ -301,7 +301,20 @@ partial class Simulation
         var destination = isTempTable
             ? context.Batch.Connection.TempTables
             : context.Batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
-        if (destination is null || !destination.TryRemove(name.Leaf, out var removedTable))
+        if (destination is null || !destination.TryGetValue(name.Leaf, out var removedTable))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
+        }
+        // DROP TABLE on a system-versioned temporal parent or its history
+        // sibling is rejected — caller must ALTER TABLE … SET (SYSTEM_VERSIONING
+        // = OFF) first (probe-confirmed Msg 13552 wording against SQL Server
+        // 2025). Applies to permanent tables only; temp tables can't be
+        // temporal so the gate doesn't fire there.
+        if (!isTempTable && (removedTable.IsHistoryTable || removedTable.SystemVersioning is not null))
+            throw SimulatedSqlException.CannotDropTemporalTable(QualifyTableName(removedTable, context.CurrentDatabase));
+        if (!destination.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
                 return;

@@ -107,10 +107,11 @@ partial class Simulation
         var hasDeleteTriggers = HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
         var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
+        var needsFullForHistory = table.SystemVersioning is not null;
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             SqlValue[]? fullValues = null;
-            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers)
+            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -152,7 +153,7 @@ partial class Simulation
                     continue;
             }
 
-            deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers) ? null : fullValues));
+            deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers && !needsFullForHistory) ? null : fullValues));
         }
 
         return CommitDelete(context, table, deleted, output, sourceView);
@@ -216,7 +217,8 @@ partial class Simulation
             SqlValue[]? fullValues = null;
             var needsFull = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
-                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete);
+                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete)
+                || table.SystemVersioning is not null;
             if (needsFull)
             {
                 fullValues = DecodeFullRow(table, targetBytes);
@@ -259,6 +261,21 @@ partial class Simulation
         }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
+        // System-versioned DELETE: copy each row's pre-delete state to
+        // history with ROW END = UtcNow before tombstoning the current row.
+        if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
+        {
+            var stampedNow = SqlValue.FromDateTime2(table.Columns[pc.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+            foreach (var (_, _, oldFull) in deleted)
+            {
+                if (oldFull is null)
+                    continue;
+                var historyRow = new SqlValue[oldFull.Length];
+                Array.Copy(oldFull, historyRow, oldFull.Length);
+                historyRow[pc.EndOrdinal] = stampedNow;
+                historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+            }
+        }
         foreach (var (pageIndex, slotIndex, _) in deleted)
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
 

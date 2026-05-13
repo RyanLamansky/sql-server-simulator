@@ -16,7 +16,7 @@ namespace SqlServerSimulator.Storage;
 /// </para>
 /// </remarks>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false)
 {
     public readonly string Name = name;
 
@@ -25,6 +25,24 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public readonly int? MaxLength = maxLength;
 
     public readonly bool Nullable = nullable;
+
+    /// <summary>
+    /// Non-<see cref="GeneratedAlwaysAsRow.None"/> when the column was declared
+    /// <c>GENERATED ALWAYS AS ROW START</c> or <c>GENERATED ALWAYS AS ROW END</c>.
+    /// Such columns participate in a <c>PERIOD FOR SYSTEM_TIME</c> declaration
+    /// and are populated by the engine on INSERT / UPDATE — explicit values
+    /// raise Msg 13536 (INSERT) / 13537 (UPDATE).
+    /// </summary>
+    public readonly GeneratedAlwaysAsRow GeneratedAs = generatedAs;
+
+    /// <summary>
+    /// True when the column was declared <c>HIDDEN</c> on a system-versioned
+    /// temporal table. Hidden columns participate in row storage and are
+    /// referenceable by explicit name (in SELECT lists, INSERT column lists,
+    /// OUTPUT clauses), but are omitted from <c>SELECT *</c> expansions —
+    /// matching SQL Server's <c>is_hidden</c> column metadata.
+    /// </summary>
+    public readonly bool IsHidden = isHidden;
 
     /// <summary>
     /// True for columns whose values flow through LOB-chain storage rather

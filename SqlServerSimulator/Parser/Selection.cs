@@ -1,3 +1,4 @@
+using System.Collections;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -1072,6 +1073,13 @@ internal sealed partial class Selection
                 for (var ci = 0; ci < heapColumnNames.Length; ci++)
                     heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
+                // Optional FOR SYSTEM_TIME (ALL | AS OF expr) between the
+                // table name and any alias. Only legal on a system-versioned
+                // parent; rejected on non-temporal tables (probe-confirmed
+                // Msg 13510 wording — surfaced via a SyntaxErrorNear here
+                // since the simulator doesn't carry the exact message).
+                var temporalRowSource = ParseOptionalForSystemTime(context, heapTable);
+
                 var heapAlias = ConsumeOptionalAlias(context);
                 var heapQualifier = heapAlias ?? objectName.Leaf;
 
@@ -1082,7 +1090,7 @@ internal sealed partial class Selection
                     storedSchema: heapTable.StoredColumns,
                     storageOrdinals: heapTable.StorageOrdinals,
                     lobStore: heapTable.Heap,
-                    rows: heapTable.Rows,
+                    rows: temporalRowSource ?? heapTable.Rows,
                     backingTable: heapTable);
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
@@ -1801,13 +1809,122 @@ internal sealed partial class Selection
 
         static void AppendSourceColumns(List<Expression> destination, FromSource source)
         {
-            foreach (var col in source.ColumnNames)
+            for (var i = 0; i < source.ColumnNames.Length; i++)
             {
+                // SELECT * excludes hidden columns (the period columns on a
+                // system-versioned temporal table). Probe-confirmed against
+                // SQL Server 2025: `select * from <temporal>` returns the
+                // non-hidden columns; explicit references continue to bind.
+                if (source.Columns[i].IsHidden)
+                    continue;
+                var col = source.ColumnNames[i];
                 destination.Add(source.Qualifier is { } q
                     ? new Reference(q, col)
                     : new Reference(col));
             }
         }
+    }
+
+    /// <summary>
+    /// Detects the optional <c>FOR SYSTEM_TIME ALL | AS OF expr</c> clause
+    /// between a table name and any alias in a FROM source. Returns the
+    /// composed row enumerator (parent rows + history rows, optionally
+    /// time-filtered) when present, or null when the clause isn't there.
+    /// </summary>
+    /// <remarks>
+    /// Only <c>ALL</c> and <c>AS OF</c> ship; <c>FROM … TO …</c>,
+    /// <c>BETWEEN … AND …</c>, and <c>CONTAINED IN (…, …)</c> raise
+    /// <see cref="NotSupportedException"/> until an application emission
+    /// requires them. Non-temporal target raises Msg 102 here (real SQL
+    /// Server raises Msg 13510 with a specific wording the simulator
+    /// doesn't carry yet — the rejection point is the same).
+    /// </remarks>
+    private static IEnumerable<byte[]>? ParseOptionalForSystemTime(ParserContext context, HeapTable heapTable)
+    {
+        // ConsumeOptionalAlias's contract: caller leaves cursor on the last
+        // table-name segment. To peek for FOR SYSTEM_TIME without breaking
+        // that contract, save a checkpoint and advance; restore on mismatch.
+        var checkpoint = context.SaveCheckpoint();
+        var nextToken = context.GetNextOptional();
+        if (nextToken is not ReservedKeyword { Keyword: Keyword.For })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return null;
+        }
+        var systemTimeToken = context.GetNextOptional();
+        if (systemTimeToken is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Time })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return null;
+        }
+        if (heapTable.SystemVersioning is null)
+            throw new NotSupportedException($"FOR SYSTEM_TIME on a non-temporal table '{heapTable.Name}' isn't allowed. The target must be system-versioned.");
+        var historyTable = heapTable.SystemVersioning;
+        if (heapTable.PeriodColumns is not { } pc)
+            throw new NotSupportedException($"FOR SYSTEM_TIME target '{heapTable.Name}' is missing its period columns.");
+
+        context.MoveNextRequired();
+        switch (context.Token)
+        {
+            // ALL: union of current + history rows, no time filter.
+            case ReservedKeyword { Keyword: Keyword.All }:
+                context.MoveNextOptional();
+                return heapTable.Rows.Concat(historyTable.Rows);
+            // AS OF expr: parent + history rows where start <= expr < end.
+            case ReservedKeyword { Keyword: Keyword.As }:
+                context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Of })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                var timeExpr = Expression.Parse(context);
+                return new TemporalAsOfRowSource(heapTable, historyTable, pc, timeExpr, context.Batch);
+            default:
+                throw new NotSupportedException("Only FOR SYSTEM_TIME ALL and FOR SYSTEM_TIME AS OF <expr> are modeled. BETWEEN / FROM … TO / CONTAINED IN are deferred.");
+        }
+    }
+}
+
+/// <summary>
+/// Lazy row source for <c>FOR SYSTEM_TIME AS OF expr</c>: yields rows from
+/// the parent and the history sibling whose period brackets the evaluated
+/// time point (start &lt;= t &lt; end). The time expression is evaluated
+/// once on iteration start (no per-row re-evaluation), matching the
+/// "constant per query" contract real SQL Server applies to the AS OF
+/// time expression.
+/// </summary>
+internal sealed class TemporalAsOfRowSource(HeapTable parent, HeapTable history, (int StartOrdinal, int EndOrdinal) period, Expression timeExpr, BatchContext batch) : IEnumerable<byte[]>
+{
+    public IEnumerator<byte[]> GetEnumerator()
+    {
+        // Evaluate the time expression once at iteration start. The
+        // resolver throws on any column reference — AS OF's expression
+        // is a parse-time / batch-state constant in real SQL Server.
+        var raw = timeExpr.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch));
+        // EF Core 10 emits AS OF '<iso-literal>' as a Varchar / NVarchar
+        // literal; coerce to datetime2 so the period filter compares ticks.
+        var timePoint = raw.CoerceTo(SqlType.GetDateTime2(7)).AsDateTime2;
+        var startStored = parent.StorageOrdinals[period.StartOrdinal];
+        var endStored = parent.StorageOrdinals[period.EndOrdinal];
+
+        foreach (var bytes in parent.Heap.EnumerateRows())
+        {
+            if (TemporalAsOfRowSource.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, timePoint))
+                yield return bytes;
+        }
+        foreach (var bytes in history.Heap.EnumerateRows())
+        {
+            if (TemporalAsOfRowSource.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, timePoint))
+                yield return bytes;
+        }
+    }
+
+    IEnumerator IEnumerable.GetEnumerator() => this.GetEnumerator();
+
+    private static bool RowMatches(HeapColumn[] storedColumns, byte[] bytes, Heap lobStore, int startStored, int endStored, DateTime timePoint)
+    {
+        var rowStart = RowDecoder.DecodeColumn(storedColumns, bytes, startStored, lobStore).AsDateTime2;
+        var rowEnd = RowDecoder.DecodeColumn(storedColumns, bytes, endStored, lobStore).AsDateTime2;
+        return rowStart <= timePoint && timePoint < rowEnd;
     }
 }
 

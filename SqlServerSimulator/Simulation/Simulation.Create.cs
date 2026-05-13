@@ -59,8 +59,18 @@ partial class Simulation
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
-        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed))
+        var pendingPeriod = new List<(string StartCol, string EndCol)>();
+        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod))
             return false;
+
+        // Optional trailing WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X))
+        // clause. Parsed regardless of skip mode so the cursor advances past
+        // it cleanly; the resulting historyTableName is only used after the
+        // skip-mode gate below.
+        context.MoveNextOptional();
+        MultiPartName? historyTableName = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            historyTableName = ParseSystemVersioningOption(context);
 
         // Pass 2: resolve computed columns now that every column's name has
         // been seen. The resolver throws Msg 1759 for any reference to another
@@ -201,6 +211,25 @@ partial class Simulation
 
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase);
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase);
+        var resolvedPeriod = ResolvePeriodColumns(heapColumns!, pendingPeriod);
+
+        // History-table pre-validation when SYSTEM_VERSIONING = ON: must have
+        // PeriodColumns on the parent, and the history table name's
+        // destination dict must accept it (schema lookup + collision check
+        // upfront so a history failure doesn't leave an orphan parent).
+        Schema? historySchema = null;
+        ConcurrentDictionary<string, HeapTable>? historyDestination = null;
+        if (historyTableName is { } hn)
+        {
+            if (resolvedPeriod is null)
+                throw new NotSupportedException("SYSTEM_VERSIONING = ON requires a PERIOD FOR SYSTEM_TIME declaration with matching GENERATED ALWAYS AS ROW START / END columns.");
+            if (!context.Batch.TryResolveSchema(hn, out historySchema))
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.Count >= 2 ? hn.ImmediateQualifier! : Database.DefaultSchemaName);
+            if (historySchema.HasNameInSharedNamespace(hn.Leaf))
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(hn.Leaf);
+            historyDestination = historySchema.HeapTables;
+        }
+
         var heapTable = new HeapTable(
             tableName.Leaf,
             [.. heapColumns!],
@@ -208,9 +237,25 @@ partial class Simulation
             schemaId,
             context.Batch.CurrentStatement.UtcNow,
             keyConstraints,
-            checkConstraints);
+            checkConstraints,
+            periodColumns: resolvedPeriod);
         if (!destination.TryAdd(heapTable.Name, heapTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
+
+        if (historyTableName is { } historyName && historyDestination is not null && historySchema is not null)
+        {
+            var historyTable = BuildHistoryTable(heapTable, historyName.Leaf, historySchema.SchemaId, context);
+            if (!historyDestination.TryAdd(historyTable.Name, historyTable))
+            {
+                // Roll back parent insertion if history-add raced — shouldn't
+                // happen given the pre-validation above, but keep both
+                // commits consistent if it does.
+                _ = destination.TryRemove(heapTable.Name, out _);
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(historyTable.Name);
+            }
+            heapTable.SystemVersioning = historyTable;
+        }
+
         // Temp-table DDL participates in transaction rollback: probe-confirmed
         // that a CREATE TABLE #foo inside BEGIN TRAN is undone by ROLLBACK on
         // real SQL Server. Regular CREATE TABLE isn't logged — a known
@@ -218,6 +263,80 @@ partial class Simulation
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
             tx.UndoLog.RecordTempTableCreation(context.Batch.Connection.TempTables, heapTable.Name);
         return true;
+    }
+
+    /// <summary>
+    /// Parses the trailing <c>WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X))</c>
+    /// option after a CREATE TABLE column list. Cursor on entry: the <c>WITH</c>
+    /// keyword. Cursor on exit: the option's closing <c>)</c>. The history
+    /// table name is required (auto-generated history naming isn't modeled).
+    /// </summary>
+    private static MultiPartName ParseSystemVersioningOption(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
+            throw new NotSupportedException("Only SYSTEM_VERSIONING is supported in the CREATE TABLE WITH clause.");
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
+            throw new NotSupportedException("SYSTEM_VERSIONING must be set to ON in CREATE TABLE.");
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw new NotSupportedException("SYSTEM_VERSIONING = ON without an explicit (HISTORY_TABLE = …) clause isn't modeled — auto-generated history-table naming is deferred.");
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.History_Table })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var historyName = BatchContext.ParseObjectName(context);
+        ExpectCloseParen(context);
+        ExpectCloseParen(context);
+        return historyName;
+    }
+
+    private static void ExpectCloseParen(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Builds the history sibling <see cref="HeapTable"/> for a system-
+    /// versioned parent. Mirrors the parent's column shape (name, type,
+    /// nullability, hidden flag, persisted-computed expressions) but strips
+    /// engine-managed flags (IDENTITY, GENERATED ALWAYS AS ROW START/END) and
+    /// all inline constraints — history rows carry materialized values from
+    /// the parent and aren't autonomous candidates for insert / update /
+    /// delete from user SQL.
+    /// </summary>
+    private static HeapTable BuildHistoryTable(HeapTable parent, string historyLeaf, int historySchemaId, ParserContext context)
+    {
+        var historyColumns = new HeapColumn[parent.Columns.Length];
+        for (var i = 0; i < parent.Columns.Length; i++)
+        {
+            var pc = parent.Columns[i];
+            historyColumns[i] = new HeapColumn(
+                pc.Name,
+                pc.Type,
+                pc.MaxLength,
+                nullable: pc.Nullable,
+                identity: null,
+                defaultExpression: null,
+                computedExpression: pc.Computed,
+                isPersisted: pc.IsPersisted,
+                generatedAs: GeneratedAlwaysAsRow.None,
+                isHidden: pc.IsHidden);
+        }
+        return new HeapTable(
+            historyLeaf,
+            historyColumns,
+            context.CurrentDatabase.AllocateObjectId(),
+            historySchemaId,
+            context.Batch.CurrentStatement.UtcNow,
+            periodColumns: parent.PeriodColumns)
+        {
+            IsHistoryTable = true,
+        };
     }
 
     /// <summary>
@@ -264,7 +383,8 @@ partial class Simulation
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
-        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed)
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
+        List<(string StartCol, string EndCol)>? pendingPeriod = null)
     {
         var identityCount = 0;
         // Parallel to heapColumns: true when the user wrote an explicit
@@ -291,6 +411,35 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check })
             {
                 ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed);
+                continue;
+            }
+
+            // Table-level PERIOD FOR SYSTEM_TIME (startCol, endCol). Only
+            // legal inside CREATE TABLE; DECLARE @t TABLE and CREATE TYPE …
+            // AS TABLE reject (probe-confirmed: real SQL Server's grammar
+            // doesn't expose the period declaration in those contexts).
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
+            {
+                if (isTableVariable || isTableType || pendingPeriod is null)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (pendingPeriod.Count > 0)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Time })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: '(' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Name startName)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Name endName)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                pendingPeriod.Add((startName.Value, endName.Value));
+                context.MoveNextRequired();
                 continue;
             }
 
@@ -353,6 +502,8 @@ partial class Simulation
             IdentityState? identity = null;
             bool? nullable = null;
             Expression? defaultExpression = null;
+            var generatedAs = GeneratedAlwaysAsRow.None;
+            var isHidden = false;
             var inlineKeyKind = (KeyConstraintKind?)null;
             string? inlineKeyName = null;
             while (true)
@@ -361,6 +512,28 @@ partial class Simulation
                 {
                     case ReservedKeyword { Keyword: Keyword.Identity } when identity is null:
                         identity = ParseIdentitySpec(context, columnName.Value);
+                        continue;
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
+                        if (isTableVariable || isTableType || pendingPeriod is null)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Always })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        generatedAs = context.GetNextRequired() switch
+                        {
+                            UnquotedString { ContextualKeyword: ContextualKeyword.Start } => GeneratedAlwaysAsRow.Start,
+                            ReservedKeyword { Keyword: Keyword.End } => GeneratedAlwaysAsRow.End,
+                            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                        };
+                        context.MoveNextRequired();
+                        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Hidden })
+                        {
+                            isHidden = true;
+                            context.MoveNextRequired();
+                        }
                         continue;
                     case ReservedKeyword { Keyword: Keyword.Not } when !nullable.HasValue:
                         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
@@ -444,7 +617,7 @@ partial class Simulation
                 actualNullable = false;
             }
 
-            heapColumns.Add(new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression));
+            heapColumns.Add(new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden));
             explicitNull.Add(nullable == true);
         } while (context.Token is Operator { Character: ',' });
 
@@ -472,7 +645,9 @@ partial class Simulation
                         identity: column.Identity,
                         defaultExpression: column.Default,
                         computedExpression: column.Computed,
-                        isPersisted: column.IsPersisted);
+                        isPersisted: column.IsPersisted,
+                        generatedAs: column.GeneratedAs,
+                        isHidden: column.IsHidden);
                 }
             }
         }
@@ -576,6 +751,62 @@ partial class Simulation
     /// table-level. The 8-hex suffix is a stable FNV-1a hash of the
     /// constraint shape, same convention as <see cref="AutoConstraintName"/>.
     /// </summary>
+    /// <summary>
+    /// Validates the temporal DDL: every <c>GENERATED ALWAYS AS ROW START/END</c>
+    /// column must be <c>datetime2</c> NOT NULL (Msg 13501 / 13587); if any
+    /// generated column is present the table must declare <c>PERIOD FOR
+    /// SYSTEM_TIME</c> (Msg 13509); the period's named columns must match the
+    /// generated columns by kind (Msg 13504 / 13505 / 13506 / 13507). Returns
+    /// the <c>(start, end)</c> ordinal pair on success, or null when the
+    /// table has neither a period declaration nor generated columns.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed wording for each rejection against SQL Server 2025
+    /// (2026-05-13). Msg 13507 (end-column not matching) covers both
+    /// "referenced column doesn't exist" and "referenced column exists but
+    /// isn't generated-as-row-end".
+    /// </remarks>
+    private static (int StartOrdinal, int EndOrdinal)? ResolvePeriodColumns(
+        List<HeapColumn?> heapColumns,
+        List<(string StartCol, string EndCol)> pendingPeriod)
+    {
+        var generatedStartOrdinal = -1;
+        var generatedEndOrdinal = -1;
+        for (var i = 0; i < heapColumns.Count; i++)
+        {
+            if (heapColumns[i] is not { } column || column.GeneratedAs == GeneratedAlwaysAsRow.None)
+                continue;
+            if (column.Type is not DateTime2SqlType)
+                throw SimulatedSqlException.TemporalGeneratedColumnInvalidType(column.Name);
+            if (column.Nullable)
+                throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name);
+            if (column.GeneratedAs == GeneratedAlwaysAsRow.Start)
+                generatedStartOrdinal = i;
+            else
+                generatedEndOrdinal = i;
+        }
+
+        if (pendingPeriod.Count == 0)
+        {
+            return (generatedStartOrdinal >= 0 || generatedEndOrdinal >= 0)
+                ? throw SimulatedSqlException.TemporalGeneratedColumnWithoutPeriod()
+                : null;
+        }
+
+        // Period declared. Both START and END columns must be present, and
+        // the period's named pair must match the generated columns.
+        if (generatedStartOrdinal < 0)
+            throw SimulatedSqlException.TemporalRowStartMissing();
+        if (generatedEndOrdinal < 0)
+            throw SimulatedSqlException.TemporalRowEndMissing();
+        var (declaredStart, declaredEnd) = pendingPeriod[0];
+        return !Collation.Default.Equals(declaredStart, heapColumns[generatedStartOrdinal]!.Name)
+            ? throw SimulatedSqlException.TemporalPeriodStartNotMatching()
+            : !Collation.Default.Equals(declaredEnd, heapColumns[generatedEndOrdinal]!.Name)
+                ? throw SimulatedSqlException.TemporalPeriodEndNotMatching()
+                : (generatedStartOrdinal, generatedEndOrdinal);
+    }
+
     internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
         IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,

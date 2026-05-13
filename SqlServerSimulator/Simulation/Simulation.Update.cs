@@ -178,7 +178,7 @@ partial class Simulation
         MutationOutputProjection? output,
         View? sourceView = null)
     {
-        var assignments = ResolveSetAssignments(rawAssignments, table, sourceView);
+        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -245,7 +245,8 @@ partial class Simulation
             var insteadOfParent = (SchemaObject?)sourceView ?? table;
             var oldSnapshotNeeded = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
-                || HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
+                || HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update)
+                || table.SystemVersioning is not null;
             var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
@@ -286,7 +287,7 @@ partial class Simulation
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
 
-        var assignments = ResolveSetAssignments(rawAssignments, table);
+        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -325,7 +326,8 @@ partial class Simulation
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple);
             var oldSnapshotNeeded = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
-                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update);
+                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update)
+                || table.SystemVersioning is not null;
             var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
             affected.Add((addr.Page, addr.Slot, newValues, oldSnapshot));
         }
@@ -370,6 +372,12 @@ partial class Simulation
         EnforceKeyConstraintsForUpdate(table, affected);
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
+        // System-versioned UPDATE: copy each affected row's pre-update state
+        // to the history sibling before tombstoning the current row. History
+        // rows carry the row's original ROW START and a fresh ROW END = the
+        // statement's frozen UtcNow.
+        if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
+            WriteHistoryRowsForUpdate(table, historyTable, pc, affected, context, undoLog);
         foreach (var (pageIndex, slotIndex, _, _) in affected)
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
         foreach (var (_, _, fullNew, _) in affected)
@@ -387,6 +395,33 @@ partial class Simulation
         }
         FireAfterUpdateTriggers(context, table, affected);
         return new SimulatedNonQuery(affected.Count);
+    }
+
+    /// <summary>
+    /// Writes a history row for each row affected by a system-versioned
+    /// UPDATE. Each history row preserves the pre-update full column set,
+    /// with ROW END overwritten to the statement's frozen UtcNow. The
+    /// resulting period is <c>[original ROW START, UtcNow)</c> — the
+    /// half-open interval during which that row was current.
+    /// </summary>
+    private static void WriteHistoryRowsForUpdate(
+        HeapTable parent,
+        HeapTable historyTable,
+        (int StartOrdinal, int EndOrdinal) period,
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
+        ParserContext context,
+        UndoLog? undoLog)
+    {
+        var stampedNow = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+        foreach (var (_, _, _, oldFull) in affected)
+        {
+            if (oldFull is null)
+                continue;
+            var historyRow = new SqlValue[oldFull.Length];
+            Array.Copy(oldFull, historyRow, oldFull.Length);
+            historyRow[period.EndOrdinal] = stampedNow;
+            historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+        }
     }
 
     private static List<byte[]> ProjectMutationOutput(
@@ -486,13 +521,31 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Builds the <c>database.schema.leaf</c> qualified name for an error
+    /// message that requires it. Schema-id → schema-name lookup is an O(N)
+    /// scan of the database's schemas dict; the table count for any realistic
+    /// workload makes this acceptable.
+    /// </summary>
+    internal static string QualifyTableName(HeapTable table, Database database)
+    {
+        foreach (var entry in database.Schemas)
+        {
+            if (entry.Value.SchemaId == table.SchemaId)
+                return $"{database.Name}.{entry.Key}.{table.Name}";
+        }
+        return $"{database.Name}.{table.Name}";
+    }
+
+    /// <summary>
     /// Resolves the raw <c>SET</c> column-name pairs to ordinals against the
-    /// target table, rejecting writes to identity / computed / rowversion
-    /// columns up-front so the per-row loop never has to re-check.
+    /// target table, rejecting writes to identity / computed / rowversion /
+    /// GENERATED ALWAYS columns up-front so the per-row loop never has to
+    /// re-check.
     /// </summary>
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
         List<(string ColumnName, Expression Expr)> rawAssignments,
         HeapTable table,
+        Database database,
         View? sourceView = null)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
@@ -538,6 +591,8 @@ partial class Simulation
                 throw SimulatedSqlException.ColumnCannotBeModified(column.Name);
             if (column.Type == SqlType.RowVersion)
                 throw SimulatedSqlException.CannotUpdateTimestampColumn();
+            if (column.GeneratedAs != GeneratedAlwaysAsRow.None)
+                throw SimulatedSqlException.CannotUpdateGeneratedAlways(QualifyTableName(table, database));
 
             assignments.Add((columnOrdinal, expr));
         }
@@ -594,6 +649,13 @@ partial class Simulation
             if (table.Columns[ci].Type == SqlType.RowVersion)
                 newValues[ci] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
         }
+
+        // Advance the current row's ROW START on a system-versioned UPDATE.
+        // ROW END stays at max (the row is still current). The pre-update
+        // ROW START surfaces in `fullValues` for the history-row copy that
+        // CommitUpdate writes.
+        if (table.PeriodColumns is { } pc && table.SystemVersioning is not null)
+            newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
 
         EvaluateComputedColumns(table, newValues, context.Batch);
         EnforceNotNull(table, newValues, "UPDATE");

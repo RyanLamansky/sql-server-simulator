@@ -57,9 +57,9 @@ public class EFCoreTemporalTables
                     Id int not null primary key,
                     Name nvarchar(30) not null,
                     Credit decimal(18, 2) not null,
-                    ValidFrom datetime2 generated always as row start hidden not null,
-                    ValidTo datetime2 generated always as row end hidden not null,
-                    period for system_time (ValidFrom, ValidTo)
+                    PeriodStart datetime2 generated always as row start hidden not null,
+                    PeriodEnd datetime2 generated always as row end hidden not null,
+                    period for system_time (PeriodStart, PeriodEnd)
                 ) with (system_versioning = on (history_table = dbo.CustomersHistory))
                 """)
             .ExecuteNonQuery();
@@ -67,7 +67,6 @@ public class EFCoreTemporalTables
     }
 
     [TestMethod]
-    [Ignore("Needs: temporal table DDL")]
     public void Insert_AppearsInCurrentTable()
     {
         using var context = new CustomerContext(CreateSimulation());
@@ -77,7 +76,6 @@ public class EFCoreTemporalTables
     }
 
     [TestMethod]
-    [Ignore("Needs: temporal table DDL + history tracking")]
     public void Update_PreservesPriorVersionInHistory()
     {
         using var context = new CustomerContext(CreateSimulation());
@@ -98,28 +96,41 @@ public class EFCoreTemporalTables
     }
 
     [TestMethod]
-    [Ignore("Needs: temporal table DDL + FOR SYSTEM_TIME queries")]
     public void TemporalAsOf_ReturnsStateAtPointInTime()
     {
         using var context = new CustomerContext(CreateSimulation());
         _ = context.Customers.Add(new Customer { Id = 1, Name = "alice", Credit = 100m });
         _ = context.SaveChanges();
 
-        var beforeUpdate = DateTime.UtcNow.AddMilliseconds(-1);
+        // Read the row's actual ROW START from the database — sidesteps host
+        // clock granularity entirely. Windows DateTime.UtcNow's ~15.6ms tick
+        // precision made the previous "DateTime.UtcNow as a midpoint" approach
+        // fragile: under the wrong tick alignment T_insert and T_update could
+        // both land on the same DateTime value, leaving no AS-OF window.
+        var insertTime = context.Customers
+            .Where(c => c.Id == 1)
+            .Select(c => EF.Property<DateTime>(c, "PeriodStart"))
+            .Single();
+
+        // Sleep so the upcoming UPDATE's frozen UtcNow lands at a strictly
+        // later tick than insertTime, even on coarse-tick hosts.
         System.Threading.Thread.Sleep(50);
 
         var alice = context.Customers.Single(c => c.Id == 1);
         alice.Credit = 999m;
         _ = context.SaveChanges();
 
+        // Pick a time strictly inside [T_insert, T_update). T_insert + 1 tick
+        // is guaranteed to satisfy ROW START <= t < ROW END for the history
+        // row because T_update is at least 50ms (≥ 3 Windows ticks) later.
+        var betweenTime = insertTime.AddTicks(1);
         var historical = context.Customers
-            .TemporalAsOf(beforeUpdate)
+            .TemporalAsOf(betweenTime)
             .Single(c => c.Id == 1);
         Assert.AreEqual(100m, historical.Credit);
     }
 
     [TestMethod]
-    [Ignore("Needs: temporal table DDL + history tracking")]
     public void Delete_MovesRowToHistory()
     {
         using var context = new CustomerContext(CreateSimulation());

@@ -167,6 +167,11 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, View? destinationView = null)
     {
+        // Direct INSERT into a history sibling is rejected — history rows
+        // are populated only by the engine via UPDATE / DELETE on the parent.
+        if (destinationTable.IsHistoryTable)
+            throw SimulatedSqlException.CannotInsertIntoTemporalHistoryTable(QualifyTableName(destinationTable, context));
+
         // INSTEAD OF INSERT on the table target replaces the heap-write
         // path entirely: identity allocation is skipped (the column shows
         // the type's typed default in INSERTED — probe-confirmed), CHECK /
@@ -198,6 +203,8 @@ partial class Simulation
                     throw SimulatedSqlException.ColumnCannotBeModified(tableColumn.Name);
                 if (tableColumn.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotInsertExplicitTimestamp();
+                if (tableColumn.GeneratedAs != GeneratedAlwaysAsRow.None)
+                    throw SimulatedSqlException.CannotInsertExplicitGeneratedAlways(QualifyTableName(destinationTable, context));
                 usedColumns.Add(tableColumn);
 
                 var separator = context.GetNextRequired();
@@ -224,8 +231,8 @@ partial class Simulation
             destinationColumns = destinationView is not null
                 ? BuildImplicitInsertColumnsForView(destinationView, destinationTable, identityInsertOn)
                 : (identityColumn is not null && !identityInsertOn)
-                    ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null && c.Type != SqlType.RowVersion)]
-                    : [.. destinationTable.Columns.Where(c => c.Computed is null && c.Type != SqlType.RowVersion)];
+                    ? [.. destinationTable.Columns.Where(c => c.Identity is null && c.Computed is null && c.Type != SqlType.RowVersion && c.GeneratedAs == GeneratedAlwaysAsRow.None)]
+                    : [.. destinationTable.Columns.Where(c => c.Computed is null && c.Type != SqlType.RowVersion && c.GeneratedAs == GeneratedAlwaysAsRow.None)];
         }
 
         if (identityColumn is not null)
@@ -349,6 +356,16 @@ partial class Simulation
             {
                 if (destinationTable.Columns[i].Type == SqlType.RowVersion)
                     rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+            }
+
+            // Auto-populate period columns on system-versioned temporal tables:
+            // ROW START = the statement's frozen UtcNow, ROW END = max
+            // datetime2 ('9999-12-31 23:59:59.9999999' — DateTime.MaxValue at
+            // datetime2(7) precision).
+            if (destinationTable.PeriodColumns is { } pc && destinationTable.SystemVersioning is not null)
+            {
+                rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(destinationTable.Columns[pc.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+                rowValues[pc.EndOrdinal] = SqlValue.FromDateTime2(destinationTable.Columns[pc.EndOrdinal].Type, DateTime.MaxValue);
             }
 
             // Evaluate computed columns now — both persisted (whose result
@@ -542,4 +559,7 @@ partial class Simulation
         }
         return [.. implicitList];
     }
+
+    private static string QualifyTableName(HeapTable table, ParserContext context) =>
+        Simulation.QualifyTableName(table, context.CurrentDatabase);
 }

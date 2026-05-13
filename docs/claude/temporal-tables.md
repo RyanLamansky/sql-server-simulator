@@ -1,0 +1,36 @@
+# System-versioned temporal tables
+
+Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW START / END`, `WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`, the auto-created history sibling, `FOR SYSTEM_TIME ALL / AS OF` query syntax, or related `HeapTable` / `HeapColumn` metadata.
+
+## What ships
+
+- **CREATE TABLE** with `PERIOD FOR SYSTEM_TIME (startCol, endCol)` table-level declaration + per-column `GENERATED ALWAYS AS ROW START | END [HIDDEN] NOT NULL`. The two period columns must be `datetime2(N)` NOT NULL; nullable or non-datetime2 raises Msg 13501 / 13587. Asymmetric definitions raise Msg 13504 / 13505; period names not matching the GENERATED columns raise Msg 13506 / 13507; orphan GENERATED-AS-ROW columns without a `PERIOD` declaration raise Msg 13509. Probe-confirmed verbatim wording against SQL Server 2025.
+- **`WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = schema.table))`** trailing clause auto-creates the sibling history `HeapTable` at parent-creation time. The history table mirrors the parent's column shape — names, types, nullability, hidden flag, persisted-computed expressions — but strips engine-managed flags (IDENTITY, GENERATED ALWAYS), inline constraints, and DEFAULTs (history rows carry materialized values from the parent). `sys.tables.temporal_type = 2` for the parent, `1` for history; `sys.tables.history_table_id` references the sibling's object_id (not yet surfaced — deferred).
+- **Auto-named history (`HISTORY_TABLE` omitted)** raises `NotSupportedException` at parse. EF Core 10 always emits the explicit form, so the auto-generated `MSSQL_TemporalHistoryFor_<hash>` shape isn't needed.
+- **INSERT** on a system-versioned parent auto-populates the period columns: ROW START = the statement's frozen `BatchContext.CurrentStatement.UtcNow`, ROW END = `DateTime.MaxValue` (datetime2(7) precision = `9999-12-31 23:59:59.9999999`). Explicit values for a GENERATED ALWAYS column raise Msg 13536. Implicit insert column lists exclude GENERATED columns (so `INSERT INTO Customers (Id, Name) VALUES (...)` works without listing period columns).
+- **UPDATE** on a system-versioned parent: pre-update full row is captured (`oldSnapshotNeeded` forced true), the post-SET row's ROW START is bumped to UtcNow, then `WriteHistoryRowsForUpdate` writes the captured pre-update row to the history sibling with ROW END overwritten to UtcNow (the period during which the row was current). Setting a GENERATED ALWAYS column in SET raises Msg 13537.
+- **DELETE** on a system-versioned parent: pre-delete full row captured (`needsFullForHistory` forced true), then history row written with ROW END = UtcNow before tombstoning the current row.
+- **`SELECT *`** excludes hidden columns (probe-confirmed: real SQL Server omits `IsHidden` columns from star expansion). Explicit references continue to bind by name, including in INSERT column lists and OUTPUT clauses (EF Core 10 emits `OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart]` and lists period columns by name in tracked-entity SELECTs).
+- **`FROM <table> FOR SYSTEM_TIME ALL [AS] <alias>`** unions current + history rows. **`FROM <table> FOR SYSTEM_TIME AS OF <expr> [AS] <alias>`** filters parent + history rows where `ROW START <= <expr> < ROW END`. The expression is evaluated once on iteration start (no per-row re-evaluation, matching SQL Server's "constant per query" contract); column references inside the expression raise Msg 207. ISO 8601 string literals with trailing `Z` (UTC marker — EF Core 10 emits this) are accepted by datetime2 coercion. The remaining temporal-query forms (`BETWEEN ... AND ...`, `FROM ... TO ...`, `CONTAINED IN (..., ...)`) raise `NotSupportedException` until an application needs them.
+- **DROP TABLE** on a system-versioned parent or its history sibling raises Msg 13552; caller must `ALTER TABLE ... SET (SYSTEM_VERSIONING = OFF)` first (`ALTER TABLE ... SET (SYSTEM_VERSIONING = OFF)` itself isn't modeled yet — deferred until needed).
+- **Direct INSERT into history** raises Msg 13559. History rows are populated only by the engine via parent UPDATE / DELETE.
+
+## Data-model footprint
+
+- **`HeapColumn`** gained `GeneratedAs` (`GeneratedAlwaysAsRow.None / Start / End`) and `IsHidden` fields.
+- **`HeapTable`** gained `PeriodColumns: (int StartOrdinal, int EndOrdinal)?` (set at construction), `SystemVersioning: HeapTable?` (mutable; set after history is auto-created — points from parent → history; null on regular and history tables), and `IsHistoryTable: bool` (mutable; true on the history sibling).
+- **Parser scope:** `ParseColumnList`'s `pendingPeriod: List<(string StartCol, string EndCol)>?` carries the period names through column-list parsing; `ResolvePeriodColumns` (in `Simulation.Create.cs`) validates and resolves to ordinals. `ParseSystemVersioningOption` parses the trailing `WITH (...)` clause and returns the history table name. `BuildHistoryTable` mirrors the parent column shape into the history sibling.
+- **Query scope:** `Selection.ParseOptionalForSystemTime` peeks for `FOR SYSTEM_TIME` between the FROM source's table name and any alias, returns `null` when absent (cursor restored), or a row enumerator wrapping `parent.Rows + history.Rows` (ALL) / `TemporalAsOfRowSource` (AS OF) when present.
+
+## EF Core 10 emit shape
+
+`ModelBuilder.Entity<T>().ToTable("Customers", b => b.IsTemporal())` defaults the period columns to **`PeriodStart`** and **`PeriodEnd`** (not `ValidFrom` / `ValidTo` — that's the SQL Server documentation convention but not EF's default). Tests bootstrap their tables with EF's expected names. INSERT emits `INSERT INTO [tbl] ([cols-without-period]) OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart] VALUES (...)`; UPDATE emits `UPDATE [tbl] SET [col] = @p OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart] WHERE [Id] = @p`; tracked-entity SELECTs explicitly list period columns by name. `.TemporalAll()` → `FROM [tbl] FOR SYSTEM_TIME ALL AS [c]`; `.TemporalAsOf(@t)` → `FROM [tbl] FOR SYSTEM_TIME AS OF '<iso-literal-with-Z>' AS [c]`.
+
+## Not modeled
+
+- **`ALTER TABLE ... SET (SYSTEM_VERSIONING = OFF)`** — required to drop a system-versioned table. Deferred until needed.
+- **`HISTORY_RETENTION_PERIOD`** option on `SYSTEM_VERSIONING = ON`. Real SQL Server prunes history rows beyond the retention period; the simulator stores history forever.
+- **Auto-named history** (`SYSTEM_VERSIONING = ON` without `(HISTORY_TABLE = ...)`).
+- **`FOR SYSTEM_TIME BETWEEN ... AND ...`** / **`FROM ... TO ...`** / **`CONTAINED IN (..., ...)`** query forms. Only `ALL` and `AS OF <expr>` ship.
+- **LOB-eligible columns** (`varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` / `text` / `ntext` / `image`) on a temporal table — the `FOR SYSTEM_TIME` row source presents one `lobStore` reference to the FROM machinery; mixing parent and history rows in the same enumerator would need per-row LOB-store dispatch. No test scenario reaches this path.
+- **sys.tables.temporal_type / history_table_id columns** in catalog views. The parent and history tables surface as regular `USER_TABLE` rows; the temporal-specific metadata columns aren't projected yet. EF Core's `IsTemporal()` doesn't query these, but reverse-engineering tools would.
