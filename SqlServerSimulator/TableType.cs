@@ -53,7 +53,7 @@ internal sealed class TableType(
     (string? Name, BooleanExpression Predicate, string? InlineColumn)[] pendingChecks)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
-    public readonly Schema Schema = schema;
+    public Schema Schema = schema;
 
     public override string ObjectTypeCode => "TT";
     public override string ObjectTypeDescription => "TYPE_TABLE";

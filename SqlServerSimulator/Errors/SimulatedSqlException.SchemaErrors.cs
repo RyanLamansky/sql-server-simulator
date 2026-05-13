@@ -428,4 +428,84 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException MultipleTimestampColumns(string tableName, string secondColumnName) =>
         new($"A table can only have one timestamp column. Because table '{tableName}' already has one, the column '{secondColumnName}' cannot be added.", 2738, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 15150: <c>DROP SCHEMA</c> targeted a built-in /
+    /// reserved schema (<c>dbo</c>, <c>sys</c>, <c>INFORMATION_SCHEMA</c>,
+    /// <c>guest</c>, …). Real SQL Server treats these as un-droppable even when
+    /// empty; the simulator matches that rejection. Probe-confirmed verbatim
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropProtectedSchema(string schemaName) =>
+        new($"Cannot drop the schema '{schemaName}'.", 15150, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 (drop-schema variant): <c>DROP SCHEMA</c>
+    /// targeted a name that doesn't exist (suppressed by <c>IF EXISTS</c>).
+    /// Probe-confirmed verbatim wording against SQL Server 2025; SQL Server
+    /// reuses Msg 15151 for several "doesn't exist or no permission" lookups
+    /// — the simulator surfaces the variant matching each statement's noun.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropSchemaDoesNotExist(string schemaName) =>
+        new($"Cannot drop the schema '{schemaName}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 (alter-schema variant): <c>ALTER SCHEMA
+    /// dest TRANSFER ...</c> named a destination schema that doesn't exist.
+    /// Probe-confirmed verbatim wording — same Msg / Class / State as the
+    /// drop-schema-missing variant, distinct only in the "alter" vs "drop"
+    /// verb in the message body.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterSchemaDoesNotExist(string schemaName) =>
+        new($"Cannot alter the schema '{schemaName}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 (find-object variant): <c>ALTER SCHEMA
+    /// ... TRANSFER source.obj</c> named a source object (table / view /
+    /// function / procedure / sequence) that doesn't resolve. The object's
+    /// leaf name is reported (probe-confirmed) — the qualifier doesn't appear
+    /// in the canonical message.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindObject(string objectLeafName) =>
+        new($"Cannot find the object '{objectLeafName}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 (find-type variant): <c>ALTER SCHEMA
+    /// ... TRANSFER TYPE::source.name</c> named a user-defined type that
+    /// doesn't resolve. Probe-confirmed wording variant — the canonical
+    /// "type" noun replaces "object".
+    /// </summary>
+    internal static SimulatedSqlException CannotFindType(string typeLeafName) =>
+        new($"Cannot find the type '{typeLeafName}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3729: <c>DROP SCHEMA</c> rejected because the
+    /// schema still contains at least one object. SQL Server names the first
+    /// object found in the dependency-graph walk (which often happens to be
+    /// an auto-named PK / UNIQUE / CHECK constraint rather than the table
+    /// itself); the simulator picks a representative name from the same
+    /// dict scan. Probe-confirmed verbatim wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropSchemaBecauseNotEmpty(string schemaName, string objectName) =>
+        new($"Cannot drop schema '{schemaName}' because it is being referenced by object '{objectName}'.", 3729, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15530: <c>ALTER SCHEMA dest TRANSFER source.obj</c>
+    /// rejected because <paramref name="objectLeafName"/> is already present
+    /// in the destination schema. The canonical wording surfaces only the
+    /// object's leaf (the destination schema isn't part of the message).
+    /// Probe-confirmed verbatim against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ObjectAlreadyExistsInDestination(string objectLeafName) =>
+        new($"The object with name \"{objectLeafName}\" already exists.", 15530, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15347: <c>ALTER SCHEMA TRANSFER</c> targeted
+    /// an object that's owned by a parent (the common case is a DML trigger,
+    /// whose schema follows its parent table / view automatically — the
+    /// trigger can't be transferred independently). Probe-confirmed verbatim
+    /// wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotTransferObjectOwnedByParent() =>
+        new("Cannot transfer an object that is owned by a parent object.", 15347, 16, 1);
 }

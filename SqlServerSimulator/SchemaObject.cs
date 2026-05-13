@@ -37,8 +37,11 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// Schema-id of the schema this object lives in. Surfaces in
     /// <c>sys.objects.schema_id</c> / <c>sys.tables.schema_id</c> /
     /// <c>sys.views.schema_id</c> / <c>sys.procedures.schema_id</c>.
+    /// Mutable — <c>ALTER SCHEMA dest TRANSFER source.obj</c> reseats the
+    /// object into a different schema and updates this field along with
+    /// the per-derived-type <c>Schema</c> reference (where present).
     /// </summary>
-    public readonly int SchemaId = schemaId;
+    public int SchemaId = schemaId;
 
     /// <summary>
     /// UTC creation timestamp — captured at CREATE time from the executing

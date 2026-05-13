@@ -45,7 +45,7 @@ internal sealed class View(
     Func<SqlValue[], BatchContext, bool>? checkOptionCheck)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
-    public readonly Schema Schema = schema;
+    public Schema Schema = schema;
 
     public override string ObjectTypeCode => "V ";
     public override string ObjectTypeDescription => "VIEW";

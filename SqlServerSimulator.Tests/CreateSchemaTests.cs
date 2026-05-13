@@ -263,11 +263,6 @@ public sealed class CreateSchemaTests
             """));
 
     [TestMethod]
-    public void DropSchema_NotSupported()
-        => Throws<DbException>(() =>
-            new Simulation().ExecuteNonQuery("create schema audit; drop schema audit"));
-
-    [TestMethod]
     public void CreateSchema_PersistsAcrossBatches()
     {
         using var conn = new Simulation().CreateDbConnection();
@@ -277,5 +272,239 @@ public sealed class CreateSchemaTests
         _ = cmd.ExecuteNonQuery();
         cmd.CommandText = "create table audit.t (id int); insert audit.t values (1); select count(*) from audit.t";
         AreEqual(1, cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DropSchema_Empty_Succeeds()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "create schema audit; drop schema audit; select schema_id('audit')";
+        AreEqual(DBNull.Value, cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DropSchema_Missing_Msg15151()
+        => new Simulation().AssertSqlError(
+            "drop schema nope",
+            15151,
+            "Cannot drop the schema 'nope', because it does not exist or you do not have permission.");
+
+    [TestMethod]
+    public void DropSchema_IfExistsMissing_NoOp()
+        => AreEqual(1, new Simulation().ExecuteScalar("drop schema if exists nope; select 1"));
+
+    [TestMethod]
+    public void DropSchema_Dbo_Msg15150()
+        => new Simulation().AssertSqlError(
+            "drop schema dbo",
+            15150,
+            "Cannot drop the schema 'dbo'.");
+
+    [TestMethod]
+    public void DropSchema_Sys_Msg15150()
+        => new Simulation().AssertSqlError(
+            "drop schema sys",
+            15150);
+
+    [TestMethod]
+    public void DropSchema_InformationSchema_Msg15150()
+        => new Simulation().AssertSqlError(
+            "drop schema INFORMATION_SCHEMA",
+            15150);
+
+    [TestMethod]
+    public void DropSchema_NotEmpty_Msg3729()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "create schema audit; create table audit.t (id int); drop schema audit",
+            3729);
+        IsTrue(ex.Message.StartsWith("Cannot drop schema 'audit' because it is being referenced by object", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_TableMoves()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create schema dst;
+            create table src.t (id int);
+            insert src.t values (1), (2);
+            alter schema dst transfer src.t;
+            select s.name from sys.tables t join sys.schemas s on s.schema_id = t.schema_id where t.name = 't'
+            """;
+        AreEqual("dst", cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_ExplicitObjectPrefix()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create schema dst;
+            create table src.t (id int);
+            alter schema dst transfer object::src.t;
+            select count(*) from dst.t
+            """;
+        AreEqual(0, cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_NameCollision_Msg15530()
+        => new Simulation().AssertSqlError(
+            """
+            create schema src;
+            create schema dst;
+            create table src.t (id int);
+            create table dst.t (id int);
+            alter schema dst transfer src.t
+            """,
+            15530,
+            "The object with name \"t\" already exists.");
+
+    [TestMethod]
+    public void AlterSchema_Transfer_MissingSource_Msg15151()
+        => new Simulation().AssertSqlError(
+            "create schema src; create schema dst; alter schema dst transfer src.nope",
+            15151,
+            "Cannot find the object 'nope', because it does not exist or you do not have permission.");
+
+    [TestMethod]
+    public void AlterSchema_Transfer_MissingDest_Msg15151()
+        => new Simulation().AssertSqlError(
+            "create schema src; create table src.t (id int); alter schema nope transfer src.t",
+            15151,
+            "Cannot alter the schema 'nope', because it does not exist or you do not have permission.");
+
+    [TestMethod]
+    public void AlterSchema_Transfer_TypeMoves()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create schema dst;
+            create type src.MyType as table (id int);
+            alter schema dst transfer type::src.MyType;
+            select s.name from sys.types tt join sys.schemas s on s.schema_id = tt.schema_id where tt.name = 'MyType'
+            """;
+        AreEqual("dst", cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_SameSchema_NoOp()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create table src.t (id int);
+            alter schema src transfer src.t;
+            select count(*) from src.t
+            """;
+        AreEqual(0, cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_TriggerDirect_Msg15347()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using (var setup = conn.CreateCommand())
+        {
+            setup.CommandText = "create schema src; create schema dst; create table src.t (id int)";
+            _ = setup.ExecuteNonQuery();
+        }
+        using (var trg = conn.CreateCommand())
+        {
+            trg.CommandText = "create trigger src.tr on src.t after insert as select 1";
+            _ = trg.ExecuteNonQuery();
+        }
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "alter schema dst transfer src.tr";
+        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
+        AreEqual("15347", ex.Data["HelpLink.EvtID"]);
+        AreEqual("Cannot transfer an object that is owned by a parent object.", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_TriggerFollowsParent()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using (var setup = conn.CreateCommand())
+        {
+            setup.CommandText = "create schema src; create schema dst; create table src.t (id int)";
+            _ = setup.ExecuteNonQuery();
+        }
+        using (var trg = conn.CreateCommand())
+        {
+            trg.CommandText = "create trigger src.tr on src.t after insert as select 1";
+            _ = trg.ExecuteNonQuery();
+        }
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "alter schema dst transfer src.t; select s.name from sys.triggers t join sys.objects o on o.object_id = t.parent_id join sys.schemas s on s.schema_id = o.schema_id where t.name = 'tr'";
+        AreEqual("dst", cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_View_Works()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create schema dst;
+            create table dbo.base (id int);
+            insert dbo.base values (1), (2);
+            """;
+        _ = cmd.ExecuteNonQuery();
+        cmd.CommandText = "create view src.v as select id from dbo.base";
+        _ = cmd.ExecuteNonQuery();
+        cmd.CommandText = "alter schema dst transfer src.v; select count(*) from dst.v";
+        AreEqual(2, cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AlterSchema_Transfer_Sequence_Works()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create schema dst;
+            create sequence src.s start with 100;
+            alter schema dst transfer src.s;
+            select next value for dst.s
+            """;
+        AreEqual(100L, cmd.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DropSchema_AfterTransferringOut_Succeeds()
+    {
+        using var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            create schema src;
+            create schema dst;
+            create table src.t (id int);
+            alter schema dst transfer src.t;
+            drop schema src;
+            select schema_id('src')
+            """;
+        AreEqual(DBNull.Value, cmd.ExecuteScalar());
     }
 }

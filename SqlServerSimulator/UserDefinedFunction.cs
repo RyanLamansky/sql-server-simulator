@@ -23,7 +23,7 @@ internal abstract class UserDefinedFunction(
     DateTime createDate)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
-    public readonly Schema Schema = schema;
+    public Schema Schema = schema;
 
     /// <summary>
     /// Declared parameters in source order. Each parameter has a name (with

@@ -47,7 +47,7 @@ internal sealed class Sequence(
     bool cycle)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
-    public readonly Schema Schema = schema;
+    public Schema Schema = schema;
 
     public override string ObjectTypeCode => "SO";
     public override string ObjectTypeDescription => "SEQUENCE_OBJECT";

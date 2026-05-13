@@ -38,6 +38,7 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.View } => DropTargetKind.View,
             ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => DropTargetKind.Procedure,
             ReservedKeyword { Keyword: Keyword.Trigger } => DropTargetKind.Trigger,
+            ReservedKeyword { Keyword: Keyword.Schema } => DropTargetKind.Schema,
             UnquotedString { ContextualKeyword: ContextualKeyword.Type } => DropTargetKind.Type,
             UnquotedString { ContextualKeyword: ContextualKeyword.Sequence } => DropTargetKind.Sequence,
             _ => DropTargetKind.None,
@@ -78,6 +79,9 @@ partial class Simulation
                 case DropTargetKind.Trigger:
                     DropOneTrigger(context, name, ifExists);
                     break;
+                case DropTargetKind.Schema:
+                    DropOneSchema(context, name, ifExists);
+                    break;
                 default:
                     DropOneTable(context, name, ifExists);
                     break;
@@ -94,7 +98,56 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger }
+    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema }
+
+    /// <summary>
+    /// Removes one entry from <see cref="Database.Schemas"/>. Missing schema
+    /// without <c>IF EXISTS</c> → Msg 15151; reserved schema names (<c>dbo</c>,
+    /// <c>sys</c>, <c>INFORMATION_SCHEMA</c>) → Msg 15150; non-empty schema
+    /// (any heap table / view / function / procedure / sequence / trigger /
+    /// table type) → Msg 3729 naming the first object encountered. Probe-
+    /// confirmed verbatim wording for all three rejection paths against SQL
+    /// Server 2025. The schema name is read from the 1-part leaf — real
+    /// SQL Server's grammar rejects qualified <c>db.schema</c> at parse;
+    /// the simulator's <see cref="BatchContext.ParseObjectName"/> accepts
+    /// up to 4 parts but the qualifier is ignored here (no <c>USE</c>).
+    /// </summary>
+    private static void DropOneSchema(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schemaName = name.Leaf;
+        if (IsReservedSchemaName(schemaName))
+            throw SimulatedSqlException.CannotDropProtectedSchema(schemaName);
+        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropSchemaDoesNotExist(schemaName);
+        }
+        var blocker = FirstSchemaResident(schema);
+        if (blocker is not null)
+            throw SimulatedSqlException.CannotDropSchemaBecauseNotEmpty(schemaName, blocker);
+        _ = context.CurrentDatabase.Schemas.TryRemove(schemaName, out _);
+    }
+
+    /// <summary>
+    /// Returns the name of any object currently residing in
+    /// <paramref name="schema"/> — used by the non-empty-schema rejection
+    /// path. Walks the shared-namespace objects via
+    /// <see cref="Schema.SchemaObjects"/> first (so DML-targetable objects
+    /// surface preferentially); falls through to <see cref="Schema.TableTypes"/>
+    /// which occupies the parallel type namespace. Returns <c>null</c> when
+    /// the schema is completely empty.
+    /// </summary>
+    private static string? FirstSchemaResident(Schema schema)
+    {
+        foreach (var obj in schema.SchemaObjects())
+            return obj.Name;
+        foreach (var tt in schema.TableTypes.Values)
+            return tt.Name;
+        return null;
+    }
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.Triggers"/>

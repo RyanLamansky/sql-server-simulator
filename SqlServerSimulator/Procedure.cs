@@ -39,7 +39,7 @@ internal sealed class Procedure(
     DateTime createDate)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
-    public readonly Schema Schema = schema;
+    public Schema Schema = schema;
 
     public override string ObjectTypeCode => "P ";
     public override string ObjectTypeDescription => "SQL_STORED_PROCEDURE";
