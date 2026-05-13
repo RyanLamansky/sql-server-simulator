@@ -379,7 +379,29 @@ internal sealed partial class Selection
     private sealed class FromClause
     {
         public readonly List<BooleanExpression> Excluders = [];
-        public readonly List<Expression> GroupBy = [];
+
+        /// <summary>
+        /// Each entry is one grouping set — the list of expressions whose
+        /// distinct combinations bucket rows for that set's pass. Simple
+        /// <c>GROUP BY a, b</c> produces a single entry <c>[a, b]</c>; ROLLUP,
+        /// CUBE, GROUPING SETS, and mixed forms desugar to multiple entries
+        /// via parse-time Cartesian product across all top-level GROUP BY
+        /// items. Empty list = no GROUP BY (the implicit-empty-set rule —
+        /// either no aggregates either, or one implicit group covering all
+        /// rows). A single empty-array entry <c>[]</c> = the explicit
+        /// <c>GROUPING SETS(())</c> form — one group, whole rowset.
+        /// </summary>
+        public readonly List<Expression[]> GroupingSets = [];
+
+        /// <summary>
+        /// Union of every expression that appears in any
+        /// <see cref="GroupingSets"/> entry, in first-seen order. Used by
+        /// GROUPING()/GROUPING_ID() to validate that their argument matches
+        /// a GROUP BY column (Msg 8161 otherwise) and to discover the column
+        /// to test in the current grouping set's "grouped-away" check.
+        /// </summary>
+        public readonly List<Expression> AllGroupingExpressions = [];
+
         public BooleanExpression? Having;
         public readonly List<OrderBySpec> OrderBy = [];
 
@@ -450,7 +472,9 @@ internal sealed partial class Selection
                     // inside a SELECT projection. CASE introduces an inline
                     // expression (see CaseExpression.ParseCase). CURRENT_TIMESTAMP
                     // is uniquely a parens-less reserved-keyword expression
-                    // (see CurrentTimeFunction).
+                    // (see CurrentTimeFunction). GROUPING / GROUPING_ID are
+                    // contextual keywords (not reserved) so they reach
+                    // Expression.Parse via the default UnquotedString path.
                     expressions.Add(Expression.Parse(context));
                     break;
 
@@ -1335,11 +1359,7 @@ internal sealed partial class Selection
             {
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                do
-                {
-                    context.MoveNextRequired();
-                    fromClause.GroupBy.Add(Expression.Parse(context));
-                } while (context.Token is Operator { Character: ',' });
+                ParseGroupByList(context, fromClause);
             }
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
@@ -1374,6 +1394,190 @@ internal sealed partial class Selection
             }
             ConsumeOffsetFetch(context, fromClause);
         }
+    }
+
+    /// <summary>
+    /// Parses the comma-separated GROUP BY list (entered with cursor one
+    /// token before the first item — caller has just consumed <c>BY</c>;
+    /// next call advances onto the item). Each item is either a regular
+    /// expression, <c>ROLLUP(expr_list)</c>, <c>CUBE(expr_list)</c>, or
+    /// <c>GROUPING SETS((set), (set), ...)</c>. Per-item contributions are
+    /// Cartesian-combined to produce the flat <see cref="FromClause.GroupingSets"/>
+    /// list. Probe-confirmed semantics: <c>GROUP BY a, ROLLUP(b, c)</c>
+    /// becomes <c>[[a, b, c], [a, b], [a]]</c>. The
+    /// <see cref="FromClause.AllGroupingExpressions"/> list is populated as a
+    /// union (in first-seen order) for GROUPING()/GROUPING_ID() validation.
+    /// </summary>
+    private static void ParseGroupByList(ParserContext context, FromClause fromClause)
+    {
+        var itemContributions = new List<List<Expression[]>>();
+        do
+        {
+            context.MoveNextRequired();
+            itemContributions.Add(ParseGroupByItem(context));
+        } while (context.Token is Operator { Character: ',' });
+
+        // Cartesian product of per-item contributions: each combination of
+        // one fragment from each item gets concatenated into one grouping
+        // set. Order matters only insofar as result-row ordering follows
+        // grouping-set iteration order.
+        var combined = new List<List<Expression>> { new() };
+        foreach (var item in itemContributions)
+        {
+            var next = new List<List<Expression>>(combined.Count * item.Count);
+            foreach (var prefix in combined)
+            {
+                foreach (var fragment in item)
+                {
+                    var merged = new List<Expression>(prefix.Count + fragment.Length);
+                    merged.AddRange(prefix);
+                    merged.AddRange(fragment);
+                    next.Add(merged);
+                }
+            }
+            combined = next;
+        }
+        foreach (var set in combined)
+            fromClause.GroupingSets.Add([.. set]);
+
+        // Build AllGroupingExpressions: union over all sets, preserving
+        // first-seen order. Uses structural identity via reference equality
+        // — same Expression instance across sets because the parser shares
+        // references through fragment lists, not by re-parsing.
+        var seen = new HashSet<Expression>(ReferenceEqualityComparer.Instance);
+        foreach (var set in fromClause.GroupingSets)
+        {
+            foreach (var expr in set)
+            {
+                if (seen.Add(expr))
+                    fromClause.AllGroupingExpressions.Add(expr);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Parses one top-level GROUP BY item. Returns the list of fragments
+    /// (each fragment a column-list) the item contributes. A plain expression
+    /// contributes a single one-element fragment <c>[[expr]]</c>; a ROLLUP
+    /// contributes <c>N+1</c> fragments shrinking from full prefix to empty;
+    /// a CUBE contributes all <c>2^N</c> subsets; a GROUPING SETS contributes
+    /// each explicit set verbatim.
+    /// </summary>
+    private static List<Expression[]> ParseGroupByItem(ParserContext context)
+    {
+        if (context.Token is UnquotedString { ContextualKeyword: var kw }
+            && kw is ContextualKeyword.Rollup or ContextualKeyword.Cube or ContextualKeyword.Grouping)
+        {
+            switch (kw)
+            {
+                case ContextualKeyword.Rollup:
+                    {
+                        var columns = ParseParenthesizedExpressionList(context);
+                        var fragments = new List<Expression[]>(columns.Length + 1);
+                        for (var k = columns.Length; k > 0; k--)
+                            fragments.Add(columns[..k]);
+                        fragments.Add([]);
+                        return fragments;
+                    }
+                case ContextualKeyword.Cube:
+                    {
+                        var columns = ParseParenthesizedExpressionList(context);
+                        var count = 1 << columns.Length;
+                        var fragments = new List<Expression[]>(count);
+                        for (var mask = count - 1; mask >= 0; mask--)
+                        {
+                            var bits = System.Numerics.BitOperations.PopCount((uint)mask);
+                            var fragment = new Expression[bits];
+                            var w = 0;
+                            for (var b = 0; b < columns.Length; b++)
+                            {
+                                if ((mask & (1 << b)) != 0)
+                                    fragment[w++] = columns[b];
+                            }
+                            fragments.Add(fragment);
+                        }
+                        return fragments;
+                    }
+                case ContextualKeyword.Grouping:
+                    {
+                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Sets })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not Operator { Character: '(' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        var fragments = new List<Expression[]>();
+                        context.MoveNextRequired();
+                        while (true)
+                        {
+                            fragments.Add(ParseGroupingSetMember(context));
+                            if (context.Token is Operator { Character: ',' })
+                            {
+                                context.MoveNextRequired();
+                                continue;
+                            }
+                            break;
+                        }
+                        if (context.Token is not Operator { Character: ')' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextOptional();
+                        return fragments;
+                    }
+            }
+        }
+        return [[Expression.Parse(context)]];
+    }
+
+    /// <summary>
+    /// Parses a parenthesized comma-separated expression list, returning the
+    /// expressions as an array. Entered with cursor on the keyword preceding
+    /// <c>(</c> (e.g., <c>ROLLUP</c> / <c>CUBE</c>); consumes through the
+    /// closing <c>)</c>.
+    /// </summary>
+    private static Expression[] ParseParenthesizedExpressionList(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var list = new List<Expression> { Expression.Parse(context) };
+        while (context.Token is Operator { Character: ',' })
+        {
+            context.MoveNextRequired();
+            list.Add(Expression.Parse(context));
+        }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return [.. list];
+    }
+
+    /// <summary>
+    /// Parses one member of a <c>GROUPING SETS(...)</c> list. A member is
+    /// either a parenthesized column tuple (<c>(a, b)</c> or the empty
+    /// <c>()</c>) or a bare single expression. Returns the member's column
+    /// list; the empty parenthesized form returns <c>[]</c> (the grand-total
+    /// grouping set).
+    /// </summary>
+    private static Expression[] ParseGroupingSetMember(ParserContext context)
+    {
+        if (context.Token is Operator { Character: '(' })
+        {
+            context.MoveNextRequired();
+            if (context.Token is Operator { Character: ')' })
+            {
+                context.MoveNextOptional();
+                return [];
+            }
+            var list = new List<Expression> { Expression.Parse(context) };
+            while (context.Token is Operator { Character: ',' })
+            {
+                context.MoveNextRequired();
+                list.Add(Expression.Parse(context));
+            }
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            return [.. list];
+        }
+        return [Expression.Parse(context)];
     }
 
     /// <summary>

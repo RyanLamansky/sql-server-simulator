@@ -221,6 +221,26 @@ internal sealed class BatchContext
     /// </summary>
     public TriggerFrame? TriggerFrame;
 
+    /// <summary>
+    /// Current grouping-set context — populated by the aggregate executor
+    /// during projection of each group, restored to null between groups and
+    /// between queries. Non-null surface exposes GROUPING() / GROUPING_ID()
+    /// to the projection / HAVING expressions: <see cref="GroupingSetExpressions"/>
+    /// is the set's column list (what's *not* grouped away for this row);
+    /// <see cref="AllGroupingExpressions"/> is the union across all sets in
+    /// the query (used to detect GROUPING(arg) where arg isn't in any
+    /// grouping set — Msg 8161). Null outside an aggregate query — bare
+    /// <c>SELECT GROUPING(x) FROM t</c> raises Msg 8161 via this null check.
+    /// </summary>
+    public Expression[]? GroupingSetExpressions;
+
+    /// <summary>
+    /// Companion to <see cref="GroupingSetExpressions"/> — the union of all
+    /// grouping-set columns across the query. See that field's docs for the
+    /// pair's role in GROUPING() validation.
+    /// </summary>
+    public IReadOnlyList<Expression>? AllGroupingExpressions;
+
     public bool IsSkipping =>
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None

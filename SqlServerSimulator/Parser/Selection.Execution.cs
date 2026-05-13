@@ -109,7 +109,7 @@ internal sealed partial class Selection
         bool isAssignmentOnly,
         MultiPartName? intoTarget)
     {
-        if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null))
+        if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null))
             throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
         var orderBy = fromClause.OrderBy;
         var outputSchema = new SqlType[expressions.Count];
@@ -190,7 +190,7 @@ internal sealed partial class Selection
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
             (batch, outerResolver) =>
-            aggregates.Count > 0 || fromClause.GroupBy.Count > 0 || fromClause.Having is not null
+            aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
                 ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
                 : windows.Count > 0
                     ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
@@ -224,7 +224,7 @@ internal sealed partial class Selection
             return (null, ViewUpdatabilityRejection.Distinct);
         if (aggregates.Count > 0)
             return (null, ViewUpdatabilityRejection.Aggregate);
-        if (fromClause.GroupBy.Count > 0 || fromClause.Having is not null)
+        if (fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
             return (null, ViewUpdatabilityRejection.GroupBy);
         if (sources.Length != 1 || joins.Length > 0)
             return (null, ViewUpdatabilityRejection.MultipleSources);

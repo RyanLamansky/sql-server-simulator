@@ -503,6 +503,7 @@ internal abstract class Expression
                 "COALESCE" => new Coalesce(context),
                 "DATEDIFF" => new DateDiff.Standard(context),
                 "DATEPART" => new DatePart(context),
+                "GROUPING" => new Grouping(context),
                 "PATINDEX" => new PatIndex(context),
                 "TRY_CAST" => new Cast(context, tryMode: true),
                 _ => null
@@ -536,6 +537,7 @@ internal abstract class Expression
             {
                 "ERROR_STATE" => new ErrorStateFunction(context),
                 "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
+                "GROUPING_ID" => new GroupingId(context),
                 "JSON_MODIFY" => new JsonModify(context),
                 "OBJECT_NAME" => new ObjectName(context),
                 "SCHEMA_NAME" => new SchemaName(context),

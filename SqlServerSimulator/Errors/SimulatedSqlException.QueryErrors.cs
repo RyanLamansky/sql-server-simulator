@@ -36,6 +36,15 @@ partial class SimulatedSqlException
         new("Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.", 116, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8161 — raised when an argument to
+    /// <c>GROUPING()</c> or <c>GROUPING_ID()</c> doesn't match any
+    /// expression in the surrounding query's GROUP BY clause (or when the
+    /// function is used outside a GROUP BY context entirely).
+    /// </summary>
+    internal static SimulatedSqlException GroupingArgumentNotInGroupBy(int argumentIndex) =>
+        new($"Argument {argumentIndex} of the GROUPING function does not match any of the expressions in the GROUP BY clause.", 8161, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 512 — fired when a scalar subquery (or one
     /// behind a comparison operator) returns more than one row. Verbatim
     /// text from the probed real SQL Server, including the literal extra
