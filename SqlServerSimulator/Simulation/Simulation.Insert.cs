@@ -135,6 +135,8 @@ partial class Simulation
 
         decimal? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
+        var hasInsertTriggers = HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
+        var triggerRows = hasInsertTriggers ? new List<SqlValue[]>(sourceRows.Count) : null;
         foreach (var sourceRow in sourceRows)
         {
             // Per-row stamp bump for DEFAULT-clause expression evaluation
@@ -249,6 +251,8 @@ partial class Simulation
                     if (projectedBytes is not null)
                         outputRows!.Add(projectedBytes);
                 }
+
+                triggerRows?.Add((SqlValue[])rowValues.Clone());
             }
         }
 
@@ -259,6 +263,21 @@ partial class Simulation
         // perturb the session's identity history.
         if (!context.Batch.IsSkipping)
             context.Connection.LastIdentity = lastIdentityValue;
+
+        // Fire AFTER INSERT triggers post-heap-write. A body-side throw
+        // propagates up; the parent statement's undo log unwinds the
+        // heap inserts (matches probe-confirmed real SQL Server behavior).
+        if (triggerRows is { Count: > 0 })
+        {
+            // @@ROWCOUNT inside the trigger reflects the affected count;
+            // also pre-set on the connection so the body sees it via
+            // @@ROWCOUNT in its first statement.
+            context.Connection.LastStatementRowCount = triggerRows.Count;
+            context.Batch.Connection.Simulation.FireTriggers(
+                context.Batch, destinationTable, TriggerActions.Insert,
+                insertedRows: triggerRows, deletedRows: null,
+                affectedRowCount: triggerRows.Count);
+        }
 
         // OUTPUT INTO @t directs rows to the target only — no result set
         // surfaces to the client (probe-confirmed). When the OUTPUT clause

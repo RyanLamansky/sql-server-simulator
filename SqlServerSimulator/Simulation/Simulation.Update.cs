@@ -227,7 +227,9 @@ partial class Simulation
             if (sourceView?.CheckOptionCheck is { } co && !co(newValues, context.Batch))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
 
-            var oldSnapshot = output is null ? null : fullValues;
+            // Snapshot the old row when OUTPUT or AFTER UPDATE triggers
+            // need it for DELETED.<col> resolution.
+            var oldSnapshot = (output is not null || HasAfterTrigger(context.Batch, table, TriggerActions.Update)) ? fullValues : null;
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
 
@@ -304,7 +306,7 @@ partial class Simulation
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list.
             context.Batch.BumpRowStamp();
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple);
-            var oldSnapshot = output is null ? null : fullValues;
+            var oldSnapshot = (output is not null || HasAfterTrigger(context.Batch, table, TriggerActions.Update)) ? fullValues : null;
             affected.Add((addr.Page, addr.Slot, newValues, oldSnapshot));
         }
 
@@ -347,9 +349,42 @@ partial class Simulation
             }
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
+            {
+                FireAfterUpdateTriggers(context, table, affected);
                 return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+            }
         }
+        FireAfterUpdateTriggers(context, table, affected);
         return new SimulatedNonQuery(affected.Count);
+    }
+
+    /// <summary>
+    /// Fires AFTER UPDATE triggers attached to <paramref name="table"/>.
+    /// The affected list always carries <c>FullNew</c>; <c>FullOld</c>
+    /// is only populated when the caller pre-captures (OUTPUT clause or
+    /// the trigger-presence check). When triggers are present but
+    /// FullOld is null on any row (e.g. update path that didn't need
+    /// the old values for OUTPUT), the trigger sees a NULL-projected
+    /// DELETED row — gap documented in CLAUDE.md.
+    /// </summary>
+    private static void FireAfterUpdateTriggers(
+        ParserContext context,
+        HeapTable table,
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+    {
+        if (!HasAfterTrigger(context.Batch, table, TriggerActions.Update))
+            return;
+        var insertedRows = new List<SqlValue[]>(affected.Count);
+        var deletedRows = new List<SqlValue[]>(affected.Count);
+        foreach (var (_, _, fullNew, fullOld) in affected)
+        {
+            insertedRows.Add(fullNew);
+            deletedRows.Add(fullOld ?? new SqlValue[table.Columns.Length]);
+        }
+        context.Connection.LastStatementRowCount = affected.Count;
+        context.Batch.Connection.Simulation.FireTriggers(
+            context.Batch, table, TriggerActions.Update,
+            insertedRows, deletedRows, affectedRowCount: affected.Count);
     }
 
     /// <summary>

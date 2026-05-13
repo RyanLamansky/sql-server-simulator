@@ -573,6 +573,7 @@ internal abstract class Expression
             {
                 "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
                 "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
+                "TRIGGER_NESTLEVEL" => new TriggerNestLevelFunction(context),
                 _ => null
             },
             18 => uppercaseName switch

@@ -24,6 +24,10 @@ partial class Simulation
                 // vs must not). Reuse the CREATE PROCEDURE parser with the
                 // isAlter flag set.
                 return TryParseCreateProcedure(context, isAlter: true, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.Trigger }:
+                // Same shape-sharing pattern as ALTER PROCEDURE — body /
+                // actions replace in place, ObjectId is preserved.
+                return TryParseCreateTrigger(context, isAlter: true, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseAlterSequence(context);
             case ReservedKeyword { Keyword: Keyword.Database }:

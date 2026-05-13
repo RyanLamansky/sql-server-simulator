@@ -98,10 +98,11 @@ partial class Simulation
         var lobStore = table.Heap;
 
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
+        var hasDeleteTriggers = HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             SqlValue[]? fullValues = null;
-            if (where is not null || output is not null || sourceView is not null)
+            if (where is not null || output is not null || sourceView is not null || hasDeleteTriggers)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -143,7 +144,7 @@ partial class Simulation
                     continue;
             }
 
-            deleted.Add((pageIndex, slotIndex, output is null ? null : fullValues));
+            deleted.Add((pageIndex, slotIndex, (output is null && !hasDeleteTriggers) ? null : fullValues));
         }
 
         return CommitDelete(context, table, deleted, output);
@@ -205,7 +206,8 @@ partial class Simulation
                 continue;
 
             SqlValue[]? fullValues = null;
-            if (output is not null)
+            var needsFull = output is not null || HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
+            if (needsFull)
             {
                 fullValues = DecodeFullRow(table, targetBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -244,8 +246,29 @@ partial class Simulation
             }
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
+            {
+                FireAfterDeleteTriggers(context, table, deleted);
                 return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+            }
         }
+        FireAfterDeleteTriggers(context, table, deleted);
         return new SimulatedNonQuery(deleted.Count);
+    }
+
+    private static void FireAfterDeleteTriggers(
+        ParserContext context,
+        HeapTable table,
+        List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted)
+    {
+        if (!HasAfterTrigger(context.Batch, table, TriggerActions.Delete))
+            return;
+        var deletedRows = new List<SqlValue[]>(deleted.Count);
+        foreach (var (_, _, fullOld) in deleted)
+            deletedRows.Add(fullOld ?? new SqlValue[table.Columns.Length]);
+        context.Connection.LastStatementRowCount = deleted.Count;
+        context.Batch.Connection.Simulation.FireTriggers(
+            context.Batch, table, TriggerActions.Delete,
+            insertedRows: null, deletedRows: deletedRows,
+            affectedRowCount: deleted.Count);
     }
 }

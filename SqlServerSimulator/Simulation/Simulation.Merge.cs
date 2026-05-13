@@ -199,6 +199,8 @@ partial class Simulation
         }
 
         var outputRows = output is null ? null : new List<byte[]>(sourceTuples.Count);
+        var hasInsertTriggers = HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
+        var triggerRows = hasInsertTriggers ? new List<SqlValue[]>(sourceTuples.Count) : null;
         decimal? lastIdentityValue = null;
         var insertedCount = 0;
         foreach (var sourceTuple in sourceTuples)
@@ -326,11 +328,22 @@ partial class Simulation
                     if (projectedBytes is not null)
                         outputRows!.Add(projectedBytes);
                 }
+
+                triggerRows?.Add((SqlValue[])rowValues.Clone());
             }
         }
 
         if (!context.Batch.IsSkipping)
             context.Connection.LastIdentity = lastIdentityValue;
+
+        if (triggerRows is { Count: > 0 })
+        {
+            context.Connection.LastStatementRowCount = triggerRows.Count;
+            context.Batch.Connection.Simulation.FireTriggers(
+                context.Batch, destinationTable, TriggerActions.Insert,
+                insertedRows: triggerRows, deletedRows: null,
+                affectedRowCount: triggerRows.Count);
+        }
 
         return output is { HasTarget: false } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)

@@ -106,6 +106,24 @@ partial class SimulatedSqlException
         new($"Cannot drop the sequence '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>trigger</c> wording variant.
+    /// Probe-confirmed verbatim against SQL Server 2025 (2026-05-13): same
+    /// number / class / state as DROP TABLE / FUNCTION / VIEW / PROCEDURE /
+    /// SEQUENCE; the object-type noun is the only difference.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropTriggerDoesNotExist(string name) =>
+        new($"Cannot drop the trigger '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
+    /// Mimics SQL Server error 8197 — <c>CREATE TRIGGER</c> referenced a
+    /// table that doesn't exist or isn't valid as a trigger parent
+    /// (views aren't supported as AFTER-trigger parents — INSTEAD OF only).
+    /// Probe-confirmed verbatim against SQL Server 2025: Class 16, State 4.
+    /// </summary>
+    internal static SimulatedSqlException ObjectDoesNotExistForTrigger(string name) =>
+        new($"The object '{name}' does not exist or is invalid for this operation.", 8197, 16, 4);
+
+    /// <summary>
     /// Mimics SQL Server error 11700: <c>CREATE SEQUENCE</c> declared
     /// <c>INCREMENT BY 0</c>. Probe-confirmed verbatim wording against
     /// SQL Server 2025.

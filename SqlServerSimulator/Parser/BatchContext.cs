@@ -210,6 +210,17 @@ internal sealed class BatchContext
     /// </summary>
     public ProcFrame? ProcFrame;
 
+    /// <summary>
+    /// Non-null when this batch is executing a trigger body. Holds the
+    /// <c>INSERTED</c> / <c>DELETED</c> pseudo-tables (materialized from
+    /// the firing DML's affected rows) so the trigger body's bare-name
+    /// <c>FROM inserted</c> / <c>FROM deleted</c> references resolve to
+    /// these instances via <see cref="TryResolveTable"/>'s 1-part
+    /// fallback. Absent outside trigger bodies — a bare <c>FROM inserted</c>
+    /// in a regular query surfaces Msg 208 through the standard path.
+    /// </summary>
+    public TriggerFrame? TriggerFrame;
+
     public bool IsSkipping =>
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None
@@ -330,6 +341,26 @@ internal sealed class BatchContext
             foreach (var kvp in tableVariables)
                 this.TableVariables[kvp.Key] = kvp.Value;
         }
+    }
+
+    /// <summary>
+    /// Constructs a batch for trigger-body re-dispatch. Mirrors the proc
+    /// body constructor's shape (re-tokenize body source, share caller's
+    /// connection / transaction / undo log via the outer batch's state)
+    /// but seeds a fresh empty <see cref="Variables"/> dict and routes
+    /// the <c>INSERTED</c> / <c>DELETED</c> pseudo-tables through the new
+    /// <see cref="TriggerFrame"/>. Trigger bodies don't take parameters
+    /// in the procedure sense and don't have a value-form RETURN, so no
+    /// frame analogous to <see cref="ProcFrame"/> is needed for those —
+    /// but result sets from SELECT statements in the body propagate to
+    /// the outer caller (same as procedures; probe-confirmed:
+    /// <c>create trigger ... as select 1</c> yields the result set).
+    /// </summary>
+    public BatchContext(SimulatedDbCommand triggerBodyCommand, TriggerFrame triggerFrame)
+    {
+        this.Variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        this.TriggerFrame = triggerFrame;
+        this.Parser = new ParserContext(triggerBodyCommand, this);
     }
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
@@ -549,6 +580,23 @@ internal sealed class BatchContext
     /// </remarks>
     public bool TryResolveTable(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
     {
+        // Trigger pseudo-tables INSERTED / DELETED resolve first when a
+        // trigger body is in flight. 1-part names only (probe-confirmed:
+        // qualified `dbo.inserted` raises Msg 208 in real SQL Server).
+        if (this.TriggerFrame is { } triggerFrame && name.Count == 1)
+        {
+            if (Collation.Default.Equals(name.Leaf, "inserted") && triggerFrame.Inserted is { } ins)
+            {
+                table = ins;
+                return true;
+            }
+            if (Collation.Default.Equals(name.Leaf, "deleted") && triggerFrame.Deleted is { } del)
+            {
+                table = del;
+                return true;
+            }
+        }
+
         if (IsLocalTempName(name.Leaf))
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
 

@@ -37,6 +37,7 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Function } => DropTargetKind.Function,
             ReservedKeyword { Keyword: Keyword.View } => DropTargetKind.View,
             ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => DropTargetKind.Procedure,
+            ReservedKeyword { Keyword: Keyword.Trigger } => DropTargetKind.Trigger,
             UnquotedString { ContextualKeyword: ContextualKeyword.Type } => DropTargetKind.Type,
             UnquotedString { ContextualKeyword: ContextualKeyword.Sequence } => DropTargetKind.Sequence,
             _ => DropTargetKind.None,
@@ -74,6 +75,9 @@ partial class Simulation
                 case DropTargetKind.Sequence:
                     DropOneSequence(context, name, ifExists);
                     break;
+                case DropTargetKind.Trigger:
+                    DropOneTrigger(context, name, ifExists);
+                    break;
                 default:
                     DropOneTable(context, name, ifExists);
                     break;
@@ -90,7 +94,25 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence }
+    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger }
+
+    /// <summary>
+    /// Removes one entry from the target schema's <see cref="Schema.Triggers"/>
+    /// dict. Missing trigger → Msg 3701 (trigger variant) unless
+    /// <paramref name="ifExists"/> is set. Probe-confirmed wording.
+    /// </summary>
+    private static void DropOneTrigger(ParserContext context, MultiPartName name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is null || !schema.Triggers.TryRemove(name.Leaf, out _))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+        }
+    }
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.Sequences"/>

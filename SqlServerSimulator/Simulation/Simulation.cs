@@ -585,6 +585,8 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Drop } when TryParseDrop(context):
             case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Disable } when TryParseEnableOrDisableTrigger(context, disable: true):
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Enable } when TryParseEnableOrDisableTrigger(context, disable: false):
                 if (!batch.IsSkipping)
                     connection.LastStatementRowCount = 0;
                 break;

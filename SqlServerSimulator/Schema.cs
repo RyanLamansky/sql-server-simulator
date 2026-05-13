@@ -77,4 +77,18 @@ internal sealed class Schema(string name, int schemaId)
     /// views / functions / procs (Msg 2714 on collision).
     /// </summary>
     public readonly ConcurrentDictionary<string, Sequence> Sequences = new(Collation.Default);
+
+    /// <summary>
+    /// DML triggers hosted by this schema. Created via <c>CREATE [OR
+    /// ALTER] TRIGGER schema.name ON schema.table AFTER ... AS body</c>;
+    /// fired automatically by INSERT / UPDATE / DELETE / MERGE against
+    /// the trigger's parent table. The trigger NAME shares the
+    /// object-name namespace with tables / views / functions / procs /
+    /// sequences (Msg 2714 on collision). Lookup at DML time scans this
+    /// dict for triggers whose <see cref="Trigger.ParentTable"/> matches
+    /// the DML target — a per-table cache lives on <see cref="HeapTable"/>
+    /// itself but the dict here is the source of truth (ENABLE / DISABLE
+    /// / DROP all operate on it).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Trigger> Triggers = new(Collation.Default);
 }

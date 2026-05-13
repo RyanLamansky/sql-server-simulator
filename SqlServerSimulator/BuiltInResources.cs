@@ -186,6 +186,8 @@ internal static class BuiltInResources
         var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
         var procType = SqlValue.FromChar(charTwo, "P ");
         var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
+        var triggerType = SqlValue.FromChar(charTwo, "TR");
+        var triggerTypeDesc = SqlValue.FromNVarchar("SQL_TRIGGER");
         var zeroParent = SqlValue.FromInt32(0);
         var objectsColumns = new HeapColumn[]
         {
@@ -200,7 +202,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
         var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, viewType, viewTypeDesc, procType, procTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, viewType, viewTypeDesc, procType, procTypeDesc, triggerType, triggerTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -494,6 +496,34 @@ internal static class BuiltInResources
         };
         var sequencesView = new CatalogView("sequences", sequencesColumns, EnumerateSysSequences);
 
+        // sys.triggers: per-trigger rows. Probe-confirmed shipped subset
+        // (SQL Server 2025): name / object_id / parent_class /
+        // parent_class_desc / parent_id / type / type_desc / create_date /
+        // modify_date / is_disabled / is_instead_of_trigger /
+        // is_not_for_replication. parent_class is always 1
+        // (OBJECT_OR_COLUMN) for DML triggers attached to tables;
+        // DDL triggers (database/server-scoped) use 0 / 100 and aren't
+        // modeled. parent_id is the parent table's object_id.
+        var parentClassObjectColumn = SqlValue.FromByte(1);
+        var parentClassObjectColumnDesc = SqlValue.FromNVarchar("OBJECT_OR_COLUMN");
+        var triggersColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("parent_class", SqlType.TinyInt, null, false),
+            new("parent_class_desc", SqlType.NVarchar, 60, true),
+            new("parent_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("is_instead_of_trigger", SqlType.Bit, null, false),
+            new("is_not_for_replication", SqlType.Bit, null, false),
+        };
+        var triggersView = new CatalogView("triggers", triggersColumns, batch =>
+            EnumerateSysTriggers(batch, parentClassObjectColumn, parentClassObjectColumnDesc, triggerType, triggerTypeDesc));
+
         // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
         // emits a row for every user-defined type (scalar UDTs surface their
         // base type; table types surface 'table type' as the data_type
@@ -522,6 +552,7 @@ internal static class BuiltInResources
             ["sys.types"] = typesView,
             ["sys.table_types"] = tableTypesView,
             ["sys.sequences"] = sequencesView,
+            ["sys.triggers"] = triggersView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -609,6 +640,47 @@ internal static class BuiltInResources
     /// NULL when no explicit <c>CACHE n</c> was given anyway). Type-id
     /// columns derive from the declared type via <see cref="SystypesRowData"/>.
     /// </summary>
+    /// <summary>
+    /// Rows for <c>sys.triggers</c>: one row per <see cref="Trigger"/> in
+    /// every schema. <c>parent_class</c> is always 1 (DML triggers attached
+    /// to tables — DDL/server triggers aren't modeled);
+    /// <c>is_not_for_replication</c> is always 0 (the simulator
+    /// parse-and-ignores the WITH clause). Probe-confirmed columns; modify
+    /// date mirrors create date because <c>ALTER TRIGGER</c> replaces the
+    /// instance wholesale.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
+        Parser.BatchContext batch,
+        SqlValue parentClassObjectColumn,
+        SqlValue parentClassObjectColumnDesc,
+        SqlValue triggerType,
+        SqlValue triggerTypeDesc)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
+            {
+                var createDate = SqlValue.FromDateTime(trigger.CreateDate);
+                yield return [
+                    SqlValue.FromSystemName(trigger.Name),
+                    SqlValue.FromInt32(trigger.ObjectId),
+                    parentClassObjectColumn,
+                    parentClassObjectColumnDesc,
+                    SqlValue.FromInt32(trigger.ParentTable.ObjectId),
+                    triggerType,
+                    triggerTypeDesc,
+                    createDate,
+                    createDate,
+                    trigger.IsDisabled ? trueBit : falseBit,
+                    trigger.Timing == TriggerTiming.InsteadOf ? trueBit : falseBit,
+                    falseBit,
+                ];
+            }
+        }
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
@@ -1282,6 +1354,7 @@ internal static class BuiltInResources
         SqlValue inlineTvfType, SqlValue inlineTvfTypeDesc,
         SqlValue viewType, SqlValue viewTypeDesc,
         SqlValue procType, SqlValue procTypeDesc,
+        SqlValue triggerType, SqlValue triggerTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
@@ -1330,6 +1403,20 @@ internal static class BuiltInResources
                     procTypeDesc,
                     SqlValue.FromDateTime(proc.CreateDate),
                     SqlValue.FromDateTime(proc.CreateDate),
+                    notMsShipped,
+                ];
+            }
+            foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromInt32(trigger.ObjectId),
+                    SqlValue.FromSystemName(trigger.Name),
+                    SqlValue.FromInt32(trigger.Schema.SchemaId),
+                    SqlValue.FromInt32(trigger.ParentTable.ObjectId),
+                    triggerType,
+                    triggerTypeDesc,
+                    SqlValue.FromDateTime(trigger.CreateDate),
+                    SqlValue.FromDateTime(trigger.CreateDate),
                     notMsShipped,
                 ];
             }

@@ -90,6 +90,26 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal const int MaxNestingLevel = 32;
 
     /// <summary>
+    /// ObjectIds of triggers currently mid-fire on this connection. The
+    /// DML dispatcher consults this set before firing a trigger and skips
+    /// any whose ObjectId is already in flight — matches SQL Server's
+    /// default <c>RECURSIVE_TRIGGERS OFF</c> behavior (direct same-trigger
+    /// recursion is suppressed; trigger-to-other-trigger chains still fire).
+    /// Probe-confirmed: an update inside a trigger doesn't re-fire that
+    /// same trigger, even though the table-level update otherwise would.
+    /// </summary>
+    internal readonly HashSet<int> FiringTriggerIds = [];
+
+    /// <summary>
+    /// Current trigger nesting depth — incremented each time a trigger
+    /// body begins executing on this connection, decremented on exit.
+    /// Surfaced by the <c>TRIGGER_NESTLEVEL()</c> scalar (probe-confirmed
+    /// to return 1 at the top-level DML's first trigger and 2+ when
+    /// trigger bodies fire further DML that itself triggers).
+    /// </summary>
+    internal int TriggerNestLevel;
+
+    /// <summary>
     /// Last identity value produced by an INSERT on this connection — the
     /// source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>. SQL
     /// Server scopes these per session/scope; the simulator collapses both

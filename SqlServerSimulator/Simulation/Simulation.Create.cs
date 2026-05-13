@@ -25,19 +25,22 @@ partial class Simulation
                 return TryParseCreateView(context);
             case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:
                 return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.Trigger }:
+                return Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
                 return TryParseCreateType(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseCreateSequence(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
-                // CREATE OR ALTER PROCEDURE — modern upsert syntax. The only
-                // ALTER-able object that ships in the simulator today is the
-                // procedure, so this routes there directly.
+                // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: true);
+                return context.GetNextRequired() switch
+                {
+                    ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: true),
+                    ReservedKeyword { Keyword: Keyword.Trigger } => Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: true),
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                };
             case ReservedKeyword { Keyword: Keyword.Table }:
                 break;
             default:
