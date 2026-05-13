@@ -11,20 +11,22 @@ partial class Simulation
     /// AS body</c>. Body source is captured between <c>AS</c> (exclusive)
     /// and the trailing statement boundary; re-tokenized per fire inside
     /// a child <see cref="BatchContext"/> with a <see cref="TriggerFrame"/>
-    /// seeded with the inserted / deleted rowsets. Only AFTER (and its
-    /// synonym FOR) is modeled — INSTEAD OF raises <see cref="NotSupportedException"/>
-    /// at parse. Probe-confirmed against SQL Server 2025 (2026-05-13).
+    /// seeded with the inserted / deleted rowsets. AFTER triggers attach
+    /// to heap tables only (views raise Msg 8197 — probe-confirmed);
+    /// INSTEAD OF triggers attach to either a heap table or a view. At
+    /// most one INSTEAD OF trigger per action per target is permitted
+    /// (Msg 2111). Probe-confirmed against SQL Server 2025 (2026-05-13).
     /// </summary>
     /// <remarks>
     /// <para>
     /// The trigger NAME lives in the schema namespace; collision with
     /// any existing object (table / view / function / proc / sequence /
     /// trigger) raises Msg 2714 (same rule as <see cref="TryParseCreateProcedure"/>).
-    /// The parent table must already exist — Msg 8197 otherwise.
+    /// The parent must already exist — Msg 8197 otherwise.
     /// </para>
     /// <para>
     /// CREATE OR ALTER upserts; ALTER requires the trigger to exist.
-    /// Both replace the body / actions in place but preserve the
+    /// Both replace the body / actions / timing in place but preserve the
     /// <see cref="Trigger.ObjectId"/>.
     /// </para>
     /// </remarks>
@@ -47,10 +49,8 @@ partial class Simulation
         context.MoveNextRequired();
 
         // Timing: AFTER (contextual) / FOR (reserved synonym) / INSTEAD OF
-        // (contextual + reserved). The simulator models AFTER only; INSTEAD
-        // OF parses but raises NotSupportedException so apps with INSTEAD
-        // OF triggers fail loudly rather than silently producing wrong
-        // behavior.
+        // (contextual + reserved). INSTEAD OF replaces the DML on the
+        // parent with the trigger body; AFTER fires post-heap-write.
         var timing = TriggerTiming.After;
         switch (context.Token)
         {
@@ -122,18 +122,50 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (timing == TriggerTiming.InsteadOf)
-            throw new NotSupportedException("INSTEAD OF triggers aren't modeled. Only AFTER (and the FOR synonym) triggers are supported; use AFTER if the actual semantic suffices, or apply the trigger's logic at the application layer.");
-
-        // Resolve parent table. Real SQL Server allows AFTER triggers on
-        // base tables only (views accept INSTEAD OF triggers, which the
-        // simulator doesn't model). System tables / table variables /
-        // temp tables aren't valid parents either.
-        if (!context.Batch.TryResolveTable(parentName, out var parentTable)
-            || parentTable.IsTableVariable
-            || BatchContext.IsLocalTempName(parentTable.Name))
+        // Resolve the parent. INSTEAD OF accepts a heap table or a view;
+        // AFTER accepts a heap table only (Msg 8197 on view target,
+        // probe-confirmed). Table variables / temp tables aren't valid
+        // parents in either case.
+        object parent;
+        string parentKind;
+        if (context.Batch.TryResolveView(parentName, out var parentView))
+        {
+            if (timing != TriggerTiming.InsteadOf)
+                throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString());
+            parent = parentView;
+            parentKind = "view";
+        }
+        else if (context.Batch.TryResolveTable(parentName, out var parentTable)
+            && !parentTable.IsTableVariable
+            && !BatchContext.IsLocalTempName(parentTable.Name))
+        {
+            parent = parentTable;
+            parentKind = "table";
+        }
+        else
         {
             throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString());
+        }
+
+        // At most one INSTEAD OF trigger per action per target (Msg 2111).
+        // ALTER / CREATE OR ALTER replacing an existing trigger by the
+        // same name is permitted; collision is only with a *different*
+        // trigger covering an overlapping action.
+        if (timing == TriggerTiming.InsteadOf)
+        {
+            foreach (var schema in context.CurrentDatabase.Schemas.Values)
+            {
+                foreach (var t in schema.Triggers.Values)
+                {
+                    if (!ReferenceEquals(t.Parent, parent)) continue;
+                    if (t.Timing != TriggerTiming.InsteadOf) continue;
+                    if (Collation.Default.Equals(t.Name, triggerName.Leaf)) continue;
+                    var overlap = t.Actions & actions;
+                    if (overlap == 0) continue;
+                    throw SimulatedSqlException.InsteadOfTriggerAlreadyExists(
+                        triggerName.Leaf, parentKind, parentName.ToString(), FirstActionName(overlap));
+                }
+            }
         }
 
         var existed = triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var existing);
@@ -157,7 +189,7 @@ partial class Simulation
             triggerSchema,
             triggerName.Leaf,
             objectId,
-            parentTable,
+            parent,
             actions,
             timing,
             bodyText,
@@ -166,12 +198,21 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>Maps a TriggerActions flag to the spelled-out action name
+    /// for Msg 2111 wording — first set bit by INSERT / UPDATE / DELETE
+    /// priority order matching SQL Server's diagnostic shape.</summary>
+    private static string FirstActionName(TriggerActions actions) =>
+        (actions & TriggerActions.Insert) != 0 ? "INSERT"
+        : (actions & TriggerActions.Update) != 0 ? "UPDATE"
+        : "DELETE";
+
     /// <summary>
-    /// Parses <c>{ DISABLE | ENABLE } TRIGGER name ON table</c>. Toggles
+    /// Parses <c>{ DISABLE | ENABLE } TRIGGER name ON parent</c>. Toggles
     /// <see cref="Trigger.IsDisabled"/>; the matching DML still parses
     /// and writes normally but the trigger body is skipped while
     /// disabled. <c>DISABLE TRIGGER ALL</c> / <c>ENABLE TRIGGER ALL</c>
-    /// (toggling every trigger on the table at once) is supported too.
+    /// (toggling every trigger on the parent at once) is supported too.
+    /// The parent may be a heap table or a view.
     /// </summary>
     private static bool TryParseEnableOrDisableTrigger(ParserContext context, bool disable)
     {
@@ -184,7 +225,7 @@ partial class Simulation
         context.MoveNextRequired();
 
         // Two shapes: a trigger name, or the literal keyword ALL. Both
-        // are followed by ON table.
+        // are followed by ON parent.
         var allTriggers = false;
         MultiPartName triggerName = default;
         if (context.Token is ReservedKeyword { Keyword: Keyword.All })
@@ -210,8 +251,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!context.Batch.TryResolveTable(parentName, out var parentTable))
-            throw SimulatedSqlException.InvalidObjectName(parentName);
+        object parent = context.Batch.TryResolveView(parentName, out var parentView)
+            ? parentView
+            : context.Batch.TryResolveTable(parentName, out var parentTable)
+                ? parentTable
+                : throw SimulatedSqlException.InvalidObjectName(parentName);
 
         if (allTriggers)
         {
@@ -219,7 +263,7 @@ partial class Simulation
             {
                 foreach (var trigger in schema.Triggers.Values)
                 {
-                    if (ReferenceEquals(trigger.ParentTable, parentTable))
+                    if (ReferenceEquals(trigger.Parent, parent))
                         trigger.IsDisabled = disable;
                 }
             }
@@ -228,7 +272,7 @@ partial class Simulation
 
         if (!context.Batch.TryResolveSchema(triggerName, out var triggerSchema)
             || !triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var matchedTrigger)
-            || !ReferenceEquals(matchedTrigger.ParentTable, parentTable))
+            || !ReferenceEquals(matchedTrigger.Parent, parent))
         {
             throw SimulatedSqlException.InvalidObjectName(triggerName);
         }

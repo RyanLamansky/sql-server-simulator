@@ -7,14 +7,14 @@ partial class Simulation
 {
     /// <summary>
     /// Fires every enabled AFTER trigger matching <paramref name="action"/>
-    /// on <paramref name="targetTable"/>, populating the inserted /
-    /// deleted pseudo-tables from <paramref name="insertedRows"/> /
-    /// <paramref name="deletedRows"/>. Called by INSERT / UPDATE /
-    /// DELETE / MERGE post-write. A trigger body throwing propagates
-    /// up — the calling DML's undo log walks back, rolling the write
-    /// itself. Direct same-trigger recursion is suppressed via
-    /// <see cref="SimulatedDbConnection.FiringTriggerIds"/> (matches
-    /// SQL Server's default <c>RECURSIVE_TRIGGERS OFF</c>).
+    /// on <paramref name="targetTable"/> (AFTER is heap-table-only),
+    /// populating the inserted / deleted pseudo-tables from
+    /// <paramref name="insertedRows"/> / <paramref name="deletedRows"/>.
+    /// Called by INSERT / UPDATE / DELETE / MERGE post-write. A trigger
+    /// body throwing propagates up — the calling DML's undo log walks
+    /// back, rolling the write itself. Direct same-trigger recursion is
+    /// suppressed via <see cref="SimulatedDbConnection.FiringTriggerIds"/>
+    /// (matches SQL Server's default <c>RECURSIVE_TRIGGERS OFF</c>).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -46,17 +46,16 @@ partial class Simulation
         List<SqlValue[]>? deletedRows,
         int affectedRowCount)
     {
-        // Find matching triggers across all schemas. Trigger ordering:
-        // SQL Server doesn't guarantee order unless sp_settriggerorder is
-        // used; the simulator uses schema-dict insertion order, which is
-        // stable for a single connection's sequence of CREATE TRIGGER
-        // statements.
+        // Find matching AFTER triggers across all schemas. Ordering uses
+        // schema-dict insertion order — stable for a single connection's
+        // CREATE TRIGGER sequence (SQL Server doesn't guarantee order
+        // unless sp_settriggerorder is used).
         var matching = new List<Trigger>();
         foreach (var schema in outerBatch.CurrentDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values)
             {
-                if (!ReferenceEquals(trigger.ParentTable, targetTable))
+                if (!ReferenceEquals(trigger.Parent, targetTable))
                     continue;
                 if (trigger.Timing != TriggerTiming.After)
                     continue;
@@ -70,17 +69,79 @@ partial class Simulation
         if (matching.Count == 0)
             return;
 
-        var connection = outerBatch.Connection;
+        var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch);
+        var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch);
+        RunTriggerBodies(outerBatch, matching, insertedPseudo, deletedPseudo, affectedRowCount);
+    }
 
-        // Build pseudo-tables once per fire. Real SQL Server always
-        // exposes BOTH inserted and deleted to trigger bodies — the
-        // logically-absent one (deleted for INSERT, inserted for DELETE)
-        // is empty rather than missing. A trigger body that joins
-        // <c>inserted left join deleted</c> works the same in an INSERT
-        // and an UPDATE; the FROM-clause name resolution doesn't
-        // discriminate by event type.
-        var insertedPseudo = MaterializePseudoTable(targetTable, "inserted", insertedRows ?? [], outerBatch);
-        var deletedPseudo = MaterializePseudoTable(targetTable, "deleted", deletedRows ?? [], outerBatch);
+    /// <summary>
+    /// Fires the single matching INSTEAD OF trigger for <paramref name="action"/>
+    /// on <paramref name="parent"/> (a <see cref="HeapTable"/> or a
+    /// <see cref="View"/>). Returns <c>true</c> when a trigger fired,
+    /// <c>false</c> when none was attached (so the caller proceeds with
+    /// the normal heap-write path). Max-one enforcement at CREATE TRIGGER
+    /// time (Msg 2111) means we either find zero or exactly one match.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <paramref name="pseudoColumns"/> is the column shape of INSERTED /
+    /// DELETED — the parent table's columns for a table target, or the
+    /// view's <see cref="View.OutputColumns"/> for a view target. Rows
+    /// supplied in <paramref name="insertedRows"/> /
+    /// <paramref name="deletedRows"/> must match this shape.
+    /// </para>
+    /// <para>
+    /// Direct-recursion suppression still applies — an INSTEAD OF body
+    /// that issues DML against its own target won't re-fire itself (the
+    /// nested DML reaches the heap directly).
+    /// </para>
+    /// </remarks>
+    internal bool TryFireInsteadOfTrigger(
+        BatchContext outerBatch,
+        object parent,
+        TriggerActions action,
+        HeapColumn[] pseudoColumns,
+        List<SqlValue[]>? insertedRows,
+        List<SqlValue[]>? deletedRows,
+        int affectedRowCount)
+    {
+        Trigger? matched = null;
+        foreach (var schema in outerBatch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values)
+            {
+                if (!ReferenceEquals(trigger.Parent, parent)) continue;
+                if (trigger.Timing != TriggerTiming.InsteadOf) continue;
+                if ((trigger.Actions & action) == 0) continue;
+                if (trigger.IsDisabled) continue;
+                matched = trigger;
+                break;
+            }
+            if (matched is not null) break;
+        }
+        if (matched is null)
+            return false;
+
+        var insertedPseudo = MaterializePseudoTable(pseudoColumns, "inserted", insertedRows ?? [], outerBatch);
+        var deletedPseudo = MaterializePseudoTable(pseudoColumns, "deleted", deletedRows ?? [], outerBatch);
+        RunTriggerBodies(outerBatch, [matched], insertedPseudo, deletedPseudo, affectedRowCount);
+        return true;
+    }
+
+    /// <summary>
+    /// Shared per-trigger dispatch loop: runs each trigger's body inside
+    /// a child <see cref="BatchContext"/>, enforces nesting / recursion
+    /// limits, and restores the outer caller's SCOPE_IDENTITY anchor on
+    /// exit. Used by both AFTER and INSTEAD OF dispatch paths.
+    /// </summary>
+    private void RunTriggerBodies(
+        BatchContext outerBatch,
+        List<Trigger> triggers,
+        HeapTable insertedPseudo,
+        HeapTable deletedPseudo,
+        int affectedRowCount)
+    {
+        var connection = outerBatch.Connection;
 
         // Save the outer caller's SCOPE_IDENTITY / @@IDENTITY anchor.
         // Real SQL Server scopes SCOPE_IDENTITY per stored-context-scope —
@@ -88,12 +149,9 @@ partial class Simulation
         // SCOPE_IDENTITY (probe-confirmed). The simulator collapses
         // SCOPE_IDENTITY and @@IDENTITY into one slot, so save/restore
         // around the trigger fires preserves the outer caller's view.
-        // EF Core's HasTrigger emit shape relies on this (the post-
-        // INSERT SELECT does WHERE [Id] = scope_identity() against the
-        // outer caller's identity).
         var outerScopeIdentity = connection.LastIdentity;
 
-        foreach (var trigger in matching)
+        foreach (var trigger in triggers)
         {
             // Direct-recursion guard. Trigger T currently firing → skip
             // re-fires of T (the body's DML may still fire other triggers
@@ -107,12 +165,6 @@ partial class Simulation
                 throw SimulatedSqlException.MaximumNestingLevelExceeded();
             }
 
-            // @@ROWCOUNT inside the trigger reflects the firing DML's
-            // affected-row count (probe-confirmed). Body statements then
-            // mutate @@ROWCOUNT normally. The caller already set
-            // LastStatementRowCount to the affected count before
-            // returning, so we don't need to save/restore here — the
-            // body's own statements will overwrite as they execute.
             connection.LastStatementRowCount = affectedRowCount;
 
             var triggerFrame = new TriggerFrame(trigger, insertedPseudo, deletedPseudo);
@@ -129,13 +181,6 @@ partial class Simulation
                     var innerBatch = new BatchContext(bodyCommand, triggerFrame);
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
-                    // Drain outcomes — result sets from a trigger body
-                    // propagate to the outer caller via the dispatch
-                    // loop's enumerator, but the immediate caller here
-                    // (the DML site) doesn't yield them. For v1 the
-                    // body's result sets are simply enumerated and
-                    // discarded; revisiting if EF apps rely on
-                    // trigger-emitted result sets.
                     foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))
                     {
                         // discard
@@ -150,10 +195,6 @@ partial class Simulation
             }
         }
 
-        // Restore the caller's SCOPE_IDENTITY view after all triggers
-        // have finished. Inside the triggers, IDENT_CURRENT / @@IDENTITY
-        // saw the trigger's effects; the caller continues to see the
-        // outer DML's last identity.
         connection.LastIdentity = outerScopeIdentity;
     }
 
@@ -163,20 +204,39 @@ partial class Simulation
     /// table. DML sites consult this before bothering to capture full
     /// per-row snapshots for the inserted / deleted pseudo-tables.
     /// </summary>
-    internal static bool HasAfterTrigger(BatchContext batch, HeapTable table, TriggerActions action)
+    internal static bool HasAfterTrigger(BatchContext batch, HeapTable table, TriggerActions action) =>
+        HasTrigger(batch, table, action, TriggerTiming.After);
+
+    /// <summary>
+    /// Fast-path predicate: returns true when an enabled INSTEAD OF
+    /// trigger of the requested action exists for <paramref name="parent"/>
+    /// (a <see cref="HeapTable"/> or a <see cref="View"/>). The caller
+    /// uses this to short-circuit the heap-write path and route to
+    /// <see cref="TryFireInsteadOfTrigger"/>.
+    /// </summary>
+    internal static bool HasInsteadOfTrigger(BatchContext batch, object parent, TriggerActions action) =>
+        HasTrigger(batch, parent, action, TriggerTiming.InsteadOf);
+
+    private static bool HasTrigger(BatchContext batch, object parent, TriggerActions action, TriggerTiming timing)
     {
+        // In-flight triggers are excluded — for AFTER, this matters only
+        // when a body re-enters itself (the recursion guard would skip
+        // anyway, so the result-set effect is the same). For INSTEAD OF
+        // the distinction is load-bearing: a body that issues DML against
+        // its own target must reach the heap, because the trigger
+        // (suppressed by the recursion guard) can't run a second time.
+        // Probe-confirmed: real SQL Server's INSTEAD OF body's nested
+        // INSERT writes the heap directly.
+        var firingIds = batch.Connection.FiringTriggerIds;
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values)
             {
-                if (!ReferenceEquals(trigger.ParentTable, table))
-                    continue;
-                if (trigger.Timing != TriggerTiming.After)
-                    continue;
-                if ((trigger.Actions & action) == 0)
-                    continue;
-                if (trigger.IsDisabled)
-                    continue;
+                if (!ReferenceEquals(trigger.Parent, parent)) continue;
+                if (trigger.Timing != timing) continue;
+                if ((trigger.Actions & action) == 0) continue;
+                if (trigger.IsDisabled) continue;
+                if (firingIds.Contains(trigger.ObjectId)) continue;
                 return true;
             }
         }
@@ -185,28 +245,60 @@ partial class Simulation
 
     /// <summary>
     /// Builds the inserted / deleted pseudo-table for a single trigger
-    /// fire. The HeapTable shares the parent table's column array (the
-    /// schema is identical — Msg 286 wouldn't fire here) and gets a
-    /// fresh empty heap that this method populates by re-encoding each
-    /// supplied row via the parent's StoredColumns / StorageOrdinals
-    /// projection. <see cref="HeapTable.IsTableVariable"/> is set so
-    /// inserts bypass identity/default re-running and aren't tracked in
-    /// the regular transaction undo log.
+    /// fire. The pseudo HeapTable carries the supplied column array
+    /// (parent table columns for a table target, view OutputColumns for
+    /// a view target) and gets a fresh empty heap that this method
+    /// populates by encoding each supplied row.
+    /// <see cref="HeapTable.IsTableVariable"/> is set so inserts bypass
+    /// identity/default re-running and aren't tracked in the regular
+    /// transaction undo log.
     /// </summary>
-    private static HeapTable MaterializePseudoTable(HeapTable parent, string name, List<SqlValue[]> rows, BatchContext outerBatch)
+    private static HeapTable MaterializePseudoTable(HeapColumn[] columns, string name, List<SqlValue[]> rows, BatchContext outerBatch)
     {
         var pseudo = new HeapTable(
             name,
-            parent.Columns,
+            columns,
             objectId: outerBatch.CurrentDatabase.AllocateObjectId(),
             schemaId: Database.DboSchemaId,
             createDate: outerBatch.CurrentStatement.UtcNow,
             isTableVariable: true);
         foreach (var row in rows)
         {
-            var stored = ProjectStoredValues(parent, row);
-            pseudo.Heap.Insert(RowEncoder.EncodeRow(parent.StoredColumns, stored, pseudo.Heap), undoLog: null);
+            var stored = ProjectStoredValuesForColumns(columns, pseudo.StorageOrdinals, row);
+            pseudo.Heap.Insert(RowEncoder.EncodeRow(pseudo.StoredColumns, stored, pseudo.Heap), undoLog: null);
         }
         return pseudo;
+    }
+
+    /// <summary>
+    /// Projects a per-column-array row to the stored-column subset.
+    /// Mirrors <c>ProjectStoredValues</c> but takes the column array and
+    /// storage ordinals directly so it works for view-shaped pseudo-tables
+    /// (whose OutputColumns are all <see cref="HeapColumn.IsStored"/> = true,
+    /// making this a straight copy in practice but defensive against future
+    /// non-stored projection columns).
+    /// </summary>
+    private static SqlValue[] ProjectStoredValuesForColumns(HeapColumn[] columns, int[] storageOrdinals, SqlValue[] fullRow)
+    {
+        var stored = new SqlValue[columns.Length == storageOrdinals.Length
+            ? CountStored(storageOrdinals)
+            : storageOrdinals.Length];
+        for (var i = 0; i < storageOrdinals.Length; i++)
+        {
+            var s = storageOrdinals[i];
+            if (s >= 0)
+                stored[s] = fullRow[i];
+        }
+        return stored;
+    }
+
+    private static int CountStored(int[] storageOrdinals)
+    {
+        var n = 0;
+        for (var i = 0; i < storageOrdinals.Length; i++)
+        {
+            if (storageOrdinals[i] >= 0) n++;
+        }
+        return n;
     }
 }

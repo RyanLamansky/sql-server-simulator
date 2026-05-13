@@ -201,12 +201,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is null || !schema.Views.TryRemove(name.Leaf, out _))
+        if (schema is null || !schema.Views.TryRemove(name.Leaf, out var droppedView))
         {
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
+        CascadeDropTriggers(context.CurrentDatabase, droppedView);
     }
 
     /// <summary>
@@ -258,5 +259,34 @@ partial class Simulation
         // documented for CREATE TABLE.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
             tx.UndoLog.RecordTempTableRemoval(context.Batch.Connection.TempTables, name.Leaf, removedTable);
+        else
+            CascadeDropTriggers(context.CurrentDatabase, removedTable);
+    }
+
+    /// <summary>
+    /// Removes every trigger across the database whose <see cref="Trigger.Parent"/>
+    /// matches the dropped object. Cascading from DROP TABLE / DROP VIEW
+    /// matches real SQL Server's "you can't have a trigger without its parent"
+    /// invariant. Triggers don't participate in the undo log; this fires
+    /// unconditionally on DROP outside transactional temp-table scope.
+    /// </summary>
+    private static void CascadeDropTriggers(Database database, object droppedParent)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            string[]? names = null;
+            foreach (var kv in schema.Triggers)
+            {
+                if (ReferenceEquals(kv.Value.Parent, droppedParent))
+                {
+                    names ??= [];
+                    Array.Resize(ref names, names.Length + 1);
+                    names[^1] = kv.Key;
+                }
+            }
+            if (names is null) continue;
+            foreach (var n in names)
+                _ = schema.Triggers.TryRemove(n, out _);
+        }
     }
 }

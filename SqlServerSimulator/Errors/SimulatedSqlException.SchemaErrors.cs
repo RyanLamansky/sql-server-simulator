@@ -124,6 +124,16 @@ partial class SimulatedSqlException
         new($"The object '{name}' does not exist or is invalid for this operation.", 8197, 16, 4);
 
     /// <summary>
+    /// Mimics SQL Server error 2111: a second <c>INSTEAD OF &lt;action&gt;</c>
+    /// trigger was declared on the same target. SQL Server allows at most
+    /// one INSTEAD OF trigger per action per object; the parent-kind label
+    /// is <c>table</c> when the parent is a heap table and <c>view</c>
+    /// when the parent is a view. Probe-confirmed verbatim wording.
+    /// </summary>
+    internal static SimulatedSqlException InsteadOfTriggerAlreadyExists(string triggerName, string parentKind, string parentName, string actionName) =>
+        new($"Cannot create trigger '{triggerName}' on {parentKind} '{parentName}' because an INSTEAD OF {actionName} trigger already exists on this object.", 2111, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11700: <c>CREATE SEQUENCE</c> declared
     /// <c>INCREMENT BY 0</c>. Probe-confirmed verbatim wording against
     /// SQL Server 2025.

@@ -34,6 +34,11 @@ partial class Simulation
         HeapTable? leadingTable;
         if (context.Batch.TryResolveView(leadingIdent, out var resolvedView))
         {
+            if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Delete)
+                && resolvedView.BaseTable is null)
+            {
+                throw new NotSupportedException($"INSTEAD OF DELETE through a non-updatable view ('{resolvedView.Schema.Name}.{resolvedView.Name}') isn't modeled. Updatable single-base views work; join / aggregate / DISTINCT views are deferred.");
+            }
             if (resolvedView.BaseTable is not { } baseTable)
             {
                 throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
@@ -98,11 +103,14 @@ partial class Simulation
         var lobStore = table.Heap;
 
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
+        var insteadOfParent = (object?)sourceView ?? table;
         var hasDeleteTriggers = HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
+        var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
+        var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             SqlValue[]? fullValues = null;
-            if (where is not null || output is not null || sourceView is not null || hasDeleteTriggers)
+            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -144,10 +152,10 @@ partial class Simulation
                     continue;
             }
 
-            deleted.Add((pageIndex, slotIndex, (output is null && !hasDeleteTriggers) ? null : fullValues));
+            deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers) ? null : fullValues));
         }
 
-        return CommitDelete(context, table, deleted, output);
+        return CommitDelete(context, table, deleted, output, sourceView);
     }
 
     /// <summary>
@@ -206,7 +214,9 @@ partial class Simulation
                 continue;
 
             SqlValue[]? fullValues = null;
-            var needsFull = output is not null || HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
+            var needsFull = output is not null
+                || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
+                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete);
             if (needsFull)
             {
                 fullValues = DecodeFullRow(table, targetBytes);
@@ -215,21 +225,38 @@ partial class Simulation
             deleted.Add((addr.Page, addr.Slot, fullValues));
         }
 
-        return CommitDelete(context, table, deleted, output);
+        return CommitDelete(context, table, deleted, output, sourceView: null);
     }
 
     /// <summary>
     /// Tombstones the deleted rows and emits OUTPUT.DELETED projection rows
     /// when requested. Shared between the no-FROM and joined-source paths.
+    /// When an INSTEAD OF DELETE trigger is attached to the target (heap
+    /// table directly, or the view passed in <paramref name="sourceView"/>),
+    /// the heap-delete / AFTER-trigger path is skipped and the INSTEAD OF
+    /// body fires with DELETED carrying the would-be deleted rows.
     /// </summary>
     private static SimulatedStatementOutcome CommitDelete(
         ParserContext context,
         HeapTable table,
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
-        MutationOutputProjection? output)
+        MutationOutputProjection? output,
+        View? sourceView = null)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+
+        var insteadOfParent = (object?)sourceView ?? table;
+        var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
+
+        if (insteadOfActive)
+        {
+            FireInsteadOfDeleteTrigger(context, table, sourceView, deleted);
+            if (output is null || output.HasTarget)
+                return new SimulatedNonQuery(deleted.Count);
+            var rows = ProjectDeleteOutput(deleted, output);
+            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+        }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         foreach (var (pageIndex, slotIndex, _) in deleted)
@@ -237,13 +264,7 @@ partial class Simulation
 
         if (output is not null)
         {
-            var rows = new List<byte[]>(deleted.Count);
-            foreach (var (_, _, fullOld) in deleted)
-            {
-                var projectedBytes = output.ProjectRow(insertedValues: null, deletedValues: fullOld);
-                if (projectedBytes is not null)
-                    rows.Add(projectedBytes);
-            }
+            var rows = ProjectDeleteOutput(deleted, output);
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
@@ -253,6 +274,20 @@ partial class Simulation
         }
         FireAfterDeleteTriggers(context, table, deleted);
         return new SimulatedNonQuery(deleted.Count);
+    }
+
+    private static List<byte[]> ProjectDeleteOutput(
+        List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
+        MutationOutputProjection output)
+    {
+        var rows = new List<byte[]>(deleted.Count);
+        foreach (var (_, _, fullOld) in deleted)
+        {
+            var projectedBytes = output.ProjectRow(insertedValues: null, deletedValues: fullOld);
+            if (projectedBytes is not null)
+                rows.Add(projectedBytes);
+        }
+        return rows;
     }
 
     private static void FireAfterDeleteTriggers(
@@ -269,6 +304,37 @@ partial class Simulation
         context.Batch.Connection.Simulation.FireTriggers(
             context.Batch, table, TriggerActions.Delete,
             insertedRows: null, deletedRows: deletedRows,
+            affectedRowCount: deleted.Count);
+    }
+
+    /// <summary>
+    /// Fires the INSTEAD OF DELETE trigger attached to
+    /// <paramref name="sourceView"/> (when non-null) or
+    /// <paramref name="table"/>. DELETED is projected through the view's
+    /// <see cref="View.BaseColumnOrdinals"/> for a view target; INSERTED
+    /// is empty for DELETE.
+    /// </summary>
+    private static void FireInsteadOfDeleteTrigger(
+        ParserContext context,
+        HeapTable table,
+        View? sourceView,
+        List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted)
+    {
+        var deletedRows = new List<SqlValue[]>(deleted.Count);
+        foreach (var (_, _, fullOld) in deleted)
+        {
+            deletedRows.Add(sourceView is null
+                ? (fullOld ?? new SqlValue[table.Columns.Length])
+                : (fullOld is null
+                    ? new SqlValue[sourceView.OutputColumns.Length]
+                    : ProjectThroughView(sourceView, fullOld)));
+        }
+        context.Connection.LastStatementRowCount = deleted.Count;
+        var pseudoColumns = sourceView?.OutputColumns ?? table.Columns;
+        var parent = (object?)sourceView ?? table;
+        _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+            context.Batch, parent, TriggerActions.Delete,
+            pseudoColumns, insertedRows: null, deletedRows: deletedRows,
             affectedRowCount: deleted.Count);
     }
 }

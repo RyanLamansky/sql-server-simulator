@@ -56,6 +56,18 @@ partial class Simulation
         HeapTable? leadingTable;
         if (context.Batch.TryResolveView(leadingIdent, out var resolvedView))
         {
+            // INSTEAD OF UPDATE on a view replaces the heap-write path; the
+            // trigger body is responsible for any base-table mutations. The
+            // simulator supports this only when the view is updatable (the
+            // single-base path) so INSERTED / DELETED can be projected from
+            // a heap row through the view's column map. INSTEAD OF UPDATE
+            // on a non-updatable (join / aggregate) view is documented as
+            // a deferred shape in CLAUDE.md.
+            if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Update)
+                && resolvedView.BaseTable is null)
+            {
+                throw new NotSupportedException($"INSTEAD OF UPDATE through a non-updatable view ('{resolvedView.Schema.Name}.{resolvedView.Name}') isn't modeled. Updatable single-base views work; join / aggregate / DISTINCT views are deferred.");
+            }
             if (resolvedView.BaseTable is not { } baseTable)
             {
                 throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
@@ -227,13 +239,18 @@ partial class Simulation
             if (sourceView?.CheckOptionCheck is { } co && !co(newValues, context.Batch))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
 
-            // Snapshot the old row when OUTPUT or AFTER UPDATE triggers
-            // need it for DELETED.<col> resolution.
-            var oldSnapshot = (output is not null || HasAfterTrigger(context.Batch, table, TriggerActions.Update)) ? fullValues : null;
+            // Snapshot the old row when OUTPUT, AFTER UPDATE triggers, or
+            // an INSTEAD OF UPDATE on the parent (table or view) needs it
+            // for DELETED.<col> resolution.
+            var insteadOfParent = (object?)sourceView ?? table;
+            var oldSnapshotNeeded = output is not null
+                || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
+                || HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
+            var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
 
-        return CommitUpdate(context, table, affected, output);
+        return CommitUpdate(context, table, affected, output, sourceView);
     }
 
     /// <summary>
@@ -306,29 +323,49 @@ partial class Simulation
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list.
             context.Batch.BumpRowStamp();
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple);
-            var oldSnapshot = (output is not null || HasAfterTrigger(context.Batch, table, TriggerActions.Update)) ? fullValues : null;
+            var oldSnapshotNeeded = output is not null
+                || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
+                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update);
+            var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
             affected.Add((addr.Page, addr.Slot, newValues, oldSnapshot));
         }
 
-        return CommitUpdate(context, table, affected, output);
+        return CommitUpdate(context, table, affected, output, sourceView: null);
     }
 
     /// <summary>
     /// Phase 2 (PK / UNIQUE validation) + phase 3 (tombstone old, insert
     /// new) + OUTPUT projection. Shared by the no-FROM and joined-source
     /// execution paths so the post-collection logic stays in one place.
+    /// When an INSTEAD OF UPDATE trigger is attached to the target
+    /// (either the heap table directly, or the view passed in
+    /// <paramref name="sourceView"/>), the heap-write / AFTER-trigger
+    /// path is skipped and the INSTEAD OF body fires with INSERTED /
+    /// DELETED carrying the would-be new and old row values.
     /// </summary>
     private static SimulatedStatementOutcome CommitUpdate(
         ParserContext context,
         HeapTable table,
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
-        MutationOutputProjection? output)
+        MutationOutputProjection? output,
+        View? sourceView = null)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
+        var insteadOfParent = (object?)sourceView ?? table;
+        var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
+
         if (affected.Count == 0)
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, []);
+
+        if (insteadOfActive)
+        {
+            FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
+            return output is null || output.HasTarget
+                ? new SimulatedNonQuery(affected.Count)
+                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, ProjectMutationOutput(affected, output));
+        }
 
         EnforceKeyConstraintsForUpdate(table, affected);
 
@@ -340,13 +377,7 @@ partial class Simulation
 
         if (output is not null)
         {
-            var rows = new List<byte[]>(affected.Count);
-            foreach (var (_, _, fullNew, fullOld) in affected)
-            {
-                var projectedBytes = output.ProjectRow(insertedValues: fullNew, deletedValues: fullOld);
-                if (projectedBytes is not null)
-                    rows.Add(projectedBytes);
-            }
+            var rows = ProjectMutationOutput(affected, output);
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
@@ -356,6 +387,73 @@ partial class Simulation
         }
         FireAfterUpdateTriggers(context, table, affected);
         return new SimulatedNonQuery(affected.Count);
+    }
+
+    private static List<byte[]> ProjectMutationOutput(
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
+        MutationOutputProjection output)
+    {
+        var rows = new List<byte[]>(affected.Count);
+        foreach (var (_, _, fullNew, fullOld) in affected)
+        {
+            var projectedBytes = output.ProjectRow(insertedValues: fullNew, deletedValues: fullOld);
+            if (projectedBytes is not null)
+                rows.Add(projectedBytes);
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Fires the single INSTEAD OF UPDATE trigger attached to
+    /// <paramref name="sourceView"/> (when non-null) or
+    /// <paramref name="table"/> (table target). INSERTED / DELETED are
+    /// projected through the view's <see cref="View.BaseColumnOrdinals"/>
+    /// for a view target so the trigger sees view-shaped rows; for a
+    /// table target the heap row is used directly.
+    /// </summary>
+    private static void FireInsteadOfUpdateTrigger(
+        ParserContext context,
+        HeapTable table,
+        View? sourceView,
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+    {
+        var insertedRows = new List<SqlValue[]>(affected.Count);
+        var deletedRows = new List<SqlValue[]>(affected.Count);
+        foreach (var (_, _, fullNew, fullOld) in affected)
+        {
+            insertedRows.Add(sourceView is null ? fullNew : ProjectThroughView(sourceView, fullNew));
+            deletedRows.Add(sourceView is null
+                ? (fullOld ?? new SqlValue[table.Columns.Length])
+                : (fullOld is null
+                    ? new SqlValue[sourceView.OutputColumns.Length]
+                    : ProjectThroughView(sourceView, fullOld)));
+        }
+        context.Connection.LastStatementRowCount = affected.Count;
+        var pseudoColumns = sourceView?.OutputColumns ?? table.Columns;
+        var parent = (object?)sourceView ?? table;
+        _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+            context.Batch, parent, TriggerActions.Update,
+            pseudoColumns, insertedRows, deletedRows,
+            affectedRowCount: affected.Count);
+    }
+
+    /// <summary>
+    /// Projects a base-table row through a view's
+    /// <see cref="View.BaseColumnOrdinals"/> map to the view's
+    /// <see cref="View.OutputColumns"/> shape. Derived projection slots
+    /// (BaseColumnOrdinals[i] = -1) get a typed NULL — there's no underlying
+    /// base column whose value to surface. Used by INSTEAD OF UPDATE / DELETE
+    /// on updatable views.
+    /// </summary>
+    private static SqlValue[] ProjectThroughView(View view, SqlValue[] baseRow)
+    {
+        var projected = new SqlValue[view.OutputColumns.Length];
+        for (var i = 0; i < view.OutputColumns.Length; i++)
+        {
+            var baseOrd = view.BaseColumnOrdinals[i];
+            projected[i] = baseOrd < 0 ? SqlValue.Null(view.OutputColumns[i].Type) : baseRow[baseOrd];
+        }
+        return projected;
     }
 
     /// <summary>

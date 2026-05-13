@@ -30,23 +30,129 @@ partial class Simulation
     }
 
     /// <summary>
-    /// INSERT through a view: validates the view's updatability shape
-    /// (raising <strong>Msg 4403</strong> / <strong>Msg 4405</strong> based
-    /// on <see cref="View.RejectionReason"/> when the shape doesn't
-    /// support DML) and routes to <see cref="ProcessHeapInsert"/> against
-    /// the view's <see cref="View.BaseTable"/> with the view passed as
-    /// <paramref name="destinationView"/> so column-name lookups translate
-    /// through <see cref="View.BaseColumnOrdinals"/> and any
-    /// <see cref="View.CheckOptionCheck"/> fires post-row-construction
-    /// (Msg 550). OUTPUT with a view target isn't modeled — raises
-    /// <see cref="NotSupportedException"/>.
+    /// INSERT through a view. An attached INSTEAD OF INSERT trigger
+    /// pre-empts the heap-write path entirely — the trigger body becomes
+    /// responsible for any side effects and INSERTED is populated with
+    /// source-provided values shaped to <see cref="View.OutputColumns"/>.
+    /// Otherwise the view's updatability shape gates routing: an updatable
+    /// view delegates to <see cref="ProcessHeapInsert"/> against the view's
+    /// <see cref="View.BaseTable"/> with column-name lookups translated
+    /// through <see cref="View.BaseColumnOrdinals"/>; a non-updatable
+    /// view raises <strong>Msg 4403</strong> / <strong>Msg 4405</strong>
+    /// from <see cref="View.RejectionReason"/>. OUTPUT with a view target
+    /// is rejected at the inner site (NotSupportedException).
     /// </summary>
     private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context) =>
-        destinationView.BaseTable is { } baseTable
-            ? ProcessHeapInsert(baseTable, context, destinationView)
-            : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
-                : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
+        HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert)
+            ? ProcessInsteadOfInsertOnView(destinationView, context)
+            : destinationView.BaseTable is { } baseTable
+                ? ProcessHeapInsert(baseTable, context, destinationView)
+                : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
+
+    /// <summary>
+    /// INSERT into a view whose INSTEAD OF INSERT trigger replaces the
+    /// underlying DML. INSERTED is shaped to <see cref="View.OutputColumns"/>;
+    /// unspecified columns get the column type's typed default (per the
+    /// probe — INSTEAD OF triggers see source-provided values verbatim,
+    /// not values computed via DEFAULT / IDENTITY because the view itself
+    /// has no such metadata to run). The trigger body is responsible for
+    /// any actual heap writes; this path simply fires the trigger and
+    /// returns the would-be affected row count.
+    /// </summary>
+    private static SimulatedNonQuery ProcessInsteadOfInsertOnView(View destinationView, ParserContext context)
+    {
+        var viewColumns = destinationView.OutputColumns;
+
+        HeapColumn[] destinationColumns;
+        if (context.GetNextRequired() is Operator { Character: '(' })
+        {
+            var usedColumns = new List<HeapColumn>();
+            while (true)
+            {
+                if (context.GetNextRequired() is not StringToken column)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+
+                var columnName = column.Value;
+                var resolved = ResolveViewColumnForInsteadOf(columnName, viewColumns);
+                usedColumns.Add(resolved);
+
+                var separator = context.GetNextRequired();
+                if (separator is Operator { Character: ')' })
+                    break;
+                if (separator is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            destinationColumns = [.. usedColumns];
+            context.MoveNextRequired();
+        }
+        else
+        {
+            destinationColumns = viewColumns;
+        }
+
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            throw new NotSupportedException($"INSERT … OUTPUT through a view ('{destinationView.Schema.Name}.{destinationView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
+
+        var sourceRows = context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Values } => EvaluateValuesTuples(context),
+            ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(sourceRows.Count);
+
+        var insertedRows = new List<SqlValue[]>(sourceRows.Count);
+        foreach (var sourceRow in sourceRows)
+        {
+            context.Batch.BumpRowStamp();
+            var rowValues = new SqlValue[viewColumns.Length];
+            for (var i = 0; i < rowValues.Length; i++)
+                rowValues[i] = SqlValue.Null(viewColumns[i].Type);
+            for (var i = 0; i < destinationColumns.Length; i++)
+            {
+                var targetColumn = destinationColumns[i];
+                var ordinal = -1;
+                for (var j = 0; j < viewColumns.Length; j++)
+                {
+                    if (ReferenceEquals(viewColumns[j], targetColumn))
+                    {
+                        ordinal = j;
+                        break;
+                    }
+                }
+                rowValues[ordinal] = CoerceForInsert(sourceRow[i], targetColumn.Type);
+            }
+            insertedRows.Add(rowValues);
+        }
+
+        _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+            context.Batch, destinationView, TriggerActions.Insert,
+            viewColumns, insertedRows, deletedRows: null,
+            affectedRowCount: sourceRows.Count);
+
+        return new SimulatedNonQuery(sourceRows.Count);
+    }
+
+    /// <summary>
+    /// Resolves an INSERT column reference against a view's OutputColumns
+    /// for the INSTEAD OF INSERT path. Unlike <see cref="ResolveInsertTargetColumn"/>,
+    /// derived columns (BaseColumnOrdinals[i] = -1) are still writable
+    /// here — the trigger body, not the simulator's heap writer, decides
+    /// what to do with them.
+    /// </summary>
+    private static HeapColumn ResolveViewColumnForInsteadOf(string columnName, HeapColumn[] viewColumns)
+    {
+        for (var i = 0; i < viewColumns.Length; i++)
+        {
+            if (Collation.Default.Equals(viewColumns[i].Name, columnName))
+                return viewColumns[i];
+        }
+        throw SimulatedSqlException.InvalidColumnName(columnName);
+    }
 
     /// <summary>
     /// INSERT processor. Parses the column subset, optional <c>OUTPUT</c>
@@ -61,6 +167,16 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, View? destinationView = null)
     {
+        // INSTEAD OF INSERT on the table target replaces the heap-write
+        // path entirely: identity allocation is skipped (the column shows
+        // the type's typed default in INSERTED — probe-confirmed), CHECK /
+        // NOT NULL / key constraints aren't enforced, and AFTER triggers
+        // don't run. The trigger body is responsible for any side effects.
+        // A view target with an INSTEAD OF trigger is routed through
+        // ProcessInsteadOfInsertOnView before ever reaching this method.
+        var insteadOfActive = destinationView is null
+            && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert);
+
         var identityOrdinal = destinationTable.IdentityOrdinal;
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
         var identityInsertOn = identityColumn is not null
@@ -135,8 +251,8 @@ partial class Simulation
 
         decimal? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
-        var hasInsertTriggers = HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
-        var triggerRows = hasInsertTriggers ? new List<SqlValue[]>(sourceRows.Count) : null;
+        var hasInsertTriggers = !insteadOfActive && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
+        var triggerRows = (hasInsertTriggers || insteadOfActive) ? new List<SqlValue[]>(sourceRows.Count) : null;
         foreach (var sourceRow in sourceRows)
         {
             // Per-row stamp bump for DEFAULT-clause expression evaluation
@@ -201,18 +317,31 @@ partial class Simulation
 
             if (identityColumn is not null && !destinationColumns.Any(c => ReferenceEquals(c, identityColumn)))
             {
-                long generated;
-                try
+                if (insteadOfActive)
                 {
-                    generated = identityColumn.Identity!.GenerateNext();
+                    // Probe-confirmed: INSTEAD OF INSERT doesn't allocate
+                    // identity values — INSERTED's identity column shows
+                    // the type's typed default (0 for int family) rather
+                    // than the next sequential value. Identity columns
+                    // are restricted to the integer family + decimal/numeric
+                    // (Msg 11702 enforces this at CREATE TABLE).
+                    rowValues[identityOrdinal] = CoerceForIdentity(0L, identityColumn);
                 }
-                catch (OverflowException)
+                else
                 {
-                    throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
-                }
+                    long generated;
+                    try
+                    {
+                        generated = identityColumn.Identity!.GenerateNext();
+                    }
+                    catch (OverflowException)
+                    {
+                        throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+                    }
 
-                rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
-                lastIdentityValue = generated;
+                    rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
+                    lastIdentityValue = generated;
+                }
             }
 
             // Auto-generate rowversion for every row in a table that has one.
@@ -226,10 +355,16 @@ partial class Simulation
             // gets stored) and non-persisted (whose result OUTPUT may reference
             // and which the row's full SqlValue array needs filled). Refs in
             // the expression bind only to stored columns thanks to Msg 1759
-            // at CREATE TABLE.
+            // at CREATE TABLE. INSTEAD OF mode still evaluates computed
+            // columns so INSERTED carries the would-be values (probe-
+            // confirmed: c AS v * 2 appears in INSERTED with the computed
+            // result, not NULL).
             EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
-            EnforceNotNull(destinationTable, rowValues);
-            EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+            if (!insteadOfActive)
+            {
+                EnforceNotNull(destinationTable, rowValues);
+                EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+            }
 
             // WITH CHECK OPTION: the post-row-construction row must satisfy
             // every CHECK OPTION-bearing WHERE up the view chain. Fires
@@ -241,9 +376,12 @@ partial class Simulation
 
             if (!context.Batch.IsSkipping)
             {
-                var storedValues = ProjectStoredValues(destinationTable, rowValues);
-                EnforceKeyConstraints(destinationTable, storedValues);
-                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                if (!insteadOfActive)
+                {
+                    var storedValues = ProjectStoredValues(destinationTable, rowValues);
+                    EnforceKeyConstraints(destinationTable, storedValues);
+                    destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                }
 
                 if (output is { } o)
                 {
@@ -260,23 +398,31 @@ partial class Simulation
         // to the generated/explicit identity if the table has one, or to
         // NULL otherwise (resetting state from a prior identity insert).
         // Suppressed in skip mode so an un-taken IF branch's INSERT doesn't
-        // perturb the session's identity history.
-        if (!context.Batch.IsSkipping)
+        // perturb the session's identity history. INSTEAD OF mode doesn't
+        // perturb SCOPE_IDENTITY either (no allocation happened).
+        if (!context.Batch.IsSkipping && !insteadOfActive)
             context.Connection.LastIdentity = lastIdentityValue;
 
-        // Fire AFTER INSERT triggers post-heap-write. A body-side throw
-        // propagates up; the parent statement's undo log unwinds the
-        // heap inserts (matches probe-confirmed real SQL Server behavior).
+        // Trigger fire: INSTEAD OF replaces the would-be DML; AFTER fires
+        // post-heap-write. Bodies throwing propagate up; the parent
+        // statement's undo log unwinds the heap inserts.
         if (triggerRows is { Count: > 0 })
         {
-            // @@ROWCOUNT inside the trigger reflects the affected count;
-            // also pre-set on the connection so the body sees it via
-            // @@ROWCOUNT in its first statement.
             context.Connection.LastStatementRowCount = triggerRows.Count;
-            context.Batch.Connection.Simulation.FireTriggers(
-                context.Batch, destinationTable, TriggerActions.Insert,
-                insertedRows: triggerRows, deletedRows: null,
-                affectedRowCount: triggerRows.Count);
+            if (insteadOfActive)
+            {
+                _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+                    context.Batch, destinationTable, TriggerActions.Insert,
+                    destinationTable.Columns, insertedRows: triggerRows, deletedRows: null,
+                    affectedRowCount: triggerRows.Count);
+            }
+            else
+            {
+                context.Batch.Connection.Simulation.FireTriggers(
+                    context.Batch, destinationTable, TriggerActions.Insert,
+                    insertedRows: triggerRows, deletedRows: null,
+                    affectedRowCount: triggerRows.Count);
+            }
         }
 
         // OUTPUT INTO @t directs rows to the target only — no result set

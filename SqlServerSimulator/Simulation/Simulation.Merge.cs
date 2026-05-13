@@ -764,7 +764,7 @@ partial class Simulation
                 {
                     continue;
                 }
-                ApplyInsert(context, destinationTable, nmbtClause, sourceValues, ResolveCombined, pendingInserts);
+                ApplyInsert(context, destinationTable, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert));
             }
         }
 
@@ -849,7 +849,8 @@ partial class Simulation
         WhenClause clause,
         SqlValue[] sourceValues,
         Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined,
-        List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts)
+        List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
+        bool insteadOfInsert)
     {
         context.Batch.BumpRowStamp();
         var rowValues = new SqlValue[destinationTable.Columns.Length];
@@ -924,16 +925,25 @@ partial class Simulation
 
         if (identityColumn is not null && !identityListed)
         {
-            long generated;
-            try
+            if (insteadOfInsert)
             {
-                generated = identityColumn.Identity!.GenerateNext();
+                // INSTEAD OF INSERT: typed default for identity, matching
+                // the table-target INSERT path (probe-confirmed).
+                rowValues[identityOrdinal] = CoerceForIdentity(0L, identityColumn);
             }
-            catch (OverflowException)
+            else
             {
-                throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+                long generated;
+                try
+                {
+                    generated = identityColumn.Identity!.GenerateNext();
+                }
+                catch (OverflowException)
+                {
+                    throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+                }
+                rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
             }
-            rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
         }
 
         for (var i = 0; i < destinationTable.Columns.Length; i++)
@@ -943,8 +953,11 @@ partial class Simulation
         }
 
         EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
-        EnforceNotNull(destinationTable, rowValues);
-        EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+        if (!insteadOfInsert)
+        {
+            EnforceNotNull(destinationTable, rowValues);
+            EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+        }
 
         pendingInserts.Add((rowValues, sourceValues));
     }
@@ -960,41 +973,64 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        // Validate key constraints for new + updated rows together. The
-        // existing UPDATE-side validator does the affected-vs-affected and
-        // affected-vs-heap pairwise checks; we extend its input by also
-        // including pending inserts via the same affected-list shape with
-        // sentinel addresses.
-        if (pendingInserts.Count > 0 || pendingUpdates.Count > 0)
+        // Per-action INSTEAD OF detection. When set, the corresponding
+        // pending list bypasses the heap-write + AFTER-trigger path and
+        // fires its INSTEAD OF trigger with would-be values. Real SQL
+        // Server allows a mixed MERGE where, say, INSERT routes through
+        // INSTEAD OF while UPDATE writes to the heap normally — each
+        // action is decided independently.
+        var insteadOfInsert = pendingInserts.Count > 0 && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert);
+        var insteadOfUpdate = pendingUpdates.Count > 0 && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Update);
+        var insteadOfDelete = pendingDeletes.Count > 0 && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Delete);
+
+        // Validate key constraints across only the actions that actually
+        // hit the heap. INSTEAD OF action lists bypass key checks since
+        // they never reach the heap — the trigger body's own DML lands
+        // with its own validation.
+        if ((!insteadOfInsert && pendingInserts.Count > 0) || (!insteadOfUpdate && pendingUpdates.Count > 0))
         {
             var pseudoAffected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
-            foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
-                pseudoAffected.Add((page, slot, newValues, oldValues));
-            // For inserts, the "address" of the new row doesn't exist yet;
-            // (-1, i) is sentinel — never collides with a real heap address.
-            for (var i = 0; i < pendingInserts.Count; i++)
-                pseudoAffected.Add((-1, i, pendingInserts[i].NewValues, FullOld: null));
+            if (!insteadOfUpdate)
+            {
+                foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
+                    pseudoAffected.Add((page, slot, newValues, oldValues));
+            }
+            if (!insteadOfInsert)
+            {
+                // For inserts, the "address" of the new row doesn't exist yet;
+                // (-1, i) is sentinel — never collides with a real heap address.
+                for (var i = 0; i < pendingInserts.Count; i++)
+                    pseudoAffected.Add((-1, i, pendingInserts[i].NewValues, FullOld: null));
+            }
             if (pseudoAffected.Count > 0)
                 EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected);
         }
 
         var undoLog = destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
 
-        // Apply deletes first (tombstone slots), then updates, then inserts.
-        // Real SQL Server applies the entire set atomically — order matters
-        // only insofar as triggers see the post-state.
-        foreach (var (page, slot, _, _) in pendingDeletes)
-            destinationTable.Heap.DeleteAt(page, slot, undoLog);
-        foreach (var (page, slot, _, _, _) in pendingUpdates)
-            destinationTable.Heap.DeleteAt(page, slot, undoLog);
-        foreach (var (_, _, _, newValues, _) in pendingUpdates)
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
-        foreach (var (newValues, _) in pendingInserts)
-            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+        // Apply heap operations only for non-INSTEAD-OF actions.
+        if (!insteadOfDelete)
+        {
+            foreach (var (page, slot, _, _) in pendingDeletes)
+                destinationTable.Heap.DeleteAt(page, slot, undoLog);
+        }
+        if (!insteadOfUpdate)
+        {
+            foreach (var (page, slot, _, _, _) in pendingUpdates)
+                destinationTable.Heap.DeleteAt(page, slot, undoLog);
+            foreach (var (_, _, _, newValues, _) in pendingUpdates)
+                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+        }
+        if (!insteadOfInsert)
+        {
+            foreach (var (newValues, _) in pendingInserts)
+                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+        }
 
-        // Identity counter: last identity is the last value generated for
-        // a real insert (NULL when no inserts ran).
-        if (destinationTable.IdentityOrdinal >= 0 && pendingInserts.Count > 0)
+        // Identity counter: only advances when the inserts actually hit the
+        // heap. INSTEAD OF INSERT doesn't allocate identity, so no update
+        // to LastIdentity is needed.
+        if (!insteadOfInsert && destinationTable.IdentityOrdinal >= 0 && pendingInserts.Count > 0)
         {
             var lastId = pendingInserts[^1].NewValues[destinationTable.IdentityOrdinal];
             context.Connection.LastIdentity = lastId.IsNull ? null : lastId.CoerceTo(SqlType.BigInt).AsInt64;
@@ -1029,19 +1065,33 @@ partial class Simulation
         }
 
         // Fire triggers in INSERT → UPDATE → DELETE order (probe-confirmed).
+        // For each action, route to INSTEAD OF if attached, else AFTER (if
+        // attached). The branch-presence checks short-circuit when there's
+        // no trigger of either timing for the action.
         var totalAffected = pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count;
-        if (pendingInserts.Count > 0 && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert))
+        if (pendingInserts.Count > 0)
         {
             var insertedRows = new List<SqlValue[]>(pendingInserts.Count);
             foreach (var (newValues, _) in pendingInserts)
                 insertedRows.Add(newValues);
-            context.Connection.LastStatementRowCount = pendingInserts.Count;
-            context.Batch.Connection.Simulation.FireTriggers(
-                context.Batch, destinationTable, TriggerActions.Insert,
-                insertedRows: insertedRows, deletedRows: null,
-                affectedRowCount: pendingInserts.Count);
+            if (insteadOfInsert)
+            {
+                context.Connection.LastStatementRowCount = pendingInserts.Count;
+                _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+                    context.Batch, destinationTable, TriggerActions.Insert,
+                    destinationTable.Columns, insertedRows, deletedRows: null,
+                    affectedRowCount: pendingInserts.Count);
+            }
+            else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert))
+            {
+                context.Connection.LastStatementRowCount = pendingInserts.Count;
+                context.Batch.Connection.Simulation.FireTriggers(
+                    context.Batch, destinationTable, TriggerActions.Insert,
+                    insertedRows: insertedRows, deletedRows: null,
+                    affectedRowCount: pendingInserts.Count);
+            }
         }
-        if (pendingUpdates.Count > 0 && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Update))
+        if (pendingUpdates.Count > 0)
         {
             var insertedRows = new List<SqlValue[]>(pendingUpdates.Count);
             var deletedRows = new List<SqlValue[]>(pendingUpdates.Count);
@@ -1050,22 +1100,44 @@ partial class Simulation
                 insertedRows.Add(newValues);
                 deletedRows.Add(oldValues);
             }
-            context.Connection.LastStatementRowCount = pendingUpdates.Count;
-            context.Batch.Connection.Simulation.FireTriggers(
-                context.Batch, destinationTable, TriggerActions.Update,
-                insertedRows: insertedRows, deletedRows: deletedRows,
-                affectedRowCount: pendingUpdates.Count);
+            if (insteadOfUpdate)
+            {
+                context.Connection.LastStatementRowCount = pendingUpdates.Count;
+                _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+                    context.Batch, destinationTable, TriggerActions.Update,
+                    destinationTable.Columns, insertedRows, deletedRows,
+                    affectedRowCount: pendingUpdates.Count);
+            }
+            else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Update))
+            {
+                context.Connection.LastStatementRowCount = pendingUpdates.Count;
+                context.Batch.Connection.Simulation.FireTriggers(
+                    context.Batch, destinationTable, TriggerActions.Update,
+                    insertedRows: insertedRows, deletedRows: deletedRows,
+                    affectedRowCount: pendingUpdates.Count);
+            }
         }
-        if (pendingDeletes.Count > 0 && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Delete))
+        if (pendingDeletes.Count > 0)
         {
             var deletedRows = new List<SqlValue[]>(pendingDeletes.Count);
             foreach (var (_, _, oldValues, _) in pendingDeletes)
                 deletedRows.Add(oldValues);
-            context.Connection.LastStatementRowCount = pendingDeletes.Count;
-            context.Batch.Connection.Simulation.FireTriggers(
-                context.Batch, destinationTable, TriggerActions.Delete,
-                insertedRows: null, deletedRows: deletedRows,
-                affectedRowCount: pendingDeletes.Count);
+            if (insteadOfDelete)
+            {
+                context.Connection.LastStatementRowCount = pendingDeletes.Count;
+                _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
+                    context.Batch, destinationTable, TriggerActions.Delete,
+                    destinationTable.Columns, insertedRows: null, deletedRows: deletedRows,
+                    affectedRowCount: pendingDeletes.Count);
+            }
+            else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Delete))
+            {
+                context.Connection.LastStatementRowCount = pendingDeletes.Count;
+                context.Batch.Connection.Simulation.FireTriggers(
+                    context.Batch, destinationTable, TriggerActions.Delete,
+                    insertedRows: null, deletedRows: deletedRows,
+                    affectedRowCount: pendingDeletes.Count);
+            }
         }
 
         context.Connection.LastStatementRowCount = totalAffected;

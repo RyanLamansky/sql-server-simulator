@@ -18,10 +18,12 @@ internal enum TriggerActions
 
 /// <summary>
 /// Whether the trigger fires AFTER the DML's heap writes or INSTEAD OF
-/// them. Real SQL Server distinguishes the two at CREATE TRIGGER time;
-/// only AFTER is modeled today (the INSTEAD OF path would route DML
-/// through the trigger body instead of the table writer, which is
-/// structurally different and deferred).
+/// them. AFTER (and its <c>FOR</c> synonym) runs the trigger body
+/// post-write with INSERTED / DELETED reflecting committed values;
+/// INSTEAD OF replaces the DML entirely — the heap is not written and
+/// the trigger body is fully responsible for any side effects. AFTER
+/// is permitted on heap tables only; INSTEAD OF is permitted on heap
+/// tables and views.
 /// </summary>
 internal enum TriggerTiming
 {
@@ -31,10 +33,10 @@ internal enum TriggerTiming
 
 /// <summary>
 /// One user-defined trigger. Created via <c>CREATE [OR ALTER] TRIGGER
-/// [schema.]name ON [schema.]parent_table { AFTER | FOR } { INSERT |
-/// UPDATE | DELETE } [, ...] AS &lt;body&gt;</c>, dropped via
+/// [schema.]name ON [schema.]parent { AFTER | FOR | INSTEAD OF } { INSERT
+/// | UPDATE | DELETE } [, ...] AS &lt;body&gt;</c>, dropped via
 /// <c>DROP TRIGGER [schema.]name</c>, toggled via <c>DISABLE TRIGGER name
-/// ON table</c> / <c>ENABLE TRIGGER name ON table</c>, invoked
+/// ON parent</c> / <c>ENABLE TRIGGER name ON parent</c>, invoked
 /// automatically by the matching DML statement (INSERT / UPDATE / DELETE /
 /// MERGE).
 /// </summary>
@@ -42,10 +44,10 @@ internal enum TriggerTiming
 /// <para>
 /// The trigger NAME lives in the schema namespace alongside tables /
 /// views / functions / procs (Msg 2714 on collision). The trigger holds
-/// a reference to its parent <see cref="HeapTable"/>; DML against that
-/// table looks up the table's attached triggers via the schema's
-/// <see cref="Schema.Triggers"/> dict + name match against the trigger's
-/// ParentTable.
+/// a reference to its parent — a <see cref="HeapTable"/> (AFTER or
+/// INSTEAD OF) or a <see cref="View"/> (INSTEAD OF only). DML against
+/// the parent looks up attached triggers via the schema's
+/// <see cref="Schema.Triggers"/> dict + parent-reference match.
 /// </para>
 /// <para>
 /// Body source is captured at CREATE time and re-tokenized per call
@@ -60,7 +62,7 @@ internal sealed class Trigger(
     Schema schema,
     string name,
     int objectId,
-    HeapTable parentTable,
+    object parent,
     TriggerActions actions,
     TriggerTiming timing,
     string bodyText,
@@ -71,12 +73,14 @@ internal sealed class Trigger(
     public readonly int ObjectId = objectId;
 
     /// <summary>
-    /// The table this trigger is attached to. DML against this table at
-    /// runtime walks the schema's <see cref="Schema.Triggers"/> dict and
-    /// fires every trigger whose <see cref="ParentTable"/> matches and
-    /// whose <see cref="Actions"/> include the current DML kind.
+    /// The table or view this trigger is attached to. Always one of
+    /// <see cref="HeapTable"/> (AFTER or INSTEAD OF) or <see cref="View"/>
+    /// (INSTEAD OF only). DML against the parent at runtime walks the
+    /// schema's <see cref="Schema.Triggers"/> dict and fires every trigger
+    /// whose <see cref="Parent"/> matches and whose <see cref="Actions"/>
+    /// include the current DML kind.
     /// </summary>
-    public readonly HeapTable ParentTable = parentTable;
+    public readonly object Parent = parent;
 
     /// <summary>
     /// The set of DML actions this trigger fires on. A single trigger
@@ -98,9 +102,21 @@ internal sealed class Trigger(
 
     /// <summary>
     /// True when the trigger is disabled via <c>DISABLE TRIGGER … ON
-    /// table</c>; disabled triggers don't fire on DML against the parent
-    /// table but remain in the schema (re-enabled via <c>ENABLE TRIGGER
-    /// … ON table</c>). Probe-confirmed.
+    /// parent</c>; disabled triggers don't fire on DML against the parent
+    /// but remain in the schema (re-enabled via <c>ENABLE TRIGGER …
+    /// ON parent</c>). Probe-confirmed.
     /// </summary>
     public bool IsDisabled;
+
+    /// <summary>
+    /// Parent's <see cref="HeapTable.ObjectId"/> / <see cref="View.ObjectId"/>
+    /// for catalog projections (<c>sys.triggers.parent_id</c>,
+    /// <c>sys.objects.parent_object_id</c>).
+    /// </summary>
+    public int ParentObjectId => Parent switch
+    {
+        HeapTable t => t.ObjectId,
+        View v => v.ObjectId,
+        _ => throw new InvalidOperationException("Trigger parent must be a HeapTable or View."),
+    };
 }

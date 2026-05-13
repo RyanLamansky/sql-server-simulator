@@ -278,14 +278,6 @@ public sealed class TriggerTests
         AreEqual("2714", ex.Data["HelpLink.EvtID"]);
     }
 
-    [TestMethod]
-    public void InsteadOf_NotSupported()
-    {
-        using var connection = Seeded();
-        _ = Throws<NotSupportedException>(() =>
-            _ = connection.CreateCommand("create trigger tr_t on t_target instead of insert as select 1").ExecuteNonQuery());
-    }
-
     // === ALTER TRIGGER ===
 
     [TestMethod]
