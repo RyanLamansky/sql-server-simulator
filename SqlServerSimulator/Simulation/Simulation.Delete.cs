@@ -103,7 +103,7 @@ partial class Simulation
         var lobStore = table.Heap;
 
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
-        var insteadOfParent = (object?)sourceView ?? table;
+        var insteadOfParent = (SchemaObject?)sourceView ?? table;
         var hasDeleteTriggers = HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
         var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
@@ -246,7 +246,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        var insteadOfParent = (object?)sourceView ?? table;
+        var insteadOfParent = (SchemaObject?)sourceView ?? table;
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
 
         if (insteadOfActive)
@@ -331,7 +331,7 @@ partial class Simulation
         }
         context.Connection.LastStatementRowCount = deleted.Count;
         var pseudoColumns = sourceView?.OutputColumns ?? table.Columns;
-        var parent = (object?)sourceView ?? table;
+        var parent = (SchemaObject?)sourceView ?? table;
         _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
             context.Batch, parent, TriggerActions.Delete,
             pseudoColumns, insertedRows: null, deletedRows: deletedRows,

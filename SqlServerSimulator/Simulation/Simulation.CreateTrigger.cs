@@ -27,7 +27,7 @@ partial class Simulation
     /// <para>
     /// CREATE OR ALTER upserts; ALTER requires the trigger to exist.
     /// Both replace the body / actions / timing in place but preserve the
-    /// <see cref="Trigger.ObjectId"/>.
+    /// <see cref="SchemaObject.ObjectId"/>.
     /// </para>
     /// </remarks>
     private static bool TryParseCreateTrigger(ParserContext context, bool isAlter, bool createOrAlter)
@@ -126,7 +126,7 @@ partial class Simulation
         // AFTER accepts a heap table only (Msg 8197 on view target,
         // probe-confirmed). Table variables / temp tables aren't valid
         // parents in either case.
-        object parent;
+        SchemaObject parent;
         string parentKind;
         if (context.Batch.TryResolveView(parentName, out var parentView))
         {
@@ -169,18 +169,8 @@ partial class Simulation
         }
 
         var existed = triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var existing);
-        if (!isAlter && !createOrAlter)
-        {
-            if (existed
-                || triggerSchema.HeapTables.ContainsKey(triggerName.Leaf)
-                || triggerSchema.Functions.ContainsKey(triggerName.Leaf)
-                || triggerSchema.Views.ContainsKey(triggerName.Leaf)
-                || triggerSchema.Procedures.ContainsKey(triggerName.Leaf)
-                || triggerSchema.Sequences.ContainsKey(triggerName.Leaf))
-            {
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
-            }
-        }
+        if (!isAlter && !createOrAlter && triggerSchema.HasNameInSharedNamespace(triggerName.Leaf))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(triggerName);
 
@@ -251,7 +241,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        object parent = context.Batch.TryResolveView(parentName, out var parentView)
+        SchemaObject parent = context.Batch.TryResolveView(parentName, out var parentView)
             ? parentView
             : context.Batch.TryResolveTable(parentName, out var parentTable)
                 ? parentTable

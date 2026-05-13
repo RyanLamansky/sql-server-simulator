@@ -62,25 +62,29 @@ internal sealed class Trigger(
     Schema schema,
     string name,
     int objectId,
-    object parent,
+    SchemaObject parent,
     TriggerActions actions,
     TriggerTiming timing,
     string bodyText,
     DateTime createDate)
+    : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public readonly Schema Schema = schema;
-    public readonly string Name = name;
-    public readonly int ObjectId = objectId;
+
+    public override string ObjectTypeCode => "TR";
+    public override string ObjectTypeDescription => "SQL_TRIGGER";
 
     /// <summary>
     /// The table or view this trigger is attached to. Always one of
     /// <see cref="HeapTable"/> (AFTER or INSTEAD OF) or <see cref="View"/>
-    /// (INSTEAD OF only). DML against the parent at runtime walks the
-    /// schema's <see cref="Schema.Triggers"/> dict and fires every trigger
-    /// whose <see cref="Parent"/> matches and whose <see cref="Actions"/>
-    /// include the current DML kind.
+    /// (INSTEAD OF only) — both are <see cref="SchemaObject"/>s so
+    /// <c>sys.objects.parent_object_id</c> reads through
+    /// <see cref="SchemaObject.ObjectId"/> directly. DML against the
+    /// parent at runtime walks the schema's <see cref="Schema.Triggers"/>
+    /// dict and fires every trigger whose <see cref="Parent"/> matches
+    /// and whose <see cref="Actions"/> include the current DML kind.
     /// </summary>
-    public readonly object Parent = parent;
+    public readonly SchemaObject Parent = parent;
 
     /// <summary>
     /// The set of DML actions this trigger fires on. A single trigger
@@ -98,8 +102,6 @@ internal sealed class Trigger(
     /// </summary>
     public readonly string BodyText = bodyText;
 
-    public readonly DateTime CreateDate = createDate;
-
     /// <summary>
     /// True when the trigger is disabled via <c>DISABLE TRIGGER … ON
     /// parent</c>; disabled triggers don't fire on DML against the parent
@@ -107,16 +109,4 @@ internal sealed class Trigger(
     /// ON parent</c>). Probe-confirmed.
     /// </summary>
     public bool IsDisabled;
-
-    /// <summary>
-    /// Parent's <see cref="HeapTable.ObjectId"/> / <see cref="View.ObjectId"/>
-    /// for catalog projections (<c>sys.triggers.parent_id</c>,
-    /// <c>sys.objects.parent_object_id</c>).
-    /// </summary>
-    public int ParentObjectId => Parent switch
-    {
-        HeapTable t => t.ObjectId,
-        View v => v.ObjectId,
-        _ => throw new InvalidOperationException("Trigger parent must be a HeapTable or View."),
-    };
 }

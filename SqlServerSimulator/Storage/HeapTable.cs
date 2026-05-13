@@ -8,15 +8,11 @@ namespace SqlServerSimulator.Storage;
 /// whose page bytes are produced by <see cref="RowEncoder"/>.
 /// </summary>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal sealed class HeapTable
+internal sealed class HeapTable : SchemaObject
 {
     public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false)
+        : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {
-        this.Name = name;
-        this.ObjectId = objectId;
-        this.SchemaId = schemaId;
-        this.CreateDate = createDate == default ? DateTime.UtcNow : createDate;
-        this.ModifyDate = this.CreateDate;
         this.Columns = columns;
         this.KeyConstraints = keyConstraints ?? [];
         this.CheckConstraints = checkConstraints ?? [];
@@ -52,37 +48,8 @@ internal sealed class HeapTable
         this.StorageOrdinals = storageOrdinals;
     }
 
-    public readonly string Name;
-
-    /// <summary>
-    /// Per-database object identifier — assigned at CREATE TABLE time from
-    /// <see cref="Database.AllocateObjectId"/>. Stable across the table's
-    /// lifetime; DROP-then-recreate yields a fresh ID (matches real SQL
-    /// Server, probe-confirmed 2026-05-11). Surfaced via <c>OBJECT_ID()</c>
-    /// and <c>sys.objects.object_id</c> / <c>sys.tables.object_id</c>.
-    /// </summary>
-    public readonly int ObjectId;
-
-    /// <summary>
-    /// Schema-id of the schema this table lives in. Surfaces in
-    /// <c>sys.tables.schema_id</c> / <c>sys.objects.schema_id</c>.
-    /// </summary>
-    public readonly int SchemaId;
-
-    /// <summary>
-    /// UTC creation timestamp — captured at CREATE TABLE from the executing
-    /// statement's frozen UtcNow on
-    /// <see cref="Parser.StatementContext"/>. Surfaces in
-    /// <c>sys.tables.create_date</c> / <c>sys.objects.create_date</c>.
-    /// </summary>
-    public readonly DateTime CreateDate;
-
-    /// <summary>
-    /// UTC modification timestamp — equal to <see cref="CreateDate"/> for a
-    /// fresh table; ALTER TABLE would update it (not modeled). Surfaces in
-    /// <c>sys.tables.modify_date</c> / <c>sys.objects.modify_date</c>.
-    /// </summary>
-    public DateTime ModifyDate;
+    public override string ObjectTypeCode => "U ";
+    public override string ObjectTypeDescription => "USER_TABLE";
 
     /// <summary>
     /// Full column set in declaration order, the surface area used for name

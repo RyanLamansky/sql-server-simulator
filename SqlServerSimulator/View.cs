@@ -43,10 +43,12 @@ internal sealed class View(
     ViewUpdatabilityRejection rejectionReason,
     Func<SqlValue[], BatchContext, bool>? visibilityCheck,
     Func<SqlValue[], BatchContext, bool>? checkOptionCheck)
+    : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public readonly Schema Schema = schema;
-    public readonly string Name = name;
-    public readonly int ObjectId = objectId;
+
+    public override string ObjectTypeCode => "V ";
+    public override string ObjectTypeDescription => "VIEW";
 
     /// <summary>
     /// One <see cref="HeapColumn"/> per projection column of the body's
@@ -76,8 +78,6 @@ internal sealed class View(
     /// violation).
     /// </summary>
     public readonly bool WithCheckOption = withCheckOption;
-
-    public readonly DateTime CreateDate = createDate;
 
     /// <summary>
     /// Resolved underlying heap table that DML through this view writes to,

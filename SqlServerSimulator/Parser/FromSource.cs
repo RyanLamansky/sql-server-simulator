@@ -49,7 +49,7 @@ internal sealed class FromSource(
     /// Back-reference to the <see cref="HeapTable"/> when this source is a
     /// table (or system table); null for derived-table sources. Used by the
     /// UPDATE / DELETE mutation paths to reach the table's
-    /// <see cref="HeapTable.KeyConstraints"/> / <see cref="HeapTable.Name"/>
+    /// <see cref="HeapTable.KeyConstraints"/> / <see cref="SchemaObject.Name"/>
     /// after FROM parsing has identified which source is the mutation target.
     /// </summary>
     public readonly HeapTable? BackingTable = backingTable;

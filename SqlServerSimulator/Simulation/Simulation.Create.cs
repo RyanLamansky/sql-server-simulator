@@ -193,6 +193,12 @@ partial class Simulation
             schemaId = schema.SchemaId;
         }
 
+        // Cross-kind name-collision check for permanent tables (Msg 2714).
+        // Temp tables live in a session-scoped dict that doesn't share the
+        // database object-name namespace.
+        if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
+
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase);
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase);
         var heapTable = new HeapTable(

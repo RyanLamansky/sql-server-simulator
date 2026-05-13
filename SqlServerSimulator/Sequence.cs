@@ -45,11 +45,12 @@ internal sealed class Sequence(
     long minValue,
     long maxValue,
     bool cycle)
+    : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public readonly Schema Schema = schema;
-    public readonly string Name = name;
-    public readonly int ObjectId = objectId;
-    public readonly DateTime CreateDate = createDate;
+
+    public override string ObjectTypeCode => "SO";
+    public override string ObjectTypeDescription => "SEQUENCE_OBJECT";
 
     /// <summary>
     /// The declared scalar type. Constrained at CREATE SEQUENCE time to the

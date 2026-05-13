@@ -51,28 +51,22 @@ internal sealed class TableType(
     HeapColumn[] columns,
     (KeyConstraintKind Kind, string? Name, int[] FullOrdinals)[] pendingKeys,
     (string? Name, BooleanExpression Predicate, string? InlineColumn)[] pendingChecks)
+    : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
     public readonly Schema Schema = schema;
-    public readonly string Name = name;
 
-    /// <summary>
-    /// Stable per-database identifier surfacing in
-    /// <c>sys.table_types.type_table_object_id</c>. <c>sys.columns</c> joins
-    /// this to project per-column rows for the type. Distinct from
-    /// <see cref="UserTypeId"/> (which is the type's own identifier in
-    /// <c>sys.types</c>).
-    /// </summary>
-    public readonly int TypeTableObjectId = typeTableObjectId;
+    public override string ObjectTypeCode => "TT";
+    public override string ObjectTypeDescription => "TYPE_TABLE";
 
     /// <summary>
     /// Per-database <c>user_type_id</c> (allocated via
     /// <see cref="Database.AllocateUserTypeId"/>, starting at 256 to avoid
     /// the system-type id range 0–255). Surfaces in
     /// <c>sys.types.user_type_id</c> and <c>sys.table_types.user_type_id</c>.
+    /// Distinct from the inherited <see cref="SchemaObject.ObjectId"/>
+    /// (which surfaces as <c>sys.table_types.type_table_object_id</c>).
     /// </summary>
     public readonly int UserTypeId = userTypeId;
-
-    public readonly DateTime CreateDate = createDate;
 
     /// <summary>
     /// Resolved column shape captured at CREATE TYPE time.

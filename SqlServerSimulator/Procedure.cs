@@ -37,21 +37,12 @@ internal sealed class Procedure(
     ProcedureParameter[] parameters,
     string bodyText,
     DateTime createDate)
+    : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public readonly Schema Schema = schema;
-    public readonly string Name = name;
 
-    /// <summary>
-    /// Stable per-database identifier; preserved across <c>ALTER PROCEDURE</c>
-    /// (probe-confirmed: real SQL Server's ALTER keeps the same object_id, so
-    /// foreign refs in <c>sys.objects</c> stay consistent). Allocated at
-    /// CREATE PROCEDURE time from <see cref="Database.AllocateObjectId"/>;
-    /// stored mutable-by-ALTER on the procedure record. Replaced wholesale on
-    /// each ALTER because parameter list / body text both swap; the field is
-    /// readonly because the ALTER path constructs a fresh <see cref="Procedure"/>
-    /// instance carrying the preserved id.
-    /// </summary>
-    public readonly int ObjectId = objectId;
+    public override string ObjectTypeCode => "P ";
+    public override string ObjectTypeDescription => "SQL_STORED_PROCEDURE";
 
     /// <summary>
     /// Declared parameters in source order. Each carries name, type, optional
@@ -70,8 +61,6 @@ internal sealed class Procedure(
     /// invoked).
     /// </summary>
     public readonly string BodyText = bodyText;
-
-    public readonly DateTime CreateDate = createDate;
 }
 
 /// <summary>

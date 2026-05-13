@@ -98,7 +98,7 @@ partial class Simulation
     /// </remarks>
     internal bool TryFireInsteadOfTrigger(
         BatchContext outerBatch,
-        object parent,
+        SchemaObject parent,
         TriggerActions action,
         HeapColumn[] pseudoColumns,
         List<SqlValue[]>? insertedRows,
@@ -214,10 +214,10 @@ partial class Simulation
     /// uses this to short-circuit the heap-write path and route to
     /// <see cref="TryFireInsteadOfTrigger"/>.
     /// </summary>
-    internal static bool HasInsteadOfTrigger(BatchContext batch, object parent, TriggerActions action) =>
+    internal static bool HasInsteadOfTrigger(BatchContext batch, SchemaObject parent, TriggerActions action) =>
         HasTrigger(batch, parent, action, TriggerTiming.InsteadOf);
 
-    private static bool HasTrigger(BatchContext batch, object parent, TriggerActions action, TriggerTiming timing)
+    private static bool HasTrigger(BatchContext batch, SchemaObject parent, TriggerActions action, TriggerTiming timing)
     {
         // In-flight triggers are excluded — for AFTER, this matters only
         // when a body re-enters itself (the recursion guard would skip

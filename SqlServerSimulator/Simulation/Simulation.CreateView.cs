@@ -135,13 +135,9 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // Reject collisions across the view / table / function name namespace.
-        if (schema.Views.ContainsKey(viewName.Leaf)
-            || schema.Functions.ContainsKey(viewName.Leaf)
-            || schema.HeapTables.ContainsKey(viewName.Leaf))
-        {
+        // Reject collisions across the shared object-name namespace.
+        if (schema.HasNameInSharedNamespace(viewName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(viewName.Leaf);
-        }
 
         var outputColumns = ComputeViewOutputColumns(bodySelection, renameList, viewName.Leaf);
 

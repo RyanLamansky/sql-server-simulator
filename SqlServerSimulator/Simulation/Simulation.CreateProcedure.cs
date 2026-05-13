@@ -29,7 +29,7 @@ partial class Simulation
     /// <para>
     /// <strong>OR ALTER</strong>: the modern <c>CREATE OR ALTER PROCEDURE</c>
     /// syntax does an upsert — creates when missing, replaces when present
-    /// (preserving the <see cref="Procedure.ObjectId"/>). Pure
+    /// (preserving the <see cref="SchemaObject.ObjectId"/>). Pure
     /// <c>CREATE PROCEDURE</c> on an existing name raises Msg 2714; pure
     /// <c>ALTER PROCEDURE</c> on a missing name raises Msg 208.
     /// </para>
@@ -128,16 +128,8 @@ partial class Simulation
         // CREATE-only (no OR ALTER) collides with any existing object of the
         // same name (procs share the namespace with tables / views /
         // functions). ALTER requires the proc to exist.
-        if (!isAlter && !createOrAlter)
-        {
-            if (existed
-                || schema.Functions.ContainsKey(procName.Leaf)
-                || schema.Views.ContainsKey(procName.Leaf)
-                || schema.HeapTables.ContainsKey(procName.Leaf))
-            {
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(procName.Leaf);
-            }
-        }
+        if (!isAlter && !createOrAlter && schema.HasNameInSharedNamespace(procName.Leaf))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(procName.Leaf);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(procName);
 

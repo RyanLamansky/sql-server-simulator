@@ -170,11 +170,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (schema.Functions.ContainsKey(functionName.Leaf)
-            || schema.HeapTables.ContainsKey(functionName.Leaf))
-        {
+        if (schema.HasNameInSharedNamespace(functionName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
-        }
 
         var objectId = context.CurrentDatabase.AllocateObjectId();
         var function = new ScalarFunction(
@@ -242,11 +239,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (schema.Functions.ContainsKey(functionName.Leaf)
-            || schema.HeapTables.ContainsKey(functionName.Leaf))
-        {
+        if (schema.HasNameInSharedNamespace(functionName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
-        }
 
         var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf);
 

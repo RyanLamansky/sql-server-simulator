@@ -167,27 +167,21 @@ internal static class BuiltInResources
                     notMsShipped,
                 }));
 
-        // sys.objects: a superset of sys.tables that also emits one row per
-        // PK / UQ / CHECK constraint, with parent_object_id linking back to
-        // the owning table. type_desc strings probe-confirmed: 'U ' /
-        // USER_TABLE, 'PK' / PRIMARY_KEY_CONSTRAINT, 'UQ' / UNIQUE_CONSTRAINT,
-        // 'C ' / CHECK_CONSTRAINT.
+        // sys.objects: every <see cref="SchemaObject"/> emits one row, plus
+        // one extra row per HeapTable PK / UQ / CHECK constraint linked via
+        // parent_object_id. type / type_desc come from the SchemaObject's
+        // own ObjectTypeCode / ObjectTypeDescription (probe-confirmed
+        // values: 'U ' / USER_TABLE, 'V ' / VIEW, 'P ' / SQL_STORED_PROCEDURE,
+        // 'FN' / SQL_SCALAR_FUNCTION, 'IF' / SQL_INLINE_TABLE_VALUED_FUNCTION,
+        // 'TR' / SQL_TRIGGER). Constraint codes ('PK', 'UQ', 'C ') live
+        // outside the SchemaObject contract since constraints aren't first-
+        // class schema objects.
         var pkType = SqlValue.FromChar(charTwo, "PK");
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
         var uqType = SqlValue.FromChar(charTwo, "UQ");
         var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
         var checkType = SqlValue.FromChar(charTwo, "C ");
         var checkTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
-        var fnType = SqlValue.FromChar(charTwo, "FN");
-        var fnTypeDesc = SqlValue.FromNVarchar("SQL_SCALAR_FUNCTION");
-        var inlineTvfType = SqlValue.FromChar(charTwo, "IF");
-        var inlineTvfTypeDesc = SqlValue.FromNVarchar("SQL_INLINE_TABLE_VALUED_FUNCTION");
-        var viewType = SqlValue.FromChar(charTwo, "V ");
-        var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
-        var procType = SqlValue.FromChar(charTwo, "P ");
-        var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
-        var triggerType = SqlValue.FromChar(charTwo, "TR");
-        var triggerTypeDesc = SqlValue.FromNVarchar("SQL_TRIGGER");
         var zeroParent = SqlValue.FromInt32(0);
         var objectsColumns = new HeapColumn[]
         {
@@ -202,7 +196,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
         var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, tableType, tableTypeDesc, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, fnType, fnTypeDesc, inlineTvfType, inlineTvfTypeDesc, viewType, viewTypeDesc, procType, procTypeDesc, triggerType, triggerTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -367,7 +361,7 @@ internal static class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, false),
         };
         var proceduresView = new CatalogView("procedures", proceduresColumns, batch =>
-            EnumerateProcedures(batch, procType, procTypeDesc, notMsShipped));
+            EnumerateProcedures(batch, charTwo, notMsShipped));
 
         // INFORMATION_SCHEMA.ROUTINES: ISO-shape view listing both procedures
         // and functions. The simulator ships the load-bearing column subset:
@@ -522,7 +516,7 @@ internal static class BuiltInResources
             new("is_not_for_replication", SqlType.Bit, null, false),
         };
         var triggersView = new CatalogView("triggers", triggersColumns, batch =>
-            EnumerateSysTriggers(batch, parentClassObjectColumn, parentClassObjectColumnDesc, triggerType, triggerTypeDesc));
+            EnumerateSysTriggers(batch, charTwo, parentClassObjectColumn, parentClassObjectColumnDesc));
 
         // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
         // emits a row for every user-defined type (scalar UDTs surface their
@@ -624,7 +618,7 @@ internal static class BuiltInResources
             {
                 yield return [
                     SqlValue.FromSystemName(tt.Name),
-                    SqlValue.FromInt32(tt.TypeTableObjectId),
+                    SqlValue.FromInt32(tt.ObjectId),
                     trueBit,
                     schemaId,
                     SqlValue.FromInt32(tt.UserTypeId),
@@ -651,13 +645,17 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
         Parser.BatchContext batch,
+        SqlType charTwo,
         SqlValue parentClassObjectColumn,
-        SqlValue parentClassObjectColumnDesc,
-        SqlValue triggerType,
-        SqlValue triggerTypeDesc)
+        SqlValue parentClassObjectColumnDesc)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
+        // 'TR' / 'SQL_TRIGGER' — matches Trigger.ObjectTypeCode /
+        // Trigger.ObjectTypeDescription, kept as local constants here to
+        // avoid one SqlValue allocation per row.
+        var triggerType = SqlValue.FromChar(charTwo, "TR");
+        var triggerTypeDesc = SqlValue.FromNVarchar("SQL_TRIGGER");
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
@@ -668,7 +666,7 @@ internal static class BuiltInResources
                     SqlValue.FromInt32(trigger.ObjectId),
                     parentClassObjectColumn,
                     parentClassObjectColumnDesc,
-                    SqlValue.FromInt32(trigger.ParentObjectId),
+                    SqlValue.FromInt32(trigger.Parent.ObjectId),
                     triggerType,
                     triggerTypeDesc,
                     createDate,
@@ -751,17 +749,21 @@ internal static class BuiltInResources
     /// Rows for <c>sys.procedures</c>: one row per <see cref="Procedure"/> in
     /// every schema. The full <c>create_date</c> / <c>modify_date</c> story
     /// in real SQL Server tracks ALTER PROCEDURE separately; the simulator
-    /// uses the ALTER-preserving <see cref="Procedure.CreateDate"/> for both
+    /// uses the ALTER-preserving <see cref="SchemaObject.CreateDate"/> for both
     /// columns (the original create date survives ALTER, matching the way
-    /// <see cref="Procedure.ObjectId"/> survives — minor fidelity gap on
+    /// <see cref="SchemaObject.ObjectId"/> survives — minor fidelity gap on
     /// modify_date which would shift on each ALTER in real SQL Server).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateProcedures(
         Parser.BatchContext batch,
-        SqlValue procType,
-        SqlValue procTypeDesc,
+        SqlType charTwo,
         SqlValue notMsShipped)
     {
+        // 'P ' / 'SQL_STORED_PROCEDURE' — matches Procedure.ObjectTypeCode /
+        // Procedure.ObjectTypeDescription, kept as local constants here to
+        // avoid one SqlValue allocation per row.
+        var procType = SqlValue.FromChar(charTwo, "P ");
+        var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -1110,9 +1112,9 @@ internal static class BuiltInResources
             // Table types surface their columns through sys.columns keyed by
             // type_table_object_id (probe G3). Computed columns inherit
             // is_computed=true; identity columns inherit is_identity=true.
-            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.TypeTableObjectId))
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
             {
-                var typeObjectId = SqlValue.FromInt32(tt.TypeTableObjectId);
+                var typeObjectId = SqlValue.FromInt32(tt.ObjectId);
                 for (var i = 0; i < tt.Columns.Length; i++)
                 {
                     var col = tt.Columns[i];
@@ -1346,104 +1348,52 @@ internal static class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateObjects(
         Parser.BatchContext batch,
-        SqlValue tableType, SqlValue tableTypeDesc,
+        SqlType charTwo,
         SqlValue pkType, SqlValue pkTypeDesc,
         SqlValue uqType, SqlValue uqTypeDesc,
         SqlValue checkType, SqlValue checkTypeDesc,
-        SqlValue fnType, SqlValue fnTypeDesc,
-        SqlValue inlineTvfType, SqlValue inlineTvfTypeDesc,
-        SqlValue viewType, SqlValue viewTypeDesc,
-        SqlValue procType, SqlValue procTypeDesc,
-        SqlValue triggerType, SqlValue triggerTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
-            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            // Schema-resident objects in ObjectId order. SchemaObject's
+            // ObjectTypeCode / ObjectTypeDescription supply the discriminators,
+            // so adding a new schema-object kind (e.g. surfacing Sequences /
+            // TableTypes in sys.objects later) only requires implementing the
+            // two abstract members on that type.
+            foreach (var obj in schema.SchemaObjects().OrderBy(o => o.ObjectId))
             {
-                var (typeCode, typeDesc) = fn switch
-                {
-                    InlineTableValuedFunction => (inlineTvfType, inlineTvfTypeDesc),
-                    _ => (fnType, fnTypeDesc),
-                };
+                var parent = obj is Trigger trigger
+                    ? SqlValue.FromInt32(trigger.Parent.ObjectId)
+                    : zeroParent;
                 yield return [
-                    SqlValue.FromInt32(fn.ObjectId),
-                    SqlValue.FromSystemName(fn.Name),
-                    SqlValue.FromInt32(fn.Schema.SchemaId),
-                    zeroParent,
-                    typeCode,
-                    typeDesc,
-                    SqlValue.FromDateTime(fn.CreateDate),
-                    SqlValue.FromDateTime(fn.CreateDate),
+                    SqlValue.FromInt32(obj.ObjectId),
+                    SqlValue.FromSystemName(obj.Name),
+                    SqlValue.FromInt32(obj.SchemaId),
+                    parent,
+                    SqlValue.FromChar(charTwo, obj.ObjectTypeCode),
+                    SqlValue.FromNVarchar(obj.ObjectTypeDescription),
+                    SqlValue.FromDateTime(obj.CreateDate),
+                    SqlValue.FromDateTime(obj.ModifyDate),
                     notMsShipped,
                 ];
-            }
-            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
-            {
-                yield return [
-                    SqlValue.FromInt32(view.ObjectId),
-                    SqlValue.FromSystemName(view.Name),
-                    SqlValue.FromInt32(view.Schema.SchemaId),
-                    zeroParent,
-                    viewType,
-                    viewTypeDesc,
-                    SqlValue.FromDateTime(view.CreateDate),
-                    SqlValue.FromDateTime(view.CreateDate),
-                    notMsShipped,
-                ];
-            }
-            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
-            {
-                yield return [
-                    SqlValue.FromInt32(proc.ObjectId),
-                    SqlValue.FromSystemName(proc.Name),
-                    SqlValue.FromInt32(proc.Schema.SchemaId),
-                    zeroParent,
-                    procType,
-                    procTypeDesc,
-                    SqlValue.FromDateTime(proc.CreateDate),
-                    SqlValue.FromDateTime(proc.CreateDate),
-                    notMsShipped,
-                ];
-            }
-            foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
-            {
-                yield return [
-                    SqlValue.FromInt32(trigger.ObjectId),
-                    SqlValue.FromSystemName(trigger.Name),
-                    SqlValue.FromInt32(trigger.Schema.SchemaId),
-                    SqlValue.FromInt32(trigger.ParentObjectId),
-                    triggerType,
-                    triggerTypeDesc,
-                    SqlValue.FromDateTime(trigger.CreateDate),
-                    SqlValue.FromDateTime(trigger.CreateDate),
-                    notMsShipped,
-                ];
-            }
-            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
-            {
-                var schemaId = SqlValue.FromInt32(t.SchemaId);
+
+                // Constraint rows hang off HeapTable parents — emit them
+                // immediately after the table they belong to so the natural
+                // sys.objects ordering matches probe-confirmed real-server
+                // shape (table rows interleaved with their own constraints).
+                if (obj is not HeapTable t) continue;
+                var schemaIdValue = SqlValue.FromInt32(t.SchemaId);
                 var createDate = SqlValue.FromDateTime(t.CreateDate);
                 var modifyDate = SqlValue.FromDateTime(t.ModifyDate);
-                yield return [
-                    SqlValue.FromInt32(t.ObjectId),
-                    SqlValue.FromSystemName(t.Name),
-                    schemaId,
-                    zeroParent,
-                    tableType,
-                    tableTypeDesc,
-                    createDate,
-                    modifyDate,
-                    notMsShipped,
-                ];
-                var parent = SqlValue.FromInt32(t.ObjectId);
+                var tableObjectId = SqlValue.FromInt32(t.ObjectId);
                 foreach (var key in t.KeyConstraints)
                 {
                     yield return [
                         SqlValue.FromInt32(key.ObjectId),
                         SqlValue.FromSystemName(key.Name),
-                        schemaId,
-                        parent,
+                        schemaIdValue,
+                        tableObjectId,
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkType : uqType,
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
                         createDate,
@@ -1456,8 +1406,8 @@ internal static class BuiltInResources
                     yield return [
                         SqlValue.FromInt32(chk.ObjectId),
                         SqlValue.FromSystemName(chk.Name),
-                        schemaId,
-                        parent,
+                        schemaIdValue,
+                        tableObjectId,
                         checkType,
                         checkTypeDesc,
                         createDate,

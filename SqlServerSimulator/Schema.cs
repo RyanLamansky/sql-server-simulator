@@ -54,7 +54,7 @@ internal sealed class Schema(string name, int schemaId)
     /// resolves through this dict. Procedures share the object-name
     /// namespace with tables / views / functions (Msg 2714 on collision).
     /// <c>ALTER PROCEDURE</c> replaces the entry while preserving the
-    /// existing <see cref="Procedure.ObjectId"/>; <c>DROP PROCEDURE</c>
+    /// existing <see cref="SchemaObject.ObjectId"/>; <c>DROP PROCEDURE</c>
     /// removes it.
     /// </summary>
     public readonly ConcurrentDictionary<string, Procedure> Procedures = new(Collation.Default);
@@ -91,4 +91,39 @@ internal sealed class Schema(string name, int schemaId)
     /// of truth (ENABLE / DISABLE / DROP all operate on it).
     /// </summary>
     public readonly ConcurrentDictionary<string, Trigger> Triggers = new(Collation.Default);
+
+    /// <summary>
+    /// Yields every <see cref="SchemaObject"/> in this schema's
+    /// object-name namespace (heap tables, views, UDFs, procedures,
+    /// sequences, triggers) — the set whose leaf names must be unique
+    /// (Msg 2714 on CREATE collision). <see cref="TableTypes"/> are
+    /// deliberately omitted: probe-confirmed that table-type names occupy
+    /// a separate namespace from this set. Used by sys.objects projection
+    /// and by the CREATE-time auto-name-collision check.
+    /// </summary>
+    public IEnumerable<SchemaObject> SchemaObjects()
+    {
+        foreach (var t in this.HeapTables.Values) yield return t;
+        foreach (var v in this.Views.Values) yield return v;
+        foreach (var fn in this.Functions.Values) yield return fn;
+        foreach (var p in this.Procedures.Values) yield return p;
+        foreach (var s in this.Sequences.Values) yield return s;
+        foreach (var tr in this.Triggers.Values) yield return tr;
+    }
+
+    /// <summary>
+    /// True when <paramref name="leaf"/> matches any existing name in
+    /// this schema's object-name namespace (<see cref="SchemaObjects"/>).
+    /// Used by every CREATE path to raise Msg 2714 before allocating an
+    /// ObjectId or writing into the relevant dict.
+    /// </summary>
+    public bool HasNameInSharedNamespace(string leaf)
+    {
+        foreach (var obj in this.SchemaObjects())
+        {
+            if (Collation.Default.Equals(obj.Name, leaf))
+                return true;
+        }
+        return false;
+    }
 }

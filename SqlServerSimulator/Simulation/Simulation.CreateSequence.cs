@@ -147,10 +147,7 @@ partial class Simulation
         // The object namespace is shared with tables / views / functions / procs;
         // duplicate names across kinds raise Msg 2714. Check cross-kind before
         // the sequence-specific insert.
-        return schema.HeapTables.ContainsKey(sequence.Name)
-            || schema.Views.ContainsKey(sequence.Name)
-            || schema.Functions.ContainsKey(sequence.Name)
-            || schema.Procedures.ContainsKey(sequence.Name)
+        return schema.HasNameInSharedNamespace(sequence.Name)
             || !schema.Sequences.TryAdd(sequence.Name, sequence)
             ? throw SimulatedSqlException.ThereIsAlreadyAnObject(sequence.Name)
             : true;

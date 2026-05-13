@@ -242,7 +242,7 @@ partial class Simulation
             // Snapshot the old row when OUTPUT, AFTER UPDATE triggers, or
             // an INSTEAD OF UPDATE on the parent (table or view) needs it
             // for DELETED.<col> resolution.
-            var insteadOfParent = (object?)sourceView ?? table;
+            var insteadOfParent = (SchemaObject?)sourceView ?? table;
             var oldSnapshotNeeded = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
                 || HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
@@ -353,7 +353,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        var insteadOfParent = (object?)sourceView ?? table;
+        var insteadOfParent = (SchemaObject?)sourceView ?? table;
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
 
         if (affected.Count == 0)
@@ -430,7 +430,7 @@ partial class Simulation
         }
         context.Connection.LastStatementRowCount = affected.Count;
         var pseudoColumns = sourceView?.OutputColumns ?? table.Columns;
-        var parent = (object?)sourceView ?? table;
+        var parent = (SchemaObject?)sourceView ?? table;
         _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
             context.Batch, parent, TriggerActions.Update,
             pseudoColumns, insertedRows, deletedRows,

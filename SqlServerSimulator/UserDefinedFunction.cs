@@ -21,10 +21,9 @@ internal abstract class UserDefinedFunction(
     UdfParameter[] parameters,
     string bodyText,
     DateTime createDate)
+    : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public readonly Schema Schema = schema;
-    public readonly string Name = name;
-    public readonly int ObjectId = objectId;
 
     /// <summary>
     /// Declared parameters in source order. Each parameter has a name (with
@@ -43,8 +42,6 @@ internal abstract class UserDefinedFunction(
     /// call.
     /// </summary>
     public readonly string BodyText = bodyText;
-
-    public readonly DateTime CreateDate = createDate;
 }
 
 /// <summary>
@@ -74,6 +71,9 @@ internal sealed class ScalarFunction(
     DateTime createDate)
     : UserDefinedFunction(schema, name, objectId, parameters, bodyText, createDate)
 {
+    public override string ObjectTypeCode => "FN";
+    public override string ObjectTypeDescription => "SQL_SCALAR_FUNCTION";
+
     public readonly SqlType ReturnType = returnType;
 
     /// <summary>
@@ -116,6 +116,9 @@ internal sealed class InlineTableValuedFunction(
     DateTime createDate)
     : UserDefinedFunction(schema, name, objectId, parameters, bodyText, createDate)
 {
+    public override string ObjectTypeCode => "IF";
+    public override string ObjectTypeDescription => "SQL_INLINE_TABLE_VALUED_FUNCTION";
+
     /// <summary>
     /// One <see cref="HeapColumn"/> per projection column of the body's
     /// SELECT, derived at <c>CREATE FUNCTION</c> time. Column names come from

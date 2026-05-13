@@ -270,7 +270,7 @@ partial class Simulation
     /// invariant. Triggers don't participate in the undo log; this fires
     /// unconditionally on DROP outside transactional temp-table scope.
     /// </summary>
-    private static void CascadeDropTriggers(Database database, object droppedParent)
+    private static void CascadeDropTriggers(Database database, SchemaObject droppedParent)
     {
         foreach (var schema in database.Schemas.Values)
         {
