@@ -169,6 +169,27 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public bool IsHistoryTable;
 
+    /// <summary>
+    /// FOREIGN KEY constraints declared on this table (the referring side).
+    /// Each entry's <see cref="ForeignKey.ReferencedTable"/> points at the
+    /// parent table whose PK/UNIQUE the FK targets. Populated post-construction
+    /// by <c>ResolveForeignKeys</c> so the parent-side back-pointer
+    /// (<see cref="IncomingForeignKeys"/>) can wire up symmetrically once both
+    /// tables exist. Enforced at INSERT/UPDATE on the child by the FK loop in
+    /// <c>EnforceOutgoingForeignKeys</c>.
+    /// </summary>
+    public readonly List<ForeignKey> OutgoingForeignKeys = [];
+
+    /// <summary>
+    /// FOREIGN KEY constraints from other tables that reference this table.
+    /// The mirror of <see cref="OutgoingForeignKeys"/>: every FK whose
+    /// <see cref="ForeignKey.ReferencedTable"/> is this table appears here on
+    /// the parent. Drives parent-side enforcement (DELETE / UPDATE of a
+    /// referenced row → Msg 547 or cascade), plus DROP TABLE rejection
+    /// (Msg 3726) when this table is still referenced.
+    /// </summary>
+    public readonly List<ForeignKey> IncomingForeignKeys = [];
+
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();
 

@@ -91,4 +91,43 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ViolationOfKeyConstraint(string kindWord, string constraintName, string tableName, string formattedKeyValues) =>
         new($"Violation of {kindWord} constraint '{constraintName}'. Cannot insert duplicate key in object 'dbo.{tableName}'. The duplicate key value is ({formattedKeyValues}).", 2627, 14, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 547 on the child side: an <c>INSERT</c> /
+    /// <c>UPDATE</c> / <c>MERGE</c> placed a value in a FOREIGN KEY column
+    /// that doesn't match any row of the referenced parent. Probe-confirmed
+    /// wording variants against SQL Server 2025 on 2026-05-13:
+    /// <list type="bullet">
+    /// <item><c>FOREIGN KEY</c> for a normal FK; <c>FOREIGN KEY SAME TABLE</c>
+    /// when the child and parent are the same table (self-reference).</item>
+    /// <item>Single-column FK appends <c>, column 'X'</c>; multi-column FK
+    /// omits the column phrase entirely.</item>
+    /// </list>
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyConflictOnChild(
+        string verb, string constraintName, string referencedSchema, string referencedTable, string? referencedColumn, bool isSelfReferencing)
+    {
+        var keyKindWord = isSelfReferencing ? "FOREIGN KEY SAME TABLE" : "FOREIGN KEY";
+        var columnSuffix = referencedColumn is null ? "" : $", column '{referencedColumn}'";
+        return new(
+            $"The {verb} statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{referencedSchema}.{referencedTable}\"{columnSuffix}.",
+            547, 16, 0);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 547 on the parent side: a <c>DELETE</c> /
+    /// <c>UPDATE</c> on a referenced row left a child orphaned (the FK action
+    /// is <c>NO ACTION</c>). Wording difference from the child-side variant:
+    /// the constraint phrase is <c>REFERENCE constraint</c> rather than
+    /// <c>FOREIGN KEY constraint</c>, and the table / column slot describes
+    /// the child (referring) side, not the referenced side (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyConflictOnParent(
+        string verb, string constraintName, string childSchema, string childTable, string? childColumn)
+    {
+        var columnSuffix = childColumn is null ? "" : $", column '{childColumn}'";
+        return new(
+            $"The {verb} statement conflicted with the REFERENCE constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{childSchema}.{childTable}\"{columnSuffix}.",
+            547, 16, 0);
+    }
 }

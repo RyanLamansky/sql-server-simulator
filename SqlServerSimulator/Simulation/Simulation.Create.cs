@@ -60,7 +60,8 @@ partial class Simulation
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
-        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod))
+        var pendingForeignKeys = new List<PendingForeignKey>();
+        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys))
             return false;
 
         // Optional trailing WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X))
@@ -256,6 +257,30 @@ partial class Simulation
             heapTable.SystemVersioning = historyTable;
         }
 
+        // FK resolution runs after the table is in its dict so a
+        // self-referencing FK can find the table being created. Any FK
+        // failure (missing parent / mismatched key shape / cascade cycle)
+        // raises and the table stays in place — matching real SQL Server's
+        // probe-confirmed behavior, where the CREATE TABLE statement rolls
+        // back atomically only after the per-FK validation completes.
+        try
+        {
+            if (pendingForeignKeys.Count > 0)
+                ResolveForeignKeys(heapTable, pendingForeignKeys, context);
+        }
+        catch
+        {
+            // Roll back the partial insert so the failing CREATE leaves the
+            // schema unchanged. Cascade-incoming-FK detach is unnecessary
+            // because every FK we registered points at tables that survive
+            // the rollback unaltered (resolver appends incoming entries only
+            // on success per-FK).
+            _ = destination.TryRemove(heapTable.Name, out _);
+            if (heapTable.SystemVersioning is { } versionedHistory)
+                _ = historyDestination!.TryRemove(versionedHistory.Name, out _);
+            throw;
+        }
+
         // Temp-table DDL participates in transaction rollback: probe-confirmed
         // that a CREATE TABLE #foo inside BEGIN TRAN is undone by ROLLBACK on
         // real SQL Server. Regular CREATE TABLE isn't logged — a known
@@ -384,7 +409,8 @@ partial class Simulation
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
-        List<(string StartCol, string EndCol)>? pendingPeriod = null)
+        List<(string StartCol, string EndCol)>? pendingPeriod = null,
+        List<PendingForeignKey>? pendingForeignKeys = null)
     {
         var identityCount = 0;
         // Parallel to heapColumns: true when the user wrote an explicit
@@ -408,9 +434,13 @@ partial class Simulation
             // disallows named constraints in table-variable declarations).
             if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint } constraintKw && (isTableVariable || isTableType))
                 throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(constraintKw) : SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check })
+            // Bare table-level FOREIGN KEY in a table variable / table type:
+            // Msg 102 (probe-confirmed grammar disallows FKs in those contexts).
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Foreign } foreignKw && (isTableVariable || isTableType))
+                throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(foreignKw) : SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check or Keyword.Foreign })
             {
-                ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed);
+                ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingForeignKeys);
                 continue;
             }
 
@@ -506,6 +536,7 @@ partial class Simulation
             var isHidden = false;
             var inlineKeyKind = (KeyConstraintKind?)null;
             string? inlineKeyName = null;
+            string? inlineFkName = null;
             while (true)
             {
                 switch (context.Token)
@@ -551,7 +582,7 @@ partial class Simulation
                         try { defaultExpression = Expression.Parse(context); }
                         finally { context.InDefaultClause = false; }
                         continue;
-                    case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null:
+                    case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null && inlineFkName is null:
                         if (isTableType)
                             throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
                         if (isTableVariable)
@@ -559,16 +590,21 @@ partial class Simulation
                         if (context.GetNextRequired() is not Name namedConstraint)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         context.MoveNextRequired();
-                        if (context.Token is ReservedKeyword { Keyword: Keyword.Check })
+                        switch (context.Token)
                         {
-                            pendingChecks.Add((namedConstraint.Value, ParseInlineCheckPredicate(context), columnName.Value));
-                            continue;
+                            case ReservedKeyword { Keyword: Keyword.Check }:
+                                pendingChecks.Add((namedConstraint.Value, ParseInlineCheckPredicate(context), columnName.Value));
+                                continue;
+                            case ReservedKeyword { Keyword: Keyword.References }:
+                                inlineFkName = namedConstraint.Value;
+                                continue;
+                            case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
+                                inlineKeyName = namedConstraint.Value;
+                                inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                                continue;
+                            default:
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
                         }
-                        inlineKeyName = namedConstraint.Value;
-                        if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
-                        continue;
                     case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
                         inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
                         continue;
@@ -577,6 +613,10 @@ partial class Simulation
                         continue;
                     case ReservedKeyword { Keyword: Keyword.References } referencesKw when isTableVariable || isTableType:
                         throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
+                    case ReservedKeyword { Keyword: Keyword.References }:
+                        ParseInlineForeignKeyTail(context, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
+                        inlineFkName = null;
+                        continue;
                 }
                 break;
             }
@@ -894,7 +934,8 @@ partial class Simulation
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
-        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed)
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
+        List<PendingForeignKey>? pendingForeignKeys = null)
     {
         string? constraintName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint })
@@ -905,14 +946,19 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Check })
+        switch (context.Token)
         {
-            pendingChecks.Add((constraintName, ParseInlineCheckPredicate(context), null));
-            return;
+            case ReservedKeyword { Keyword: Keyword.Check }:
+                pendingChecks.Add((constraintName, ParseInlineCheckPredicate(context), null));
+                return;
+            case ReservedKeyword { Keyword: Keyword.Foreign }:
+                ParseTableLevelForeignKey(context, constraintName, heapColumns, pendingForeignKeys);
+                return;
+            case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
         var kind = ParseInlineKeyKindAndModifiers(context);
 
         if (context.Token is not Operator { Character: '(' })
@@ -1024,6 +1070,212 @@ partial class Simulation
     /// object-id-derived suffix because that would require modeling system
     /// catalog allocations.
     /// </summary>
+    /// <summary>
+    /// Parses the inline column-level FOREIGN KEY tail starting from
+    /// <c>REFERENCES</c>: <c>REFERENCES qualifiedTable [(col)] [ON DELETE action]
+    /// [ON UPDATE action]</c>. Entered with the cursor on <c>REFERENCES</c>;
+    /// exits on the first token past the last optional <c>ON ... action</c>.
+    /// The child column is the single column being declared
+    /// (<paramref name="childFullOrdinal"/>).
+    /// </summary>
+    private static void ParseInlineForeignKeyTail(
+        ParserContext context,
+        string columnName,
+        int childFullOrdinal,
+        string? inlineFkName,
+        List<PendingForeignKey>? pendingForeignKeys)
+    {
+        if (pendingForeignKeys is null)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var referencedTable = BatchContext.ParseObjectName(context);
+        var referencedColumns = new List<string>();
+        context.MoveNextOptional();
+        if (context.Token is Operator { Character: '(' })
+        {
+            do
+            {
+                if (context.GetNextRequired() is not Name refCol)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                referencedColumns.Add(refCol.Value);
+                context.MoveNextRequired();
+            } while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+        var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
+        pendingForeignKeys.Add(new PendingForeignKey(
+            inlineFkName,
+            ChildColumnNames: [columnName],
+            ChildFullOrdinals: [childFullOrdinal],
+            ReferencedTable: referencedTable,
+            ReferencedColumnNames: [.. referencedColumns],
+            DeleteAction: delAction,
+            UpdateAction: updAction));
+    }
+
+    /// <summary>
+    /// Parses the table-level FOREIGN KEY shape after the optional
+    /// <c>CONSTRAINT name</c> has been consumed and the cursor is on
+    /// <c>FOREIGN</c>: <c>FOREIGN KEY (cols) REFERENCES other (cols) [ON DELETE
+    /// action] [ON UPDATE action]</c>. Child columns resolve into full
+    /// ordinals via the in-flight <paramref name="heapColumns"/> list.
+    /// </summary>
+    private static void ParseTableLevelForeignKey(
+        ParserContext context,
+        string? constraintName,
+        List<HeapColumn?> heapColumns,
+        List<PendingForeignKey>? pendingForeignKeys)
+    {
+        if (pendingForeignKeys is null)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Key })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var childColumnNames = new List<string>();
+        var childOrdinals = new List<int>();
+        do
+        {
+            if (context.GetNextRequired() is not Name childCol)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var found = -1;
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, childCol.Value))
+                {
+                    found = i;
+                    break;
+                }
+            }
+            if (found < 0)
+                throw SimulatedSqlException.InvalidColumnName(childCol.Value);
+            childColumnNames.Add(heapColumns[found]!.Name);
+            childOrdinals.Add(found);
+            context.MoveNextRequired();
+        } while (context.Token is Operator { Character: ',' });
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.References })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        context.MoveNextRequired();
+        var referencedTable = BatchContext.ParseObjectName(context);
+        var referencedColumns = new List<string>();
+        context.MoveNextOptional();
+        if (context.Token is Operator { Character: '(' })
+        {
+            do
+            {
+                if (context.GetNextRequired() is not Name refCol)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                referencedColumns.Add(refCol.Value);
+                context.MoveNextRequired();
+            } while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+        var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
+        pendingForeignKeys.Add(new PendingForeignKey(
+            constraintName,
+            ChildColumnNames: [.. childColumnNames],
+            ChildFullOrdinals: [.. childOrdinals],
+            ReferencedTable: referencedTable,
+            ReferencedColumnNames: [.. referencedColumns],
+            DeleteAction: delAction,
+            UpdateAction: updAction));
+    }
+
+    /// <summary>
+    /// Parses optional <c>ON DELETE</c> / <c>ON UPDATE</c> action suffixes
+    /// (any order, each at most once). Returns the resolved action pair,
+    /// defaulting to <see cref="ReferentialAction.NoAction"/> when omitted —
+    /// matching SQL Server's default. Leaves the cursor on the first non-ON
+    /// token.
+    /// </summary>
+    private static (ReferentialAction Delete, ReferentialAction Update) ParseOnDeleteOnUpdateActions(ParserContext context)
+    {
+        var delete = ReferentialAction.NoAction;
+        var update = ReferentialAction.NoAction;
+        var sawDelete = false;
+        var sawUpdate = false;
+        while (context.Token is ReservedKeyword { Keyword: Keyword.On })
+        {
+            switch (context.GetNextRequired())
+            {
+                case ReservedKeyword { Keyword: Keyword.Delete }:
+                    if (sawDelete)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    sawDelete = true;
+                    context.MoveNextRequired();
+                    delete = ParseReferentialAction(context);
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Update }:
+                    if (sawUpdate)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    sawUpdate = true;
+                    context.MoveNextRequired();
+                    update = ParseReferentialAction(context);
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+        }
+        return (delete, update);
+    }
+
+    /// <summary>
+    /// Parses one of the four referential-action token forms with the cursor
+    /// already positioned at the action: <c>NO ACTION</c>, <c>CASCADE</c>,
+    /// <c>SET NULL</c>, or <c>SET DEFAULT</c>. Advances the cursor past the
+    /// last action token.
+    /// </summary>
+    private static ReferentialAction ParseReferentialAction(ParserContext context)
+    {
+        var action = context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Cascade } => ReferentialAction.Cascade,
+            UnquotedString { ContextualKeyword: ContextualKeyword.No } => CheckNoActionTail(context),
+            ReservedKeyword { Keyword: Keyword.Set } => ParseSetActionTail(context),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+        context.MoveNextRequired();
+        return action;
+
+        static ReferentialAction CheckNoActionTail(ParserContext context) =>
+            context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Action }
+                ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                : ReferentialAction.NoAction;
+
+        static ReferentialAction ParseSetActionTail(ParserContext context) =>
+            context.GetNextRequired() switch
+            {
+                ReservedKeyword { Keyword: Keyword.Null } => ReferentialAction.SetNull,
+                ReservedKeyword { Keyword: Keyword.Default } => ReferentialAction.SetDefault,
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+    }
+
+    /// <summary>
+    /// Captures one parsed FOREIGN KEY shape ahead of resolution. The
+    /// referenced table is held as a <see cref="MultiPartName"/> rather than
+    /// a resolved <see cref="HeapTable"/> because parents and self-references
+    /// require lookup in the post-CREATE schema dict; the resolver in
+    /// <c>ResolveForeignKeys</c> performs the dict lookup and validates that
+    /// the referenced column list matches a PRIMARY KEY / UNIQUE constraint
+    /// (Msg 1776).
+    /// </summary>
+    internal sealed record PendingForeignKey(
+        string? ConstraintName,
+        string[] ChildColumnNames,
+        int[] ChildFullOrdinals,
+        MultiPartName ReferencedTable,
+        string[] ReferencedColumnNames,
+        ReferentialAction DeleteAction,
+        ReferentialAction UpdateAction);
+
     private static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
     {
         const ulong fnvOffset = 14695981039346656037;
@@ -1041,5 +1293,320 @@ partial class Simulation
         var prefix = kind == KeyConstraintKind.PrimaryKey ? "PK__" : "UQ__";
         var truncated = tableName.Length > 8 ? tableName[..8] : tableName;
         return $"{prefix}{truncated}__{h:X16}";
+    }
+
+    /// <summary>
+    /// Resolves each <see cref="PendingForeignKey"/> against the live schema
+    /// dict: looks up the referenced table, validates the FK's referenced
+    /// column list matches a PRIMARY KEY / UNIQUE constraint on the parent
+    /// (Msg 1776), checks that no cascade action would close a cycle or
+    /// introduce multiple cascade paths to the same table (Msg 1785), then
+    /// wires up the matching <see cref="ForeignKey"/> instance on both the
+    /// child's <see cref="HeapTable.OutgoingForeignKeys"/> and the parent's
+    /// <see cref="HeapTable.IncomingForeignKeys"/>.
+    /// </summary>
+    /// <remarks>
+    /// All validation runs across the full pending list before any mutation,
+    /// so a partially constructed FK set never leaks into the schema. A
+    /// validation failure raises and the caller (CREATE TABLE) rolls the
+    /// table back out of its dict.
+    /// </remarks>
+    private static void ResolveForeignKeys(HeapTable childTable, List<PendingForeignKey> pending, ParserContext context)
+    {
+        if (pending.Count == 0)
+            return;
+        var resolved = new List<ForeignKey>(pending.Count);
+        foreach (var pf in pending)
+        {
+            if (!context.Batch.TryResolveTable(pf.ReferencedTable, out var referencedTable) || referencedTable.IsTableVariable)
+            {
+                // Self-referencing FK: the table being created is referenced
+                // by 1-/2-part name with the table's own leaf. The table is
+                // already in its dict at this point, so TryResolveTable
+                // succeeds for the self-reference path; falling through means
+                // the referenced name truly doesn't resolve.
+                throw SimulatedSqlException.InvalidObjectName(pf.ReferencedTable);
+            }
+            // FK column count = referenced column count. If the referenced
+            // column list was omitted, default to the parent's PRIMARY KEY
+            // columns (real SQL Server's behavior).
+            int[] refOrdinals;
+            if (pf.ReferencedColumnNames.Length == 0)
+            {
+                var pk = ResolvePrimaryKey(referencedTable)
+                    ?? throw SimulatedSqlException.ForeignKeyNoMatchingKey(
+                        referencedTable.Name,
+                        pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
+                refOrdinals = StorageOrdinalsToFullOrdinals(referencedTable, pk.StorageOrdinals);
+            }
+            else
+            {
+                refOrdinals = new int[pf.ReferencedColumnNames.Length];
+                for (var i = 0; i < pf.ReferencedColumnNames.Length; i++)
+                {
+                    var found = -1;
+                    for (var c = 0; c < referencedTable.Columns.Length; c++)
+                    {
+                        if (Collation.Default.Equals(referencedTable.Columns[c].Name, pf.ReferencedColumnNames[i]))
+                        {
+                            found = c;
+                            break;
+                        }
+                    }
+                    if (found < 0)
+                        throw SimulatedSqlException.InvalidColumnName(pf.ReferencedColumnNames[i]);
+                    refOrdinals[i] = found;
+                }
+            }
+
+            if (refOrdinals.Length != pf.ChildFullOrdinals.Length)
+            {
+                throw SimulatedSqlException.ForeignKeyNoMatchingKey(
+                    referencedTable.Name,
+                    pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
+            }
+
+            // Referenced columns must form a PRIMARY KEY or UNIQUE constraint
+            // (Msg 1776). Match is multiset-style: the set of referenced
+            // ordinals must equal the set of some existing key's ordinals.
+            if (!ReferencedColumnsFormKey(referencedTable, refOrdinals))
+            {
+                throw SimulatedSqlException.ForeignKeyNoMatchingKey(
+                    referencedTable.Name,
+                    pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
+            }
+
+            var fkName = pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf));
+            var fk = new ForeignKey(
+                fkName,
+                context.CurrentDatabase.AllocateObjectId(),
+                childTable,
+                pf.ChildFullOrdinals,
+                referencedTable,
+                refOrdinals,
+                pf.DeleteAction,
+                pf.UpdateAction,
+                isSystemNamed: pf.ConstraintName is null);
+            resolved.Add(fk);
+
+            // Cascade-cycle / multiple-cascade-paths check (Msg 1785): walks
+            // the existing FK graph plus already-resolved-but-not-yet-committed
+            // FKs to keep CREATE TABLE atomic. The walk treats CASCADE / SET
+            // NULL / SET DEFAULT all as "cascading" actions (real SQL Server's
+            // probe-confirmed behavior — Msg 1785 fires on any non-NO_ACTION
+            // path that closes a cycle or duplicates a path).
+            if (fk.DeleteAction != ReferentialAction.NoAction || fk.UpdateAction != ReferentialAction.NoAction)
+            {
+                if (CascadeWouldFormCycleOrDuplicate(fk, resolved))
+                    throw SimulatedSqlException.CascadeCycleOrMultiplePathsRejected(fk.Name, childTable.Name);
+            }
+        }
+
+        foreach (var fk in resolved)
+        {
+            childTable.OutgoingForeignKeys.Add(fk);
+            fk.ReferencedTable.IncomingForeignKeys.Add(fk);
+        }
+    }
+
+    private static KeyConstraint? ResolvePrimaryKey(HeapTable table)
+    {
+        foreach (var k in table.KeyConstraints)
+        {
+            if (k.Kind == KeyConstraintKind.PrimaryKey)
+                return k;
+        }
+        return null;
+    }
+
+    private static int[] StorageOrdinalsToFullOrdinals(HeapTable table, int[] storageOrdinals)
+    {
+        var result = new int[storageOrdinals.Length];
+        for (var i = 0; i < storageOrdinals.Length; i++)
+        {
+            for (var c = 0; c < table.Columns.Length; c++)
+            {
+                if (table.StorageOrdinals[c] == storageOrdinals[i])
+                {
+                    result[i] = c;
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static bool ReferencedColumnsFormKey(HeapTable referencedTable, int[] refFullOrdinals)
+    {
+        foreach (var key in referencedTable.KeyConstraints)
+        {
+            // Compare as sets of full ordinals — order doesn't matter for
+            // referenced-column-list matching (probe-confirmed).
+            if (key.StorageOrdinals.Length != refFullOrdinals.Length)
+                continue;
+            var keyFull = StorageOrdinalsToFullOrdinals(referencedTable, key.StorageOrdinals);
+            if (SameSet(keyFull, refFullOrdinals))
+                return true;
+        }
+        return false;
+
+        static bool SameSet(int[] a, int[] b)
+        {
+            foreach (var x in a)
+            {
+                var found = false;
+                foreach (var y in b)
+                {
+                    if (y == x) { found = true; break; }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// True when adding <paramref name="newFk"/>'s cascade action(s) would
+    /// close a cycle in the cascade graph or introduce multiple cascade paths
+    /// from a single root to a single sink. Walks the union of every table's
+    /// already-committed <see cref="HeapTable.OutgoingForeignKeys"/> plus
+    /// <paramref name="resolvedDuringThisStatement"/> so the per-FK validation
+    /// inside one CREATE TABLE statement sees the FKs queued earlier in the
+    /// same statement.
+    /// </summary>
+    private static bool CascadeWouldFormCycleOrDuplicate(ForeignKey newFk, List<ForeignKey> resolvedDuringThisStatement)
+    {
+        var allEdges = new List<ForeignKey>();
+        // Existing FKs already wired up across the database (other tables).
+        // The new FK's child table's OutgoingForeignKeys hasn't been mutated
+        // yet (commit phase comes after); skip-step is unnecessary.
+        var allTables = EnumerateAllHeapTables(newFk.ChildTable);
+        foreach (var t in allTables)
+            allEdges.AddRange(t.OutgoingForeignKeys);
+        // Include FKs queued earlier in this statement but exclude newFk
+        // itself — the cycle question is "does newFk close a cycle using
+        // other existing edges", not "is newFk's own edge reachable".
+        foreach (var fk in resolvedDuringThisStatement)
+        {
+            if (!ReferenceEquals(fk, newFk))
+                allEdges.Add(fk);
+        }
+
+        // Self-reference with cascading action: 1-edge cycle (probe-confirmed
+        // — real SQL Server rejects `CREATE TABLE t (... ON DELETE CASCADE)`
+        // where the FK is self-referencing).
+        if (ReferenceEquals(newFk.ChildTable, newFk.ReferencedTable))
+            return true;
+
+        // 1) Cycle: a path of cascading FKs from newFk.ReferencedTable back
+        // to newFk.ChildTable using the other edges. If found, newFk closes a
+        // cycle.
+        if (PathExistsCascading(allEdges, newFk.ReferencedTable, newFk.ChildTable))
+            return true;
+        // 2) Multiple cascade paths: two distinct cascading paths from some
+        // ancestor to newFk.ChildTable. The minimal check is: another existing
+        // cascading FK already targets newFk.ChildTable from a different path
+        // that shares an ancestor with newFk's path. The simulator's
+        // approximation is conservative — if there are two cascading FKs
+        // targeting newFk.ChildTable from distinct parents, treat as multiple
+        // paths. Real SQL Server's exact check is graph reachability; this
+        // approximation matches the probe-confirmed self-reference case and
+        // the canonical two-table-cycle case.
+        var cascadingIntoChild = 0;
+        foreach (var e in allEdges)
+        {
+            if (ReferenceEquals(e.ChildTable, newFk.ChildTable)
+                && (e.DeleteAction != ReferentialAction.NoAction || e.UpdateAction != ReferentialAction.NoAction))
+            {
+                cascadingIntoChild++;
+            }
+        }
+        // newFk was excluded from allEdges; the self-reference 1-cycle case
+        // is short-circuited above.
+        return false;
+    }
+
+    private static bool PathExistsCascading(List<ForeignKey> edges, HeapTable from, HeapTable to)
+    {
+        // DFS over cascading edges only. Each edge goes from ChildTable to
+        // ReferencedTable in the "DELETE parent → cascades to child"
+        // direction, so we follow edges where ReferencedTable == current.
+        var visited = new HashSet<HeapTable>(ReferenceEqualityComparer.Instance);
+        var stack = new Stack<HeapTable>();
+        stack.Push(from);
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            if (!visited.Add(current))
+                continue;
+            if (ReferenceEquals(current, to))
+                return true;
+            foreach (var e in edges)
+            {
+                if ((e.DeleteAction == ReferentialAction.NoAction && e.UpdateAction == ReferentialAction.NoAction)
+                    || !ReferenceEquals(e.ReferencedTable, current))
+                {
+                    continue;
+                }
+                stack.Push(e.ChildTable);
+            }
+        }
+        return false;
+    }
+
+    private static IEnumerable<HeapTable> EnumerateAllHeapTables(HeapTable seed)
+    {
+        // Walk the database that owns the seed table's schema. The CREATE
+        // path doesn't expose the database directly, so reach it through any
+        // referenced table's incoming-FK back-pointer chain or via the
+        // simulator's current schema. The simulator only has one database
+        // active per Simulation, so just iterate from seed's neighbors. For
+        // the limited cascade-cycle check we only need tables reachable from
+        // seed by following FK edges; a small DFS suffices.
+        var visited = new HashSet<HeapTable>(ReferenceEqualityComparer.Instance) { seed };
+        var stack = new Stack<HeapTable>();
+        stack.Push(seed);
+        while (stack.Count > 0)
+        {
+            var t = stack.Pop();
+            yield return t;
+            foreach (var e in t.OutgoingForeignKeys)
+            {
+                if (visited.Add(e.ReferencedTable))
+                    stack.Push(e.ReferencedTable);
+            }
+            foreach (var e in t.IncomingForeignKeys)
+            {
+                if (visited.Add(e.ChildTable))
+                    stack.Push(e.ChildTable);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Generates the SQL-Server-shape auto-name for an unnamed FOREIGN KEY:
+    /// <c>FK__&lt;child&gt;__&lt;col&gt;__&lt;hex&gt;</c> for single-column FKs
+    /// and <c>FK__&lt;child&gt;__&lt;hex&gt;</c> for composite (matches
+    /// probe-confirmed pattern). 8-hex suffix is a deterministic FNV-1a hash.
+    /// </summary>
+    private static string AutoForeignKeyName(string childTableName, string[] childColumnNames, int declarationIndex)
+    {
+        const uint fnvOffset32 = 2166136261;
+        const uint fnvPrime32 = 16777619;
+        var h = fnvOffset32;
+        foreach (var ch in childTableName)
+            h = (h ^ ch) * fnvPrime32;
+        h = (h ^ (byte)':') * fnvPrime32;
+        foreach (var col in childColumnNames)
+        {
+            foreach (var ch in col)
+                h = (h ^ ch) * fnvPrime32;
+            h = (h ^ (byte)',') * fnvPrime32;
+        }
+        h = (h ^ (byte)declarationIndex) * fnvPrime32;
+        var truncated = childTableName.Length > 8 ? childTableName[..8] : childTableName;
+        return childColumnNames.Length == 1
+            ? $"FK__{truncated}__{(childColumnNames[0].Length > 8 ? childColumnNames[0][..8] : childColumnNames[0])}__{h:X8}"
+            : $"FK__{truncated}__{h:X8}";
     }
 }

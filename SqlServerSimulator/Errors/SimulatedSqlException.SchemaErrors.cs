@@ -624,4 +624,36 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotFindObjectForAlterTable(string nameAsWritten) =>
         new($"Cannot find the object \"{nameAsWritten}\" because it does not exist or you do not have permissions.", 4902, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1776: a FOREIGN KEY's referenced column list
+    /// doesn't match any PRIMARY KEY or UNIQUE constraint on the referenced
+    /// table. Real SQL Server pairs this with a trailing Msg 1750 / 1753
+    /// "Could not create constraint or index"; the simulator collapses the
+    /// pair into a single Msg 1776 since the second is purely informational.
+    /// Probe-confirmed verbatim wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyNoMatchingKey(string referencedTable, string foreignKeyName) =>
+        new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 3726: <c>DROP TABLE</c> targeted a table that
+    /// is still referenced by at least one FOREIGN KEY constraint from
+    /// another (or the same) table. The simulator names the parent target
+    /// only; real SQL Server emits a trailing Msg 1753 with the FK name list
+    /// which the simulator omits (informational only).
+    /// </summary>
+    internal static SimulatedSqlException CannotDropTableReferencedByForeignKey(string tableName) =>
+        new($"Could not drop object '{tableName}' because it is referenced by a FOREIGN KEY constraint.", 3726, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1785: a newly declared FOREIGN KEY with a
+    /// non-NO-ACTION referential action would close a cascade cycle or
+    /// introduce multiple cascade paths to the same table. Real SQL Server
+    /// performs this analysis at CREATE TABLE / ALTER TABLE ADD CONSTRAINT
+    /// time; the simulator walks the existing FK graph during the same
+    /// CREATE pass.
+    /// </summary>
+    internal static SimulatedSqlException CascadeCycleOrMultiplePathsRejected(string constraintName, string tableName) =>
+        new($"Introducing FOREIGN KEY constraint '{constraintName}' on table '{tableName}' may cause cycles or multiple cascade paths. Specify ON DELETE NO ACTION or ON UPDATE NO ACTION, or modify other FOREIGN KEY constraints.", 1785, 16, 0);
 }

@@ -108,10 +108,11 @@ partial class Simulation
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
         var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
         var needsFullForHistory = table.SystemVersioning is not null;
+        var needsFullForFk = table.IncomingForeignKeys.Count > 0;
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             SqlValue[]? fullValues = null;
-            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory)
+            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory || needsFullForFk)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -153,7 +154,7 @@ partial class Simulation
                     continue;
             }
 
-            deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers && !needsFullForHistory) ? null : fullValues));
+            deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers && !needsFullForHistory && !needsFullForFk) ? null : fullValues));
         }
 
         return CommitDelete(context, table, deleted, output, sourceView);
@@ -278,6 +279,22 @@ partial class Simulation
         }
         foreach (var (pageIndex, slotIndex, _) in deleted)
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
+
+        // Incoming-FK cascade: parent-side DELETE fires the matching FK's
+        // DELETE action on every child table whose FK columns reference one
+        // of the deleted rows. NO ACTION raises Msg 547; CASCADE recurses;
+        // SET NULL / SET DEFAULT rewrite the child's FK columns.
+        if (table.IncomingForeignKeys.Count > 0)
+        {
+            var oldRows = new List<SqlValue[]>(deleted.Count);
+            foreach (var (_, _, oldFull) in deleted)
+            {
+                if (oldFull is not null)
+                    oldRows.Add(oldFull);
+            }
+            if (oldRows.Count > 0)
+                EnforceIncomingForeignKeys(table, oldRows, affectedNewValues: null, context, "DELETE", depth: 0);
+        }
 
         if (output is not null)
         {

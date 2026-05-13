@@ -407,6 +407,7 @@ partial class Simulation
                 {
                     var storedValues = ProjectStoredValues(destinationTable, rowValues);
                     EnforceKeyConstraints(destinationTable, storedValues);
+                    EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
                     destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
                 }
 

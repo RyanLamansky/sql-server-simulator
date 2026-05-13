@@ -314,6 +314,11 @@ partial class Simulation
         // temporal so the gate doesn't fire there.
         if (!isTempTable && (removedTable.IsHistoryTable || removedTable.SystemVersioning is not null))
             throw SimulatedSqlException.CannotDropTemporalTable(QualifyTableName(removedTable, context.CurrentDatabase));
+        // FK protection: refuse to drop a table that is the parent (referenced
+        // table) of any FK constraint. Real SQL Server's wording targets the
+        // bare table name, not the qualified one (probe-confirmed).
+        if (removedTable.IncomingForeignKeys.Count > 0)
+            throw SimulatedSqlException.CannotDropTableReferencedByForeignKey(removedTable.Name);
         if (!destination.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
@@ -324,9 +329,19 @@ partial class Simulation
         // SQL Server). Regular DROP TABLE isn't logged — same asymmetry
         // documented for CREATE TABLE.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
+        {
             tx.UndoLog.RecordTempTableRemoval(context.Batch.Connection.TempTables, name.Leaf, removedTable);
+        }
         else
+        {
+            // Detach the dropped child's outgoing FKs from each parent's
+            // IncomingForeignKeys list so future DROP TABLE on the parent
+            // doesn't see a stale reference. The FK protection check above
+            // guarantees this table had no incoming FKs.
+            foreach (var fk in removedTable.OutgoingForeignKeys)
+                _ = fk.ReferencedTable.IncomingForeignKeys.RemoveAll(other => ReferenceEquals(other, fk));
             CascadeDropTriggers(context.CurrentDatabase, removedTable);
+        }
     }
 
     /// <summary>

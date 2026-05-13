@@ -21,6 +21,7 @@ enum ContextualKeyword
 {
     NotChecked = 0, // Default field value — token hasn't been classified yet.
     _,              // Classified: not a contextual keyword.
+    Action,
     After,
     Always,
     Apply,

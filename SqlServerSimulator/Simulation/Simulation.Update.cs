@@ -246,7 +246,8 @@ partial class Simulation
             var oldSnapshotNeeded = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
                 || HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update)
-                || table.SystemVersioning is not null;
+                || table.SystemVersioning is not null
+                || table.IncomingForeignKeys.Count > 0;
             var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
@@ -371,6 +372,16 @@ partial class Simulation
 
         EnforceKeyConstraintsForUpdate(table, affected);
 
+        // Outgoing FK check on the post-update rows (UPDATE may have rewritten
+        // the child's FK columns to point at a parent that doesn't exist).
+        if (table.OutgoingForeignKeys.Count > 0)
+        {
+            var newRows = new List<SqlValue[]>(affected.Count);
+            foreach (var (_, _, fullNew, _) in affected)
+                newRows.Add(fullNew);
+            EnforceOutgoingForeignKeys(table, newRows, context, "UPDATE");
+        }
+
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         // System-versioned UPDATE: copy each affected row's pre-update state
         // to the history sibling before tombstoning the current row. History
@@ -382,6 +393,22 @@ partial class Simulation
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
         foreach (var (_, _, fullNew, _) in affected)
             table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
+
+        // Incoming-FK cascade: if any of the updated rows participate in a
+        // referenced key, fire the matching FK's UPDATE action against the
+        // child tables. Filters internally on actually-changed referenced
+        // columns so an UPDATE that doesn't touch a key is a no-op.
+        if (table.IncomingForeignKeys.Count > 0)
+        {
+            var pairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(affected.Count);
+            foreach (var (_, _, fullNew, fullOld) in affected)
+            {
+                if (fullOld is null) continue;
+                pairs.Add((fullOld, fullNew));
+            }
+            if (pairs.Count > 0)
+                EnforceIncomingFkOnUpdate(table, pairs, context, depth: 0);
+        }
 
         if (output is not null)
         {

@@ -518,6 +518,52 @@ internal static class BuiltInResources
         var triggersView = new CatalogView("triggers", triggersColumns, batch =>
             EnumerateSysTriggers(batch, charTwo, parentClassObjectColumn, parentClassObjectColumnDesc));
 
+        // sys.foreign_keys: probe-confirmed 21-column shape against SQL
+        // Server 2025 (2026-05-13). EF Core reads name / parent_object_id /
+        // referenced_object_id / delete_referential_action /
+        // update_referential_action; the simulator ships the full set so
+        // catalog-introspection tooling sees an authentic shape.
+        var foreignKeysColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, true),
+            new("is_published", SqlType.Bit, null, true),
+            new("is_schema_published", SqlType.Bit, null, true),
+            new("referenced_object_id", SqlType.Int32, null, false),
+            new("key_index_id", SqlType.Int32, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("is_not_for_replication", SqlType.Bit, null, false),
+            new("is_not_trusted", SqlType.Bit, null, false),
+            new("delete_referential_action", SqlType.TinyInt, null, false),
+            new("delete_referential_action_desc", SqlType.NVarchar, 60, true),
+            new("update_referential_action", SqlType.TinyInt, null, false),
+            new("update_referential_action_desc", SqlType.NVarchar, 60, true),
+            new("is_system_named", SqlType.Bit, null, false),
+        };
+        var foreignKeysView = new CatalogView("foreign_keys", foreignKeysColumns, EnumerateSysForeignKeys);
+
+        // sys.foreign_key_columns: probe-confirmed 6-column shape. One row
+        // per (FK, column-pair) — composite FKs emit one row per participant
+        // column with constraint_column_id starting at 1.
+        var foreignKeyColumnsColumns = new HeapColumn[]
+        {
+            new("constraint_object_id", SqlType.Int32, null, false),
+            new("constraint_column_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("parent_column_id", SqlType.Int32, null, false),
+            new("referenced_object_id", SqlType.Int32, null, false),
+            new("referenced_column_id", SqlType.Int32, null, false),
+        };
+        var foreignKeyColumnsView = new CatalogView("foreign_key_columns", foreignKeyColumnsColumns, EnumerateSysForeignKeyColumns);
+
         // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
         // emits a row for every user-defined type (scalar UDTs surface their
         // base type; table types surface 'table type' as the data_type
@@ -547,6 +593,8 @@ internal static class BuiltInResources
             ["sys.table_types"] = tableTypesView,
             ["sys.sequences"] = sequencesView,
             ["sys.triggers"] = triggersView,
+            ["sys.foreign_keys"] = foreignKeysView,
+            ["sys.foreign_key_columns"] = foreignKeyColumnsView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -643,6 +691,100 @@ internal static class BuiltInResources
     /// date mirrors create date because <c>ALTER TRIGGER</c> replaces the
     /// instance wholesale.
     /// </summary>
+    /// <summary>
+    /// Rows for <c>sys.foreign_keys</c>: every FOREIGN KEY constraint across
+    /// every schema. <c>type</c> = <c>F </c> (probe-confirmed two-char
+    /// padding); <c>type_desc</c> = <c>FOREIGN_KEY_CONSTRAINT</c>.
+    /// <c>delete_referential_action</c> / <c>update_referential_action</c>
+    /// use the integer codes 0=NO_ACTION, 1=CASCADE, 2=SET_NULL, 3=SET_DEFAULT.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysForeignKeys(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var fkType = SqlValue.FromChar(CharSqlType.Get(2), "F ");
+        var fkTypeDesc = SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT");
+        // key_index_id is the index id on the referenced table that satisfies
+        // the FK — the simulator doesn't model indexes so report 1 (the
+        // referenced PK / UQ ordinal in real SQL Server typically lands at 1
+        // because PK gets a clustered index id of 1).
+        var keyIndexId = SqlValue.FromInt32(1);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                {
+                    var createDate = SqlValue.FromDateTime(table.CreateDate);
+                    yield return [
+                        SqlValue.FromSystemName(fk.Name),
+                        SqlValue.FromInt32(fk.ObjectId),
+                        nullPrincipal,
+                        schemaId,
+                        SqlValue.FromInt32(table.ObjectId),
+                        fkType,
+                        fkTypeDesc,
+                        createDate,
+                        createDate,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        SqlValue.FromInt32(fk.ReferencedTable.ObjectId),
+                        keyIndexId,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        SqlValue.FromByte((byte)fk.DeleteAction),
+                        SqlValue.FromNVarchar(ReferentialActionDescription(fk.DeleteAction)),
+                        SqlValue.FromByte((byte)fk.UpdateAction),
+                        SqlValue.FromNVarchar(ReferentialActionDescription(fk.UpdateAction)),
+                        fk.IsSystemNamed ? trueBit : falseBit,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.foreign_key_columns</c>: one per (FK, column-pair).
+    /// <c>parent_column_id</c> and <c>referenced_column_id</c> are 1-based
+    /// (probe-confirmed) — matches the <c>sys.columns.column_id</c> convention.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysForeignKeyColumns(Parser.BatchContext batch)
+    {
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                {
+                    for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
+                    {
+                        yield return [
+                            SqlValue.FromInt32(fk.ObjectId),
+                            SqlValue.FromInt32(i + 1),
+                            SqlValue.FromInt32(fk.ChildTable.ObjectId),
+                            SqlValue.FromInt32(fk.ChildColumnOrdinals[i] + 1),
+                            SqlValue.FromInt32(fk.ReferencedTable.ObjectId),
+                            SqlValue.FromInt32(fk.ReferencedColumnOrdinals[i] + 1),
+                        ];
+                    }
+                }
+            }
+        }
+    }
+
+    private static string ReferentialActionDescription(ReferentialAction action) => action switch
+    {
+        ReferentialAction.NoAction => "NO_ACTION",
+        ReferentialAction.Cascade => "CASCADE",
+        ReferentialAction.SetNull => "SET_NULL",
+        ReferentialAction.SetDefault => "SET_DEFAULT",
+        _ => "NO_ACTION",
+    };
+
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
         Parser.BatchContext batch,
         SqlType charTwo,
@@ -1410,6 +1552,20 @@ internal static class BuiltInResources
                         tableObjectId,
                         checkType,
                         checkTypeDesc,
+                        createDate,
+                        modifyDate,
+                        notMsShipped,
+                    ];
+                }
+                foreach (var fk in t.OutgoingForeignKeys)
+                {
+                    yield return [
+                        SqlValue.FromInt32(fk.ObjectId),
+                        SqlValue.FromSystemName(fk.Name),
+                        schemaIdValue,
+                        tableObjectId,
+                        SqlValue.FromChar(charTwo, "F "),
+                        SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT"),
                         createDate,
                         modifyDate,
                         notMsShipped,

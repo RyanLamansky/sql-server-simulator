@@ -1038,6 +1038,26 @@ partial class Simulation
 
         var undoLog = destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
 
+        // Outgoing FK validation on inserts + updates (the post-image rows
+        // that are about to land in the heap). Fires before mutation so a
+        // violation rolls back cleanly via the statement-atomic exception.
+        if (destinationTable.OutgoingForeignKeys.Count > 0)
+        {
+            var newRows = new List<SqlValue[]>(pendingInserts.Count + pendingUpdates.Count);
+            if (!insteadOfInsert)
+            {
+                foreach (var (newValues, _) in pendingInserts)
+                    newRows.Add(newValues);
+            }
+            if (!insteadOfUpdate)
+            {
+                foreach (var (_, _, _, newValues, _) in pendingUpdates)
+                    newRows.Add(newValues);
+            }
+            if (newRows.Count > 0)
+                EnforceOutgoingForeignKeys(destinationTable, newRows, context, "MERGE");
+        }
+
         // Apply heap operations only for non-INSTEAD-OF actions.
         if (!insteadOfDelete)
         {
@@ -1055,6 +1075,27 @@ partial class Simulation
         {
             foreach (var (newValues, _) in pendingInserts)
                 destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+        }
+
+        // Incoming-FK cascade for MERGE's DELETE/UPDATE actions on the
+        // destination. INSTEAD OF paths bypass (the trigger handles its own
+        // DML).
+        if (destinationTable.IncomingForeignKeys.Count > 0)
+        {
+            if (!insteadOfDelete && pendingDeletes.Count > 0)
+            {
+                var oldRows = new List<SqlValue[]>(pendingDeletes.Count);
+                foreach (var (_, _, oldValues, _) in pendingDeletes)
+                    oldRows.Add(oldValues);
+                EnforceIncomingForeignKeys(destinationTable, oldRows, affectedNewValues: null, context, "DELETE", depth: 0);
+            }
+            if (!insteadOfUpdate && pendingUpdates.Count > 0)
+            {
+                var pairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(pendingUpdates.Count);
+                foreach (var (_, _, oldValues, newValues, _) in pendingUpdates)
+                    pairs.Add((oldValues, newValues));
+                EnforceIncomingFkOnUpdate(destinationTable, pairs, context, depth: 0);
+            }
         }
 
         // Identity counter: only advances when the inserts actually hit the
