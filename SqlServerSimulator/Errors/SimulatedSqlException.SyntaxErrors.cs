@@ -73,6 +73,65 @@ partial class SimulatedSqlException
         new("Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.", 319, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 5324: a <c>MERGE</c> statement had a
+    /// <c>WHEN MATCHED</c> (or <c>WHEN NOT MATCHED BY SOURCE</c>) clause
+    /// carrying a search condition appear <em>after</em> a clause of the
+    /// same family with no search condition. Real SQL Server requires the
+    /// unconditional fallback to be last in the family. Probe-confirmed
+    /// against SQL Server 2025 (2026-05-13): Class 16, State 1, exact
+    /// wording verbatim. The <paramref name="clauseFamily"/> is either
+    /// <c>"WHEN MATCHED"</c> or <c>"WHEN NOT MATCHED BY SOURCE"</c> —
+    /// <c>WHEN NOT MATCHED [BY TARGET]</c> has at most one clause total
+    /// (Msg 10714) and so doesn't share this path.
+    /// </summary>
+    internal static SimulatedSqlException MergeUnconditionalMustBeLast(string clauseFamily) =>
+        new($"In a MERGE statement, a '{clauseFamily}' clause with a search condition cannot appear after a '{clauseFamily}' clause with no search condition.", 5324, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8672: a <c>MERGE</c> statement's
+    /// <c>WHEN MATCHED ... THEN UPDATE</c> branch attempted to update the
+    /// same target row from multiple source rows. SQL Server's <c>DELETE</c>
+    /// matched branch is forgiving (multiple matches collapse to one delete),
+    /// but <c>UPDATE</c> raises this. Probe-confirmed against SQL Server 2025
+    /// (2026-05-13): Class 16, State 1, exact wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException MergeMultiMatch() =>
+        new("The MERGE statement attempted to UPDATE or DELETE the same row more than once. This happens when a target row matches more than one source row. A MERGE statement cannot UPDATE/DELETE the same row of the target table multiple times. Refine the ON clause to ensure a target row matches at most one source row, or use the GROUP BY clause to group the source rows.", 8672, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10710: a <c>MERGE</c> statement specified an
+    /// <c>UPDATE</c> or <c>DELETE</c> action in a <c>WHEN NOT MATCHED</c> /
+    /// <c>WHEN NOT MATCHED BY TARGET</c> clause where only <c>INSERT</c> is
+    /// legal. Probe-confirmed against SQL Server 2025 (2026-05-13): Class 15,
+    /// State 1, exact wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException MergeUpdateNotAllowedInNotMatched() =>
+        new("An action of type 'UPDATE' is not allowed in the 'WHEN NOT MATCHED' clause of a MERGE statement.", 10710, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10711: a <c>MERGE</c> statement specified an
+    /// <c>INSERT</c> action in a <c>WHEN MATCHED</c> or <c>WHEN NOT MATCHED
+    /// BY SOURCE</c> clause where only <c>UPDATE</c> / <c>DELETE</c> is
+    /// legal. Probe-confirmed against SQL Server 2025 (2026-05-13): Class
+    /// 15, State 1, exact wording verbatim. The <paramref name="clauseType"/>
+    /// is either <c>"WHEN MATCHED"</c> or <c>"WHEN NOT MATCHED BY SOURCE"</c>.
+    /// </summary>
+    internal static SimulatedSqlException MergeInsertNotAllowedInClause(string clauseType) =>
+        new($"An action of type 'INSERT' is not allowed in the '{clauseType}' clause of a MERGE statement.", 10711, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10714: a <c>MERGE</c> statement had more than
+    /// one <c>WHEN NOT MATCHED [BY TARGET]</c> clause. Real SQL Server allows
+    /// at most one INSERT branch (unlike <c>WHEN MATCHED</c> and <c>WHEN
+    /// NOT MATCHED BY SOURCE</c>, both of which can have multiple
+    /// AND-conditioned clauses). Probe-confirmed against SQL Server 2025
+    /// (2026-05-13): Class 15, State 1, exact wording verbatim — note the
+    /// idiosyncratic <c>"a 'INSERT' clause"</c> phrasing.
+    /// </summary>
+    internal static SimulatedSqlException MergeMultipleNotMatchedClauses() =>
+        new("An action of type 'WHEN NOT MATCHED' cannot appear more than once in a 'INSERT' clause of a MERGE statement.", 10714, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 10713: a <c>MERGE</c> statement was not
     /// followed by a <c>;</c>. Probe-confirmed verbatim text (note the
     /// hyphenated <c>"semi-colon"</c>) / Class 15 / State 1. <c>MERGE</c> is

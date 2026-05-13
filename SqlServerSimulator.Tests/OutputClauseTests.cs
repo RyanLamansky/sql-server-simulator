@@ -206,16 +206,6 @@ public class OutputClauseTests
             when not matched then insert (id, rv) values (s.id, s.rv);
             """, 273);
 
-    // Simulator parses WHEN MATCHED but throws if the ON predicate ever steers a source row there.
-    [TestMethod]
-    public void Merge_WhenMatchedFires_RaisesNotSupported()
-        => _ = Assert.Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("""
-            create table t ( id int, v int );
-            merge t using (values (1, 99)) as i (id, v) on 1 = 1
-            when matched then update set v = i.v
-            when not matched then insert (id, v) values (i.id, i.v);
-            """));
-
     [TestMethod]
     public void Merge_FirstSourceTuple_DeterminesAliasSchema()
     {

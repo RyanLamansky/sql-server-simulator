@@ -116,10 +116,9 @@ Three entry points share one per-connection undo log: implicit (statement-level 
 - **Temp-table CREATE/DROP participates in the log** via `TempTableCreation` / `TempTableRemoval` `UndoEntry` subtypes (rollback removes from / restores into the connection's `TempTables` dict). Regular CREATE/DROP TABLE is NOT logged — see the corresponding quirk.
 - No isolation: uncommitted writes immediately visible to all readers (single-Simulation, single-thread-at-a-time).
 
-### MERGE / OUTPUT (EF SaveChanges shape only)
+### MERGE / OUTPUT
 - `INSERT ... OUTPUT INSERTED.<col>` (single-row).
-- `MERGE INTO target USING (VALUES ...) AS alias (cols) ON predicate WHEN NOT MATCHED THEN INSERT ... [OUTPUT ...]` (multi-row batch).
-- `WHEN MATCHED` parses but throws `NotSupportedException` if its predicate ever evaluates true.
+- `MERGE INTO target [AS alias] USING (<source>) AS alias [(cols)] ON predicate <when-clause>+ [OUTPUT …]` — source can be `VALUES`, `SELECT`, or a set-op chain. WHEN clauses: `WHEN MATCHED [AND <cond>] THEN UPDATE SET …` / `DELETE`, `WHEN NOT MATCHED [BY TARGET] [AND <cond>] THEN INSERT (…) VALUES (…)`, `WHEN NOT MATCHED BY SOURCE [AND <cond>] THEN UPDATE SET …` / `DELETE`. Multiple AND-conditioned clauses per family allowed; unconditional must be last (Msg 5324). `WHEN NOT MATCHED [BY TARGET]` admits at most one clause (Msg 10714). Trailing `;` required (Msg 10713). `$action` in OUTPUT projects uppercase `INSERT` / `UPDATE` / `DELETE` per affected row. Multi-match: a target row matched by more than one source row raises Msg 8672 only when the chosen action is UPDATE (DELETE is forgiving — multiple matches collapse to one delete). Triggers fire INSERT → UPDATE → DELETE, each kind once with its combined affected rows. See [`docs/claude/dml.md`](docs/claude/dml.md).
 
 ### EF Core adapter coverage
 `UseSqlServerSimulator(...)` covers seven SqlParameter-downcast pairs: `DateOnly→date`, `DateTime→date`, `DateTime→smalldatetime`, `TimeOnly→time(N)`, `TimeSpan→time(N)`, `decimal→money`, `decimal→smallmoney`. Without the adapter those mappings throw at SaveChanges. MAX-string family flows through plain `UseSqlServer`.
@@ -165,7 +164,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - `CONVERT` / `TRY_CONVERT` style codes other than `0` / `120` / `121`.
 - `LEN(ntext)` raising Msg 8116; legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
 - `OUTPUT DELETED.*` / `INSERTED.*` star expansion. (`OUTPUT INTO <target>` ships for both `@t` and regular tables — see Table variables below.)
-- MERGE source subqueries; MERGE target column refs in `ON`; `WHEN MATCHED` UPDATE/DELETE branches; `$action`.
+- MERGE source as a CTE-headed SELECT (`USING (WITH cte AS … SELECT …)`) — Selection.Parse's CTE entry doesn't reach the USING-clause grammar; wrap the CTE inside a regular SELECT instead. MERGE inside a CTE body, multi-statement MERGE WHEN-clause bodies, and `MERGE INTO <view>` (real SQL Server's updatable-view MERGE) are also deferred.
 - `PRIMARY KEY` / `UNIQUE` on a computed column (`NotSupportedException`).
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - **Table-variable named constraints / foreign keys** — `DECLARE @t TABLE (...)` shares its column-list parser with CREATE TABLE (see `docs/claude/table-variables.md`); column features (IDENTITY / UNIQUE / inline + table-level CHECK / computed columns / rowversion) all ship, alongside per-statement-atomic mutations and `OUTPUT … INTO <target>` for both `@t` and regular tables. Named constraints (`CONSTRAINT pk1 PRIMARY KEY`) and `FOREIGN KEY` raise Msg 102 (matches probe — real SQL Server's grammar disallows both shapes inside `DECLARE @t TABLE`). Multi-variable DECLARE with a table variable (`DECLARE @t1 TABLE (...), @t2 TABLE (...)`) and mixed scalar+table DECLARE also raise Msg 102/156. `SET IDENTITY_INSERT @t ON` likewise raises Msg 102 (probe-confirmed: there's no way to force a specific value into a table-variable identity column).

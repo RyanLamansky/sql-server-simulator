@@ -47,6 +47,7 @@ static class Tokenizer
             '/' => ParseForwardSlashOrComment(command, ref index),
             '[' => ParseBracketDelimitedString(command, ref index),
             '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or '=' or '&' or '|' or '^' or '>' or '<' or '!' => new Operator(command, index++),
+            '$' when IsDollarAction(command, index) => ParseDollarAction(command, ref index),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
@@ -279,6 +280,43 @@ static class Tokenizer
 
     private static bool IsHexDigit(char c) =>
         c is (>= '0' and <= '9') or (>= 'a' and <= 'f') or (>= 'A' and <= 'F');
+
+    /// <summary>
+    /// Returns true when the cursor sits on a <c>$action</c> pseudo-column
+    /// — only recognized in MERGE's OUTPUT clause, but tokenized here so
+    /// it surfaces as a single <see cref="UnquotedString"/> with value
+    /// <c>"$action"</c> rather than tokenizing into a money-literal
+    /// <c>$</c> followed by an unrelated identifier. Word-boundary
+    /// terminated (rejects <c>$action_</c>).
+    /// </summary>
+    private static bool IsDollarAction(string command, int index)
+    {
+        if (index + 6 >= command.Length)
+            return false;
+        var body = command.AsSpan(index + 1, 6);
+        if (!body.Equals("action", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (index + 7 < command.Length)
+        {
+            var next = command[index + 7];
+            if (char.IsLetterOrDigit(next) || next == '_')
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Emits the <c>$action</c> pseudo-column as a single
+    /// <see cref="UnquotedString"/>. The MERGE OUTPUT parser detects it
+    /// by string comparison and synthesizes a <c>MergeActionReference</c>
+    /// expression.
+    /// </summary>
+    private static UnquotedString ParseDollarAction(string command, ref int index)
+    {
+        var start = index;
+        index += 7;
+        return (UnquotedString)UnquotedString.CheckReserved(command, start, 7);
+    }
 
     /// <summary>
     /// Parses a money literal: a single currency symbol followed by an

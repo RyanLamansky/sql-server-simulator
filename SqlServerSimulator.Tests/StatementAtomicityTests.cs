@@ -105,7 +105,7 @@ public sealed class StatementAtomicityTests
         _ = Throws<DbException>(() =>
             _ = connection.CreateCommand(
                 "merge into t using (values (1, 10), (5, 50), (3, 30)) as src(id, val) " +
-                "on t.id = src.id " +
+                "on 1 = 0 " +
                 "when not matched then insert (id, val) values (src.id, src.val);").ExecuteNonQuery());
 
         // The PK collision on (5, 50) should roll back the (1, 10) insert too.

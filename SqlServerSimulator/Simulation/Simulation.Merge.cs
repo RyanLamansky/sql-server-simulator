@@ -1,5 +1,4 @@
 using SqlServerSimulator.Parser;
-using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -8,26 +7,43 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses <c>MERGE</c>, narrowly scoped to the shape EF Core emits for a
-    /// multi-row batch insert: <c>USING (VALUES ...) AS alias (cols) ON
-    /// predicate WHEN NOT MATCHED THEN INSERT (cols) VALUES (alias.col, ...)
-    /// [OUTPUT ...]</c>. The <c>ON</c> predicate is evaluated per source row
-    /// against an alias-only resolver — column references into the target
-    /// table aren't supported, since modeling that requires a JOIN-style scan.
-    /// EF's shape always emits <c>ON 1=0</c>, which cleanly degenerates to
-    /// "insert every source row." A <c>WHEN MATCHED</c> branch parses
-    /// syntactically (so the grammar shape isn't a surprise) but throws if
-    /// the per-row predicate ever evaluates to true.
+    /// Parses and executes a <c>MERGE</c> statement. Supports the full
+    /// branch family — <c>WHEN MATCHED</c> with <c>UPDATE</c> /
+    /// <c>DELETE</c>, <c>WHEN NOT MATCHED [BY TARGET]</c> with
+    /// <c>INSERT</c>, and <c>WHEN NOT MATCHED BY SOURCE</c> with
+    /// <c>UPDATE</c> / <c>DELETE</c>. The source may be a <c>VALUES</c>
+    /// list or any SELECT-expression (CTE / set-op chain / derived
+    /// table). Each branch family allows multiple <c>AND
+    /// search_condition</c>-gated clauses with an unconditional fallback
+    /// last; <c>WHEN NOT MATCHED [BY TARGET]</c> is the exception — it
+    /// admits at most one clause total (Msg 10714). <c>$action</c> is
+    /// recognized in OUTPUT and projects the uppercase action verb per
+    /// row.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Execution is single-pass over the target heap × materialized
+    /// source. For each target row, all matching source rows are
+    /// gathered; the first applicable <c>WHEN MATCHED</c> clause wins. A
+    /// target row matched by multiple source rows raises <strong>Msg
+    /// 8672</strong> only when the chosen action is <c>UPDATE</c> —
+    /// <c>DELETE</c> is forgiving (multiple matches collapse to one
+    /// delete, probe-confirmed). Source rows that didn't match any
+    /// target are candidates for <c>WHEN NOT MATCHED [BY TARGET]</c>;
+    /// target rows that didn't match any source are candidates for
+    /// <c>WHEN NOT MATCHED BY SOURCE</c>. Triggers fire in
+    /// <c>INSERT → UPDATE → DELETE</c> order (probe-confirmed), each
+    /// kind once with its combined affected rows.
+    /// </para>
+    /// </remarks>
     private static SimulatedStatementOutcome ParseMerge(ParserContext context)
     {
-        // Optional INTO: real SQL Server accepts both, EF drops it. Either form lands on the table name.
+        // MERGE [INTO] target [AS] alias
         var afterMerge = context.GetNextRequired();
         if (afterMerge is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-
         var destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
             ? table
             : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
@@ -36,326 +52,1033 @@ partial class Simulation
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
 
+        // Optional target alias: AS <alias> or bare <alias>.
         context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+            context.MoveNextRequired();
+        var targetAlias = context.Token switch
+        {
+            UnquotedString { ContextualKeyword: ContextualKeyword.Using } => destinationTable.Name,
+            Name n => n.Value,
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+        if (!Collation.Default.Equals(targetAlias, destinationTable.Name))
+            context.MoveNextRequired();
+
+        // USING (<source>) [AS] alias [(col, ...)]
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema) = ParseMergeSource(context);
+
+        // ON predicate — resolves target via targetAlias/destinationName, source via sourceAlias.
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        SqlType ResolveTypeBoth(MultiPartName name)
+        {
+            if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
+                || Collation.Default.Equals(name.ImmediateQualifier, destinationTable.Name))
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return destinationTable.Columns[i].Type;
+                }
+            }
+            if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            {
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceSchema[i];
+                }
+            }
+            // Unqualified: try target then source.
+            if (name.Count == 1)
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return destinationTable.Columns[i].Type;
+                }
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceSchema[i];
+                }
+            }
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+        }
+
+        // Walk the ON's expression tree with the two-sided resolver so any
+        // column reference type-checks correctly at parse time.
+        var prevResolver = context.OuterTypeResolver;
+        context.OuterTypeResolver = ResolveTypeBoth;
+        BooleanExpression onPredicate;
+        try
+        {
+            onPredicate = BooleanExpression.Parse(context);
+        }
+        finally
+        {
+            context.OuterTypeResolver = prevResolver;
+        }
+
+        // WHEN clauses.
+        var whenClauses = ParseMergeWhenClauses(context, destinationTable, targetAlias, sourceAlias, sourceColumnNames, sourceSchema);
+
+        // OUTPUT.
+        var output = TryParseMergeOutputClause(context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema);
+
+        // Required trailing ; — but the dispatch loop may have already
+        // consumed it (statement separators are flexible). If the cursor
+        // sits on either ; or end-of-batch, accept; otherwise raise Msg 10713.
+        return context.Token is not (null or Operator { Character: ';' })
+            ? throw SimulatedSqlException.MergeMustBeTerminated()
+            : ExecuteMerge(context, destinationTable, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
+    }
+
+    /// <summary>
+    /// Parses the <c>USING (...)</c> source — either a <c>VALUES</c>
+    /// tuple list or a parenthesized SELECT / set-op chain — followed
+    /// by the required <c>[AS] alias</c> and the optional
+    /// <c>(col1, col2, ...)</c> rename list. Returns a materializer that
+    /// produces the source rows on demand plus the schema metadata
+    /// (alias, column names, column types).
+    /// </summary>
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseMergeSource(ParserContext context)
+    {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Values })
-            throw new NotSupportedException("MERGE source must be a VALUES clause; subqueries aren't supported.");
+        context.MoveNextRequired();
 
-        var sourceTuples = ParseValuesTuples(context);
+        Func<BatchContext, List<SqlValue[]>> materialize;
+        SqlType[] sourceSchema;
+        string[] selectionColumnNames;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
+        {
+            var tuples = ParseValuesTuples(context);
+            // Static type inference from the first tuple's expressions.
+            sourceSchema = new SqlType[tuples[0].Length];
+            for (var i = 0; i < tuples[0].Length; i++)
+                sourceSchema[i] = tuples[0][i].GetSqlType(name => throw SimulatedSqlException.InvalidColumnName(name));
+            selectionColumnNames = new string[tuples[0].Length];
+            materialize = batch =>
+            {
+                var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+                var rows = new List<SqlValue[]>(tuples.Count);
+                foreach (var tuple in tuples)
+                {
+                    batch.BumpRowStamp();
+                    var values = new SqlValue[tuple.Length];
+                    for (var i = 0; i < tuple.Length; i++)
+                        values[i] = tuple[i].Run(runtime);
+                    rows.Add(values);
+                }
+                return rows;
+            };
+        }
+        else
+        {
+            var selection = Selection.Parse(context, depth: 1);
+            sourceSchema = selection.Schema;
+            selectionColumnNames = selection.ColumnNames;
+            materialize = batch =>
+            {
+                var rs = selection.Execute(batch);
+                var rows = new List<SqlValue[]>();
+                foreach (var rowBytes in rs.RowBytes)
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                return rows;
+            };
+        }
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Optional AS (EF emits it).
         var afterUsingClose = context.GetNextRequired();
         if (afterUsingClose is ReservedKeyword { Keyword: Keyword.As })
             afterUsingClose = context.GetNextRequired();
 
-        var sourceAlias = (afterUsingClose as Name)?.Value
+        var alias = (afterUsingClose as Name)?.Value
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        var sourceColumnNames = new List<string>();
-        while (true)
+        context.MoveNextRequired();
+        string[] columnNames;
+        if (context.Token is Operator { Character: '(' })
         {
-            if (context.GetNextRequired() is not Name srcCol)
+            var names = new List<string>();
+            while (true)
+            {
+                if (context.GetNextRequired() is not Name colName)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                names.Add(colName.Value);
+                var sep = context.GetNextRequired();
+                if (sep is Operator { Character: ')' })
+                    break;
+                if (sep is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (names.Count != sourceSchema.Length)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            sourceColumnNames.Add(srcCol.Value);
-            var sep = context.GetNextRequired();
-            if (sep is Operator { Character: ')' })
-                break;
-            if (sep is not Operator { Character: ',' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            columnNames = [.. names];
+            context.MoveNextRequired();
+        }
+        else
+        {
+            columnNames = new string[selectionColumnNames.Length];
+            for (var i = 0; i < selectionColumnNames.Length; i++)
+            {
+                if (string.IsNullOrEmpty(selectionColumnNames[i]))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                columnNames[i] = selectionColumnNames[i];
+            }
         }
 
-        if (sourceColumnNames.Count != sourceTuples[0].Length)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        return (materialize, alias, columnNames, sourceSchema);
+    }
 
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+    /// <summary>
+    /// Parses the 1+ WHEN clauses following MERGE's ON predicate.
+    /// Enforces the grammar rules SQL Server probes confirmed:
+    /// <list type="bullet">
+    /// <item>WHEN MATCHED admits UPDATE or DELETE (Msg 10711 rejects INSERT).</item>
+    /// <item>WHEN NOT MATCHED [BY TARGET] admits INSERT only (Msg 10710 rejects UPDATE/DELETE), and may appear at most once (Msg 10714).</item>
+    /// <item>WHEN NOT MATCHED BY SOURCE admits UPDATE or DELETE (Msg 10711 rejects INSERT).</item>
+    /// <item>Within MATCHED and NOT MATCHED BY SOURCE families, an unconditional clause cannot be followed by a conditional one (Msg 5324).</item>
+    /// </list>
+    /// </summary>
+    private static List<WhenClause> ParseMergeWhenClauses(
+        ParserContext context,
+        HeapTable destinationTable,
+        string targetAlias,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        SqlType[] sourceSchema)
+    {
+        var clauses = new List<WhenClause>();
+        var matchedUnconditionalSeen = false;
+        var nmbsUnconditionalSeen = false;
+        var nmbtSeen = false;
 
-        context.MoveNextRequired();
-        var onPredicate = BooleanExpression.Parse(context);
+        SqlType ResolveType(MultiPartName name)
+        {
+            if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
+                || Collation.Default.Equals(name.ImmediateQualifier, destinationTable.Name))
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return destinationTable.Columns[i].Type;
+                }
+            }
+            if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            {
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceSchema[i];
+                }
+            }
+            if (name.Count == 1)
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return destinationTable.Columns[i].Type;
+                }
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceSchema[i];
+                }
+            }
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+        }
 
-        // Compute source schema by static type-of'ing the first tuple's
-        // expressions. Source tuples can't reference any columns yet (they're
-        // literals or parameters in EF's emit), so the resolver throws.
-        var sourceSchema = new SqlType[sourceColumnNames.Count];
-        for (var i = 0; i < sourceColumnNames.Count; i++)
-            sourceSchema[i] = sourceTuples[0][i].GetSqlType(name => throw SimulatedSqlException.InvalidColumnName(name));
-
-        // WHEN clauses. EF only emits a single WHEN NOT MATCHED THEN INSERT;
-        // anything else (WHEN MATCHED branches with UPDATE/DELETE) parses
-        // syntactically but throws if the predicate ever picks that branch.
-        Expression[]? insertColumnExprs = null;
-        Expression[]? insertValueExprs = null;
-        var whenMatchedSeen = false;
         while (context.Token is ReservedKeyword { Keyword: Keyword.When })
         {
             context.MoveNextRequired();
+            bool isNotMatched;
             if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
             {
+                isNotMatched = true;
                 context.MoveNextRequired();
-                if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Matched })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Then })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Insert })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            else
+            {
+                isNotMatched = false;
+            }
 
-                // Optional column list.
-                List<Expression> insertColumns = [];
-                if (context.GetNextRequired() is Operator { Character: '(' })
+            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Matched })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+
+            // Optional BY {TARGET | SOURCE}. Default is BY TARGET for NOT
+            // MATCHED; MATCHED never carries BY.
+            WhenClauseKind kind;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.By })
+            {
+                if (!isNotMatched)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                kind = context.Token switch
                 {
-                    while (true)
-                    {
-                        context.MoveNextRequired();
-                        var colExpr = Expression.Parse(context);
-                        insertColumns.Add(colExpr);
-                        if (context.Token is Operator { Character: ')' })
-                            break;
-                        if (context.Token is not Operator { Character: ',' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                    }
-                    context.MoveNextRequired();
+                    UnquotedString { ContextualKeyword: ContextualKeyword.Source } => WhenClauseKind.NotMatchedBySource,
+                    UnquotedString { ContextualKeyword: ContextualKeyword.Target } => WhenClauseKind.NotMatchedByTarget,
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                };
+                context.MoveNextRequired();
+            }
+            else
+            {
+                kind = isNotMatched ? WhenClauseKind.NotMatchedByTarget : WhenClauseKind.Matched;
+            }
+
+            // Optional AND search_condition.
+            BooleanExpression? searchCondition = null;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.And })
+            {
+                context.MoveNextRequired();
+                var prevResolver = context.OuterTypeResolver;
+                context.OuterTypeResolver = ResolveType;
+                try
+                {
+                    searchCondition = BooleanExpression.Parse(context);
                 }
-
-                if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                if (context.GetNextRequired() is not Operator { Character: '(' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                List<Expression> insertValues = [];
-                while (true)
+                finally
                 {
-                    context.MoveNextRequired();
-                    insertValues.Add(Expression.Parse(context));
-                    if (context.Token is Operator { Character: ')' })
-                        break;
-                    if (context.Token is not Operator { Character: ',' })
+                    context.OuterTypeResolver = prevResolver;
+                }
+            }
+
+            // Family-level ordering checks.
+            if (kind == WhenClauseKind.Matched)
+            {
+                if (matchedUnconditionalSeen)
+                    throw SimulatedSqlException.MergeUnconditionalMustBeLast("WHEN MATCHED");
+                if (searchCondition is null)
+                    matchedUnconditionalSeen = true;
+            }
+            else if (kind == WhenClauseKind.NotMatchedBySource)
+            {
+                if (nmbsUnconditionalSeen)
+                    throw SimulatedSqlException.MergeUnconditionalMustBeLast("WHEN NOT MATCHED BY SOURCE");
+                if (searchCondition is null)
+                    nmbsUnconditionalSeen = true;
+            }
+            else // NotMatchedByTarget
+            {
+                if (nmbtSeen)
+                    throw SimulatedSqlException.MergeMultipleNotMatchedClauses();
+                nmbtSeen = true;
+            }
+
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Then })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+
+            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, ResolveType));
+        }
+
+        return clauses.Count == 0 ? throw SimulatedSqlException.SyntaxErrorNear(context) : clauses;
+    }
+
+    private static WhenClause ParseMergeAction(
+        ParserContext context,
+        WhenClauseKind kind,
+        BooleanExpression? searchCondition,
+        HeapTable destinationTable,
+        Func<MultiPartName, SqlType> resolveType) =>
+        context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, resolveType),
+            ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, resolveType),
+            ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+
+    private static WhenClause ParseMergeInsertAction(
+        ParserContext context,
+        WhenClauseKind kind,
+        BooleanExpression? searchCondition,
+        HeapTable destinationTable,
+        Func<MultiPartName, SqlType> resolveType)
+    {
+        if (kind == WhenClauseKind.Matched)
+            throw SimulatedSqlException.MergeInsertNotAllowedInClause("WHEN MATCHED");
+        if (kind == WhenClauseKind.NotMatchedBySource)
+            throw SimulatedSqlException.MergeInsertNotAllowedInClause("WHEN NOT MATCHED BY SOURCE");
+
+        var insertColumns = new List<HeapColumn>();
+        var afterInsert = context.GetNextRequired();
+        if (afterInsert is Operator { Character: '(' })
+        {
+            while (true)
+            {
+                if (context.GetNextRequired() is not StringToken colTok)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var col = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, colTok.Value))
+                    ?? throw SimulatedSqlException.InvalidColumnName(colTok.Value);
+                if (col.Computed is not null)
+                    throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
+                if (col.Type == SqlType.RowVersion)
+                    throw SimulatedSqlException.CannotInsertExplicitTimestamp();
+                insertColumns.Add(col);
+                var sep = context.GetNextRequired();
+                if (sep is Operator { Character: ')' })
+                    break;
+                if (sep is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            context.MoveNextRequired();
+        }
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var insertValues = new List<Expression>();
+        var prevResolver = context.OuterTypeResolver;
+        context.OuterTypeResolver = resolveType;
+        try
+        {
+            while (true)
+            {
+                context.MoveNextRequired();
+                insertValues.Add(Expression.Parse(context));
+                if (context.Token is Operator { Character: ')' })
+                    break;
+                if (context.Token is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+        }
+        finally
+        {
+            context.OuterTypeResolver = prevResolver;
+        }
+        context.MoveNextOptional();
+
+        HeapColumn[] columns;
+        if (insertColumns.Count == 0)
+        {
+            var defaultCols = new List<HeapColumn>();
+            foreach (var c in destinationTable.Columns)
+            {
+                if (c.Computed is null && c.Type != SqlType.RowVersion)
+                    defaultCols.Add(c);
+            }
+            columns = [.. defaultCols];
+        }
+        else
+        {
+            columns = [.. insertColumns];
+        }
+
+        return columns.Length != insertValues.Count
+            ? throw SimulatedSqlException.SyntaxErrorNear(context)
+            : new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: columns, insertValues: [.. insertValues]);
+    }
+
+    private static WhenClause ParseMergeUpdateAction(
+        ParserContext context,
+        WhenClauseKind kind,
+        BooleanExpression? searchCondition,
+        HeapTable destinationTable,
+        Func<MultiPartName, SqlType> resolveType)
+    {
+        if (kind == WhenClauseKind.NotMatchedByTarget)
+            throw SimulatedSqlException.MergeUpdateNotAllowedInNotMatched();
+
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var assignments = new List<(int Ordinal, Expression Expr)>();
+        var prevResolver = context.OuterTypeResolver;
+        context.OuterTypeResolver = resolveType;
+        try
+        {
+            while (true)
+            {
+                if (context.GetNextRequired() is not StringToken first)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                string columnName;
+                var afterName = context.GetNextRequired();
+                if (afterName is Operator { Character: '.' })
+                {
+                    if (context.GetNextRequired() is not StringToken col)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    columnName = col.Value;
+                    context.MoveNextRequired();
+                }
+                else
+                {
+                    columnName = first.Value;
                 }
 
-                insertColumnExprs = [.. insertColumns];
-                insertValueExprs = [.. insertValues];
+                if (context.Token is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                var rhs = Expression.Parse(context);
+
+                var ordinal = -1;
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, columnName))
+                    {
+                        ordinal = i;
+                        break;
+                    }
+                }
+                if (ordinal < 0)
+                    throw SimulatedSqlException.InvalidColumnName(columnName);
+                var targetColumn = destinationTable.Columns[ordinal];
+                if (targetColumn.Identity is not null)
+                    throw SimulatedSqlException.CannotUpdateIdentityColumn(targetColumn.Name);
+                if (targetColumn.Computed is not null)
+                    throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
+                if (targetColumn.Type == SqlType.RowVersion)
+                    throw SimulatedSqlException.CannotUpdateTimestampColumn();
+                assignments.Add((ordinal, rhs));
+
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+            }
+        }
+        finally
+        {
+            context.OuterTypeResolver = prevResolver;
+        }
+
+        return new WhenClause(kind, MergeActionKind.Update, searchCondition, assignments: assignments, insertColumns: null, insertValues: null);
+    }
+
+    private static WhenClause ParseMergeDeleteAction(ParserContext context, WhenClauseKind kind, BooleanExpression? searchCondition)
+    {
+        if (kind == WhenClauseKind.NotMatchedByTarget)
+            throw SimulatedSqlException.MergeUpdateNotAllowedInNotMatched();
+        context.MoveNextOptional();
+        return new WhenClause(kind, MergeActionKind.Delete, searchCondition, assignments: null, insertColumns: null, insertValues: null);
+    }
+
+    /// <summary>
+    /// OUTPUT clause parser specialized for MERGE — supports INSERTED.col
+    /// (NULL for DELETE rows), DELETED.col (NULL for INSERT rows),
+    /// source-alias.col (NULL for WHEN NOT MATCHED BY SOURCE rows),
+    /// and the <c>$action</c> pseudo-column (uppercase 'INSERT' /
+    /// 'UPDATE' / 'DELETE' string).
+    /// </summary>
+    private static MergeOutputProjection? TryParseMergeOutputClause(
+        ParserContext context,
+        HeapTable destinationTable,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        SqlType[] sourceSchema)
+    {
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            return null;
+
+        var expressions = new List<Expression>();
+        var columnNames = new List<string>();
+
+        SqlType ResolveOutputType(MultiPartName name)
+        {
+            if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED")
+                || Collation.Default.Equals(name.ImmediateQualifier, "DELETED"))
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return destinationTable.Columns[i].Type;
+                }
+            }
+            else if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            {
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceSchema[i];
+                }
+            }
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+        }
+
+        do
+        {
+            context.MoveNextRequired();
+            Expression expr;
+            // $action pseudo-column: detected by the tokenizer's $action
+            // single-token emission. Synthesize a literal reference that
+            // the runtime resolves to the action verb via the row context.
+            if (context.Token is UnquotedString u && u.Value.Equals("$action", StringComparison.OrdinalIgnoreCase))
+            {
+                expr = new MergeActionReference();
                 context.MoveNextOptional();
             }
             else
             {
-                // WHEN MATCHED — parse and discard until next clause boundary.
-                whenMatchedSeen = true;
-                while (context.Token is not (null
-                    or ReservedKeyword { Keyword: Keyword.When }
-                    or Operator { Character: ';' }
-                    or UnquotedString))
+                expr = Expression.Parse(context);
+            }
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.As }:
+                    expr = Expression.AssignName(expr, context.GetNextRequired<Name>());
+                    context.MoveNextOptional();
+                    break;
+                case Name aliasName:
+                    expr = Expression.AssignName(expr, aliasName);
+                    context.MoveNextOptional();
+                    break;
+            }
+            expressions.Add(expr);
+            columnNames.Add(string.IsNullOrEmpty(expr.Name) && IsMergeActionRef(expr) ? "$action" : expr.Name);
+        }
+        while (context.Token is Operator { Character: ',' });
+
+        var schema = new SqlType[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
+            schema[i] = IsMergeActionRef(expressions[i]) ? NVarcharSqlType.Get(10) : expressions[i].GetSqlType(ResolveOutputType);
+
+        return new MergeOutputProjection(
+            [.. expressions], [.. columnNames], schema,
+            destinationTable, sourceAlias, sourceColumnNames, context.Batch);
+    }
+
+    /// <summary>
+    /// Runs the prepared MERGE plan against the live target heap. The
+    /// source <see cref="Selection"/> materializes into a list once;
+    /// each target row is scanned, its action chosen via the first
+    /// applicable WHEN clause, and queued. Unmatched source rows fall
+    /// into the <c>WHEN NOT MATCHED [BY TARGET]</c> clause if present.
+    /// All queued mutations apply atomically before triggers fire.
+    /// </summary>
+    private static SimulatedStatementOutcome ExecuteMerge(
+        ParserContext context,
+        HeapTable destinationTable,
+        string targetAlias,
+        Func<BatchContext, List<SqlValue[]>> materializeSource,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        SqlType[] sourceSchema,
+        BooleanExpression onPredicate,
+        List<WhenClause> whenClauses,
+        MergeOutputProjection? output)
+    {
+        var sourceRows = materializeSource(context.Batch);
+        var sourceMatched = new bool[sourceRows.Count];
+
+        // Resolve target columns by qualifier; null-source means BY-SOURCE branch (everything in source resolver returns NULL).
+        SqlValue ResolveCombined(SqlValue[]? targetValues, SqlValue[]? sourceValues, MultiPartName name)
+        {
+            if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
+                || Collation.Default.Equals(name.ImmediateQualifier, destinationTable.Name))
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
                 {
-                    context.MoveNextOptional();
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return targetValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : targetValues[i];
                 }
-                if (context.Token is UnquotedString u && u.ContextualKeyword != ContextualKeyword.Output)
-                    context.MoveNextOptional();
+            }
+            if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            {
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
+                }
+            }
+            if (name.Count == 1)
+            {
+                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                {
+                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        return targetValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : targetValues[i];
+                }
+                for (var i = 0; i < sourceColumnNames.Length; i++)
+                {
+                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
+                }
+            }
+            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+        }
+
+        var pendingInserts = new List<(SqlValue[] NewValues, SqlValue[]? SourceValues)>();
+        var pendingUpdates = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)>();
+        var pendingDeletes = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)>();
+
+        // Phase A: target × source scan.
+        foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
+        {
+            var targetValues = DecodeFullRow(destinationTable, rowBytes);
+            EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+
+            // Find all matching source rows.
+            var matchedSources = new List<int>();
+            for (var si = 0; si < sourceRows.Count; si++)
+            {
+                var pred = onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch));
+                if (pred == true)
+                {
+                    matchedSources.Add(si);
+                    sourceMatched[si] = true;
+                }
+            }
+
+            if (matchedSources.Count > 0)
+            {
+                var firstSourceIndex = matchedSources[0];
+                var sourceValues = sourceRows[firstSourceIndex];
+                var chosen = PickClause(whenClauses, WhenClauseKind.Matched, targetValues, sourceValues, context.Batch, ResolveCombined);
+                if (chosen is null)
+                    continue;
+                if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
+                    throw SimulatedSqlException.MergeMultiMatch();
+
+                ApplyChosenMatchedAction(context, destinationTable, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
+            }
+            else
+            {
+                var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
+                if (chosen is null)
+                    continue;
+                ApplyChosenMatchedAction(context, destinationTable, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
             }
         }
 
-        if (insertColumnExprs is null || insertValueExprs is null)
-            throw new NotSupportedException("MERGE without a WHEN NOT MATCHED THEN INSERT branch isn't supported.");
-
-        // Resolve insert columns against destination schema.
-        var insertColumns2 = new HeapColumn[insertColumnExprs.Length];
-        for (var i = 0; i < insertColumnExprs.Length; i++)
+        // Phase B: unmatched source rows → WHEN NOT MATCHED BY TARGET.
+        var nmbtClause = whenClauses.FirstOrDefault(c => c.Kind == WhenClauseKind.NotMatchedByTarget);
+        if (nmbtClause is not null)
         {
-            var colName = (insertColumnExprs[i] as Reference)?.Name
-                ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-            insertColumns2[i] = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, colName))
-                ?? throw SimulatedSqlException.InvalidColumnName(colName);
-            if (insertColumns2[i].Computed is not null)
-                throw SimulatedSqlException.ColumnCannotBeModified(insertColumns2[i].Name);
-            if (insertColumns2[i].Type == SqlType.RowVersion)
-                throw SimulatedSqlException.CannotInsertExplicitTimestamp();
+            for (var si = 0; si < sourceRows.Count; si++)
+            {
+                if (sourceMatched[si])
+                    continue;
+                var sourceValues = sourceRows[si];
+                if (nmbtClause.SearchCondition is { } cond
+                    && cond.Run(new RuntimeContext(name => ResolveCombined(null, sourceValues, name), context.Batch)) != true)
+                {
+                    continue;
+                }
+                ApplyInsert(context, destinationTable, nmbtClause, sourceValues, ResolveCombined, pendingInserts);
+            }
         }
 
-        var output = TryParseOutputClause(context, destinationTable, (sourceAlias, [.. sourceColumnNames], sourceSchema));
+        // Phase C: commit mutations.
+        return CommitMerge(context, destinationTable, pendingInserts, pendingUpdates, pendingDeletes, output);
+    }
 
-        // Identity wiring (mirrors ProcessHeapInsert).
+    /// <summary>
+    /// Walks the WHEN clauses of a given kind in declaration order and
+    /// returns the first one whose <c>AND</c> search condition is
+    /// satisfied (or absent). Returns null when no clause of that kind
+    /// applies.
+    /// </summary>
+    private static WhenClause? PickClause(
+        List<WhenClause> clauses,
+        WhenClauseKind kind,
+        SqlValue[]? targetValues,
+        SqlValue[]? sourceValues,
+        BatchContext batch,
+        Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined)
+    {
+        foreach (var clause in clauses)
+        {
+            if (clause.Kind != kind)
+                continue;
+            if (clause.SearchCondition is { } cond)
+            {
+                var result = cond.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), batch));
+                if (result != true)
+                    continue;
+            }
+            return clause;
+        }
+        return null;
+    }
+
+    private static void ApplyChosenMatchedAction(
+        ParserContext context,
+        HeapTable destinationTable,
+        WhenClause clause,
+        int pageIndex,
+        int slotIndex,
+        SqlValue[] targetValues,
+        SqlValue[]? sourceValues,
+        Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined,
+        List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
+        List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes)
+    {
+        if (clause.Action == MergeActionKind.Delete)
+        {
+            pendingDeletes.Add((pageIndex, slotIndex, targetValues, sourceValues));
+            return;
+        }
+        // UPDATE: compute new row using assignments evaluated against the same pre-update snapshot.
+        context.Batch.BumpRowStamp();
+        var newValues = new SqlValue[destinationTable.Columns.Length];
+        Array.Copy(targetValues, newValues, targetValues.Length);
+
+        foreach (var (ord, expr) in clause.Assignments!)
+        {
+            var raw = expr.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
+            EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable.Name, context.Connection);
+            newValues[ord] = CoerceForInsert(raw, destinationTable.Columns[ord].Type);
+        }
+
+        for (var ci = 0; ci < destinationTable.Columns.Length; ci++)
+        {
+            if (destinationTable.Columns[ci].Type == SqlType.RowVersion)
+                newValues[ci] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+        }
+
+        EvaluateComputedColumns(destinationTable, newValues, context.Batch);
+        EnforceNotNull(destinationTable, newValues, "UPDATE");
+        EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE");
+
+        pendingUpdates.Add((pageIndex, slotIndex, targetValues, newValues, sourceValues));
+    }
+
+    private static void ApplyInsert(
+        ParserContext context,
+        HeapTable destinationTable,
+        WhenClause clause,
+        SqlValue[] sourceValues,
+        Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined,
+        List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts)
+    {
+        context.Batch.BumpRowStamp();
+        var rowValues = new SqlValue[destinationTable.Columns.Length];
+        for (var i = 0; i < rowValues.Length; i++)
+            rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
+
         var identityOrdinal = destinationTable.IdentityOrdinal;
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
         var identityInsertOn = identityColumn is not null
             && context.Connection.IdentityInsertTable is string activeTable
             && Collation.Default.Equals(activeTable, destinationTable.Name);
+
+        var identityListed = false;
+        for (var i = 0; i < clause.InsertColumns!.Length; i++)
+        {
+            if (ReferenceEquals(clause.InsertColumns[i], identityColumn))
+            {
+                identityListed = true;
+                break;
+            }
+        }
         if (identityColumn is not null)
         {
-            var identityListed = insertColumns2.Any(c => ReferenceEquals(c, identityColumn));
             if (identityListed && !identityInsertOn)
                 throw SimulatedSqlException.CannotInsertExplicitIdentity(destinationTable.Name);
             if (!identityListed && identityInsertOn)
                 throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
         }
 
-        var outputRows = output is null ? null : new List<byte[]>(sourceTuples.Count);
-        var hasInsertTriggers = HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
-        var triggerRows = hasInsertTriggers ? new List<SqlValue[]>(sourceTuples.Count) : null;
-        decimal? lastIdentityValue = null;
-        var insertedCount = 0;
-        foreach (var sourceTuple in sourceTuples)
+        // Defaults for columns absent from the INSERT branch's list.
+        for (var i = 0; i < destinationTable.Columns.Length; i++)
         {
-            // Evaluate the source tuple to concrete values.
-            var sourceRowValues = new SqlValue[sourceColumnNames.Count];
-            var sourceRuntime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch);
-            for (var i = 0; i < sourceTuple.Length; i++)
-                sourceRowValues[i] = sourceTuple[i].Run(sourceRuntime);
-
-            // Resolver for the ON predicate and the INSERT value expressions:
-            // matches references to the source alias and falls back to error
-            // for anything else. Targeting the destination table is rejected
-            // (see method-level remarks).
-            SqlValue ResolveSource(MultiPartName name)
+            var column = destinationTable.Columns[i];
+            if (column.Default is null) continue;
+            var listed = false;
+            for (var j = 0; j < clause.InsertColumns.Length; j++)
             {
-                if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+                if (ReferenceEquals(clause.InsertColumns[j], column))
                 {
-                    for (var i = 0; i < sourceColumnNames.Count; i++)
-                    {
-                        if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
-                            return sourceRowValues[i];
-                    }
-                }
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
-            }
-
-            if (onPredicate.Run(new RuntimeContext(_ => SqlValue.Null(SqlType.Int32), context.Batch)) == true)
-            {
-                // Predicate matched — would route to WHEN MATCHED.
-                if (whenMatchedSeen)
-                    throw new NotSupportedException("MERGE's WHEN MATCHED branch isn't supported.");
-                continue;
-            }
-
-            // WHEN NOT MATCHED: insert one row.
-            var rowValues = new SqlValue[destinationTable.Columns.Length];
-            for (var i = 0; i < rowValues.Length; i++)
-                rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
-
-            // Defaults run only for columns absent from the INSERT branch's
-            // column list — same rule as plain INSERT (see ProcessHeapInsert).
-            for (var i = 0; i < destinationTable.Columns.Length; i++)
-            {
-                var column = destinationTable.Columns[i];
-                if (column.Default is null) continue;
-                var listed = false;
-                for (var j = 0; j < insertColumns2.Length; j++)
-                {
-                    if (ReferenceEquals(insertColumns2[j], column))
-                    {
-                        listed = true;
-                        break;
-                    }
-                }
-                if (listed) continue;
-                var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
-                rowValues[i] = CoerceForInsert(defaultValue, column.Type);
-            }
-
-            for (var i = 0; i < insertColumns2.Length; i++)
-            {
-                var targetColumn = insertColumns2[i];
-                var ordinal = -1;
-                for (var j = 0; j < destinationTable.Columns.Length; j++)
-                {
-                    if (ReferenceEquals(destinationTable.Columns[j], targetColumn))
-                    {
-                        ordinal = j;
-                        break;
-                    }
-                }
-
-                var source = insertValueExprs[i].Run(new RuntimeContext(ResolveSource, context.Batch));
-                EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
-                var coerced = CoerceForInsert(source, targetColumn.Type);
-                rowValues[ordinal] = coerced;
-
-                if (ReferenceEquals(targetColumn, identityColumn))
-                {
-                    var explicitValue = coerced.CoerceTo(SqlType.BigInt).AsInt64;
-                    identityColumn.Identity!.ObserveExplicit(explicitValue);
-                    lastIdentityValue = explicitValue;
+                    listed = true;
+                    break;
                 }
             }
+            if (listed) continue;
+            var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
+            rowValues[i] = CoerceForInsert(defaultValue, column.Type);
+        }
 
-            if (identityColumn is not null && !insertColumns2.Any(c => ReferenceEquals(c, identityColumn)))
+        for (var i = 0; i < clause.InsertColumns.Length; i++)
+        {
+            var targetColumn = clause.InsertColumns[i];
+            var ordinal = -1;
+            for (var j = 0; j < destinationTable.Columns.Length; j++)
             {
-                long generated;
-                try
+                if (ReferenceEquals(destinationTable.Columns[j], targetColumn))
                 {
-                    generated = identityColumn.Identity!.GenerateNext();
+                    ordinal = j;
+                    break;
                 }
-                catch (OverflowException)
-                {
-                    throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
-                }
-
-                rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
-                lastIdentityValue = generated;
             }
+            var source = clause.InsertValues![i].Run(new RuntimeContext(name => resolveCombined(null, sourceValues, name), context.Batch));
+            EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
+            var coerced = CoerceForInsert(source, targetColumn.Type);
+            rowValues[ordinal] = coerced;
 
-            // Auto-generate rowversion for every row in a table that has one;
-            // mirrors INSERT (the explicit-value rejection is gated above).
-            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            if (ReferenceEquals(targetColumn, identityColumn))
             {
-                if (destinationTable.Columns[i].Type == SqlType.RowVersion)
-                    rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
-            }
-
-            EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
-            EnforceNotNull(destinationTable, rowValues);
-            EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
-
-            if (!context.Batch.IsSkipping)
-            {
-                var storedValues = ProjectStoredValues(destinationTable, rowValues);
-                EnforceKeyConstraints(destinationTable, storedValues);
-                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
-                insertedCount++;
-
-                if (output is { } o)
-                {
-                    var projectedBytes = o.ProjectRow(rowValues, sourceRowValues);
-                    if (projectedBytes is not null)
-                        outputRows!.Add(projectedBytes);
-                }
-
-                triggerRows?.Add((SqlValue[])rowValues.Clone());
+                var explicitValue = coerced.CoerceTo(SqlType.BigInt).AsInt64;
+                identityColumn.Identity!.ObserveExplicit(explicitValue);
             }
         }
 
-        if (!context.Batch.IsSkipping)
-            context.Connection.LastIdentity = lastIdentityValue;
-
-        if (triggerRows is { Count: > 0 })
+        if (identityColumn is not null && !identityListed)
         {
-            context.Connection.LastStatementRowCount = triggerRows.Count;
+            long generated;
+            try
+            {
+                generated = identityColumn.Identity!.GenerateNext();
+            }
+            catch (OverflowException)
+            {
+                throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+            }
+            rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
+        }
+
+        for (var i = 0; i < destinationTable.Columns.Length; i++)
+        {
+            if (destinationTable.Columns[i].Type == SqlType.RowVersion)
+                rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+        }
+
+        EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
+        EnforceNotNull(destinationTable, rowValues);
+        EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+
+        pendingInserts.Add((rowValues, sourceValues));
+    }
+
+    private static SimulatedStatementOutcome CommitMerge(
+        ParserContext context,
+        HeapTable destinationTable,
+        List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
+        List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
+        List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
+        MergeOutputProjection? output)
+    {
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
+        // Validate key constraints for new + updated rows together. The
+        // existing UPDATE-side validator does the affected-vs-affected and
+        // affected-vs-heap pairwise checks; we extend its input by also
+        // including pending inserts via the same affected-list shape with
+        // sentinel addresses.
+        if (pendingInserts.Count > 0 || pendingUpdates.Count > 0)
+        {
+            var pseudoAffected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
+            foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
+                pseudoAffected.Add((page, slot, newValues, oldValues));
+            // For inserts, the "address" of the new row doesn't exist yet;
+            // (-1, i) is sentinel — never collides with a real heap address.
+            for (var i = 0; i < pendingInserts.Count; i++)
+                pseudoAffected.Add((-1, i, pendingInserts[i].NewValues, FullOld: null));
+            if (pseudoAffected.Count > 0)
+                EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected);
+        }
+
+        var undoLog = destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
+
+        // Apply deletes first (tombstone slots), then updates, then inserts.
+        // Real SQL Server applies the entire set atomically — order matters
+        // only insofar as triggers see the post-state.
+        foreach (var (page, slot, _, _) in pendingDeletes)
+            destinationTable.Heap.DeleteAt(page, slot, undoLog);
+        foreach (var (page, slot, _, _, _) in pendingUpdates)
+            destinationTable.Heap.DeleteAt(page, slot, undoLog);
+        foreach (var (_, _, _, newValues, _) in pendingUpdates)
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+        foreach (var (newValues, _) in pendingInserts)
+            destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+
+        // Identity counter: last identity is the last value generated for
+        // a real insert (NULL when no inserts ran).
+        if (destinationTable.IdentityOrdinal >= 0 && pendingInserts.Count > 0)
+        {
+            var lastId = pendingInserts[^1].NewValues[destinationTable.IdentityOrdinal];
+            context.Connection.LastIdentity = lastId.IsNull ? null : lastId.CoerceTo(SqlType.BigInt).AsInt64;
+        }
+
+        // Build OUTPUT result: INSERT rows, then UPDATE rows, then DELETE rows.
+        var outputRows = output is null ? null : new List<byte[]>();
+        if (output is not null)
+        {
+            var nullTarget = new SqlValue[destinationTable.Columns.Length];
+            for (var i = 0; i < nullTarget.Length; i++)
+                nullTarget[i] = SqlValue.Null(destinationTable.Columns[i].Type);
+
+            foreach (var (newValues, sourceValues) in pendingInserts)
+            {
+                var bytes = output.ProjectRow(insertedValues: newValues, deletedValues: nullTarget, sourceValues: sourceValues, action: "INSERT");
+                if (bytes is not null)
+                    outputRows!.Add(bytes);
+            }
+            foreach (var (_, _, oldValues, newValues, sourceValues) in pendingUpdates)
+            {
+                var bytes = output.ProjectRow(insertedValues: newValues, deletedValues: oldValues, sourceValues: sourceValues, action: "UPDATE");
+                if (bytes is not null)
+                    outputRows!.Add(bytes);
+            }
+            foreach (var (_, _, oldValues, sourceValues) in pendingDeletes)
+            {
+                var bytes = output.ProjectRow(insertedValues: nullTarget, deletedValues: oldValues, sourceValues: sourceValues, action: "DELETE");
+                if (bytes is not null)
+                    outputRows!.Add(bytes);
+            }
+        }
+
+        // Fire triggers in INSERT → UPDATE → DELETE order (probe-confirmed).
+        var totalAffected = pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count;
+        if (pendingInserts.Count > 0 && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert))
+        {
+            var insertedRows = new List<SqlValue[]>(pendingInserts.Count);
+            foreach (var (newValues, _) in pendingInserts)
+                insertedRows.Add(newValues);
+            context.Connection.LastStatementRowCount = pendingInserts.Count;
             context.Batch.Connection.Simulation.FireTriggers(
                 context.Batch, destinationTable, TriggerActions.Insert,
-                insertedRows: triggerRows, deletedRows: null,
-                affectedRowCount: triggerRows.Count);
+                insertedRows: insertedRows, deletedRows: null,
+                affectedRowCount: pendingInserts.Count);
+        }
+        if (pendingUpdates.Count > 0 && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Update))
+        {
+            var insertedRows = new List<SqlValue[]>(pendingUpdates.Count);
+            var deletedRows = new List<SqlValue[]>(pendingUpdates.Count);
+            foreach (var (_, _, oldValues, newValues, _) in pendingUpdates)
+            {
+                insertedRows.Add(newValues);
+                deletedRows.Add(oldValues);
+            }
+            context.Connection.LastStatementRowCount = pendingUpdates.Count;
+            context.Batch.Connection.Simulation.FireTriggers(
+                context.Batch, destinationTable, TriggerActions.Update,
+                insertedRows: insertedRows, deletedRows: deletedRows,
+                affectedRowCount: pendingUpdates.Count);
+        }
+        if (pendingDeletes.Count > 0 && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Delete))
+        {
+            var deletedRows = new List<SqlValue[]>(pendingDeletes.Count);
+            foreach (var (_, _, oldValues, _) in pendingDeletes)
+                deletedRows.Add(oldValues);
+            context.Connection.LastStatementRowCount = pendingDeletes.Count;
+            context.Batch.Connection.Simulation.FireTriggers(
+                context.Batch, destinationTable, TriggerActions.Delete,
+                insertedRows: null, deletedRows: deletedRows,
+                affectedRowCount: pendingDeletes.Count);
         }
 
-        return output is { HasTarget: false } o2
-            ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)
-            : new SimulatedNonQuery(insertedCount);
+        context.Connection.LastStatementRowCount = totalAffected;
+        return output is not null
+            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!)
+            : new SimulatedNonQuery(totalAffected);
     }
 
     /// <summary>
     /// Parses one or more comma-separated <c>(...)</c> tuples following a
     /// <c>VALUES</c> keyword. Enters with <see cref="ParserContext.Token"/>
-    /// on <c>VALUES</c>; on return <see cref="ParserContext.Token"/> sits on
-    /// the first token after the last tuple's closing paren — typically a
-    /// surrounding <c>)</c> for MERGE or a clause keyword for INSERT.
+    /// on <c>VALUES</c>; on return the cursor sits on the first token
+    /// after the last tuple's closing paren. Shared with INSERT.
     /// </summary>
     private static List<Expression[]> ParseValuesTuples(ParserContext context)
     {
@@ -383,5 +1106,123 @@ partial class Simulation
         while (context.GetNextOptional() is Operator { Character: ',' });
 
         return tuples;
+    }
+
+    private enum WhenClauseKind
+    {
+        Matched,
+        NotMatchedByTarget,
+        NotMatchedBySource,
+    }
+
+    private enum MergeActionKind
+    {
+        Insert,
+        Update,
+        Delete,
+    }
+
+    private sealed class WhenClause(
+        WhenClauseKind kind,
+        MergeActionKind action,
+        BooleanExpression? searchCondition,
+        List<(int Ordinal, Expression Expr)>? assignments,
+        HeapColumn[]? insertColumns,
+        Expression[]? insertValues)
+    {
+        public readonly WhenClauseKind Kind = kind;
+        public readonly MergeActionKind Action = action;
+        public readonly BooleanExpression? SearchCondition = searchCondition;
+        public readonly List<(int Ordinal, Expression Expr)>? Assignments = assignments;
+        public readonly HeapColumn[]? InsertColumns = insertColumns;
+        public readonly Expression[]? InsertValues = insertValues;
+    }
+
+    /// <summary>
+    /// Synthetic expression representing MERGE's <c>$action</c> pseudo-
+    /// column. Runtime evaluation goes through the <see cref="MergeOutputProjection.ProjectRow"/>
+    /// per-row context which threads the action verb in directly; the
+    /// <see cref="Expression.Run"/> override here exists only to satisfy
+    /// the Expression contract and isn't called on the MERGE OUTPUT path.
+    /// </summary>
+    private sealed class MergeActionReference : Expression
+    {
+        public override SqlType GetSqlType(Func<MultiPartName, SqlType>? resolver) => NVarcharSqlType.Get(10);
+        public override SqlValue Run(RuntimeContext runtime) => SqlValue.Null(NVarcharSqlType.Get(10));
+        internal override string DebugDisplay() => "$action";
+    }
+
+    /// <summary>
+    /// Drills past any <see cref="Parser.Expressions.NamedExpression"/>
+    /// wrapper (from <c>AS alias</c>) to detect the
+    /// <see cref="MergeActionReference"/> pseudo-column at any nesting
+    /// depth.
+    /// </summary>
+    private static bool IsMergeActionRef(Expression expr) =>
+        expr switch
+        {
+            MergeActionReference => true,
+            Parser.Expressions.NamedExpression n => IsMergeActionRef(n.Inner),
+            _ => false,
+        };
+
+    /// <summary>
+    /// MERGE-flavored output projection. Mirrors <see cref="OutputProjection"/>'s
+    /// shape but resolves INSERTED + DELETED + source-alias + <c>$action</c>
+    /// references; the per-row caller supplies the action verb directly
+    /// rather than the projection inferring it.
+    /// </summary>
+    private sealed class MergeOutputProjection(
+        Expression[] expressions,
+        string[] columnNames,
+        SqlType[] schema,
+        HeapTable destinationTable,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        BatchContext batch)
+    {
+        public readonly SqlType[] Schema = schema;
+        public readonly string[] ColumnNames = columnNames;
+
+        public byte[]? ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues, SqlValue[]? sourceValues, string action)
+        {
+            SqlValue Resolve(MultiPartName name)
+            {
+                if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED"))
+                {
+                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                    {
+                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                            return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : insertedValues[i];
+                    }
+                }
+                else if (Collation.Default.Equals(name.ImmediateQualifier, "DELETED"))
+                {
+                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                    {
+                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                            return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : deletedValues[i];
+                    }
+                }
+                else if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+                {
+                    for (var i = 0; i < sourceColumnNames.Length; i++)
+                    {
+                        if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                            return sourceValues is null ? SqlValue.Null(this.Schema[0]) : sourceValues[i];
+                    }
+                }
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+            }
+
+            var projected = new SqlValue[expressions.Length];
+            for (var i = 0; i < expressions.Length; i++)
+            {
+                projected[i] = IsMergeActionRef(expressions[i])
+                    ? SqlValue.FromNVarchar(action)
+                    : expressions[i].Run(new RuntimeContext(Resolve, batch));
+            }
+            return RowEncoder.EncodeRow(this.Schema, projected);
+        }
     }
 }
