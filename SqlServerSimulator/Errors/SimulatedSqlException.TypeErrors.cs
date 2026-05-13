@@ -168,6 +168,17 @@ partial class SimulatedSqlException
         new("Conversion failed when converting date and/or time from character string.", 241, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 9807: <c>CONVERT(date-like, '...', N)</c>
+    /// received a string that parses as a valid date but doesn't follow the
+    /// specific style number's format. Distinct from Msg 241 (general bad
+    /// format) — apps that explicitly check for style-specific input shape
+    /// can distinguish "wrong format" from "not a date at all". Probe-
+    /// confirmed verbatim against SQL Server 2025 (2026-05-13).
+    /// </summary>
+    internal static SimulatedSqlException InputCharacterStringStyleMismatch(int style) =>
+        new($"The input character string does not follow style {style}, either change the input character string or use a different style.", 9807, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 295: the <c>smalldatetime</c>-specific
     /// counterpart of <see cref="ConversionFailedDateTimeFromString"/>. SQL
     /// Server uses a distinct Msg number and a target-named message text

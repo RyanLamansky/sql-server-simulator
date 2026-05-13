@@ -248,5 +248,6 @@ internal sealed class Cast : Expression
         or 8114 // ConvertingDataTypeError
         or 8115 // ArithmeticOverflow
         or 8169 // ConversionFailedFromStringToUniqueIdentifier
-        or 8170; // InsufficientResultSpaceForUniqueIdentifier
+        or 8170 // InsufficientResultSpaceForUniqueIdentifier
+        or 9807; // InputCharacterStringStyleMismatch
 }

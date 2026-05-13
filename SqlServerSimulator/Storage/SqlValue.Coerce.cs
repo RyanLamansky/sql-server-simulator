@@ -377,44 +377,61 @@ internal readonly partial struct SqlValue
 
     /// <summary>
     /// CONVERT-style string formatting for a date-like source. Implements
-    /// SQL Server styles <c>0</c>, <c>120</c>, and <c>121</c> only — anything
-    /// else raises Msg 281 with the source-family wording. Style <c>121</c>
-    /// matches the simulator's CAST default for date / datetime2 / time /
-    /// datetimeoffset, while style <c>0</c> switches those types to the
-    /// legacy <c>"Mar 15 2024 10:20AM"</c> presentation that <c>datetime</c>
-    /// and <c>smalldatetime</c> already use by default.
+    /// styles <c>0</c> (default per type), <c>1</c>/<c>101</c>
+    /// (<c>mm/dd/yy</c> / <c>mm/dd/yyyy</c>, US),
+    /// <c>10</c>/<c>110</c> (<c>mm-dd-yy</c> / <c>mm-dd-yyyy</c>, USA),
+    /// <c>12</c>/<c>112</c> (<c>yymmdd</c> / <c>yyyymmdd</c>, ISO compact),
+    /// <c>102</c> (<c>yyyy.mm.dd</c>, ANSI), <c>103</c> (<c>dd/mm/yyyy</c>,
+    /// UK/French), <c>23</c> (<c>yyyy-mm-dd</c>, date-only ISO),
+    /// <c>120</c>/<c>121</c> (ODBC canonical, with and without millisecond
+    /// fraction), and <c>126</c>/<c>127</c> (ISO 8601 with <c>T</c>
+    /// separator; <c>127</c> projects datetimeoffset to UTC with a
+    /// trailing <c>Z</c>). Probe-confirmed verbatim against SQL Server
+    /// 2025 (2026-05-13). Any other style raises Msg 281 with the
+    /// source-family wording.
     /// </summary>
     /// <remarks>
-    /// Caller (the <c>CONVERT</c> expression) has already verified the
-    /// target is a character-string type; the method just emits the
-    /// formatted text and re-types it.
+    /// The "date-only" style family (<c>1</c>/<c>101</c>/<c>10</c>/<c>110</c>/
+    /// <c>12</c>/<c>112</c>/<c>23</c>/<c>102</c>/<c>103</c>) emits just the
+    /// calendar-date portion regardless of source: <c>SELECT CONVERT(varchar,
+    /// CAST('2026-05-13 14:25:36' AS DATETIME), 112)</c> returns
+    /// <c>20260513</c>, not <c>20260513 14:25:36</c>. The shared
+    /// <see cref="FormatDateOnlyStyle"/> helper does that formatting; each
+    /// per-type case delegates to it for those styles and reserves its own
+    /// arms for styles 0 / 120 / 121 / 126 / 127 which include time
+    /// information.
     /// </remarks>
     internal SqlValue CoerceDateTimeToStringWithStyle(SqlType target, int style) => this.Type switch
     {
-        _ when this.Type == SqlType.Date => style is 0 or 120 or 121
-            ? FromString(target, this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
-            : throw SimulatedSqlException.InvalidStyleForCharacterString(style, "date"),
-        _ when this.Type == SqlType.DateTime => style switch
+        _ when this.Type == SqlType.Date => FromString(target, style is 0 or 120 or 121 or 23 or 126 or 127
+            ? this.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+            : FormatDateOnlyStyle(style, this.AsDate, "date")),
+        _ when this.Type == SqlType.DateTime => FromString(target, style switch
         {
-            0 => FromString(target, FormatLegacyDateTime(this.AsDateTime)),
-            120 => FromString(target, this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-            121 => FromString(target, this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetime"),
-        },
-        _ when this.Type == SqlType.SmallDateTime => style switch
+            0 => FormatLegacyDateTime(this.AsDateTime),
+            120 => this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            121 => this.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
+            126 or 127 => this.AsDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture),
+            _ => FormatDateOnlyStyle(style, DateOnly.FromDateTime(this.AsDateTime), "datetime"),
+        }),
+        _ when this.Type == SqlType.SmallDateTime => FromString(target, style switch
         {
-            0 => FromString(target, FormatLegacyDateTime(this.AsSmallDateTime)),
-            120 => FromString(target, this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-            121 => FromString(target, this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "smalldatetime"),
-        },
-        DateTime2SqlType srcDt2 => style switch
+            0 => FormatLegacyDateTime(this.AsSmallDateTime),
+            120 => this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            121 => this.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
+            126 or 127 => this.AsSmallDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture),
+            _ => FormatDateOnlyStyle(style, DateOnly.FromDateTime(this.AsSmallDateTime), "smalldatetime"),
+        }),
+        DateTime2SqlType srcDt2 => FromString(target, style switch
         {
-            0 => FromString(target, FormatLegacyDateTime(this.AsDateTime2)),
-            120 => FromString(target, this.AsDateTime2.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-            121 => FromString(target, this.AsDateTime2.ToString(DateTime2Format(srcDt2.precision), CultureInfo.InvariantCulture)),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetime2"),
-        },
+            0 => FormatLegacyDateTime(this.AsDateTime2),
+            120 => this.AsDateTime2.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            121 => this.AsDateTime2.ToString(DateTime2Format(srcDt2.precision), CultureInfo.InvariantCulture),
+            126 or 127 => this.AsDateTime2.ToString(srcDt2.precision == 0
+                ? "yyyy-MM-ddTHH:mm:ss"
+                : "yyyy-MM-ddTHH:mm:ss." + new string('f', srcDt2.precision), CultureInfo.InvariantCulture),
+            _ => FormatDateOnlyStyle(style, DateOnly.FromDateTime(this.AsDateTime2), "datetime2"),
+        }),
         TimeSqlType srcTime => style switch
         {
             0 => FromString(target, FormatLegacyTimeOfDay(this.AsTime)),
@@ -428,9 +445,166 @@ internal readonly partial struct SqlValue
                 + " " + this.AsDateTimeOffset.ToString("zzz", CultureInfo.InvariantCulture)),
             120 => FromString(target, FormatDateTimeOffset(this.AsDateTimeOffset, 0)),
             121 => FromString(target, FormatDateTimeOffset(this.AsDateTimeOffset, srcDto.precision)),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetimeoffset"),
+            // Style 126: keep the original offset (`+05:30`).
+            // Style 127: project to UTC and emit with trailing `Z`.
+            126 => FromString(target, FormatDateTimeOffsetIso(this.AsDateTimeOffset, srcDto.precision)),
+            127 => FromString(target, FormatDateTimeOffsetIso(this.AsDateTimeOffset.ToUniversalTime(), srcDto.precision).Replace("+00:00", "Z", StringComparison.Ordinal)),
+            _ => FromString(target, FormatDateOnlyStyle(style, DateOnly.FromDateTime(this.AsDateTimeOffset.DateTime), "datetimeoffset")),
         },
         _ => throw new NotSupportedException($"CONVERT style codes aren't implemented for {this.Type}."),
+    };
+
+    /// <summary>
+    /// Shared formatter for the "date-only" CONVERT style family (1 / 10 /
+    /// 12 / 23 / 101 / 102 / 103 / 110 / 112). Every date-like source that
+    /// has a calendar portion (date / datetime / smalldatetime / datetime2
+    /// / datetimeoffset) routes through this for those styles — they emit
+    /// just the date portion regardless of source precision. The
+    /// <paramref name="sourceTypeWord"/> threads the source family name
+    /// into the Msg 281 wording on an unrecognized style.
+    /// </summary>
+    private static string FormatDateOnlyStyle(int style, DateOnly date, string sourceTypeWord) => style switch
+    {
+        1 => date.ToString("MM/dd/yy", CultureInfo.InvariantCulture),
+        101 => date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture),
+        10 => date.ToString("MM-dd-yy", CultureInfo.InvariantCulture),
+        110 => date.ToString("MM-dd-yyyy", CultureInfo.InvariantCulture),
+        12 => date.ToString("yyMMdd", CultureInfo.InvariantCulture),
+        112 => date.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
+        102 => date.ToString("yyyy.MM.dd", CultureInfo.InvariantCulture),
+        103 => date.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture),
+        23 => date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, sourceTypeWord),
+    };
+
+    /// <summary>
+    /// ISO 8601 formatter for <c>datetimeoffset</c> CONVERT style 126 (and,
+    /// after a <c>ToUniversalTime</c>, style 127). The <c>T</c> separator
+    /// distinguishes ISO from the ODBC-canonical 121 form; the offset is
+    /// preserved verbatim with the canonical <c>+HH:mm</c> shape.
+    /// </summary>
+    private static string FormatDateTimeOffsetIso(DateTimeOffset value, int precision) => value.ToString(
+        precision == 0
+            ? "yyyy-MM-ddTHH:mm:sszzz"
+            : "yyyy-MM-ddTHH:mm:ss." + new string('f', precision) + "zzz",
+        CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// CONVERT-style string formatting for a <c>money</c>/<c>smallmoney</c>
+    /// source. Style <c>0</c> emits with no thousands separators and 2
+    /// fractional digits (<c>1234567.89</c>); style <c>1</c> adds comma
+    /// thousands separators (<c>1,234,567.89</c>); style <c>2</c> drops the
+    /// thousands separators and uses 4 fractional digits (<c>1234567.8910</c>).
+    /// Probe-confirmed verbatim against SQL Server 2025 (2026-05-13).
+    /// Any other style raises Msg 281 with <c>"money"</c> as the source
+    /// family wording.
+    /// </summary>
+    internal SqlValue CoerceMoneyToStringWithStyle(SqlType target, int style)
+    {
+        var value = this.AsMoney;
+        var formatted = style switch
+        {
+            0 => value.ToString("F2", CultureInfo.InvariantCulture),
+            1 => value.ToString("N2", CultureInfo.InvariantCulture),
+            2 => value.ToString("F4", CultureInfo.InvariantCulture),
+            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "money"),
+        };
+        return FromString(target, formatted);
+    }
+
+    /// <summary>
+    /// String → date-like coercion with a CONVERT style hint. Each style
+    /// pins the acceptable input format(s); a string that matches the
+    /// style's format parses; a string that's a valid date by some OTHER
+    /// format raises Msg 9807 (style mismatch); a string that's not a
+    /// valid date by any format raises Msg 241 (general parse failure).
+    /// Probe-confirmed against SQL Server 2025 (2026-05-13): all three
+    /// disposition paths land on the matching Msg numbers / wording.
+    /// </summary>
+    /// <remarks>
+    /// Styles supported here: <c>1</c>/<c>101</c>, <c>10</c>/<c>110</c>,
+    /// <c>12</c>/<c>112</c>, <c>102</c>, <c>103</c>, <c>23</c>,
+    /// <c>126</c>/<c>127</c> (ISO 8601 with optional fractional seconds).
+    /// Other styles fall through to the default style-less parser via
+    /// caller dispatch.
+    /// </remarks>
+    internal SqlValue CoerceStringToDateLikeWithStyle(SqlType target, int style)
+    {
+        var input = this.AsString;
+        var formats = StyleSpecificDateFormats(style);
+        if (formats is null)
+        {
+            // Style isn't in the parser's known set; fall back to default
+            // style-less parsing. Matches SQL Server's "silently ignore
+            // unrecognized style on string source" behavior for the styles
+            // that lack a dedicated input parser (e.g. styles only meaningful
+            // on output, like style 0 with mixed-type sources).
+            return this.CoerceTo(target);
+        }
+        // AssumeUniversal + AdjustToUniversal keeps the wall-clock reading
+        // when the input carries a `Z` suffix (style 127's UTC form): the
+        // parser would otherwise reinterpret `Z` as "convert to local
+        // timezone", which on a non-UTC host (e.g. Windows in PT) returns a
+        // value offset from the input. Real SQL Server's datetime2 target
+        // has no offset surface, so it preserves the literal wall-clock
+        // time verbatim — those flags get us the same result deterministically
+        // regardless of host timezone.
+        const DateTimeStyles ParseStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
+        if (DateTime.TryParseExact(input, formats, CultureInfo.InvariantCulture, ParseStyles, out var parsed))
+        {
+            // Re-encode via the simulator's own datetime2(7) path so target-
+            // specific narrowing (smalldatetime range, datetime2 precision,
+            // date-only truncation) goes through one route.
+            return FromDateTime2(SqlType.GetDateTime2(7), parsed).CoerceTo(target);
+        }
+        // Style didn't match. Distinguish "parseable as some date" (Msg 9807)
+        // from "not a date at all" (Msg 241) by trying the default parser.
+        if (DateTime.TryParse(input, CultureInfo.InvariantCulture, ParseStyles, out _))
+            throw SimulatedSqlException.InputCharacterStringStyleMismatch(style);
+        throw SimulatedSqlException.ConversionFailedDateTimeFromString();
+    }
+
+    /// <summary>
+    /// Returns the input-format strings accepted by <see cref="CoerceStringToDateLikeWithStyle"/>
+    /// for the given style code, or <see langword="null"/> when the style
+    /// has no dedicated input parser (caller falls back to the default
+    /// style-less parser). Each style allows the trailing-time portion as
+    /// an optional extra: real SQL Server accepts <c>'20260513 14:25:36'</c>
+    /// under style 112 by parsing the date portion against style and the
+    /// time portion as free-form — the alternative formats here capture
+    /// that "date + optional time" shape.
+    /// </summary>
+    private static string[]? StyleSpecificDateFormats(int style) => style switch
+    {
+        1 => ["MM/dd/yy", "MM/dd/yy HH:mm:ss", "MM/dd/yy HH:mm:ss.fff"],
+        101 => ["MM/dd/yyyy", "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm:ss.fff"],
+        10 => ["MM-dd-yy", "MM-dd-yy HH:mm:ss", "MM-dd-yy HH:mm:ss.fff"],
+        110 => ["MM-dd-yyyy", "MM-dd-yyyy HH:mm:ss", "MM-dd-yyyy HH:mm:ss.fff"],
+        12 => ["yyMMdd", "yyMMdd HH:mm:ss", "yyMMdd HH:mm:ss.fff"],
+        112 => ["yyyyMMdd", "yyyyMMdd HH:mm:ss", "yyyyMMdd HH:mm:ss.fff"],
+        102 => ["yyyy.MM.dd", "yyyy.MM.dd HH:mm:ss", "yyyy.MM.dd HH:mm:ss.fff"],
+        103 => ["dd/MM/yyyy", "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm:ss.fff"],
+        23 => ["yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm:ss.fff", "yyyy-MM-dd HH:mm:ss.fffffff"],
+        126 or 127 =>
+        [
+            "yyyy-MM-ddTHH:mm:ss",
+            "yyyy-MM-ddTHH:mm:ss.f",
+            "yyyy-MM-ddTHH:mm:ss.ff",
+            "yyyy-MM-ddTHH:mm:ss.fff",
+            "yyyy-MM-ddTHH:mm:ss.ffff",
+            "yyyy-MM-ddTHH:mm:ss.fffff",
+            "yyyy-MM-ddTHH:mm:ss.ffffff",
+            "yyyy-MM-ddTHH:mm:ss.fffffff",
+            "yyyy-MM-ddTHH:mm:ssZ",
+            "yyyy-MM-ddTHH:mm:ss.fZ",
+            "yyyy-MM-ddTHH:mm:ss.ffZ",
+            "yyyy-MM-ddTHH:mm:ss.fffZ",
+            "yyyy-MM-ddTHH:mm:ss.ffffZ",
+            "yyyy-MM-ddTHH:mm:ss.fffffZ",
+            "yyyy-MM-ddTHH:mm:ss.ffffffZ",
+            "yyyy-MM-ddTHH:mm:ss.fffffffZ",
+        ],
+        _ => null,
     };
 
     /// <summary>

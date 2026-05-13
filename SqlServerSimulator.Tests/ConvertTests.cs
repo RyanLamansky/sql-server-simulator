@@ -172,4 +172,110 @@ public sealed class ConvertTests
         var ex = Throws<DbException>(() => ExecuteScalar("select convert(notatype, 1)"));
         Contains("notatype", ex.Message);
     }
+
+    [TestMethod]
+    [DataRow(1, "05/13/26")]
+    [DataRow(101, "05/13/2026")]
+    [DataRow(10, "05-13-26")]
+    [DataRow(110, "05-13-2026")]
+    [DataRow(12, "260513")]
+    [DataRow(112, "20260513")]
+    [DataRow(102, "2026.05.13")]
+    [DataRow(103, "13/05/2026")]
+    [DataRow(23, "2026-05-13")]
+    [DataRow(126, "2026-05-13T14:25:36.790")]
+    [DataRow(127, "2026-05-13T14:25:36.790")]
+    public void Convert_DateTimeStyle(int style, string expected) =>
+        AreEqual(expected, ExecuteScalar($"declare @d datetime = '2026-05-13T14:25:36.789'; select convert(varchar(40), @d, {style})"));
+
+    [TestMethod]
+    [DataRow(1, "05/13/26")]
+    [DataRow(101, "05/13/2026")]
+    [DataRow(112, "20260513")]
+    [DataRow(23, "2026-05-13")]
+    [DataRow(126, "2026-05-13")]
+    public void Convert_DateStyle(int style, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select convert(varchar(40), cast('2026-05-13' as date), {style})"));
+
+    [TestMethod]
+    public void Convert_DateTime2Style126_FullPrecision() =>
+        AreEqual("2026-05-13T14:25:36.1234567", ExecuteScalar(
+            "select convert(varchar(40), cast('2026-05-13T14:25:36.1234567' as datetime2(7)), 126)"));
+
+    [TestMethod]
+    public void Convert_DateTimeOffsetStyle126_PreservesOffset() =>
+        AreEqual("2026-05-13T14:25:36.1234567+05:30", ExecuteScalar(
+            "select convert(varchar(40), cast('2026-05-13T14:25:36.1234567+05:30' as datetimeoffset(7)), 126)"));
+
+    [TestMethod]
+    public void Convert_DateTimeOffsetStyle127_ProjectsToUtcWithZ() =>
+        AreEqual("2026-05-13T08:55:36.1234567Z", ExecuteScalar(
+            "select convert(varchar(40), cast('2026-05-13T14:25:36.1234567+05:30' as datetimeoffset(7)), 127)"));
+
+    [TestMethod]
+    [DataRow(101, "05/13/2026")]
+    [DataRow(112, "20260513")]
+    [DataRow(102, "2026.05.13")]
+    [DataRow(103, "13/05/2026")]
+    [DataRow(23, "2026-05-13")]
+    public void Convert_StringToDateWithStyle(int style, string input) =>
+        AreEqual(new DateTime(2026, 5, 13), ExecuteScalar($"select convert(date, '{input}', {style})"));
+
+    [TestMethod]
+    public void Convert_StringToDateTime2_Style126() =>
+        AreEqual(new DateTime(2026, 5, 13, 14, 25, 36, 789), ExecuteScalar(
+            "select convert(datetime2(3), '2026-05-13T14:25:36.789', 126)"));
+
+    [TestMethod]
+    public void Convert_StringToDateTime2_Style127WithZ() =>
+        AreEqual(new DateTime(2026, 5, 13, 14, 25, 36, 789), ExecuteScalar(
+            "select convert(datetime2(3), '2026-05-13T14:25:36.789Z', 127)"));
+
+    [TestMethod]
+    public void Convert_StringToDate_StyleMismatchRaisesMsg9807()
+    {
+        var ex = Throws<DbException>(() => ExecuteScalar(
+            "select convert(date, '05/13/2026', 112)"));
+        AreEqual("9807", ex.Data["HelpLink.EvtID"]);
+        Contains("style 112", ex.Message);
+    }
+
+    [TestMethod]
+    public void Convert_StringToDate_NotADate_RaisesMsg241()
+    {
+        var ex = Throws<DbException>(() => ExecuteScalar(
+            "select convert(date, 'nope', 112)"));
+        AreEqual("241", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void TryConvert_StringToDate_StyleMismatchReturnsNull() =>
+        IsInstanceOfType<DBNull>(ExecuteScalar("select try_convert(date, '05/13/2026', 112)"));
+
+    [TestMethod]
+    public void TryConvert_StringToDate_NotADateReturnsNull() =>
+        IsInstanceOfType<DBNull>(ExecuteScalar("select try_convert(date, 'nope', 112)"));
+
+    [TestMethod]
+    [DataRow(0, "1234567.89")]
+    [DataRow(1, "1,234,567.89")]
+    [DataRow(2, "1234567.8910")]
+    public void Convert_MoneyStyle(int style, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select convert(varchar(40), cast(1234567.891 as money), {style})"));
+
+    [TestMethod]
+    public void Convert_MoneyStyle_Negative()
+        => AreEqual("-12.50", ExecuteScalar("select convert(varchar(40), cast(-12.5 as money), 0)"));
+
+    [TestMethod]
+    public void Convert_SmallMoneyStyle1()
+        => AreEqual("1,234.56", ExecuteScalar("select convert(varchar(40), cast(1234.56 as smallmoney), 1)"));
+
+    [TestMethod]
+    public void Convert_MoneyStyle_UnknownStyle_RaisesMsg281()
+    {
+        var ex = Throws<DbException>(() => ExecuteScalar("select convert(varchar(40), cast(1.5 as money), 99)"));
+        AreEqual("281", ex.Data["HelpLink.EvtID"]);
+        Contains("money", ex.Message);
+    }
 }

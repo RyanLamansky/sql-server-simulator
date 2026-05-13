@@ -83,14 +83,29 @@ internal sealed class ConvertExpression : Expression
 
         try
         {
-            // Style is meaningful only for date-like sources targeting a
-            // character string; everywhere else SQL Server silently
-            // ignores it.
-            return styleCode is int sc
-                && sourceValue.Type.Category == SqlTypeCategory.DateTime
-                && this.targetType.Category == SqlTypeCategory.String
-                    ? sourceValue.CoerceDateTimeToStringWithStyle(this.targetType, sc)
-                    : Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
+            // Style is meaningful for: date-like → string (formatted output),
+            // string → date-like (style-aware input parser), and money →
+            // string (currency formatting). Everywhere else SQL Server
+            // silently ignores it.
+            if (styleCode is int sc)
+            {
+                if (sourceValue.Type.Category == SqlTypeCategory.DateTime
+                    && this.targetType.Category == SqlTypeCategory.String)
+                {
+                    return sourceValue.CoerceDateTimeToStringWithStyle(this.targetType, sc);
+                }
+                if (sourceValue.Type.Category == SqlTypeCategory.String
+                    && this.targetType.Category == SqlTypeCategory.DateTime)
+                {
+                    return sourceValue.CoerceStringToDateLikeWithStyle(this.targetType, sc);
+                }
+                if (sourceValue.Type.Category == SqlTypeCategory.Money
+                    && this.targetType.Category == SqlTypeCategory.String)
+                {
+                    return sourceValue.CoerceMoneyToStringWithStyle(this.targetType, sc);
+                }
+            }
+            return Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
         }
         catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
         {
