@@ -358,11 +358,21 @@ partial class Simulation
                     rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
             }
 
-            // Auto-populate period columns on system-versioned temporal tables:
-            // ROW START = the statement's frozen UtcNow, ROW END = max
-            // datetime2 ('9999-12-31 23:59:59.9999999' — DateTime.MaxValue at
-            // datetime2(7) precision).
-            if (destinationTable.PeriodColumns is { } pc && destinationTable.SystemVersioning is not null)
+            // Auto-populate period columns whose ordinals carry the GENERATED
+            // ALWAYS markers: ROW START = the statement's frozen UtcNow, ROW
+            // END = max datetime2 ('9999-12-31 23:59:59.9999999' —
+            // DateTime.MaxValue at datetime2(7) precision). Gating on the
+            // per-column GeneratedAs (not on the table-level SystemVersioning
+            // link) matches real SQL Server's behavior probed 2026-05-13:
+            // after ALTER TABLE … SET (SYSTEM_VERSIONING = OFF), the parent's
+            // GENERATED ALWAYS column markers persist and INSERT continues to
+            // auto-populate. The (former) history sibling never reaches here:
+            // BuildHistoryTable strips the GENERATED markers, so its
+            // PeriodColumns ordinals carry GeneratedAs.None and the gate
+            // skips. (While versioning is still ON, INSERT into the history
+            // sibling is rejected upstream by Msg 13559.)
+            if (destinationTable.PeriodColumns is { } pc
+                && destinationTable.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
             {
                 rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(destinationTable.Columns[pc.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
                 rowValues[pc.EndOrdinal] = SqlValue.FromDateTime2(destinationTable.Columns[pc.EndOrdinal].Type, DateTime.MaxValue);

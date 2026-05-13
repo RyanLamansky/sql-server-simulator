@@ -601,4 +601,27 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotDropTemporalTable(string qualifiedTableName) =>
         new($"Drop table operation failed on table '{qualifiedTableName}' because it is not a supported operation on system-versioned temporal tables.", 13552, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13591: <c>ALTER TABLE … SET (SYSTEM_VERSIONING
+    /// = OFF)</c> targeted a table that isn't system-versioned. Fires for
+    /// plain regular tables and for the history sibling itself (the history
+    /// sibling carries the <c>HISTORY_TABLE</c> role but doesn't "have"
+    /// versioning — only the parent does). Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException SystemVersioningNotOn(string qualifiedTableName) =>
+        new($"SYSTEM_VERSIONING is not turned ON for table '{qualifiedTableName}'.", 13591, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4902: <c>ALTER TABLE</c> named a target that
+    /// doesn't resolve to an existing table. The qualified name is reported
+    /// verbatim in double-quotes (distinct from the single-quoted form Msg
+    /// 208 uses for un-qualified DML name resolution). Probe-confirmed
+    /// wording against SQL Server 2025: <c>ALTER TABLE dbo.tNoSuch SET
+    /// (SYSTEM_VERSIONING = OFF)</c> on a missing target raises this rather
+    /// than the generic Msg 208.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindObjectForAlterTable(string nameAsWritten) =>
+        new($"Cannot find the object \"{nameAsWritten}\" because it does not exist or you do not have permissions.", 4902, 16, 1);
 }

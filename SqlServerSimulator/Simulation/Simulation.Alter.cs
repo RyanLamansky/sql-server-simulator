@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -32,6 +33,8 @@ partial class Simulation
                 return TryParseAlterSequence(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:
                 return TryParseAlterSchemaTransfer(context);
+            case ReservedKeyword { Keyword: Keyword.Table }:
+                return TryParseAlterTable(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:
@@ -393,6 +396,85 @@ partial class Simulation
         }
 
         throw SimulatedSqlException.CannotFindObject(leafName);
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER TABLE [schema.]name SET (SYSTEM_VERSIONING = OFF)</c>.
+    /// The only <c>ALTER TABLE</c> shape modeled — every other shape (ADD /
+    /// DROP COLUMN, ADD / DROP CONSTRAINT, SET other options, ENABLE /
+    /// DISABLE, REBUILD, etc.) raises <see cref="NotSupportedException"/> at
+    /// the post-name dispatch point. Entered with <see cref="ParserContext.Token"/>
+    /// on the <c>TABLE</c> keyword.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Probe-confirmed error paths (SQL Server 2025, 2026-05-13):
+    /// </para>
+    /// <list type="bullet">
+    /// <item>Target name doesn't resolve → <strong>Msg 4902</strong>
+    /// (alter-table-specific table-not-found variant; distinct from Msg 208's
+    /// generic name-resolution wording).</item>
+    /// <item>Target exists but isn't system-versioned (plain regular table
+    /// or the history sibling itself) → <strong>Msg 13591</strong>.</item>
+    /// <item>Grammar variants other than <c>SET (SYSTEM_VERSIONING = OFF)</c>
+    /// → <see cref="NotSupportedException"/>. Real SQL Server reaches a
+    /// range of error codes (Msg 102 syntax for typos, Msg 13510 for the
+    /// <c>= ON</c> path without a period definition); the simulator collapses
+    /// these to one not-supported signal since the broader ALTER TABLE
+    /// grammar isn't modeled.</item>
+    /// </list>
+    /// <para>
+    /// Successful flip clears <see cref="HeapTable.SystemVersioning"/> on the
+    /// parent (the parent's link to its history sibling) and
+    /// <see cref="HeapTable.IsHistoryTable"/> on the sibling — both tables
+    /// revert to plain regular status. Period and GENERATED ALWAYS column
+    /// metadata stays intact (probe-confirmed: <c>sys.columns.generated_always_type_desc</c>
+    /// and <c>is_hidden</c> remain after SET OFF). DROP TABLE on either now
+    /// succeeds.
+    /// </para>
+    /// </remarks>
+    private static bool TryParseAlterTable(ParserContext context)
+    {
+        context.MoveNextRequired();
+        if (context.Token is not Name)
+            return false;
+        var tableName = BatchContext.ParseObjectName(context);
+
+        // Cursor is on the last name segment; advance to the post-name token.
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
+            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF) is supported.");
+
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
+            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF) is supported.");
+
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Off })
+            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF) is supported (the = ON form requires the parent column-list grammar which isn't modeled).");
+
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+
+        if (table.SystemVersioning is null)
+            throw SimulatedSqlException.SystemVersioningNotOn(QualifyTableName(table, context.CurrentDatabase));
+
+        // Flip both tables to regular status. Period and GENERATED ALWAYS
+        // column metadata stays — only the parent → history link and the
+        // sibling's history-role flag clear.
+        var historyTable = table.SystemVersioning;
+        table.SystemVersioning = null;
+        historyTable.IsHistoryTable = false;
+        return true;
     }
 
     /// <summary>
