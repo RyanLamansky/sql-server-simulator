@@ -134,7 +134,7 @@ internal abstract class BooleanExpression
             case ReservedKeyword { Keyword: Keyword.Like }:
                 return ParseLike(left, context, negated: false);
             case ReservedKeyword { Keyword: Keyword.Is }:
-                return ParseIsNullSuffix(left, context);
+                return ParseIsSuffix(left, context);
             case ReservedKeyword { Keyword: Keyword.In }:
                 return ParseInList(left, context, negated: false);
             case ReservedKeyword { Keyword: Keyword.Between }:
@@ -285,13 +285,14 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
-    /// Parses the <c>IS [NOT] NULL</c> suffix after an expression. Entered
-    /// with <see cref="ParserContext.Token"/> on the <c>IS</c> keyword;
-    /// consumes <c>IS</c>, optional <c>NOT</c>, and the required <c>NULL</c>.
-    /// Leaves the token on the next un-consumed token (typically a boolean
-    /// combinator, comma, or end-of-input).
+    /// Parses an <c>IS</c> suffix after an expression — either <c>IS [NOT] NULL</c>
+    /// (returns <see cref="IsNullExpression"/>) or <c>IS [NOT] DISTINCT FROM rhs</c>
+    /// (returns <see cref="DistinctFromExpression"/>, SQL Server 2022+ NULL-safe
+    /// equality). Entered with <see cref="ParserContext.Token"/> on the <c>IS</c>
+    /// keyword; consumes <c>IS</c>, optional <c>NOT</c>, then dispatches by the
+    /// next token. Leaves the token on the next un-consumed token.
     /// </summary>
-    private static IsNullExpression ParseIsNullSuffix(Expression left, ParserContext context)
+    private static BooleanExpression ParseIsSuffix(Expression left, ParserContext context)
     {
         var negated = false;
         var next = context.GetNextRequired();
@@ -300,10 +301,19 @@ internal abstract class BooleanExpression
             negated = true;
             next = context.GetNextRequired();
         }
-        if (next is not ReservedKeyword { Keyword: Keyword.Null })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextOptional();
-        return new IsNullExpression(left, negated);
+        switch (next)
+        {
+            case ReservedKeyword { Keyword: Keyword.Null }:
+                context.MoveNextOptional();
+                return new IsNullExpression(left, negated);
+            case ReservedKeyword { Keyword: Keyword.Distinct }:
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.From })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                return new DistinctFromExpression(left, Expression.Parse(context), negated);
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
     }
 
     /// <summary>
@@ -470,6 +480,41 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
+    }
+
+    /// <summary>
+    /// <c>expr IS [NOT] DISTINCT FROM rhs</c> — SQL Server 2022 NULL-safe
+    /// comparison. Like <see cref="IsNullExpression"/>, never returns UNKNOWN:
+    /// <c>both NULL → not distinct</c>, <c>exactly one NULL → distinct</c>,
+    /// <c>both non-null → distinct iff unequal</c>. Type promotion follows the
+    /// regular comparison path via <see cref="CompareValuesPromoted"/>; a
+    /// genuinely uncoercible operand pair (e.g. <c>'hello' is distinct from 5</c>)
+    /// still surfaces the underlying Msg 245 / Msg 402 from the comparator,
+    /// matching real SQL Server's behavior.
+    /// </summary>
+    private sealed class DistinctFromExpression(Expression left, Expression right, bool negated) : BooleanExpression
+    {
+        public override bool? Run(RuntimeContext runtime)
+        {
+            var l = left.Run(runtime);
+            var r = right.Run(runtime);
+            var distinct = (l.IsNull, r.IsNull) switch
+            {
+                (true, true) => false,
+                (true, false) or (false, true) => true,
+                _ => CompareValuesPromoted(l, r, "not equal to", static (a, b) => !a.Equals(b)) == true,
+            };
+            return distinct ^ negated;
+        }
+
+        internal override string DebugDisplay() =>
+            $"{left.DebugDisplay()} IS {(negated ? "NOT " : "")}DISTINCT FROM {right.DebugDisplay()}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            visitor(left);
+            visitor(right);
+        }
     }
 
     /// <summary>
