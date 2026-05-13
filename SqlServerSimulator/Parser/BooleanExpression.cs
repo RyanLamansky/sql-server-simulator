@@ -137,11 +137,14 @@ internal abstract class BooleanExpression
                 return ParseIsNullSuffix(left, context);
             case ReservedKeyword { Keyword: Keyword.In }:
                 return ParseInList(left, context, negated: false);
+            case ReservedKeyword { Keyword: Keyword.Between }:
+                return ParseBetween(left, context, negated: false);
             case ReservedKeyword { Keyword: Keyword.Not }:
                 return context.GetNextRequired() switch
                 {
                     ReservedKeyword { Keyword: Keyword.Like } => ParseLike(left, context, negated: true),
                     ReservedKeyword { Keyword: Keyword.In } => ParseInList(left, context, negated: true),
+                    ReservedKeyword { Keyword: Keyword.Between } => ParseBetween(left, context, negated: true),
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 };
         }
@@ -342,6 +345,28 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
+    /// Parses the <c>[NOT] BETWEEN lower AND upper</c> suffix after an
+    /// expression. Entered with <see cref="ParserContext.Token"/> on the
+    /// <c>BETWEEN</c> keyword; consumes <c>BETWEEN</c>, the lower expression,
+    /// the required <c>AND</c>, and the upper expression. Both bounds are
+    /// plain value expressions (not boolean predicates) — <see cref="Expression.Parse"/>
+    /// naturally stops at the trailing <c>AND</c> keyword because <c>AND</c>
+    /// is a boolean combinator at higher precedence, so a trailing <c>AND
+    /// other-predicate</c> falls back to the surrounding
+    /// <see cref="ParseAnd"/> loop.
+    /// </summary>
+    private static BetweenExpression ParseBetween(Expression left, ParserContext context, bool negated)
+    {
+        context.MoveNextRequired();
+        var lower = Expression.Parse(context);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var upper = Expression.Parse(context);
+        return new BetweenExpression(left, lower, upper, negated);
+    }
+
+    /// <summary>
     /// Evaluates the predicate to SQL Server's three-valued logic:
     /// <c>true</c>, <c>false</c>, or <c>null</c> (UNKNOWN). NULL operands in a
     /// comparison surface as <c>null</c> here; <c>NOT</c>, <c>AND</c>, and
@@ -511,6 +536,44 @@ internal abstract class BooleanExpression
         // unreachable from this validator (and a subquery in inline CHECK
         // raises Msg 1046 in real SQL Server anyway).
         internal override void VisitOperandExpressions(Action<Expression> visitor) { }
+    }
+
+    /// <summary>
+    /// <c>value [NOT] BETWEEN lower AND upper</c>: equivalent to
+    /// <c>value &gt;= lower AND value &lt;= upper</c> (with the result negated
+    /// for the NOT form). Both bounds inclusive (probe-confirmed against
+    /// SQL Server 2025 — <c>5 between 1 and 5</c> is true at both endpoints).
+    /// Reversed bounds (low &gt; high) produce a definite false; NULL in any
+    /// operand position propagates per the standard three-valued AND/NOT
+    /// truth tables. <c>value</c> is evaluated once per row even though the
+    /// desugaring would suggest two evaluations.
+    /// </summary>
+    private sealed class BetweenExpression(Expression value, Expression lower, Expression upper, bool negated) : BooleanExpression
+    {
+        public override bool? Run(RuntimeContext runtime)
+        {
+            var v = value.Run(runtime);
+            var lo = lower.Run(runtime);
+            var hi = upper.Run(runtime);
+            var ge = CompareValuesPromoted(v, lo, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
+            var le = CompareValuesPromoted(v, hi, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
+            var inRange = ge == false || le == false ? false
+                : ge == true && le == true ? true
+                : (bool?)null;
+            return negated
+                ? inRange switch { true => false, false => true, _ => null }
+                : inRange;
+        }
+
+        internal override string DebugDisplay() =>
+            $"{value.DebugDisplay()} {(negated ? "NOT BETWEEN" : "BETWEEN")} {lower.DebugDisplay()} AND {upper.DebugDisplay()}";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor)
+        {
+            visitor(value);
+            visitor(lower);
+            visitor(upper);
+        }
     }
 
     /// <summary>
