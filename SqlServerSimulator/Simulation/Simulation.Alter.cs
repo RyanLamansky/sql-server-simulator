@@ -328,9 +328,9 @@ partial class Simulation
         }
 
         if (classIsType)
-            TransferTableType(sourceSchema, destSchema, sourceName.Leaf);
+            TransferTableType(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
         else
-            TransferObject(sourceSchema, destSchema, sourceName.Leaf);
+            TransferObject(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
         return true;
     }
 
@@ -342,7 +342,7 @@ partial class Simulation
     /// <see cref="SchemaObject.SchemaId"/>; <see cref="TableType.Schema"/>
     /// reference updates in lockstep.
     /// </summary>
-    private static void TransferTableType(Schema sourceSchema, Schema destSchema, string leafName)
+    private static void TransferTableType(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
     {
         if (!sourceSchema.TableTypes.TryGetValue(leafName, out var tableType))
             throw SimulatedSqlException.CannotFindType(leafName);
@@ -350,6 +350,7 @@ partial class Simulation
             return;
         if (destSchema.TableTypes.ContainsKey(leafName))
             throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+        batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
         _ = sourceSchema.TableTypes.TryRemove(leafName, out _);
         destSchema.TableTypes[leafName] = tableType;
         tableType.Schema = destSchema;
@@ -365,7 +366,7 @@ partial class Simulation
     /// HeapTable / View transfers reseat any attached triggers — they belong
     /// to the destination schema after the transfer.
     /// </summary>
-    private static void TransferObject(Schema sourceSchema, Schema destSchema, string leafName)
+    private static void TransferObject(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
     {
         // Triggers can't be transferred directly — Msg 15347 owns this case.
         if (sourceSchema.Triggers.TryGetValue(leafName, out _))
@@ -378,6 +379,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            batch.AcquireStatementLock(heap.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.HeapTables.TryRemove(leafName, out _);
             destSchema.HeapTables[leafName] = heap;
             heap.SchemaId = destSchema.SchemaId;
@@ -389,6 +391,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            batch.AcquireStatementLock(view.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.Views.TryRemove(leafName, out _);
             destSchema.Views[leafName] = view;
             view.Schema = destSchema;
@@ -401,6 +404,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            batch.AcquireStatementLock(fn.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.Functions.TryRemove(leafName, out _);
             destSchema.Functions[leafName] = fn;
             fn.Schema = destSchema;
@@ -412,6 +416,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            batch.AcquireStatementLock(proc.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.Procedures.TryRemove(leafName, out _);
             destSchema.Procedures[leafName] = proc;
             proc.Schema = destSchema;
@@ -423,6 +428,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            batch.AcquireStatementLock(seq.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.Sequences.TryRemove(leafName, out _);
             destSchema.Sequences[leafName] = seq;
             seq.Schema = destSchema;

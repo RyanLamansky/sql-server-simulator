@@ -328,9 +328,19 @@ struct copy can't tear).
   on the old + new RID.
 - **OUTPUT INTO target / SELECT INTO destination row-X** — shipped
   (phase 2): per-row row-X acquired on the destination table.
-- **Row-lock cleanup on DELETE** — leaked entries in
-  `HeapTable.RowLocks` accumulate (same pattern as the heap's slot /
-  payload leak). Practical impact is tiny since slots leak too.
+- **Row-lock cleanup on DELETE** — shipped: per-row `DeleteAt` is
+  followed by `table.RowLocks.TryRemove((page, slot), out _)` for every
+  successfully tombstoned slot (guard: `IsLockableTable(table)` so
+  table-vars / temp-tables / system tables skip the path that never
+  populated the dict). Safe because slot directory entries never reuse
+  (the heap's existing slot-leak quirk doubles as a guarantee here) and
+  concurrent accessors can't reach a tombstoned slot — heap iteration
+  skips them, and SI / RCSI tombstoned-slot resolution walks via the
+  separate `RowVersions` dict without probing `RowLocks`. The row-X
+  acquired during the DELETE remains held in
+  `tx.HeldLocks` / `StatementSchemaLocks` until commit / statement
+  end; the LockResource reference there keeps the resource alive even
+  after the dict entry is dropped.
 
 ## Snapshot isolation + MVCC (phase 3)
 

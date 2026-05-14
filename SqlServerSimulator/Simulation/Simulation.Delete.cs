@@ -316,6 +316,16 @@ partial class Simulation
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
             if (oldBytes is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, Storage.VersionWriteKind.Delete);
+            // Row-lock dict cleanup: the slot is tombstoned and slot ids
+            // never get reused (`Heap.DeleteAt` doesn't recycle directory
+            // entries), so the per-row LockResource has no future relevance.
+            // Drop the dict entry here even though our row-X is still held
+            // — the holder reference in `tx.HeldLocks` / `StatementSchemaLocks`
+            // keeps the resource alive until release; concurrent accessors
+            // can't reach a tombstoned slot (heap iteration skips them, and
+            // SI / RCSI tombstoned-slot resolution bypasses locks entirely).
+            if (lockableTable)
+                _ = table.RowLocks.TryRemove((pageIndex, slotIndex), out _);
         }
 
         // Incoming-FK cascade: parent-side DELETE fires the matching FK's

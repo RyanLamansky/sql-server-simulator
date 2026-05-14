@@ -28,6 +28,7 @@
 - **Missing source object** → **Msg 15151** find-object variant (`"Cannot find the object '<leaf>', …"`); the qualifier doesn't echo into the message (probe-confirmed).
 - **Same-schema transfer** (source schema = destination schema) is a silent no-op — probe-confirmed against real SQL Server.
 - **SchemaId mutability**: `SchemaObject.SchemaId` is a settable `int` (not `readonly`) so the TRANSFER path can reseat objects. Every derived type with a separate `Schema` field (`View`, `Procedure`, `UserDefinedFunction`, `Sequence`, `TableType`, `Trigger`) likewise dropped `readonly`. Apps that read `SchemaId` between transfers see the updated value.
+- **Sch-M acquisition**: every actual move (same-schema fast-path excluded) calls `batch.AcquireStatementLock(obj.SchemaLock, LockMode.SchemaModification)` on the moving object before mutating the source / destination dicts. Statement-scoped — matches the idiom every other DDL site uses (`CREATE` / `ALTER` / `DROP` / `TRUNCATE`). Same-schema transfers skip the lock acquisition along with the mutation.
 
 **Deferred**: `ALTER SCHEMA … TRANSFER` with the `XML SCHEMA COLLECTION::` / `PARTITION FUNCTION::` / other niche class prefixes (the simulator only models OBJECT and TYPE); `ALTER AUTHORIZATION` (no principal model); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
 
