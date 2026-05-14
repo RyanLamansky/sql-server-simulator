@@ -649,8 +649,10 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop })
             throw new NotSupportedException("ALTER TABLE ALTER COLUMN sub-clauses (ADD/DROP PERSISTED/MASKED/ROWGUIDCOL/SPARSE) aren't modeled.");
 
-        if (context.Token is not Name typeName)
+        if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var qualifiedTypeName = BatchContext.ParseObjectName(context);
+        var typeName = (Name)context.Token;
         context.MoveNextOptional();
 
         int? declaredMaxLength = null;
@@ -733,8 +735,14 @@ partial class Simulation
         if (existingCol.GeneratedAs != GeneratedAlwaysAsRow.None)
             throw new NotSupportedException("ALTER COLUMN on a GENERATED ALWAYS AS ROW START/END column isn't modeled.");
 
-        var (newType, newMaxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, ordinal + 1, columnName);
-        var newNullable = nullable ?? existingCol.Nullable;
+        var (newType, newMaxLength, aliasIsNullable) = ResolveTypeReference(
+            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
+            index: ordinal + 1, columnName: columnName);
+        // For ALTER COLUMN, the precedence is: explicit NULL/NOT NULL on the
+        // ALTER clause wins; otherwise alias-default; otherwise preserve
+        // existing column nullability. Matches column-on-CREATE-TABLE
+        // semantics for the alias-default propagation step.
+        var newNullable = nullable ?? aliasIsNullable ?? existingCol.Nullable;
 
         // Identity preservation: ALTER COLUMN keeps the IdentityState alive
         // (probe-confirmed — INT IDENTITY → BIGINT keeps the counter), and

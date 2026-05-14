@@ -200,19 +200,34 @@ partial class Simulation
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.TableTypes"/>
-    /// dict. Probe-confirmed wording on the two failure modes against SQL
-    /// Server 2025: missing without IF EXISTS → Msg 218; referenced by at
-    /// least one procedure → Msg 3732 (the simulator scans every procedure
-    /// in the database and names the first one found — real SQL Server does
-    /// the same, naming a single referencing object even when more than one
-    /// exists). Types don't participate in the undo log (same convention as
-    /// CREATE / DROP regular tables — only temp-table DDL is transactional).
+    /// or <see cref="Schema.AliasTypes"/> dict (the two share the type-name
+    /// namespace). Probe-confirmed wording on the two failure modes against
+    /// SQL Server 2025: missing without IF EXISTS → Msg 218; table-type
+    /// referenced by at least one procedure → Msg 3732 (the simulator scans
+    /// every procedure in the database and names the first one found — real
+    /// SQL Server does the same, naming a single referencing object even
+    /// when more than one exists). Types don't participate in the undo log
+    /// (same convention as CREATE / DROP regular tables — only temp-table
+    /// DDL is transactional).
     /// </summary>
+    /// <remarks>
+    /// Alias-type drops do NOT scan tables for column references in this
+    /// bundle — the simulator's <c>HeapColumn</c> doesn't retain a back-
+    /// pointer to its declaring alias, so a fidelity-faithful Msg 3732 path
+    /// for alias types would require threading the alias pointer through
+    /// every column creation site. Deferred as a known fidelity gap; the
+    /// bacpac-loader use case never drops alias types during import.
+    /// </remarks>
     private static void DropOneType(ParserContext context, MultiPartName name, bool ifExists)
     {
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out _))
+        {
+            _ = schema.AliasTypes.TryRemove(name.Leaf, out _);
+            return;
+        }
         if (schema is null || !schema.TableTypes.TryGetValue(name.Leaf, out var tableType))
         {
             if (ifExists)

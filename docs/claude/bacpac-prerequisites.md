@@ -39,14 +39,21 @@ Sorted approximately by surface-area / effort, smallest first. Each is a candida
 
 Coverage: 53 new tests in `AlterDatabaseOptionsTests.cs` exercise every option × value-shape combination, the QUERY_STORE block (single sub-option / nested / multi / CLEAR forms), the COLLATE hard-error, the load-bearing-options-still-wired regression, and the three syntax-error paths the probe found (`SET RECOVERY = FULL`, `SET ACCELERATED_DATABASE_RECOVERY ON` without `=`, `SET TARGET_RECOVERY_TIME = 60` without unit — all Msg 102, matching probe).
 
-### [ ] UDDTs / alias types (`CREATE TYPE … FROM …`) (small-medium)
-6 in AW: `[dbo].[AccountNumber]` (nvarchar(15)), `[dbo].[Flag]` (bit), `[dbo].[Name]` (nvarchar(50)), `[dbo].[NameStyle]` (bit), `[dbo].[OrderNumber]` (nvarchar(25)), `[dbo].[Phone]` (nvarchar(25)). All simple alias-over-builtin with optional NOT NULL. Columns reference them by full name (`[dbo].[Name]`) instead of `[nvarchar]` in their `TypeSpecifier`'s `Type` relationship.
+### [x] UDDTs / alias types (`CREATE TYPE … FROM …`) (shipped 2026-05-14)
+Real-feature path landed: `CREATE TYPE schema.name FROM <builtin>[(N[, S])] [NULL | NOT NULL]` parses to a new `AliasType` (`SqlServerSimulator/AliasType.cs`) registered on `Schema.AliasTypes` (`ConcurrentDictionary<string, AliasType>`, sharing the type-name namespace with `TableTypes` — duplicate-name collision raises Msg 219 verbatim across both dicts). The 6 AW alias types (`AccountNumber` / `Flag` / `Name` / `NameStyle` / `OrderNumber` / `Phone`) load successfully end-to-end; a smoke test in `AliasTypeTests` declares all 6 + a `Customer` table using `[dbo].[AccountNumber]` / `[dbo].[Name]` / `[dbo].[NameStyle]` / `[dbo].[Phone]` and verifies `is_nullable=0` propagation for the three NOT-NULL aliases.
 
-Distinct from the already-shipped `CREATE TYPE … AS TABLE` (TVP namespace). Two options:
-1. **Real feature**: add an `AliasTypes` dict to `Schema`, route `TypeSpecifier`'s `Type` relationship through it during DDL emission, support `CREATE TYPE name FROM <underlying>` parser. `sys.types` already needs to surface these.
-2. **Loader-only inline expansion**: walk the model first, build an alias-resolution map, substitute the underlying type at DDL emission time. Smaller scope, but the simulator can't load alias-typed `DECLARE @x dbo.Name` or `CREATE TYPE … FROM` written by application code.
+**Type-reference parsing** at every consumer site (CREATE TABLE column, DECLARE @v, ALTER TABLE ALTER COLUMN, CREATE PROCEDURE / FUNCTION / SEQUENCE parameter, OPENJSON column, sp_executesql parameter) now accepts 1- or 2-part dotted type names — was previously single-`Name` only. Each site routes through `Simulation.ResolveTypeReference(BatchContext, MultiPartName, Name leaf, …)` which checks `Schema.AliasTypes` first and falls back to `SqlType.GetByName` for built-in types. A length-parameter at the alias-usage site raises **Msg 2716 St 3** verbatim (probe-confirmed against SQL Server 2025; distinct from the State-1 form for built-ins).
 
-**Recommended (1)** — even though (2) is smaller, alias types show up in real EF Core apps (data-annotation `[Column(TypeName = "...")]` over a UDDT), and the `sys.types` surface needs them anyway for catalog correctness.
+**Nullability inheritance**: probe-confirmed semantics — bare `CREATE TYPE T FROM int` and explicit `FROM int NULL` both set the alias's `IsNullable=true`; `NOT NULL` sets false. When a column / variable references an alias without its own explicit `NULL` / `NOT NULL` marker, the alias's default propagates. Column-site explicit marker (`c MyAlias NULL`) overrides the alias default.
+
+**Errors enforced verbatim**: Msg 219 (duplicate type name, alias-vs-alias or alias-vs-table-type), Msg 222 (`The base type "X" is not a valid base type for the alias data type.`), Msg 2716 St 3 (column width at alias-usage site), Msg 218 (DROP TYPE on missing alias without IF EXISTS).
+
+**`sys.types`** rows for alias types ship via `BuiltInResources.cs::EnumerateSysTypes` — `system_type_id` from the **underlying** builtin (e.g. 231 for nvarchar-of-… , 56 for int-of-…), `user_type_id` from the alias's per-database allocation (starts at 256), `schema_id` from the owning schema, `is_user_defined=1`, `is_table_type=0`, `is_nullable` from the alias's stored marker.
+
+**Known fidelity gaps** (deferred — not load-bearing for the bacpac baseline):
+- `HeapColumn` doesn't retain a back-pointer to its declaring `AliasType`. Consequence: `sys.columns.user_type_id` surfaces the underlying built-in's id (not the alias's) when a column is alias-typed, and `DROP TYPE` on an alias type doesn't enforce **Msg 3732** (referenced-by-object). Real bacpac load never drops alias types during import, so this is acceptable for the baseline.
+- Alias-type max-length surfaces on `sys.types.max_length` aren't emitted (the catalog view's shipped subset doesn't include `max_length` yet — pre-existing gap from before this bundle, not specific to alias types).
+- Alias-of-alias not modeled — `CREATE TYPE T2 FROM T1` where T1 is itself an alias raises Msg 222 (matches probe: real SQL Server rejects alias-of-alias the same way).
 
 ### [ ] Extended properties (`sp_addextendedproperty` + `sys.extended_properties`) (medium)
 538 in AW — they're how SQL Server attaches descriptions/metadata to schemas/tables/columns/etc. Surface needed:
@@ -123,8 +130,8 @@ Encoding-edge probes needed (carve out tiny custom BACPACs locally via `SqlPacka
 
 Rough sequence — work each bundle to completion, update this checklist, then revisit BACPAC scoping once the prerequisites land:
 
-1. ~~**Database options expansion**~~ (shipped 2026-05-14) + **UDDTs** (next — smallest remaining, no XML / spatial blocker dependencies)
-2. **Extended properties** (mid-size, self-contained)
+1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ (both shipped 2026-05-14)
+2. **Extended properties** (next — mid-size, self-contained)
 3. **`hierarchyid`** (large but self-contained, unblocks `HumanResources.Employee`)
 4. **DDL trigger + permission statements** as parse-and-store-but-no-enforce (smallest scope; both end up as catalog-view-visible no-ops)
 5. **Loader baseline implementation**, with `xml` / `geography` / full-text **loaded in degraded mode** (xml/geography → nvarchar(MAX), full-text indexes → parse-and-discard). Diagnostics report which features were degraded.

@@ -1343,6 +1343,24 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Resolves <paramref name="name"/> to a registered scalar
+    /// <see cref="AliasType"/> (UDDT) in the per-database schema dictionary.
+    /// Like table types, alias types accept 1-part names with fallback to
+    /// <see cref="Database.DefaultSchemaName"/>; 2-part qualified references
+    /// route through <see cref="TryResolveSchema"/>. Used by every type-
+    /// reference parser site (CREATE TABLE column, DECLARE @v, procedure /
+    /// function / sequence param, ALTER TABLE ALTER COLUMN, OPENJSON, EXEC
+    /// dynamic-SQL parameter) to determine whether a parsed type reference
+    /// expands to a built-in or to an alias's underlying type.
+    /// </summary>
+    public bool TryResolveAliasType(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out AliasType? aliasType)
+    {
+        aliasType = null;
+        return this.TryResolveSchema(name, out var schema)
+            && schema.AliasTypes.TryGetValue(name.Leaf, out aliasType);
+    }
+
+    /// <summary>
     /// Resolves <paramref name="name"/> to a registered <see cref="Sequence"/>.
     /// Accepts 1-part names (probe-confirmed: <c>NEXT VALUE FOR seq1</c> finds
     /// <c>dbo.seq1</c>) with fallback to <see cref="Database.DefaultSchemaName"/>;

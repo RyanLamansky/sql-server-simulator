@@ -45,9 +45,11 @@ partial class Simulation
             {
                 case ReservedKeyword { Keyword: Keyword.As }:
                     context.MoveNextRequired();
-                    if (context.Token is not Name typeName)
+                    if (context.Token is not Name)
                         return false;
-                    declaredType = ResolveSequenceType(context, typeName, sequenceName.ToString());
+                    var qualifiedTypeName = BatchContext.ParseObjectName(context);
+                    var typeName = (Name)context.Token;
+                    declaredType = ResolveSequenceType(context, qualifiedTypeName, typeName, sequenceName.ToString());
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Start }:
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.With })
@@ -160,7 +162,7 @@ partial class Simulation
     /// after the type name are consumed via the same parens path the
     /// column-declaration parser uses; non-zero scale raises Msg 11702.
     /// </summary>
-    private static SqlType ResolveSequenceType(ParserContext context, Name typeName, string fullName)
+    private static SqlType ResolveSequenceType(ParserContext context, MultiPartName qualifiedTypeName, Name typeName, string fullName)
     {
         int? declaredMaxLength = null;
         int? declaredScale = null;
@@ -194,7 +196,9 @@ partial class Simulation
             context.RestoreCheckpoint(afterTypeName);
         }
 
-        var (resolved, _) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, typeName.Value);
+        var (resolved, _, _) = ResolveTypeReference(
+            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
+            index: 1, columnName: typeName.Value);
         return resolved switch
         {
             TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => resolved,

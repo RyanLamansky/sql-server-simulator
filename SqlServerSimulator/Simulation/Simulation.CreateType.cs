@@ -29,9 +29,10 @@ partial class Simulation
     /// raise — type names live in their own namespace (probe-confirmed).
     /// </para>
     /// <para>
-    /// Scalar UDT form (<c>CREATE TYPE name FROM &lt;basetype&gt;</c>) is
-    /// not modeled — only the <c>AS TABLE</c> form. Anything other than
-    /// <c>AS TABLE</c> after the type name raises Msg 156.
+    /// Scalar UDT form (<c>CREATE TYPE name FROM &lt;basetype&gt;[(N[, S])]
+    /// [NULL | NOT NULL]</c>) is dispatched to
+    /// <see cref="TryParseCreateAliasType"/>. Anything other than <c>AS</c>
+    /// or <c>FROM</c> after the type name raises Msg 156.
     /// </para>
     /// </remarks>
     private static bool TryParseCreateType(ParserContext context)
@@ -44,11 +45,16 @@ partial class Simulation
         if (!context.Batch.TryResolveSchema(typeName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(typeName.ImmediateQualifier ?? Database.DefaultSchemaName);
 
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        switch (context.GetNextRequired())
+        {
+            case ReservedKeyword { Keyword: Keyword.From }:
+                return TryParseCreateAliasType(context, schema, typeName);
+            case ReservedKeyword { Keyword: Keyword.As }:
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
 
-        // Only the AS TABLE shape is modeled; AS <basetype> (scalar UDT) is
-        // a separate feature that's not in scope.
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Table })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -127,7 +133,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (schema.TableTypes.ContainsKey(typeName.Leaf))
+        if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
             throw SimulatedSqlException.TypeAlreadyExists(fullName);
 
         var tableType = new TableType(
@@ -140,6 +146,125 @@ partial class Simulation
             pendingKeys: [.. pendingKeys],
             pendingChecks: [.. pendingChecks]);
         schema.TableTypes[typeName.Leaf] = tableType;
+        return true;
+    }
+
+    /// <summary>
+    /// Parses the scalar alias-type form of <c>CREATE TYPE</c>: <c>CREATE
+    /// TYPE schema.name FROM &lt;builtin&gt;[(N[, S])] [NULL | NOT NULL]</c>.
+    /// Entered with the cursor on the <c>FROM</c> keyword. Resolves the base
+    /// type via the standard built-in lookup; unknown base raises
+    /// <see cref="SimulatedSqlException.InvalidBaseTypeForAlias"/> (Msg 222).
+    /// Stores the resulting <see cref="AliasType"/> in
+    /// <see cref="Schema.AliasTypes"/>; duplicate type name in either
+    /// <see cref="Schema.AliasTypes"/> or <see cref="Schema.TableTypes"/>
+    /// raises Msg 219 (shared type-name namespace, probe-confirmed).
+    /// </summary>
+    /// <remarks>
+    /// Nullability marker semantics — probe-confirmed against SQL Server 2025:
+    /// bare <c>FROM int</c> and explicit <c>FROM int NULL</c> both set the
+    /// alias's <see cref="AliasType.IsNullable"/> to true; <c>NOT NULL</c>
+    /// sets false. The marker propagates as the column / variable default
+    /// when the consumer omits its own nullability hint; an explicit
+    /// <c>NULL</c> / <c>NOT NULL</c> at the consumer site overrides.
+    /// </remarks>
+    private static bool TryParseCreateAliasType(ParserContext context, Schema schema, MultiPartName typeName)
+    {
+        // Cursor on FROM; advance to the base-type name token. The base may
+        // be a 1- or 2-part dotted name (e.g. `[sys].[int]`), matching real
+        // SQL Server's grammar — but only the leaf is used for resolution,
+        // since alias-of-alias isn't legal (probe-confirmed: Msg 222).
+        context.MoveNextRequired();
+        if (context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        _ = BatchContext.ParseObjectName(context);
+        if (context.Token is not Name baseLeafToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Optional (N[, S]) length / scale + trailing [NULL | NOT NULL] —
+        // both pieces are optional, and either can land at end-of-batch
+        // (`CREATE TYPE dbo.Probe FROM int` is a valid single-statement
+        // batch). MoveNextOptional after the base-type-name leaf lets the
+        // cursor walk off the end without raising.
+        int? declaredMaxLength = null;
+        int? declaredScale = null;
+        if (context.GetNextOptional() is Operator { Character: '(' })
+        {
+            var lengthToken = context.GetNextRequired();
+            declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
+                ? numericValue.AsInt32
+                : lengthToken is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
+                    ? SqlType.MaxLengthSentinel
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is Operator { Character: ',' })
+            {
+                var scaleToken = context.GetNextRequired();
+                declaredScale = scaleToken is Numeric { Value: { IsNull: false } scaleNumeric }
+                    ? scaleNumeric.AsInt32
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+            }
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
+
+        // Optional [NULL | NOT NULL]. Bare and explicit NULL → nullable=true;
+        // NOT NULL → nullable=false. Probe-confirmed.
+        var isNullable = true;
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Null }:
+                isNullable = true;
+                context.MoveNextOptional();
+                break;
+            case ReservedKeyword { Keyword: Keyword.Not }:
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                isNullable = false;
+                context.MoveNextOptional();
+                break;
+        }
+
+        // Resolve the base type. Real SQL Server's Msg 222 only fires when the
+        // leaf isn't a recognized built-in; the simulator's GetByName raises a
+        // different message family for invalid args. Catch the unknown-name
+        // case and re-throw as Msg 222 verbatim.
+        SqlType resolvedType;
+        int? resolvedMaxLength;
+        try
+        {
+            (resolvedType, resolvedMaxLength) = SqlType.GetByName(
+                baseLeafToken, declaredMaxLength, declaredScale,
+                index: 1, columnName: typeName.Leaf);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
+        {
+            // GetByName routes unknown names through CannotFindDataType /
+            // CannotFindDataTypeInCast / SyntaxErrorNear; for CREATE TYPE
+            // FROM the canonical message is Msg 222 regardless of which path
+            // the inner lookup took.
+            throw SimulatedSqlException.InvalidBaseTypeForAlias(baseLeafToken.ToString());
+        }
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var fullName = $"{schema.Name}.{typeName.Leaf}";
+        if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
+            throw SimulatedSqlException.TypeAlreadyExists(fullName);
+
+        schema.AliasTypes[typeName.Leaf] = new AliasType(
+            schema,
+            typeName.Leaf,
+            underlyingType: resolvedType,
+            declaredMaxLength: resolvedMaxLength,
+            declaredPrecision: null,
+            declaredScale: declaredScale,
+            isNullable: isNullable,
+            userTypeId: context.CurrentDatabase.AllocateUserTypeId(),
+            createDate: context.Batch.CurrentStatement.UtcNow);
         return true;
     }
 }

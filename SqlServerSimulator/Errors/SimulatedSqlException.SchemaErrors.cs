@@ -197,6 +197,26 @@ partial class SimulatedSqlException
         new($"The type '{fullName}' already exists, or you do not have permission to create it.", 219, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 222: <c>CREATE TYPE name FROM &lt;basetype&gt;</c>
+    /// referenced a base type that doesn't resolve to a built-in. Probe-
+    /// confirmed verbatim wording against SQL Server 2025 — the base-type name
+    /// appears in double-quotes inside the message text.
+    /// </summary>
+    internal static SimulatedSqlException InvalidBaseTypeForAlias(string baseTypeName) =>
+        new($"The base type \"{baseTypeName}\" is not a valid base type for the alias data type.", 222, 16, 1);
+
+    /// <summary>
+    /// Alias-type variant of Msg 2716: an alias-typed column / parameter /
+    /// variable declaration carries a width specifier (e.g.
+    /// <c>c dbo.MyAlias(100)</c>). Probe-confirmed State 3 against SQL Server
+    /// 2025 — distinct from <c>CannotSpecifyColumnWidth</c> (State 1, used
+    /// for builtin types). The alias's fully-qualified name
+    /// (<c>schema.name</c>) lands in the message verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotSpecifyColumnWidthOnAlias(string aliasFullName, int index) =>
+        new($"Column, parameter, or variable #{index}: Cannot specify a column width on data type {aliasFullName}.", 2716, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 218: <c>DROP TYPE</c> targeted a name that
     /// doesn't exist (suppressed by <c>IF EXISTS</c>). Probe-confirmed
     /// against SQL Server 2025.

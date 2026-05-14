@@ -114,8 +114,10 @@ partial class Simulation
     /// </summary>
     private static (SqlType Type, int? MaxLength) ParseDeclareTypeSpec(ParserContext context, string variableName)
     {
-        if (context.Token is not Name typeName)
+        if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var qualifiedTypeName = BatchContext.ParseObjectName(context);
+        var typeName = (Name)context.Token;
 
         context.MoveNextRequired();
         int? declaredMaxLength = null;
@@ -147,7 +149,9 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, variableName);
+        var (resolved, maxLength, _) = ResolveTypeReference(
+            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale, 1, variableName);
+        return (resolved, maxLength);
     }
 
     /// <summary>
@@ -171,7 +175,8 @@ partial class Simulation
     /// </summary>
     private static bool TryParseDeclareTableTypeVariable(ParserContext context, Name firstNameToken, string variableName, int variableIndex)
     {
-        // Peek for `.` continuation. Multi-part means user-defined type.
+        // Peek for `.` continuation. Multi-part means user-defined type
+        // (built-in scalars are always 1-part).
         var checkpoint = context.SaveCheckpoint();
         var sawDot = context.MoveNext() && context.Token is Operator { Character: '.' };
         context.RestoreCheckpoint(checkpoint);
@@ -179,14 +184,25 @@ partial class Simulation
         if (sawDot)
         {
             var objectName = BatchContext.ParseObjectName(context);
-            if (!context.Batch.TryResolveTableType(objectName, out var tableType))
-                throw SimulatedSqlException.CannotFindDataType(variableIndex, objectName.ToString(), "@" + variableName);
-            context.MoveNextOptional();
-            RegisterTableTypeVariable(context, variableName, tableType);
-            return true;
+            if (context.Batch.TryResolveTableType(objectName, out var tableType))
+            {
+                context.MoveNextOptional();
+                RegisterTableTypeVariable(context, variableName, tableType);
+                return true;
+            }
+            // Multi-part may also resolve to an alias type — fall through to
+            // the scalar parser when so. ParseDeclareTypeSpec re-parses the
+            // multi-part name itself (cursor restored).
+            if (context.Batch.TryResolveAliasType(objectName, out _))
+            {
+                context.RestoreCheckpoint(checkpoint);
+                return false;
+            }
+            throw SimulatedSqlException.CannotFindDataType(variableIndex, objectName.ToString(), "@" + variableName);
         }
 
-        // 1-part name. Try TableType lookup; on miss, fall through to scalar.
+        // 1-part name. Try TableType lookup; on miss, fall through to scalar
+        // (which itself may resolve to a 1-part alias type or a built-in).
         if (!context.Batch.TryResolveTableType(new MultiPartName(firstNameToken.Value), out var singleType))
             return false;
         context.MoveNextOptional();

@@ -270,8 +270,10 @@ internal sealed partial class Selection
             var columnName = columnNameToken.Value;
 
             context.MoveNextRequired();
-            if (context.Token is not Name typeNameToken)
+            if (context.Token is not Name)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            var qualifiedTypeName = BatchContext.ParseObjectName(context);
+            var typeNameToken = (Name)context.Token;
             context.MoveNextRequired();
 
             int? declaredMaxLength = null;
@@ -302,7 +304,9 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
-            var (resolvedType, _) = SqlType.GetByName(typeNameToken, declaredMaxLength, declaredScale, columns.Count + 1, columnName);
+            var (resolvedType, _, _) = Simulation.ResolveTypeReference(
+                context.Batch, qualifiedTypeName, typeNameToken, declaredMaxLength, declaredScale,
+                index: columns.Count + 1, columnName: columnName);
 
             // Optional per-column path literal; defaults to `$.<column-name>`.
             JsonPath path;

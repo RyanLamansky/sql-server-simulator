@@ -562,8 +562,10 @@ partial class Simulation
             return;
         }
 
-        if (context.Token is not Name typeName)
+        if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var qualifiedTypeName = BatchContext.ParseObjectName(context);
+        var typeName = (Name)context.Token;
         context.MoveNextRequired();
 
         int? declaredMaxLength = null;
@@ -705,8 +707,13 @@ partial class Simulation
             nullable = false;
         }
 
+        var (resolvedType, maxLength, aliasIsNullable) = ResolveTypeReference(
+            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
+            index: heapColumns.Count + 1, columnName: columnName.Value);
+        // Alias-type-declared nullability propagates as the column default
+        // when the column declaration omits an explicit NULL / NOT NULL.
+        nullable ??= aliasIsNullable;
         var actualNullable = nullable ?? (identity is null);
-        var (resolvedType, maxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, heapColumns.Count + 1, columnName.Value);
 
         if (inlineKeyKind is KeyConstraintKind kind)
             pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count]));

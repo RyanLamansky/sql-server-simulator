@@ -66,9 +66,21 @@ internal sealed class Schema(string name, int schemaId)
     /// parameters (TVPs). Probed against SQL Server 2025: type names occupy
     /// a separate namespace from tables / views / functions / procs — a
     /// table type can share a leaf with a table (Msg 219 on dup type name
-    /// only).
+    /// only). Alias types (<see cref="AliasTypes"/>) share this same
+    /// type-name namespace.
     /// </summary>
     public readonly ConcurrentDictionary<string, TableType> TableTypes = new(Collation.Default);
+
+    /// <summary>
+    /// Scalar user-defined alias types (UDDTs) hosted by this schema.
+    /// Created via <c>CREATE TYPE schema.name FROM &lt;builtin&gt;[(N[, S])]
+    /// [NULL | NOT NULL]</c>, dropped via <c>DROP TYPE schema.name</c>,
+    /// consumed wherever a builtin type name is legal (CREATE TABLE column
+    /// type, DECLARE @v, procedure / function parameter, etc.). Shares the
+    /// type-name namespace with <see cref="TableTypes"/> — a CREATE TYPE
+    /// colliding with an existing entry in either dict raises Msg 219.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, AliasType> AliasTypes = new(Collation.Default);
 
     /// <summary>
     /// Sequence objects hosted by this schema. Created via <c>CREATE

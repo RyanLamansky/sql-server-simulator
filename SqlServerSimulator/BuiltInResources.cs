@@ -870,6 +870,27 @@ internal static class BuiltInResources
                 ];
             }
         }
+        // Scalar alias types (UDDTs): probe-confirmed against SQL Server 2025
+        // — `system_type_id` is the **underlying** built-in's id (e.g. 56 for
+        // an alias of int, 231 for an alias of nvarchar), `is_user_defined`
+        // is true, `is_table_type` is false, and `is_nullable` reflects the
+        // alias-defined NULL/NOT NULL marker from CREATE TYPE.
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
+            {
+                yield return [
+                    SqlValue.FromSystemName(alias.Name),
+                    SqlValue.FromByte(alias.UnderlyingType.SystemTypeId),
+                    SqlValue.FromInt32(alias.UserTypeId),
+                    schemaId,
+                    trueBit,
+                    falseBit,
+                    alias.IsNullable ? trueBit : falseBit,
+                ];
+            }
+        }
     }
 
     private static IEnumerable<SqlValue[]> EnumerateSysTableTypes(Parser.BatchContext batch)

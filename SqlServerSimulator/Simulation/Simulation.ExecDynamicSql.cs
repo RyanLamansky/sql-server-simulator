@@ -297,8 +297,10 @@ partial class Simulation
     /// </summary>
     private static (SqlType Type, int? DeclaredMaxLength) ParseSpExecuteSqlParamType(ParserContext context)
     {
-        if (context.Token is not Name typeName)
+        if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var qualifiedTypeName = BatchContext.ParseObjectName(context);
+        var typeName = (Name)context.Token;
         context.MoveNextOptional();
 
         int? declaredMaxLength = null;
@@ -328,7 +330,9 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        var (resolvedType, _) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, index: 1, columnName: null);
+        var (resolvedType, _, _) = ResolveTypeReference(
+            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
+            index: 1, columnName: null);
         return (resolvedType, declaredMaxLength);
     }
 
