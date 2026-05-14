@@ -53,7 +53,12 @@ partial class Simulation
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
         }
         context.MoveNextOptional();
-        Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        // Phase 1a: acquire X on the resolved DELETE target. Tx-scoped when
+        // BEGIN TRAN is active. Skipped when leadingTable is null (multi-
+        // source alias form — target determined post-FROM, deferred to 1b).
+        if (leadingTable is not null)
+            context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
         // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-

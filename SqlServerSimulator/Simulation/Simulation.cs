@@ -90,6 +90,16 @@ public sealed partial class Simulation
     private int nextSpid = 50;
 
     /// <summary>
+    /// Per-Simulation lock coordinator — single gate every
+    /// <see cref="LockResource"/> acquisition / release serializes through,
+    /// plus the cycle-detection walker. One instance per simulation;
+    /// SystemHeapTables (shared across simulations) bypass via the
+    /// resolver's no-Sch-S branch, so cross-simulation locking isn't a
+    /// concern.
+    /// </summary>
+    internal readonly LockManager LockManager = new();
+
+    /// <summary>
     /// Allocates the next session id (SPID) for a freshly-constructed
     /// <see cref="SimulatedDbConnection"/>. Used to fill the <c>Process ID
     /// &lt;N&gt;</c> slot in Msg 1205 (deadlock victim) and to identify
@@ -382,8 +392,17 @@ public sealed partial class Simulation
             {
                 outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte)];
             }
-            catch (SimulatedSqlException ex) when (batch.TryFrameDepth > 0)
+            catch (SimulatedSqlException ex)
             {
+                // Class 13 = deadlock victim. Real SQL Server auto-rolls
+                // back the active transaction before propagating (probe-
+                // confirmed: @@TRANCOUNT reads 0 in the catch handler).
+                // Done BEFORE the TRY-frame check so both the propagating
+                // path and the TRY-caught path observe the same rollback.
+                if (ex.Class == 13)
+                    connection.CurrentTransaction?.Rollback();
+                if (batch.TryFrameDepth == 0)
+                    throw;
                 caught = ex;
             }
         }

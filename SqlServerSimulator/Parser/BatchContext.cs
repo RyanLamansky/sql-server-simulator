@@ -341,15 +341,75 @@ internal sealed class BatchContext
     /// <see cref="SimulatedDbConnection.LockTimeoutMillis"/>, and records the
     /// acquisition in <see cref="StatementSchemaLocks"/> so the dispatch
     /// loop releases it at statement end. The two-phase split (acquire then
-    /// record) is fine because <see cref="LockResource.Acquire"/> can only
+    /// record) is fine because <see cref="LockManager.Acquire"/> can only
     /// fail by throwing — on success the lock IS held, and we always reach
     /// the append. On throw the lock isn't held, no cleanup needed.
     /// </summary>
     public void AcquireStatementLock(LockResource resource, LockMode mode)
     {
         var connection = this.Connection;
-        resource.Acquire(mode, connection, connection.LockTimeoutMillis);
+        connection.Simulation.LockManager.Acquire(resource, mode, connection, connection.LockTimeoutMillis);
         this.StatementSchemaLocks.Add((resource, mode));
+    }
+
+    /// <summary>
+    /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
+    /// the current connection and records the acquisition against the
+    /// active <see cref="SimulatedDbTransaction"/>, so the lock releases at
+    /// COMMIT / ROLLBACK instead of statement end. Used for X data locks
+    /// (which must span the transaction under READ COMMITTED) and HOLDLOCK-
+    /// upgraded S locks (held until tx end matching SERIALIZABLE).
+    /// </summary>
+    /// <remarks>
+    /// When no transaction is active, the lock falls back to statement-end
+    /// release (recorded in <see cref="StatementSchemaLocks"/>) — auto-
+    /// commit semantics, matching real SQL Server's implicit-commit-after-
+    /// statement behavior for DML outside <c>BEGIN TRAN</c>.
+    /// </remarks>
+    public void AcquireTransactionLock(LockResource resource, LockMode mode)
+    {
+        var connection = this.Connection;
+        connection.Simulation.LockManager.Acquire(resource, mode, connection, connection.LockTimeoutMillis);
+        if (connection.CurrentTransaction is { } tx)
+            tx.HeldLocks.Add((resource, mode));
+        else
+            this.StatementSchemaLocks.Add((resource, mode));
+    }
+
+    /// <summary>
+    /// Phase-1a entry point: acquire the table-level data lock that goes
+    /// with a DML read (<paramref name="isWrite"/> = false → S) or write
+    /// (isWrite = true → X) on <paramref name="table"/>. Read hints
+    /// (<paramref name="hints"/>) drive the S behavior: <c>NOLOCK</c> /
+    /// <c>READUNCOMMITTED</c> skips acquisition entirely (dirty-read
+    /// semantics); <c>HOLDLOCK</c> / <c>REPEATABLEREAD</c> / <c>SERIALIZABLE</c>
+    /// promotes the S to transaction-scoped retention. Write hints are
+    /// ignored — X is always acquired (tx-scoped when a tx is active,
+    /// statement-scoped otherwise).
+    /// </summary>
+    /// <remarks>
+    /// Skips data-lock acquisition entirely for tables that aren't shared
+    /// across connections (table variables, local temp tables, system
+    /// tables) — same set that <see cref="TryResolveTable"/> bypasses for
+    /// Sch-S acquisition.
+    /// </remarks>
+    public void AcquireDataLockIfApplicable(HeapTable table, Selection.TableHintInfo hints, bool isWrite)
+    {
+        if (table.IsTableVariable || IsLocalTempName(table.Name))
+            return;
+        if (Simulation.SystemHeapTables.ContainsValue(table))
+            return;
+        if (isWrite)
+        {
+            this.AcquireTransactionLock(table.SchemaLock, LockMode.Exclusive);
+            return;
+        }
+        if (hints.NoLock)
+            return;
+        if (hints.HoldLock)
+            this.AcquireTransactionLock(table.SchemaLock, LockMode.Shared);
+        else
+            this.AcquireStatementLock(table.SchemaLock, LockMode.Shared);
     }
 
     /// <summary>
@@ -361,6 +421,7 @@ internal sealed class BatchContext
     public void ReleaseStatementSchemaLocks()
     {
         var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
         // Release in reverse acquisition order — symmetric to a stack of
         // acquires. Phase 0 has no order-dependent semantics in release
         // (every Sch-S / Sch-M release pulses the gate independently), but
@@ -368,7 +429,7 @@ internal sealed class BatchContext
         for (var i = this.StatementSchemaLocks.Count - 1; i >= 0; i--)
         {
             var (resource, mode) = this.StatementSchemaLocks[i];
-            resource.Release(mode, connection);
+            manager.Release(resource, mode, connection);
         }
         this.StatementSchemaLocks.Clear();
     }
@@ -798,12 +859,13 @@ internal sealed class BatchContext
         if (!this.TryResolveSchema(name, out var schema))
         {
             // 1-part fallback to system tables when the default schema lookup
-            // misses; matches the legacy bare-`systypes` access path.
-            if (name.Count == 1 && Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table))
-            {
-                this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
-                return true;
-            }
+            // misses; matches the legacy bare-`systypes` access path. System
+            // tables are immutable and SHARED across Simulations (the dict
+            // lives in BuiltInResources as a static Value), so per-instance
+            // lock acquisition would race across simulations — skip the
+            // schema-stability acquire; nothing can DDL them anyway.
+            if (name.Count == 1)
+                return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
             table = null;
             return false;
         }
@@ -815,12 +877,10 @@ internal sealed class BatchContext
         }
 
         // Bare 1-part also falls through to system tables when the default
-        // schema doesn't hold the table.
-        if (name.Count == 1 && Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table))
-        {
-            this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
-            return true;
-        }
+        // schema doesn't hold the table — same shared-instance reasoning,
+        // no Sch-S acquire.
+        if (name.Count == 1)
+            return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
 
         table = null;
         return false;

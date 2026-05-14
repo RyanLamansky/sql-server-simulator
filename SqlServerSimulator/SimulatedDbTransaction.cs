@@ -43,6 +43,19 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     /// </summary>
     internal readonly Dictionary<string, int> Savepoints = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Transaction-scoped lock holds: data X locks (acquired by DML
+    /// targets while this transaction is active) and HOLDLOCK-upgraded
+    /// S locks (acquired by reads that opted into "hold until tx end").
+    /// Released at <see cref="Commit"/> / <see cref="Rollback"/> /
+    /// <see cref="Dispose"/> — matching SQL Server's "X locks released
+    /// at transaction end under READ COMMITTED" rule, probe-confirmed.
+    /// Savepoint partial-rollback does NOT release these (real SQL
+    /// Server keeps locks across savepoint rollback — probe-confirmed
+    /// via the EF SaveChanges path).
+    /// </summary>
+    internal readonly List<(LockResource Resource, LockMode Mode)> HeldLocks = [];
+
     public override IsolationLevel IsolationLevel { get; } = isolationLevel;
 
     protected override DbConnection DbConnection => this.connection;
@@ -63,6 +76,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         if (this.TranCount > 0)
             return;
         this.UndoLog.Clear();
+        ReleaseAllLocks();
         this.connection.CurrentTransaction = null;
         this.finished = true;
     }
@@ -73,6 +87,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
         this.UndoLog.Rollback();
         this.TranCount = 0;
+        ReleaseAllLocks();
         this.connection.CurrentTransaction = null;
         this.finished = true;
     }
@@ -88,9 +103,30 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         if (disposing && !this.finished)
         {
             this.UndoLog.Rollback();
+            ReleaseAllLocks();
             this.connection.CurrentTransaction = null;
             this.finished = true;
         }
         base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// Releases every entry in <see cref="HeldLocks"/> in reverse
+    /// acquisition order against the manager's gate. Called by
+    /// <see cref="Commit"/> / <see cref="Rollback"/> / dispose-implicit-
+    /// rollback. Safe to call multiple times (the list clears between
+    /// calls). LIFO discipline matches structured-locking convention; the
+    /// manager pulses every waiter on each release so order doesn't affect
+    /// correctness, just style.
+    /// </summary>
+    private void ReleaseAllLocks()
+    {
+        var manager = this.simulation.LockManager;
+        for (var i = this.HeldLocks.Count - 1; i >= 0; i--)
+        {
+            var (resource, mode) = this.HeldLocks[i];
+            manager.Release(resource, mode, this.connection);
+        }
+        this.HeldLocks.Clear();
     }
 }

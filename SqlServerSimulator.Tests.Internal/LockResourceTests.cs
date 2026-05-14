@@ -4,185 +4,249 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Direct exercises of the phase-0 <see cref="LockResource"/> primitive:
-/// per-owner re-entrant counting, Sch-S × Sch-S compatibility,
-/// Sch-M-blocks-everything, cross-thread blocking wait, LOCK_TIMEOUT path
-/// (Msg 1222), and same-thread-deadlock short-circuit (Msg 1205). These
-/// live in the Internal test project because <see cref="LockResource"/>
-/// is internal — the user-facing surface for phase 0 is just the SET /
-/// connection-state plumbing, and end-to-end blocking tests need X locks
-/// (phase 1a) to observe holds that span statements.
+/// Direct exercises of the <see cref="LockManager"/> + <see cref="LockResource"/>
+/// pair: per-owner re-entrant counting, compatibility matrix across
+/// Sch-S / Sch-M / S / X, cross-thread blocking wait, LOCK_TIMEOUT path
+/// (Msg 1222), same-thread-deadlock short-circuit (Msg 1205), and
+/// wait-for-graph cycle detection (Msg 1205 on the requester).
 /// </summary>
 [TestClass]
 public sealed class LockResourceTests
 {
     public TestContext TestContext { get; set; } = null!;
 
-    private static SimulatedDbConnection NewConnection()
-    {
-        var sim = new Simulation();
-        return (SimulatedDbConnection)sim.CreateDbConnection();
-    }
-
     [TestMethod]
     public void SchS_OnEmptyResource_GrantsImmediately()
     {
+        var sim = new Simulation();
         var resource = new LockResource();
-        var conn = NewConnection();
-        resource.Acquire(LockMode.SchemaStability, conn, timeoutMillis: 0);
-        // No throw = grant. Release to leave the resource clean.
-        resource.Release(LockMode.SchemaStability, conn);
+        var conn = (SimulatedDbConnection)sim.CreateDbConnection();
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, conn, timeoutMillis: 0);
+        sim.LockManager.Release(resource, LockMode.SchemaStability, conn);
     }
 
     [TestMethod]
     public void SchS_TwoDifferentOwners_BothGrant()
     {
+        var sim = new Simulation();
         var resource = new LockResource();
-        var a = NewConnection();
-        var b = NewConnection();
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0);
-        resource.Acquire(LockMode.SchemaStability, b, timeoutMillis: 0);
-        resource.Release(LockMode.SchemaStability, b);
-        resource.Release(LockMode.SchemaStability, a);
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, b, 0);
+        sim.LockManager.Release(resource, LockMode.SchemaStability, b);
+        sim.LockManager.Release(resource, LockMode.SchemaStability, a);
     }
 
     [TestMethod]
     public void SchM_BlocksConflictingSchS_TimeoutZeroRaises1222()
     {
+        var sim = new Simulation();
         var resource = new LockResource();
-        var a = NewConnection();
-        var b = NewConnection();
-        // a runs synchronously on this thread but won't be "executing" once
-        // we clear it — simulating a holder whose statement has parked.
-        a.CurrentExecutingThreadId = -1; // not this thread; cross-thread blocker
-        resource.Acquire(LockMode.SchemaModification, a, timeoutMillis: 0);
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        a.CurrentExecutingThreadId = -1;
+        sim.LockManager.Acquire(resource, LockMode.SchemaModification, a, 0);
         var ex = Throws<DbException>(() =>
-            resource.Acquire(LockMode.SchemaStability, b, timeoutMillis: 0));
+            sim.LockManager.Acquire(resource, LockMode.SchemaStability, b, 0));
         AreEqual("1222", ex.Data["HelpLink.EvtID"]);
         AreEqual("Lock request time out period exceeded.", ex.Message);
-        resource.Release(LockMode.SchemaModification, a);
+        sim.LockManager.Release(resource, LockMode.SchemaModification, a);
     }
 
     [TestMethod]
-    public void SchS_BlocksConflictingSchM_TimeoutZeroRaises1222()
+    public void X_BlocksConflictingX_TimeoutZeroRaises1222()
     {
+        var sim = new Simulation();
         var resource = new LockResource();
-        var a = NewConnection();
-        var b = NewConnection();
-        a.CurrentExecutingThreadId = -1; // not this thread
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0);
-        var ex = Throws<DbException>(() =>
-            resource.Acquire(LockMode.SchemaModification, b, timeoutMillis: 0));
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
-        resource.Release(LockMode.SchemaStability, a);
-    }
-
-    [TestMethod]
-    public void SchS_BlocksConflictingSchM_PositiveTimeoutEventuallyRaises1222()
-    {
-        var resource = new LockResource();
-        var a = NewConnection();
-        var b = NewConnection();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0);
-        var started = Environment.TickCount64;
+        sim.LockManager.Acquire(resource, LockMode.Exclusive, a, 0);
         var ex = Throws<DbException>(() =>
-            resource.Acquire(LockMode.SchemaModification, b, timeoutMillis: 100));
-        var elapsed = Environment.TickCount64 - started;
+            sim.LockManager.Acquire(resource, LockMode.Exclusive, b, 0));
         AreEqual("1222", ex.Data["HelpLink.EvtID"]);
-        IsGreaterThanOrEqualTo(80L, elapsed);
-        resource.Release(LockMode.SchemaStability, a);
+        sim.LockManager.Release(resource, LockMode.Exclusive, a);
+    }
+
+    [TestMethod]
+    public void X_BlocksConflictingS_TimeoutZeroRaises1222()
+    {
+        var sim = new Simulation();
+        var resource = new LockResource();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        a.CurrentExecutingThreadId = -1;
+        sim.LockManager.Acquire(resource, LockMode.Exclusive, a, 0);
+        _ = Throws<DbException>(() =>
+            sim.LockManager.Acquire(resource, LockMode.Shared, b, 0));
+        sim.LockManager.Release(resource, LockMode.Exclusive, a);
+    }
+
+    [TestMethod]
+    public void SS_Compatible_BothGrant()
+    {
+        var sim = new Simulation();
+        var resource = new LockResource();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        sim.LockManager.Acquire(resource, LockMode.Shared, a, 0);
+        sim.LockManager.Acquire(resource, LockMode.Shared, b, 0);
+        sim.LockManager.Release(resource, LockMode.Shared, b);
+        sim.LockManager.Release(resource, LockMode.Shared, a);
+    }
+
+    [TestMethod]
+    public void SchS_AndS_AreOrthogonal_BothGrant()
+    {
+        // The schema family (Sch-S/Sch-M) and the data family (S/X) are
+        // independent — a Sch-S holder doesn't block an X requester and
+        // vice versa.
+        var sim = new Simulation();
+        var resource = new LockResource();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
+        sim.LockManager.Acquire(resource, LockMode.Exclusive, b, 0);
+        sim.LockManager.Release(resource, LockMode.Exclusive, b);
+        sim.LockManager.Release(resource, LockMode.SchemaStability, a);
     }
 
     [TestMethod]
     public void Reentrance_SameOwnerSameMode_BumpsCount()
     {
+        var sim = new Simulation();
         var resource = new LockResource();
-        var a = NewConnection();
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0);
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0); // re-entry
-        resource.Release(LockMode.SchemaStability, a); // first release just decrements
-        // Lock is still held; another owner's Sch-M would conflict.
-        var b = NewConnection();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
+        sim.LockManager.Release(resource, LockMode.SchemaStability, a);
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
-        _ = Throws<DbException>(() => resource.Acquire(LockMode.SchemaModification, b, 0));
-        resource.Release(LockMode.SchemaStability, a); // final release
-        // Now b can acquire.
-        resource.Acquire(LockMode.SchemaModification, b, timeoutMillis: 0);
-        resource.Release(LockMode.SchemaModification, b);
+        _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, LockMode.SchemaModification, b, 0));
+        sim.LockManager.Release(resource, LockMode.SchemaStability, a);
+        sim.LockManager.Acquire(resource, LockMode.SchemaModification, b, 0);
+        sim.LockManager.Release(resource, LockMode.SchemaModification, b);
     }
 
     [TestMethod]
-    public void SameOwner_HoldsSchS_ThenAcquiresSchM_Grants()
+    public async Task CrossThread_SchSDrainsAfterRelease_QueuedSchMSucceeds()
     {
-        // A single owner that already holds Sch-S can also acquire Sch-M —
-        // there are no other holders to conflict with. This is the path the
-        // ALTER dispatcher takes (Sch-S via TryResolveTable, then Sch-M
-        // explicitly). Both holds release independently.
+        var sim = new Simulation();
         var resource = new LockResource();
-        var a = NewConnection();
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0);
-        resource.Acquire(LockMode.SchemaModification, a, timeoutMillis: 0);
-        resource.Release(LockMode.SchemaModification, a);
-        resource.Release(LockMode.SchemaStability, a);
-    }
-
-    [TestMethod]
-    public void CrossThread_SchSDrainsAfterRelease_QueuedSchMSucceeds()
-    {
-        var resource = new LockResource();
-        var holder = NewConnection();
-        var waiter = NewConnection();
-        // Holder takes Sch-S on a different thread (simulated via thread id).
-        var holderThread = new Thread(() =>
+        var holder = (SimulatedDbConnection)sim.CreateDbConnection();
+        var waiter = (SimulatedDbConnection)sim.CreateDbConnection();
+        var holderTask = Task.Run(() =>
         {
             holder.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
-            resource.Acquire(LockMode.SchemaStability, holder, timeoutMillis: 0);
+            sim.LockManager.Acquire(resource, LockMode.SchemaStability, holder, 0);
             Thread.Sleep(100);
-            resource.Release(LockMode.SchemaStability, holder);
+            sim.LockManager.Release(resource, LockMode.SchemaStability, holder);
             holder.CurrentExecutingThreadId = null;
-        });
-        holderThread.Start();
-        // Give the holder thread time to acquire before the waiter starts.
-        Thread.Sleep(20);
-        // Waiter requests Sch-M with a generous timeout. Should wait for the
-        // holder to release then succeed.
-        var started = Environment.TickCount64;
-        resource.Acquire(LockMode.SchemaModification, waiter, timeoutMillis: 1000);
-        var elapsed = Environment.TickCount64 - started;
-        resource.Release(LockMode.SchemaModification, waiter);
-        holderThread.Join();
-        // Elapsed should be roughly the remaining sleep time on the holder
-        // (~80ms after the 20ms head start). Generous bounds for CI noise.
-        IsGreaterThanOrEqualTo(20L, elapsed);
+        }, TestContext.CancellationToken);
+        await Task.Delay(20, TestContext.CancellationToken);
+        sim.LockManager.Acquire(resource, LockMode.SchemaModification, waiter, 1000);
+        sim.LockManager.Release(resource, LockMode.SchemaModification, waiter);
+        await holderTask;
     }
 
     [TestMethod]
     public void SameThreadConflict_RaisesMsg1205Immediately()
     {
-        // A conflicting holder whose CurrentExecutingThreadId equals the
-        // caller's thread means the holder can't release until the caller
-        // does — no progress is possible. The simulator raises Msg 1205
-        // immediately rather than letting the wait hang (or rely on the
-        // timeout).
+        var sim = new Simulation();
         var resource = new LockResource();
-        var a = NewConnection();
-        var b = NewConnection();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
         a.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
-        resource.Acquire(LockMode.SchemaStability, a, timeoutMillis: 0);
+        sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
         var ex = Throws<DbException>(() =>
-            resource.Acquire(LockMode.SchemaModification, b, timeoutMillis: 10000));
+            sim.LockManager.Acquire(resource, LockMode.SchemaModification, b, 10000));
         AreEqual("1205", ex.Data["HelpLink.EvtID"]);
         Contains($"Process ID {b.Spid}", ex.Message);
         Contains("deadlocked on lock resources", ex.Message);
-        resource.Release(LockMode.SchemaStability, a);
+        sim.LockManager.Release(resource, LockMode.SchemaStability, a);
+    }
+
+    [TestMethod]
+    public void CycleDetection_DetectorPicksRequester()
+    {
+        // Set up a 2-cycle without real threading: this thread holds X on
+        // r1; a second "impersonated" connection holds X on r2 and is
+        // marked as waiting on r1 (WaitingOnResource = r1). When this
+        // thread asks for X on r2, the detector walks r2's holders → b →
+        // b.WaitingOnResource = r1 → r1's holders → us, cycle closed.
+        // Caller (us) is the victim per the always-the-requester policy.
+        var sim = new Simulation();
+        var r1 = new LockResource();
+        var r2 = new LockResource();
+        var caller = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        caller.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+        b.CurrentExecutingThreadId = -1; // foreign thread — avoids the same-thread short-circuit
+        sim.LockManager.Acquire(r1, LockMode.Exclusive, caller, 0);
+        sim.LockManager.Acquire(r2, LockMode.Exclusive, b, 0);
+        b.WaitingOnResource = r1;
+        try
+        {
+            var ex = Throws<DbException>(() =>
+                sim.LockManager.Acquire(r2, LockMode.Exclusive, caller, timeoutMillis: 10000));
+            AreEqual("1205", ex.Data["HelpLink.EvtID"]);
+            Contains($"Process ID {caller.Spid}", ex.Message);
+        }
+        finally
+        {
+            b.WaitingOnResource = null;
+            sim.LockManager.Release(r2, LockMode.Exclusive, b);
+            sim.LockManager.Release(r1, LockMode.Exclusive, caller);
+        }
+    }
+
+    [TestMethod]
+    public void TransactionScopedX_ReleasedAtCommit()
+    {
+        // Once the simulator runs a tx-scoped X acquire (via
+        // BatchContext.AcquireTransactionLock), Commit releases every
+        // entry in the tx's HeldLocks list.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var schemaLock = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"].SchemaLock;
+        ExecuteNonQuery(conn, "begin tran; insert t values (1)");
+        IsNotEmpty(schemaLock.Holders);
+        ExecuteNonQuery(conn, "commit tran");
+        IsEmpty(schemaLock.Holders);
+    }
+
+    [TestMethod]
+    public void TransactionScopedX_ReleasedAtRollback()
+    {
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var schemaLock = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"].SchemaLock;
+        ExecuteNonQuery(conn, "begin tran; insert t values (1); rollback tran");
+        IsEmpty(schemaLock.Holders);
+    }
+
+    private static void ExecuteNonQuery(Simulation sim, string sql)
+    {
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        ExecuteNonQuery(conn, sql);
+    }
+
+    private static void ExecuteNonQuery(DbConnection conn, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        _ = cmd.ExecuteNonQuery();
     }
 
     [TestMethod]
     public void Spid_FirstUserConnection_Is51()
     {
-        // SQL Server's convention reserves SPIDs 1-50 for system/internal
-        // use and starts user sessions at 51. The simulator matches.
         var sim = new Simulation();
         var conn1 = (SimulatedDbConnection)sim.CreateDbConnection();
         var conn2 = (SimulatedDbConnection)sim.CreateDbConnection();

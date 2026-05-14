@@ -36,12 +36,24 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     /// against this connection, or <c>null</c> when no command is in flight.
     /// Set at the top of <see cref="Simulation.CreateResultSetsForCommand"/>'s
     /// outer wrapper and cleared in its <c>finally</c>. Drives
-    /// <see cref="LockResource"/>'s same-thread-deadlock detection: a
+    /// <see cref="LockManager"/>'s same-thread-deadlock detection: a
     /// conflicting holder whose <see cref="CurrentExecutingThreadId"/>
     /// matches the caller's thread can't release without the caller
     /// releasing first, so Msg 1205 fires immediately instead of waiting.
     /// </summary>
     internal int? CurrentExecutingThreadId;
+
+    /// <summary>
+    /// Resource this connection is currently blocked waiting to acquire,
+    /// or <c>null</c> when not in a wait state. Set under the
+    /// <see cref="LockManager"/> gate just before <see cref="Monitor.Wait(object, int)"/>
+    /// suspends the caller; cleared in the wait's <c>finally</c> so an
+    /// exception (Msg 1222 / 1205) leaves no stale edge. Read by
+    /// other connections' cycle-detection walks (under the same gate, so
+    /// the snapshot is consistent) to spot a wait-for-graph cycle that
+    /// includes this connection.
+    /// </summary>
+    internal LockResource? WaitingOnResource;
 
     /// <summary>
     /// The database this session is pointed at. Defaults to the entry named

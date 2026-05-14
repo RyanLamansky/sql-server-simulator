@@ -983,7 +983,7 @@ internal sealed partial class Selection
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
-                    ParseOptionalTableHints(context);
+                    _ = ParseOptionalTableHints(context);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
@@ -1049,7 +1049,12 @@ internal sealed partial class Selection
                 var temporalRowSource = ParseOptionalForSystemTime(context, heapTable);
 
                 var heapAlias = ConsumeOptionalAlias(context);
-                ParseOptionalTableHints(context);
+                var heapHints = ParseOptionalTableHints(context);
+                // Phase 1a: acquire table-level S (or skip on NOLOCK, or
+                // upgrade to tx-scoped on HOLDLOCK/SERIALIZABLE/REPEATABLEREAD).
+                // No data lock on table variables / temp tables / system
+                // tables — none are cross-connection contention points.
+                context.Batch.AcquireDataLockIfApplicable(heapTable, heapHints, isWrite: false);
                 var heapQualifier = heapAlias ?? objectName.Leaf;
 
                 return new FromSource(
@@ -1075,7 +1080,7 @@ internal sealed partial class Selection
                 for (var ci = 0; ci < tvColumnNames.Length; ci++)
                     tvColumnNames[ci] = tvTable.Columns[ci].Name;
                 var tvAlias = ConsumeOptionalAlias(context);
-                ParseOptionalTableHints(context);
+                _ = ParseOptionalTableHints(context);
                 return new FromSource(
                     qualifier: tvAlias ?? tvName.Leaf,
                     columnNames: tvColumnNames,

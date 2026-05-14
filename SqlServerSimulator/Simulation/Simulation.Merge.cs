@@ -61,7 +61,10 @@ partial class Simulation
         // variable targets reject hints — skip the parser for `@t`.
         context.MoveNextRequired();
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+            _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        // Phase 1a: acquire X on the MERGE target. Tx-scoped when an
+        // explicit BEGIN TRAN is active.
+        context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
 
         // Optional target alias: AS <alias> or bare <alias>.
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
@@ -318,17 +321,24 @@ partial class Simulation
                 sourceSchema[i] = heapTable.Columns[i].Type;
                 columnNames[i] = heapTable.Columns[i].Name;
             }
+            var sourceTable = heapTable;
+            var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
+            var sourceHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
+            // Phase 1a: MERGE bare-table source is a READ — acquire S unless
+            // NOLOCK/READUNCOMMITTED skips it; HOLDLOCK upgrades to tx-scope.
+            context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
             materialize = batch =>
             {
                 var rows = new List<SqlValue[]>();
-                foreach (var rowBytes in heapTable.Heap.EnumerateRows())
+                foreach (var rowBytes in sourceTable.Heap.EnumerateRows())
                 {
-                    var fullValues = DecodeFullRow(heapTable, rowBytes);
-                    EvaluateComputedColumns(heapTable, fullValues, batch);
+                    var fullValues = DecodeFullRow(sourceTable, rowBytes);
+                    EvaluateComputedColumns(sourceTable, fullValues, batch);
                     rows.Add(fullValues);
                 }
                 return rows;
             };
+            return (materialize, alias, columnNames, sourceSchema);
         }
         else
         {
@@ -337,9 +347,9 @@ partial class Simulation
                 : SimulatedSqlException.InvalidObjectName(objectName);
         }
 
-        var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
-        Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-        return (materialize, alias, columnNames, sourceSchema);
+        var defaultAlias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
+        _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
+        return (materialize, defaultAlias, columnNames, sourceSchema);
     }
 
     /// <summary>

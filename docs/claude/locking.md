@@ -1,155 +1,201 @@
-# Locking — phase 0 (schema-stability locks)
+# Locking — phases 0 + 1a
 
-Phase 0 of the lock-manager rollout: schema-stability (Sch-S) and
-schema-modification (Sch-M) locks on every schema-bound object, plus the
-per-connection plumbing (SPID, `@@LOCK_TIMEOUT`, currently-executing
-thread) the data-lock phases will build on. **Data locks (S / X / U / IS
-/ IX / SIX), lock hints' behavioral effect, and MVCC are NOT phase 0** —
-those land in phases 1a / 1b / 2 / 3 of the rollout (see CLAUDE.md's
-roadmap entry).
+Phase 0 shipped schema-stability locks (Sch-S / Sch-M) on every schema-
+bound object plus the per-connection plumbing (SPID, `@@LOCK_TIMEOUT`,
+currently-executing thread). Phase 1a adds **table-level data locks
+(Shared / Exclusive)**, **transaction-scoped X retention**, the
+**NOLOCK / HOLDLOCK hint semantics**, **auto-rollback on deadlock victim
+(Msg 1205)**, and **cross-thread waiter-graph cycle detection**.
 
-The user-visible new behaviors:
+User-visible behaviors:
 
-- A DDL statement (`DROP TABLE`, `ALTER TABLE`, `TRUNCATE TABLE`) on one
-  connection waits for concurrent readers / writers on another
-  connection to finish their statements before proceeding (cross-thread
-  Sch-S → Sch-M serialization).
-- `SET LOCK_TIMEOUT N` now has semantic effect: a blocked acquisition
-  raises **Msg 1222** (`Lock request time out period exceeded.`) instead
-  of waiting indefinitely. Default is `-1` (wait forever, probe-confirmed
-  default on a fresh SqlConnection).
+- `BEGIN TRAN; INSERT/UPDATE/DELETE; …` holds **X** on the target table
+  until COMMIT / ROLLBACK. A concurrent reader on another connection
+  blocks on **S** until the writer commits.
+- `SET LOCK_TIMEOUT N` raises **Msg 1222** on a blocked acquisition
+  whose wait exceeds `N` milliseconds.
+- A classic 2-cycle deadlock (A holds t1 / waits on t2; B holds t2 /
+  waits on t1) raises **Msg 1205** on the connection that closes the
+  cycle (the requester). The victim's transaction is auto-rolled-back;
+  the survivor's UPDATE completes.
+- `WITH (NOLOCK)` / `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED`
+  reads through the X holder — dirty-read semantics.
+- `WITH (HOLDLOCK)` / `WITH (SERIALIZABLE)` / `WITH (REPEATABLEREAD)`
+  upgrades the read's **S** to transaction-scoped retention.
 - A conflict against a holder running on the caller's own OS thread
-  raises **Msg 1205** (`Transaction (Process ID <N>) was deadlocked on
-  lock resources with another process and has been chosen as the deadlock
-  victim. Rerun the transaction.`) immediately — that thread can't make
-  progress on the holder until the caller releases it. SPID embedded is
-  the victim's (probe-confirmed against SQL Server 2025).
+  raises **Msg 1205** immediately (no progress possible — the thread is
+  busy with the requester).
 
-## Implementation map
+## Lock modes
 
-- [`LockResource.cs`](../../SqlServerSimulator/LockResource.cs) — the
-  per-object reader/writer primitive. `Acquire(mode, owner,
-  timeoutMillis)` blocks via `Monitor.Wait`; `Release` pulses every
-  waiter so each re-checks under the gate. Re-entrant per `(owner,
-  mode)`. Same-thread-deadlock check happens on every acquire-conflict
-  path.
-- [`SchemaObject.SchemaLock`](../../SqlServerSimulator/SchemaObject.cs)
-  — one `LockResource` per `HeapTable` / `View` / `UserDefinedFunction` /
-  `Procedure` / `Sequence` / `TableType` / `Trigger`. Inherited from the
-  base class, so adding a new `SchemaObject`-derived kind picks the lock
-  up automatically.
-- [`SimulatedDbConnection.Spid`](../../SqlServerSimulator/SimulatedDbConnection.cs)
-  / `LockTimeoutMillis` / `CurrentExecutingThreadId` — per-connection
-  state allocated at construction / updated by `SET LOCK_TIMEOUT` /
-  managed by the dispatch loop.
-- [`Simulation.AllocateSpid`](../../SqlServerSimulator/Simulation/Simulation.cs)
-  — monotonic counter; first user SPID = 51 (SQL Server convention).
-- [`BatchContext.StatementSchemaLocks`](../../SqlServerSimulator/Parser/BatchContext.cs)
-  — per-statement list of `(LockResource, LockMode)` tuples; the
-  dispatch loop releases every entry in a `finally` at statement end,
-  unconditionally.
-- [`BatchContext.AcquireStatementLock`](../../SqlServerSimulator/Parser/BatchContext.cs)
-  — helper that calls `LockResource.Acquire` with the connection's
-  current `LockTimeoutMillis` and records the acquisition for statement-
-  end release.
+| Mode                  | Semantics                                            |
+| --------------------- | ---------------------------------------------------- |
+| `SchemaStability`     | Phase 0. Held during read / use of a schema object.  |
+| `SchemaModification`  | Phase 0. Exclusive against everything; held by DDL.  |
+| `Shared`              | Phase 1a. Held during table reads. Multiple OK.      |
+| `Exclusive`           | Phase 1a. Held during table writes. Exclusive.       |
+
+Compatibility matrix (phase 1a):
+
+|        | Sch-S | Sch-M | S     | X     |
+| ------ | ----- | ----- | ----- | ----- |
+| Sch-S  | ✓     | ✗     | ✓     | ✓     |
+| Sch-M  | ✗     | ✗     | ✗     | ✗     |
+| S      | ✓     | ✗     | ✓     | ✗     |
+| X      | ✓     | ✗     | ✗     | ✗     |
+
+Schema family (Sch-S / Sch-M) and data family (S / X) are orthogonal —
+DDL takes Sch-M and conflicts with everything; DML takes S or X plus the
+implicit Sch-S that comes with `TryResolveTable`. Same-owner re-entrance
+always succeeds (the conflict check skips holders whose owner matches
+the requester).
+
+## Lock-owner / lock-scope model
+
+Lock owner is always the `SimulatedDbConnection`. The *scope* (when the
+lock releases) depends on the mode and surrounding transaction state:
+
+| Acquired at               | No tx (auto-commit)        | Inside `BEGIN TRAN`             |
+| ------------------------- | -------------------------- | ------------------------------- |
+| `TryResolve*` (Sch-S)     | Released at statement end. | Released at statement end.      |
+| DDL site (Sch-M)          | Released at statement end. | Released at statement end.      |
+| FROM source plain (S)     | Released at statement end. | Released at statement end.      |
+| FROM source HOLDLOCK (S)  | Released at statement end. | Released at COMMIT / ROLLBACK.  |
+| DML target (X)            | Released at statement end. | Released at COMMIT / ROLLBACK.  |
+
+Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and
+release in `DispatchOneStatement`'s `finally`. Transaction-scoped locks
+live in `SimulatedDbTransaction.HeldLocks` and release in `Commit()` /
+`Rollback()` / dispose-implicit-rollback. Savepoint partial rollbacks
+(`ROLLBACK TRAN <savepoint>`) do NOT release locks — matches real SQL
+Server (probe-confirmed).
 
 ## Acquisition sites
 
-**Sch-S** — acquired by every `TryResolve*` success path on
-`BatchContext` (table / view / function / procedure / table-type /
-sequence). Temp tables (`#foo`), table variables (`@t`), and trigger
-pseudo-tables (`INSERTED` / `DELETED`) bypass — they're per-session /
-per-batch and not concurrency-reachable. Re-entrance handles a single
-statement that resolves the same object twice (`FROM t a JOIN t b`).
+**Sch-S** — every successful `BatchContext.TryResolve*` path (table /
+view / function / procedure / table-type / sequence) on a schema-bound
+object. Skipped for temp tables / table variables / trigger
+`INSERTED` / `DELETED` pseudo-tables / system tables (none cross-
+connection-reachable).
 
-**Sch-M** — acquired by every DDL site:
+**Sch-M** — every DDL site: `DROP {TABLE,VIEW,FUNCTION,PROCEDURE,TYPE,
+SEQUENCE,TRIGGER}` after the lookup; `TRUNCATE TABLE`; `ALTER TABLE`
+(once at the dispatcher entry).
 
-- `DROP TABLE` / `DROP VIEW` / `DROP FUNCTION` / `DROP PROCEDURE` /
-  `DROP TYPE` / `DROP SEQUENCE` / `DROP TRIGGER` — after the
-  `TryGetValue` succeeds and before the `TryRemove`.
-- `TRUNCATE TABLE` — after `TryGetValue` succeeds.
-- `ALTER TABLE` — once at the dispatcher entry; sub-parsers' own
-  `TryResolveTable` calls add re-entrant Sch-S holds that release with
-  everything else at statement end.
+**Shared (S)** — `BatchContext.AcquireDataLockIfApplicable(table, hints,
+isWrite: false)` from FROM-source resolution in `Selection.cs` and from
+MERGE bare-table source resolution in `Simulation.Merge.cs`. Skipped on
+`NOLOCK` / `READUNCOMMITTED` hint. Tx-scoped on `HOLDLOCK` /
+`REPEATABLEREAD` / `SERIALIZABLE` hint.
 
-**Not yet wired** (phase 1a / 2 follow-ups): `ALTER PROCEDURE` / `ALTER
-TRIGGER` / `ALTER SEQUENCE` / `ALTER SCHEMA TRANSFER` / `DROP SCHEMA`.
-These rarely contend in practice and depend on the same primitive when
-they land. `DROP SCHEMA` is special — `Schema` isn't a `SchemaObject`
-and would need its own lock resource if schema-level concurrency
-mattered.
+**Exclusive (X)** — `AcquireDataLockIfApplicable(table, default,
+isWrite: true)` from INSERT / UPDATE / DELETE / MERGE target sites.
+Tx-scoped when an explicit transaction is active.
 
-## Same-thread deadlock detection (Msg 1205)
+Table variables / local temp tables / system tables bypass all data-lock
+acquisition.
 
-The user requested model: connections are owners, not threads — multiple
-connections can be open on one OS thread, and they can deadlock each
-other on that thread. The detection works as follows:
+## Cycle detection
 
-- Every `LockResource.Acquire` that finds a conflict walks the holder
-  list and asks each holder: *"is your current-executing thread the same
-  as mine?"* If yes, the caller's thread is the one that would need to
-  release the holder, which it can't do while it's also the requester →
-  no progress is possible → immediate Msg 1205.
-- `CurrentExecutingThreadId` is set to `Environment.CurrentManagedThreadId`
-  at the top of `Simulation.DispatchOneStatement` and restored in
-  `finally`. Save+restore handles nested-body dispatches (procedure body,
-  trigger body, scalar UDF, multi-statement TVF) — each entry uses the
-  parent connection, so the value should observe nesting correctly.
+When a conflict-driven wait would block, `LockManager.Acquire`:
 
-Cross-thread waiter-graph cycle detection isn't part of phase 0 — Sch-S
-/ Sch-M alone, given the simulator's per-statement acquisition pattern,
-can't form a cross-thread cycle (Sch-S is released at statement end; a
-connection can't hold Sch-S across statements and then need Sch-M on
-another resource the symmetric peer holds). Cross-thread cycles emerge
-with data X locks held across transactions; the detector will land in
-phase 1a or 1b.
+1. **Same-thread short-circuit** (carried forward from phase 0): if any
+   conflicting holder's `CurrentExecutingThreadId` equals the caller's
+   managed thread id, raise Msg 1205 immediately. That thread can't
+   release the holder while it's also the requester.
+2. **Cross-thread cycle walk**: `WouldCreateCycle` walks the wait-for
+   graph starting at each conflicting holder. Each connection's
+   `WaitingOnResource` (set under the gate at wait-entry, cleared in
+   `finally` at wait-exit) is read consistently under the manager's
+   gate. If any walk reaches the caller's connection, a cycle exists;
+   caller is the victim (phase-1a policy: always-the-requester).
+3. **Auto-rollback on Msg 1205**: when `LockManager` raises Msg 1205,
+   `DispatchOneStatement` catches the exception, rolls back the
+   connection's current transaction (releasing every held lock and
+   waking the survivor), and propagates. Done BEFORE the TRY/CATCH
+   frame check so both the propagating and TRY-captured paths observe
+   the same auto-rollback (probe-confirmed: `@@TRANCOUNT` reads 0 in
+   the catch handler).
+
+The walker uses DFS with a `visited` set so degenerate cycles in the
+holder set itself don't loop forever. The detection is O(holders ×
+walk-depth) per blocked acquire — acceptable at simulator scale.
 
 ## Lock-timeout semantics
 
-`SET LOCK_TIMEOUT N`:
+Unchanged from phase 0: `SET LOCK_TIMEOUT N` → `connection.LockTimeoutMillis`.
+Negative = wait forever (default), `0` = fail-fast on first conflict,
+positive `N` = wait up to `N` ms before raising Msg 1222. Phase 1a
+adds the timeout to every data-lock acquire too (the same `LockManager.Acquire`
+path handles all four modes).
 
-- `N = -1` (the default): wait indefinitely on conflict.
-- `N = 0`: fail-fast on first conflict (probe-confirmed: real SQL Server
-  raises Msg 1222 within milliseconds, no grace period).
-- `N > 0`: wait up to `N` milliseconds; expiry raises Msg 1222.
+## Hint surface
 
-The acquisition path uses `Monitor.Wait(gate, remainingMs)` with the
-deadline tracked via `Environment.TickCount64`. On every spurious wake
-the deadline is re-checked; on every grant-fail the conflict matrix is
-re-checked. Single, fixed wording for Msg 1222 — probe-confirmed
-identical for row-lock and schema-lock timeouts (only the `State`
-differs: `45` for row paths, `56` for schema paths; the simulator's
-factory uses `56` as the default since phase 0 has only schema-level
-acquires).
+| Hint                              | Phase 1a effect                                |
+| --------------------------------- | ---------------------------------------------- |
+| `NOLOCK` / `READUNCOMMITTED`      | Skip S acquisition (dirty read).               |
+| `HOLDLOCK` / `REPEATABLEREAD` / `SERIALIZABLE` | S upgraded to tx-scoped.          |
+| `READPAST`                        | Parse-and-discard (phase 1b — row-level skip). |
+| `UPDLOCK` / `XLOCK`               | Parse-and-discard (phase 1b — row U / X).      |
+| `TABLOCK` / `TABLOCKX` / `ROWLOCK` / `PAGLOCK` | Parse-and-discard (phase 1b granularity). |
+| Everything else                   | Parse-and-discard.                             |
 
-## SPID
+The closed `TableHintNames` accept-list still raises Msg 321 on
+unknown names. Conflict-detection (`Msg 1047` on `NOLOCK + XLOCK`) is
+unmodeled; phase 1b's row-level dispatch will surface those naturally
+once the simulator has lock state to conflict over.
 
-`Simulation.nextSpid` seeded at `50`, `AllocateSpid()` returns the next
-value via `Interlocked.Increment`. First user connection gets `51`,
-matching SQL Server's "SPIDs 1-50 reserved for system, user starts at
-51" convention. Surfaced in Msg 1205's `Process ID <N>` slot; will
-surface in `@@SPID` / `sys.dm_exec_sessions.session_id` if those land.
+## Phase-1a gaps (intentional)
 
-## Phase-0 gaps (intentional)
+- **Granularity = table-only**. Row / page / key locks not modeled —
+  phase 1b. Practical effect: phase 1a is *stronger* than real SQL
+  Server's READ COMMITTED (a SELECT blocks on any X-locked row in the
+  table, not just the row being read). Apps that depend on row-level
+  RC concurrency need phase 1b.
+- **`READPAST` / `UPDLOCK` / `XLOCK` / `TABLOCK` / `TABLOCKX` /
+  `ROWLOCK` / `PAGLOCK`** all parse-and-discard. The first four
+  matter most in phase 1b; the last three become no-ops since
+  table-only granularity collapses them.
+- **REPEATABLE READ isolation level** isn't a separate mode — the
+  simulator's table-level Shared lock combined with `HOLDLOCK` already
+  delivers stronger-than-RR semantics. `SET TRANSACTION ISOLATION
+  LEVEL REPEATABLE READ` still parses-and-discards.
+- **SERIALIZABLE-as-isolation-level** vs `HOLDLOCK` hint: the hint is
+  modeled (tx-scoped S); the isolation-level form is not (still
+  parse-and-discard via `SET TRANSACTION ISOLATION LEVEL`).
+- **UPDATE / DELETE multi-table form (alias + FROM)**: the X acquire
+  fires only when the leading identifier resolves to a concrete table
+  directly (the simple `UPDATE t SET …` shape). The alias-form
+  `UPDATE x SET … FROM t x JOIN …` defers X acquire to phase 1b when
+  proper target identification through the FROM clause lands.
+- **SNAPSHOT / READ_COMMITTED_SNAPSHOT** — phase 3 (requires MVCC
+  version chain on every row).
+- **Lock escalation** — Msg 1204-style threshold-based promotion from
+  row-level → table-level. Phase 1a is always-table-level so escalation
+  is a no-op; phase 1b will need this once row locks ship.
+- **`sys.dm_tran_locks` / `sys.dm_os_waiting_tasks`** — diagnostic
+  views over the lock manager's state. Phase 2.
+- **`@@LOCK_TIMEOUT` scalar function** — the state lives on
+  `SimulatedDbConnection.LockTimeoutMillis` but isn't surfaced through
+  `SELECT @@LOCK_TIMEOUT`. Phase 1b / 2.
+- **`Heap.Insert` / `DeleteAt` are not thread-safe across concurrent
+  writers on different threads**. Phase 1a's X locks serialize naturally
+  for concurrent INSERTs into the same table; cross-table concurrent
+  INSERTs from different connections are serialized only by Sch-S /
+  Sch-M (not by data locks since they're on different tables). Phase 1b
+  will refine via row-level locks.
 
-- **Data locks (S / X / U / IS / IX / SIX) aren't modeled** — concurrent
-  INSERT / UPDATE / DELETE across connections rely on the per-Heap
-  natural-row-order discipline; phase 1a adds proper serialization with
-  row-level X locks.
-- **Heap mutations aren't thread-safe** across simultaneous writers on
-  different threads — `Heap.Insert` / `DeleteAt` are not synchronized.
-  Phase 0 tests use one-thread-at-a-time DML; phase 1a's S/X locks
-  serialize naturally.
-- **Lock hints (`WITH (NOLOCK)`, `HOLDLOCK`, etc.) still parse-and-
-  discard** — see [`query-hints.md`](query-hints.md). They acquire no
-  data locks since none exist in phase 0.
-- **Isolation levels still parse-and-discard** — `SET TRANSACTION
-  ISOLATION LEVEL …` accepts every recognized level and is a no-op.
-- **`@@LOCK_TIMEOUT` scalar function isn't wired** — the state lives on
-  `SimulatedDbConnection.LockTimeoutMillis` but the SQL reader has no
-  way to introspect it through a `SELECT @@LOCK_TIMEOUT` query.
-- **`SET LOCK_TIMEOUT -1`** (or any negative literal) currently parses
-  through the generic Integer-option path that only accepts a single
-  `Numeric` token — the tokenizer produces two tokens (`-`, `1`) for
-  negatives. The default is already `-1`, so this rarely matters in
-  practice; a fix would route the value through `Expression.Parse`.
+## Phase-0 carry-forwards
+
+These ship from phase 0 unchanged:
+
+- `LockResource` + `LockManager` infrastructure (gate, holder list,
+  Acquire / Release, re-entrance counting).
+- `SchemaObject.SchemaLock` field.
+- `SimulatedDbConnection.Spid` / `LockTimeoutMillis` /
+  `CurrentExecutingThreadId`.
+- `Simulation.AllocateSpid()` (first user SPID = 51).
+- Msg 1222 verbatim wording (`"Lock request time out period exceeded."`,
+  Class 16, State 56).
+- Msg 1205 verbatim wording with SPID interpolation.
+- Same-thread-deadlock short-circuit.

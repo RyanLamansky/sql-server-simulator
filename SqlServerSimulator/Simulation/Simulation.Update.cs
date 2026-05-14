@@ -88,7 +88,14 @@ partial class Simulation
         }
 
         context.MoveNextRequired();
-        Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        // Phase 1a: when the leading identifier resolved to a concrete table
+        // (the simple `UPDATE t SET …` case), acquire X on it. Tx-scoped via
+        // AcquireDataLockIfApplicable when an explicit BEGIN TRAN is active.
+        // The multi-table-alias form's target is determined later via the
+        // FROM clause; that path's X acquisition is deferred to phase 1b.
+        if (leadingTable is not null)
+            context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 

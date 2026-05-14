@@ -28,17 +28,22 @@ partial class Simulation
         // dispatch since we don't call the hint parser for `@t`.
         context.MoveNextRequired();
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+            _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
 
-        return context.Batch.TryResolveView(destinationName, out var destinationView)
-            ? ProcessViewInsert(destinationView, context)
-            : !context.Batch.TryResolveTable(destinationName, out var destinationTable)
-                ? throw (BatchContext.IsTableVariableName(destinationName.Leaf)
-                    ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
-                    : SimulatedSqlException.InvalidObjectName(destinationName))
-                : destinationTable.IsTableValuedParameter
-                    ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf)
-                    : ProcessHeapInsert(destinationTable, context);
+        if (context.Batch.TryResolveView(destinationName, out var destinationView))
+            return ProcessViewInsert(destinationView, context);
+        if (!context.Batch.TryResolveTable(destinationName, out var destinationTable))
+        {
+            throw BatchContext.IsTableVariableName(destinationName.Leaf)
+                ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
+                : SimulatedSqlException.InvalidObjectName(destinationName);
+        }
+        if (destinationTable.IsTableValuedParameter)
+            throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
+        // Phase 1a: acquire table-level X on the INSERT target. Tx-scoped
+        // when an explicit BEGIN TRAN is active; statement-scoped otherwise.
+        context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
+        return ProcessHeapInsert(destinationTable, context);
     }
 
     /// <summary>

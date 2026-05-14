@@ -73,6 +73,18 @@ internal sealed partial class Selection
     };
 
     /// <summary>
+    /// Recognized hint modifiers that affect phase-1a data-lock acquisition.
+    /// Every other hint is parse-and-discard.
+    /// </summary>
+    internal struct TableHintInfo
+    {
+        /// <summary><c>NOLOCK</c> or <c>READUNCOMMITTED</c> — read source skips S acquisition (dirty-read).</summary>
+        public bool NoLock;
+        /// <summary><c>HOLDLOCK</c> / <c>REPEATABLEREAD</c> / <c>SERIALIZABLE</c> — S held until transaction end.</summary>
+        public bool HoldLock;
+    }
+
+    /// <summary>
     /// Consumes an optional table-hint clause after a FROM source / JOIN-RHS
     /// table name (or after an INSERT / UPDATE / DELETE / MERGE target /
     /// MERGE source). The standard <c>WITH (hint [, …])</c> form is always
@@ -88,17 +100,20 @@ internal sealed partial class Selection
     /// entry the cursor sits at the token immediately following the alias
     /// (or the bare table name if no alias was present). On exit the cursor
     /// sits at the next un-consumed lookahead token (WHERE / JOIN / comma /
-    /// <c>;</c> / null).
+    /// <c>;</c> / null). Returns a <see cref="TableHintInfo"/> capturing the
+    /// hint modifiers phase 1a's data-lock acquisition acts on; every other
+    /// recognized hint discards.
     /// </summary>
-    internal static void ParseOptionalTableHints(ParserContext context, bool allowLegacyParenForm = true, bool commitOnLegacyParen = false)
+    internal static TableHintInfo ParseOptionalTableHints(ParserContext context, bool allowLegacyParenForm = true, bool commitOnLegacyParen = false)
     {
+        var info = default(TableHintInfo);
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            ConsumeTableHintListBody(context);
-            return;
+            ConsumeTableHintListBody(context, ref info);
+            return info;
         }
         if (allowLegacyParenForm && context.Token is Operator { Character: '(' })
         {
@@ -113,18 +128,19 @@ internal sealed partial class Selection
             if (commitOnLegacyParen)
             {
                 context.MoveNextRequired();
-                ConsumeTableHintListBody(context);
-                return;
+                ConsumeTableHintListBody(context, ref info);
+                return info;
             }
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextRequired();
             if (context.Token is not null && TableHintNames.Contains(context.Token.ToString()))
             {
-                ConsumeTableHintListBody(context);
-                return;
+                ConsumeTableHintListBody(context, ref info);
+                return info;
             }
             context.RestoreCheckpoint(checkpoint);
         }
+        return info;
     }
 
     /// <summary>
@@ -132,11 +148,11 @@ internal sealed partial class Selection
     /// the first hint-name token (immediately after the opening <c>(</c>).
     /// Cursor on exit: the next token after the closing <c>)</c>.
     /// </summary>
-    private static void ConsumeTableHintListBody(ParserContext context)
+    private static void ConsumeTableHintListBody(ParserContext context, ref TableHintInfo info)
     {
         while (true)
         {
-            ConsumeOneTableHint(context);
+            ConsumeOneTableHint(context, ref info);
             if (context.Token is Operator { Character: ')' })
             {
                 context.MoveNextOptional();
@@ -151,15 +167,33 @@ internal sealed partial class Selection
     /// <summary>
     /// Validates and consumes a single table-hint entry: <c>name</c>,
     /// <c>name = literal</c>, or <c>name (arg-list)</c>. Unknown name →
-    /// Msg 321. Cursor advances to the trailing <c>,</c> or <c>)</c>.
+    /// Msg 321. Cursor advances to the trailing <c>,</c> or <c>)</c>. Updates
+    /// <paramref name="info"/> for the phase-1a-recognized modifier set.
     /// </summary>
-    private static void ConsumeOneTableHint(ParserContext context)
+    private static void ConsumeOneTableHint(ParserContext context, ref TableHintInfo info)
     {
         if (context.Token is null)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var sourceSpan = context.Token.Source;
         if (!TableHintNames.Contains(sourceSpan.ToString()))
             throw SimulatedSqlException.UnrecognizedTableHint(sourceSpan);
+        // Recognize the phase-1a lock-affecting hints. NOLOCK and
+        // READUNCOMMITTED both mean "skip S acquisition". HOLDLOCK /
+        // REPEATABLEREAD / SERIALIZABLE all mean "S held until tx end"
+        // (probe-confirmed: HOLDLOCK is a synonym for SERIALIZABLE on
+        // a single statement; at table-only granularity REPEATABLEREAD
+        // is indistinguishable). Everything else parses-and-discards.
+        var nameText = sourceSpan.ToString();
+        if (Collation.Default.Equals(nameText, "NOLOCK") || Collation.Default.Equals(nameText, "READUNCOMMITTED"))
+        {
+            info.NoLock = true;
+        }
+        else if (Collation.Default.Equals(nameText, "HOLDLOCK")
+            || Collation.Default.Equals(nameText, "REPEATABLEREAD")
+            || Collation.Default.Equals(nameText, "SERIALIZABLE"))
+        {
+            info.HoldLock = true;
+        }
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '=' })
         {
