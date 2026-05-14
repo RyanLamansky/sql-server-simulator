@@ -138,16 +138,20 @@ public sealed class QueryHintTests
     }
 
     [TestMethod]
-    public void Update_LegacyParenForm_AppliesChange()
-    {
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
+    public void Update_LegacyParenForm_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
             create table t (id int primary key, v int);
             insert t values (1, 100);
             update t (tablock) set v = 999
-            """);
-        AreEqual(999, sim.ExecuteScalar("select v from t where id = 1"));
-    }
+            """, 102);
+
+    [TestMethod]
+    public void Delete_LegacyParenForm_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            create table t (id int primary key);
+            insert t values (1);
+            delete from t (tablock) where id = 1
+            """, 102);
 
     [TestMethod]
     public void Update_UnknownHint_RaisesMsg321()
@@ -294,4 +298,184 @@ public sealed class QueryHintTests
             """);
         AreEqual(999, sim.ExecuteScalar("select v from t where id = 1"));
     }
+
+    // --------------- INSERT target hints ---------------
+    //
+    // Probe-confirmed (2026-05-14): INSERT accepts WITH (hint [, …]) only,
+    // between target name and column list / VALUES. The legacy bare-paren
+    // form `INSERT t (TABLOCK) …` is always a column list — probe surfaces
+    // Msg 207 'Invalid column name TABLOCK' rather than parsing it as a
+    // hint. Hint after column list raises Msg 156 / Msg 102. Table-variable
+    // targets reject hints entirely.
+
+    [TestMethod]
+    public void Insert_WithHint_NoColumnList_AcceptsAsNoop()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t with (tablock) values (N'a'), (N'b')
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void Insert_WithHint_ExplicitColumnList_AcceptsAsNoop()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t with (tablock) (name) values (N'a')
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void Insert_WithHint_NoInto_AcceptsAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert t with (tablock) values (N'a');
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void Insert_WithHint_MultipleHints_AcceptsAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t with (tablock, holdlock) values (N'a');
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void Insert_WithHint_OutputClause_AcceptsAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t with (tablock) output inserted.id values (N'a')
+            """));
+
+    [TestMethod]
+    public void Insert_WithHint_UnknownHint_RaisesMsg321()
+        => new Simulation().AssertSqlError("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t with (banana) values (N'a')
+            """, 321, "\"banana\" is not a recognized table hints option.");
+
+    [TestMethod]
+    public void Insert_LegacyParenForm_ParsesAsColumnList_RaisesMsg207()
+    {
+        // Probe-confirmed: real SQL Server parses `(TABLOCK)` as a column
+        // list and raises Msg 207. The simulator's column resolver throws
+        // InvalidColumnName from ResolveInsertTargetColumn — matching code
+        // and wording.
+        var ex = new Simulation().AssertSqlError("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t (TABLOCK) values (N'a')
+            """, 207);
+        Contains("TABLOCK", ex.Message);
+    }
+
+    [TestMethod]
+    public void Insert_HintAfterColumnList_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            create table t (id int identity primary key, name nvarchar(50));
+            insert into t (name) with (tablock) values (N'a')
+            """, 102);
+
+    [TestMethod]
+    public void Insert_HintOnTableVariable_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            declare @t table (id int, name nvarchar(50));
+            insert into @t with (tablock) values (1, N'a')
+            """, 102);
+
+    [TestMethod]
+    public void Insert_HintOnTempTable_AcceptsAsNoop()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create table #tmp (id int);
+            insert into #tmp with (tablock) values (1), (2);
+            select count(*) from #tmp
+            """));
+
+    // --------------- MERGE target hints ---------------
+    //
+    // Probe-confirmed (2026-05-14): MERGE target uses hint-then-alias
+    // placement — `MERGE INTO t WITH (TABLOCK) AS x USING …` works,
+    // `MERGE INTO t AS x WITH (TABLOCK) …` raises Msg 156. Opposite of
+    // FROM / UPDATE / DELETE which are alias-then-hint. Legacy bare-paren
+    // form rejected with Msg 102.
+
+    [TestMethod]
+    public void Merge_TargetWithHint_AliasAfter_AcceptsAsNoop()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 100), (2, 200);
+            merge into tgt with (tablock) as t
+            using (select id, v from src) as s on s.id = t.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        AreEqual(100, sim.ExecuteScalar("select v from tgt where id = 1"));
+        AreEqual(200, sim.ExecuteScalar("select v from tgt where id = 2"));
+    }
+
+    [TestMethod]
+    public void Merge_TargetWithHint_NoAlias_AcceptsAsNoop()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert src values (1, 100);
+            merge into tgt with (tablock)
+            using (select id, v from src) as s on s.id = tgt.id
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        AreEqual(100, sim.ExecuteScalar("select v from tgt where id = 1"));
+    }
+
+    [TestMethod]
+    public void Merge_TargetMultipleHints_AcceptsAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert src values (1, 100);
+            merge into tgt with (tablock, holdlock) as t
+            using (select id, v from src) as s on s.id = t.id
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            select count(*) from tgt
+            """));
+
+    [TestMethod]
+    public void Merge_AliasThenHint_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            merge into tgt as t with (tablock)
+            using (select id, v from src) as s on s.id = t.id
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """, 102);
+
+    [TestMethod]
+    public void Merge_LegacyParenForm_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            merge into tgt (tablock) as t
+            using (select id, v from src) as s on s.id = t.id
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """, 102);
+
+    [TestMethod]
+    public void Merge_UnknownHint_RaisesMsg321()
+        => new Simulation().AssertSqlError("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            merge into tgt with (banana) as t
+            using (select id, v from src) as s on s.id = t.id
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """, 321, "\"banana\" is not a recognized table hints option.");
 }

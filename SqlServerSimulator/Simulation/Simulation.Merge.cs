@@ -52,8 +52,18 @@ partial class Simulation
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
 
-        // Optional target alias: AS <alias> or bare <alias>.
+        // MERGE target hints: hint-then-alias placement
+        // (probe-confirmed: `MERGE INTO t WITH (TABLOCK) AS x USING …` works,
+        // `MERGE INTO t AS x WITH (TABLOCK) USING …` raises Msg 156). The
+        // hint slot sits between the target name and the optional
+        // <c>[AS] alias</c>, opposite of FROM / UPDATE / DELETE which use
+        // alias-then-hint. Legacy bare-paren form is rejected. Table-
+        // variable targets reject hints — skip the parser for `@t`.
         context.MoveNextRequired();
+        if (!BatchContext.IsTableVariableName(destinationName.Leaf))
+            Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+
+        // Optional target alias: AS <alias> or bare <alias>.
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
             context.MoveNextRequired();
         var targetAlias = context.Token switch

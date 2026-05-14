@@ -53,7 +53,7 @@ partial class Simulation
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
         }
         context.MoveNextOptional();
-        Selection.ParseOptionalTableHints(context);
+        Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
         // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-

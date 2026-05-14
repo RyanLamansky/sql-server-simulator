@@ -74,17 +74,23 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Consumes an optional table-hint clause after a FROM source / JOIN-RHS
-    /// table name (or after an UPDATE / DELETE / INSERT target). Both the
-    /// standard <c>WITH (hint [, …])</c> and the legacy <c>(hint [, …])</c>
-    /// (no <c>WITH</c>) forms are accepted; the legacy form is disambiguated
-    /// from a derived-table column-alias list by peeking at the first inner
-    /// token and only consuming when it matches <see cref="TableHintNames"/>.
-    /// On entry the cursor sits at the token immediately following the
-    /// alias (or the bare table name if no alias was present). On exit the
-    /// cursor sits at the next un-consumed lookahead token (WHERE / JOIN /
-    /// comma / <c>;</c> / null).
+    /// table name (or after an INSERT / UPDATE / DELETE / MERGE target /
+    /// MERGE source). The standard <c>WITH (hint [, …])</c> form is always
+    /// accepted; the legacy <c>(hint [, …])</c> (no <c>WITH</c>) form is
+    /// only accepted when <paramref name="allowLegacyParenForm"/> is
+    /// <c>true</c>. FROM / JOIN-RHS pass <c>true</c>; INSERT, UPDATE, DELETE,
+    /// and MERGE all pass <c>false</c> (probe-confirmed: real SQL Server
+    /// rejects the bare-paren form on every DML target, raising either
+    /// Msg 102 for UPDATE / DELETE / MERGE or treating the paren as a
+    /// column list on INSERT). The legacy form is disambiguated from a
+    /// derived-table column-alias list by peeking at the first inner token
+    /// and only consuming when it matches <see cref="TableHintNames"/>. On
+    /// entry the cursor sits at the token immediately following the alias
+    /// (or the bare table name if no alias was present). On exit the cursor
+    /// sits at the next un-consumed lookahead token (WHERE / JOIN / comma /
+    /// <c>;</c> / null).
     /// </summary>
-    internal static void ParseOptionalTableHints(ParserContext context)
+    internal static void ParseOptionalTableHints(ParserContext context, bool allowLegacyParenForm = true)
     {
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
@@ -94,7 +100,7 @@ internal sealed partial class Selection
             ConsumeTableHintListBody(context);
             return;
         }
-        if (context.Token is Operator { Character: '(' })
+        if (allowLegacyParenForm && context.Token is Operator { Character: '(' })
         {
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextRequired();

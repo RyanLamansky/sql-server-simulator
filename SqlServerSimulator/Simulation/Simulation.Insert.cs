@@ -18,6 +18,18 @@ partial class Simulation
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
+        // Advance past the target name so the optional WITH (hint …) clause
+        // has a token to peek at. INSERT accepts the WITH form only — the
+        // legacy bare-paren form is unambiguously a column list here
+        // (probe-confirmed: `INSERT t (TABLOCK) VALUES …` raises Msg 207
+        // "Invalid column name 'TABLOCK'"). Table-variable targets reject
+        // hints entirely: real SQL Server raises Msg 156 near 'with'; the
+        // simulator falls through to Msg 102 at the column-list / VALUES
+        // dispatch since we don't call the hint parser for `@t`.
+        context.MoveNextRequired();
+        if (!BatchContext.IsTableVariableName(destinationName.Leaf))
+            Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+
         return context.Batch.TryResolveView(destinationName, out var destinationView)
             ? ProcessViewInsert(destinationView, context)
             : !context.Batch.TryResolveTable(destinationName, out var destinationTable)
@@ -66,7 +78,7 @@ partial class Simulation
         var viewColumns = destinationView.OutputColumns;
 
         HeapColumn[] destinationColumns;
-        if (context.GetNextRequired() is Operator { Character: '(' })
+        if (context.Token is Operator { Character: '(' })
         {
             var usedColumns = new List<HeapColumn>();
             while (true)
@@ -189,7 +201,7 @@ partial class Simulation
             && Collation.Default.Equals(activeTable, destinationTable.Name);
 
         HeapColumn[] destinationColumns;
-        if (context.GetNextRequired() is Operator { Character: '(' })
+        if (context.Token is Operator { Character: '(' })
         {
             var usedColumns = new List<HeapColumn>();
             while (true)

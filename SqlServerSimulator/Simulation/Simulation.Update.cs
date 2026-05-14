@@ -88,7 +88,7 @@ partial class Simulation
         }
 
         context.MoveNextRequired();
-        Selection.ParseOptionalTableHints(context);
+        Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
