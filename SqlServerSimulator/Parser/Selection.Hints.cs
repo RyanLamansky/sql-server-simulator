@@ -90,7 +90,7 @@ internal sealed partial class Selection
     /// sits at the next un-consumed lookahead token (WHERE / JOIN / comma /
     /// <c>;</c> / null).
     /// </summary>
-    internal static void ParseOptionalTableHints(ParserContext context, bool allowLegacyParenForm = true)
+    internal static void ParseOptionalTableHints(ParserContext context, bool allowLegacyParenForm = true, bool commitOnLegacyParen = false)
     {
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
@@ -102,6 +102,20 @@ internal sealed partial class Selection
         }
         if (allowLegacyParenForm && context.Token is Operator { Character: '(' })
         {
+            // commitOnLegacyParen = true: `(` after the table reference is
+            // unambiguously a hint clause attempt (probe-confirmed for
+            // MERGE bare-table source with alias and for FROM-source-with-
+            // alias on real SQL Server — Msg 321 surfaces with the first
+            // inner token as the would-be hint name). commit=false keeps
+            // the peek-and-restore disambiguation needed by the existing
+            // FROM/JOIN-RHS callers, which don't otherwise prove an alias
+            // was consumed at the call site.
+            if (commitOnLegacyParen)
+            {
+                context.MoveNextRequired();
+                ConsumeTableHintListBody(context);
+                return;
+            }
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextRequired();
             if (context.Token is not null && TableHintNames.Contains(context.Token.ToString()))

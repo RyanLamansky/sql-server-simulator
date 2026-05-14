@@ -1264,7 +1264,7 @@ internal sealed partial class Selection
     /// the next un-consumed lookahead position (typically WHERE / GROUP /
     /// HAVING / ORDER / JOIN keywords / ; / null).
     /// </summary>
-    private static string? ConsumeOptionalAlias(ParserContext context)
+    internal static string? ConsumeOptionalAlias(ParserContext context)
     {
         var nextToken = context.GetNextOptional();
         if (nextToken is ReservedKeyword { Keyword: Keyword.As })

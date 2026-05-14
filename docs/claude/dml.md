@@ -35,7 +35,13 @@ Creates a destination table from the projection's inferred schema, then copies r
 
 ## MERGE
 
-`MERGE [INTO] target [AS alias] USING (<source>) [AS] alias [(cols)] ON predicate <when-clause>+ [OUTPUT …];` where `<source>` is `VALUES`, `SELECT`, or a set-op chain, and `<when-clause>` is one of:
+`MERGE [INTO] target [WITH (hints)] [AS alias] USING <source> [AS alias] [(cols)] [WITH (hints)] ON predicate <when-clause>+ [OUTPUT …];` where `<source>` is one of:
+
+- `(VALUES …)` — parenthesized literal tuples; alias is required.
+- `(SELECT …)` or a set-op chain — parenthesized query; alias is required.
+- bare-table / view / `#temp` / `@tablevar` / `schema.table` reference — alias is optional and defaults to the source's leaf name. Optional `WITH (hint [, …])` table hints sit alias-then-hint (same placement as FROM source); the trailing column-rename `(c1, c2)` list isn't legal here and parses as a hint clause (probe-confirmed Msg 321 on the first column name).
+
+`<when-clause>` is one of:
 
 - `WHEN MATCHED [AND <cond>] THEN UPDATE SET col = expr [, …]` / `DELETE`
 - `WHEN NOT MATCHED [BY TARGET] [AND <cond>] THEN INSERT (cols) VALUES (exprs)`
@@ -56,7 +62,7 @@ Creates a destination table from the projection's inferred schema, then copies r
 
 `Simulation.Merge.cs:ExecuteMerge` is a single-pass walk:
 
-1. **Materialize source** once into `List<SqlValue[]>` via the parse-time `Func<BatchContext, List<SqlValue[]>>` materializer (`VALUES`-form evaluates the tuple expressions; `SELECT`-form runs `Selection.Execute` and decodes via `RowDecoder`).
+1. **Materialize source** once into `List<SqlValue[]>` via the parse-time `Func<BatchContext, List<SqlValue[]>>` materializer. `VALUES`-form evaluates the tuple expressions; `SELECT`-form runs `Selection.Execute` and decodes via `RowDecoder`; the bare-table / view form iterates the underlying heap or view selection respectively, then runs `EvaluateComputedColumns` per row so source-side computed columns are observable from the ON predicate / SET / INSERT projections.
 2. **Phase A — target × source**: for each target heap row, enumerate source rows; ON evaluates with a combined resolver wired to both target alias and source alias. Multiple-match collection feeds the Msg 8672 guard. For each target with ≥ 1 match, walk WHEN MATCHED clauses; first clause whose `AND` is satisfied (or absent) wins. For each target with 0 matches, walk WHEN NOT MATCHED BY SOURCE clauses the same way. Action gets queued (`pendingInserts` / `pendingUpdates` / `pendingDeletes`) along with the `(page, slot)` address + pre-update and post-update row snapshots.
 3. **Phase B — unmatched sources**: for each source row that didn't match any target, the single WHEN NOT MATCHED BY TARGET clause's AND condition is evaluated; if true, queue an INSERT.
 4. **Phase C — commit**: PK / UNIQUE validation runs on the union of pending inserts + updates via `EnforceKeyConstraintsForUpdate` (inserts use sentinel `(-1, i)` addresses). If a violation surfaces, every queued mutation is abandoned and the statement-atomic undo log already captures the no-heap-writes state. Then deletes tombstone, updates rewrite, inserts append, in that order.

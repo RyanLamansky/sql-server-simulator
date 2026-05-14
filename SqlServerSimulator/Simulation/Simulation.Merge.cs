@@ -154,15 +154,34 @@ partial class Simulation
     /// Parses the <c>USING (...)</c> source — either a <c>VALUES</c>
     /// tuple list or a parenthesized SELECT / set-op chain — followed
     /// by the required <c>[AS] alias</c> and the optional
-    /// <c>(col1, col2, ...)</c> rename list. Returns a materializer that
-    /// produces the source rows on demand plus the schema metadata
-    /// (alias, column names, column types).
+    /// <c>(col1, col2, ...)</c> rename list. Also accepts a bare-table /
+    /// view / temp-table / table-variable reference (<c>USING tbl [AS]
+    /// alias</c>), probe-confirmed 2026-05-14 to match real SQL Server:
+    /// alias is optional (defaults to the table's leaf name), optional
+    /// <c>WITH (hint [, …])</c> sits between alias and ON (alias-then-hint
+    /// placement, same as FROM source). Column-rename list is not
+    /// supported in the bare-table form — real SQL Server parses the
+    /// trailing <c>(...)</c> as a hint clause (probed Msg 321 with the
+    /// first column name as the would-be hint name) and the simulator
+    /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
     private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseMergeSource(ParserContext context)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        return context.Token is Operator { Character: '(' }
+            ? ParseParenthesizedMergeSource(context)
+            : ParseBareTableMergeSource(context);
+    }
 
+    /// <summary>
+    /// <c>USING (VALUES …) AS alias [(cols)]</c> or
+    /// <c>USING (SELECT … / WITH … SELECT …) AS alias [(cols)]</c>. The
+    /// alias is required here (matches real SQL Server). Cursor on entry:
+    /// the opening <c>(</c>. Cursor on exit: the next un-consumed token
+    /// (typically <c>ON</c>).
+    /// </summary>
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseParenthesizedMergeSource(ParserContext context)
+    {
         context.MoveNextRequired();
 
         Func<BatchContext, List<SqlValue[]>> materialize;
@@ -171,7 +190,6 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
         {
             var tuples = ParseValuesTuples(context);
-            // Static type inference from the first tuple's expressions.
             sourceSchema = new SqlType[tuples[0].Length];
             for (var i = 0; i < tuples[0].Length; i++)
                 sourceSchema[i] = tuples[0][i].GetSqlType(name => throw SimulatedSqlException.InvalidColumnName(name));
@@ -248,6 +266,79 @@ partial class Simulation
             }
         }
 
+        return (materialize, alias, columnNames, sourceSchema);
+    }
+
+    /// <summary>
+    /// <c>USING tbl [AS] alias [WITH (hints)]</c> — the bare-table /
+    /// view / temp-table / table-variable form. Alias is optional (per
+    /// probe; defaults to the leaf name). Hints sit between alias and ON
+    /// (alias-then-hint placement, same as FROM-source). Column-rename
+    /// list is not a valid grammar here — real SQL Server parses a
+    /// trailing <c>(c1, c2)</c> as a hint clause and rejects with
+    /// Msg 321; the simulator matches by routing through the hint parser
+    /// (which surfaces the same code when the first inner token isn't a
+    /// known hint name). Cursor on entry: the first name segment of the
+    /// table / view object. Cursor on exit: the next un-consumed token
+    /// (typically <c>ON</c>).
+    /// </summary>
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseBareTableMergeSource(ParserContext context)
+    {
+        var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+
+        Func<BatchContext, List<SqlValue[]>> materialize;
+        SqlType[] sourceSchema;
+        string[] columnNames;
+
+        if (context.Batch.TryResolveView(objectName, out var resolvedView))
+        {
+            sourceSchema = new SqlType[resolvedView.OutputColumns.Length];
+            columnNames = new string[resolvedView.OutputColumns.Length];
+            for (var i = 0; i < resolvedView.OutputColumns.Length; i++)
+            {
+                sourceSchema[i] = resolvedView.OutputColumns[i].Type;
+                columnNames[i] = resolvedView.OutputColumns[i].Name;
+            }
+            var viewSelection = Selection.ForView(resolvedView);
+            materialize = batch =>
+            {
+                var rs = viewSelection.Execute(batch);
+                var rows = new List<SqlValue[]>();
+                foreach (var rowBytes in rs.RowBytes)
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                return rows;
+            };
+        }
+        else if (context.Batch.TryResolveTable(objectName, out var heapTable))
+        {
+            sourceSchema = new SqlType[heapTable.Columns.Length];
+            columnNames = new string[heapTable.Columns.Length];
+            for (var i = 0; i < heapTable.Columns.Length; i++)
+            {
+                sourceSchema[i] = heapTable.Columns[i].Type;
+                columnNames[i] = heapTable.Columns[i].Name;
+            }
+            materialize = batch =>
+            {
+                var rows = new List<SqlValue[]>();
+                foreach (var rowBytes in heapTable.Heap.EnumerateRows())
+                {
+                    var fullValues = DecodeFullRow(heapTable, rowBytes);
+                    EvaluateComputedColumns(heapTable, fullValues, batch);
+                    rows.Add(fullValues);
+                }
+                return rows;
+            };
+        }
+        else
+        {
+            throw BatchContext.IsTableVariableName(objectName.Leaf)
+                ? SimulatedSqlException.MustDeclareTableVariable(objectName.Leaf)
+                : SimulatedSqlException.InvalidObjectName(objectName);
+        }
+
+        var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
+        Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
         return (materialize, alias, columnNames, sourceSchema);
     }
 

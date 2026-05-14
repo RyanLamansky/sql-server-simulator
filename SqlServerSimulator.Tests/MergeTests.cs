@@ -361,4 +361,206 @@ public sealed class MergeTests
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(1, reader.GetInt32(0));
     }
+
+    // --------------- USING bare-table source ---------------
+    //
+    // Probe-confirmed 2026-05-14: `USING tbl [AS] alias` is grammar-equivalent
+    // to a FROM-source heap table — works for regular heap tables, views,
+    // temp-tables, table-variables, schema-qualified names. Alias is
+    // optional (defaults to the table's leaf name on the source side);
+    // optional WITH (...) hints sit alias-then-hint (same placement as
+    // FROM); column-rename list trailing the alias parses as a hint
+    // clause and surfaces Msg 321 with the first column-name as the
+    // would-be hint name.
+
+    [TestMethod]
+    public void UsingBareTable_WithAlias_Upserts()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 100), (2, 200);
+            merge into tgt as t
+            using src as s on s.id = t.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        using var reader = simulation.ExecuteReader("select id, v from tgt order by id");
+        var rows = new List<(int, int)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetInt32(1)));
+        CollectionAssert.AreEqual(new[] { (1, 100), (2, 200) }, rows);
+    }
+
+    [TestMethod]
+    public void UsingBareTable_NoAs_BareAlias_Works()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 999);
+            merge into tgt t
+            using src s on s.id = t.id
+            when matched then update set v = s.v;
+            """);
+        Assert.AreEqual(999, simulation.ExecuteScalar<int>("select v from tgt where id = 1"));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_NoAlias_ReferenceByTableName()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 100), (2, 200);
+            merge into tgt
+            using src on src.id = tgt.id
+            when matched then update set v = src.v
+            when not matched by target then insert (id, v) values (src.id, src.v);
+            """);
+        Assert.AreEqual(2, simulation.ExecuteScalar<int>("select count(*) from tgt"));
+        Assert.AreEqual(100, simulation.ExecuteScalar<int>("select v from tgt where id = 1"));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_SchemaQualified_Works()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create schema au;
+            create table tgt (id int primary key, v int);
+            create table au.src (id int primary key, v int);
+            insert au.src values (5, 500);
+            merge into tgt as t
+            using au.src as s on s.id = t.id
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        Assert.AreEqual(500, simulation.ExecuteScalar<int>("select v from tgt where id = 5"));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_AliasThenWithHint_AcceptsAsNoop()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 100);
+            merge into tgt as t
+            using src as s with (nolock) on s.id = t.id
+            when matched then update set v = s.v;
+            """);
+        Assert.AreEqual(100, simulation.ExecuteScalar<int>("select v from tgt where id = 1"));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_LegacyParenHint_AcceptsAsNoop()
+    {
+        // Mirrors FROM-source behavior: the legacy bare-paren `(NOLOCK)`
+        // form after alias is also accepted (probe-confirmed indirectly
+        // via the column-rename rejection — the parser routes the
+        // trailing `(…)` through ParseOptionalTableHints regardless of
+        // whether the first inner token is a hint name).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 100);
+            merge into tgt as t
+            using src as s (nolock) on s.id = t.id
+            when matched then update set v = s.v;
+            """);
+        Assert.AreEqual(100, simulation.ExecuteScalar<int>("select v from tgt where id = 1"));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_ColumnRenameList_RaisesMsg321()
+        => new Simulation().AssertSqlError("""
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert src values (1, 100);
+            merge into tgt as t
+            using src as s (x, y) on s.x = t.id
+            when matched then update set v = s.y;
+            """, 321, "\"x\" is not a recognized table hints option.");
+
+    [TestMethod]
+    public void UsingBareTable_TempTable_Works()
+    {
+        // Temp table source on the same connection.
+        Assert.AreEqual(2, new Simulation().ExecuteScalar<int>("""
+            create table tgt (id int primary key, v int);
+            create table #src (id int, v int);
+            insert tgt values (1, 10);
+            insert #src values (1, 100), (2, 200);
+            merge into tgt as t
+            using #src as s on s.id = t.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            select count(*) from tgt;
+            """));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_TableVariable_Works()
+    {
+        Assert.AreEqual(100, new Simulation().ExecuteScalar<int>("""
+            create table tgt (id int primary key, v int);
+            insert tgt values (1, 10);
+            declare @tv table (id int, v int);
+            insert @tv values (1, 100);
+            merge into tgt as t
+            using @tv as s on s.id = t.id
+            when matched then update set v = s.v;
+            select v from tgt where id = 1;
+            """));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_View_Works()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table tgt (id int primary key, v int);
+            create table src (id int primary key, v int);
+            insert tgt values (1, 10);
+            insert src values (1, 100), (2, 200);
+            """,
+            "create view vsrc as select id, v from src",
+            """
+            merge into tgt as t
+            using vsrc as s on s.id = t.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        Assert.AreEqual(2, simulation.ExecuteScalar<int>("select count(*) from tgt"));
+        Assert.AreEqual(100, simulation.ExecuteScalar<int>("select v from tgt where id = 1"));
+    }
+
+    [TestMethod]
+    public void UsingBareTable_MissingTable_RaisesMsg208()
+        => new Simulation().AssertSqlError("""
+            create table tgt (id int primary key, v int);
+            merge into tgt as t
+            using nosuch as s on s.id = t.id
+            when matched then update set v = 1;
+            """, 208);
+
+    [TestMethod]
+    public void UsingBareTable_MissingTableVariable_RaisesMsg1087()
+        => new Simulation().AssertSqlError("""
+            create table tgt (id int primary key, v int);
+            merge into tgt as t
+            using @nosuch as s on s.id = t.id
+            when matched then update set v = 1;
+            """, 1087);
 }

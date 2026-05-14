@@ -21,7 +21,8 @@ Position varies by site (probe-confirmed against SQL Server 2025):
 | DELETE target         | target-then-hint       | rejected (Msg 102)   |
 | INSERT target         | target-then-hint, before column list | always parses as column list (Msg 207 on the would-be hint name) |
 | MERGE target          | hint-then-alias        | rejected (Msg 102)   |
-| MERGE source          | not modeled            | n/a                  |
+| MERGE source (bare-table) | alias-then-hint    | accepted (commits)   |
+| MERGE source (parenthesized) | not accepted    | n/a                  |
 
 Examples:
 
@@ -52,11 +53,15 @@ Real SQL Server rejects alias-then-hint on MERGE target with Msg 156.
 `ParseOptionalTableHints`; `WITH` after `@t` falls through to the
 default Msg 102 at the dispatch site.
 
-**MERGE source hints aren't modeled** — the simulator only supports the
-parenthesized `USING (SELECT/VALUES …)` form, and probe-confirmed that
-real SQL Server rejects WITH-hints on a parenthesized source anyway
-(Msg 156). Bare-table USING (`USING t AS s WITH (nolock)`) accepts hints
-on real SQL Server but isn't parsed by the simulator yet.
+**MERGE source supports two shapes**: the parenthesized form
+`USING (VALUES … / SELECT …) AS alias` and the bare-table form
+`USING tbl [AS alias]`. Hints are accepted only on the bare-table form
+(alias-then-hint placement), matching real SQL Server: probe-confirmed
+that `USING (SELECT …) AS s WITH (NOLOCK)` raises Msg 156 (the parser
+treats WITH after the parenthesized source as a CTE prefix, not a hint
+clause). The bare-table form is alias-then-hint with the same commit-
+on-paren semantic real SQL Server applies — a trailing `(x, y)` with
+unknown names raises Msg 321 rather than falling through to Msg 102.
 
 Hint-argument shapes recognized:
 
