@@ -95,7 +95,7 @@ partial class Simulation
         // The multi-table-alias form's target is determined later via the
         // FROM clause; that path's X acquisition is deferred to phase 1b.
         if (leadingTable is not null)
-            context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
+            _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -399,10 +399,21 @@ partial class Simulation
         // statement's frozen UtcNow.
         if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
             WriteHistoryRowsForUpdate(table, historyTable, pc, affected, context, undoLog);
+        var lockableTable = !table.IsTableVariable
+            && !BatchContext.IsLocalTempName(table.Name)
+            && !Simulation.SystemHeapTables.ContainsValue(table);
         foreach (var (pageIndex, slotIndex, _, _) in affected)
+        {
+            if (lockableTable)
+                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
+        }
         foreach (var (_, _, fullNew, _) in affected)
-            table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
+        {
+            var (newPageIndex, newSlotIndex) = table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
+            if (lockableTable)
+                context.Batch.AcquireRowLockTxScoped(table, newPageIndex, newSlotIndex, LockMode.Exclusive);
+        }
 
         // Incoming-FK cascade: if any of the updated rows participate in a
         // referenced key, fire the matching FK's UPDATE action against the
@@ -457,7 +468,7 @@ partial class Simulation
             var historyRow = new SqlValue[oldFull.Length];
             Array.Copy(oldFull, historyRow, oldFull.Length);
             historyRow[period.EndOrdinal] = stampedNow;
-            historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+            _ = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
         }
     }
 

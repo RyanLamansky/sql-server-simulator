@@ -325,7 +325,7 @@ partial class Simulation
             }
 
             var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
-            newHeap.Insert(encoded);
+            _ = newHeap.Insert(encoded);
         }
 
         table.Heap = newHeap;
@@ -1016,7 +1016,7 @@ partial class Simulation
             }
 
             var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
-            newHeap.Insert(encoded);
+            _ = newHeap.Insert(encoded);
         }
 
         table.Heap = newHeap;
@@ -1054,7 +1054,7 @@ partial class Simulation
                 newStoredValues[mapped] = RowDecoder.DecodeColumn(oldStoredColumns, oldBytes, i, oldHeap);
             }
             var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
-            newHeap.Insert(encoded);
+            _ = newHeap.Insert(encoded);
         }
 
         table.Heap = newHeap;

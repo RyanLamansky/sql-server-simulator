@@ -82,7 +82,7 @@ internal static class BuiltInResources
             for (var i = 0; i < systypesColumns.Length; i++)
                 values[i] = ObjectToSqlValue(row[i], systypesColumns[i].Type);
 
-            systypes.Heap.Insert(RowEncoder.EncodeRow(systypes.Schema, values));
+            _ = systypes.Heap.Insert(RowEncoder.EncodeRow(systypes.Schema, values));
         }
 
         return new(Collation.Default) { [systypes.Name] = systypes };

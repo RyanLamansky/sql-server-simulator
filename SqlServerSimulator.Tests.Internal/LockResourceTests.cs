@@ -204,18 +204,21 @@ public sealed class LockResourceTests
     [TestMethod]
     public void TransactionScopedX_ReleasedAtCommit()
     {
-        // Once the simulator runs a tx-scoped X acquire (via
-        // BatchContext.AcquireTransactionLock), Commit releases every
-        // entry in the tx's HeldLocks list.
+        // Once the simulator runs a tx-scoped IX-then-row-X acquire (via
+        // BatchContext.AcquireTransactionLock + AcquireRowLockTxScoped),
+        // Commit releases every entry in the tx's HeldLocks list — both
+        // the table-IX and every row-X.
         var sim = new Simulation();
         ExecuteNonQuery(sim, "create table t (id int)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
-        var schemaLock = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"].SchemaLock;
+        var table = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "begin tran; insert t values (1)");
-        IsNotEmpty(schemaLock.Holders);
+        IsNotEmpty(table.TableDataLock.Holders);
         ExecuteNonQuery(conn, "commit tran");
-        IsEmpty(schemaLock.Holders);
+        IsEmpty(table.TableDataLock.Holders);
+        foreach (var (_, resource) in table.RowLocks)
+            IsEmpty(resource.Holders);
     }
 
     [TestMethod]
@@ -225,9 +228,11 @@ public sealed class LockResourceTests
         ExecuteNonQuery(sim, "create table t (id int)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
-        var schemaLock = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"].SchemaLock;
+        var table = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "begin tran; insert t values (1); rollback tran");
-        IsEmpty(schemaLock.Holders);
+        IsEmpty(table.TableDataLock.Holders);
+        foreach (var (_, resource) in table.RowLocks)
+            IsEmpty(resource.Holders);
     }
 
     private static void ExecuteNonQuery(Simulation sim, string sql)
@@ -284,5 +289,127 @@ public sealed class LockResourceTests
         cmd.CommandText = "set lock_timeout 0";
         _ = cmd.ExecuteNonQuery();
         AreEqual(0, ((SimulatedDbConnection)conn).LockTimeoutMillis);
+    }
+
+    [TestMethod]
+    public void U_CompatibleWith_S_IS()
+    {
+        // U × S: compatible (read-with-intent-to-upgrade coexists with
+        // plain readers). U × IS: compatible (the IS holder might be
+        // a different child of the same parent).
+        var sim = new Simulation();
+        var resource = new LockResource();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        sim.LockManager.Acquire(resource, LockMode.Shared, a, 0);
+        sim.LockManager.Acquire(resource, LockMode.Update, b, 0);
+        sim.LockManager.Release(resource, LockMode.Update, b);
+        sim.LockManager.Release(resource, LockMode.Shared, a);
+        sim.LockManager.Acquire(resource, LockMode.IntentShared, a, 0);
+        sim.LockManager.Acquire(resource, LockMode.Update, b, 0);
+        sim.LockManager.Release(resource, LockMode.Update, b);
+        sim.LockManager.Release(resource, LockMode.IntentShared, a);
+    }
+
+    [TestMethod]
+    public void U_ConflictsWith_U_X_IX_SIX()
+    {
+        var sim = new Simulation();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        a.CurrentExecutingThreadId = -1;
+        foreach (var conflict in new[] { LockMode.Update, LockMode.Exclusive, LockMode.IntentExclusive, LockMode.SharedIntentExclusive })
+        {
+            var resource = new LockResource();
+            sim.LockManager.Acquire(resource, LockMode.Update, a, 0);
+            _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, conflict, b, 0));
+            sim.LockManager.Release(resource, LockMode.Update, a);
+        }
+    }
+
+    [TestMethod]
+    public void IS_CompatibleWithEverythingExceptX()
+    {
+        var sim = new Simulation();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        a.CurrentExecutingThreadId = -1;
+        foreach (var ok in new[] { LockMode.IntentShared, LockMode.IntentExclusive, LockMode.SharedIntentExclusive, LockMode.Shared, LockMode.Update })
+        {
+            var resource = new LockResource();
+            sim.LockManager.Acquire(resource, LockMode.IntentShared, a, 0);
+            sim.LockManager.Acquire(resource, ok, b, 0);
+            sim.LockManager.Release(resource, ok, b);
+            sim.LockManager.Release(resource, LockMode.IntentShared, a);
+        }
+        // IS × X: conflict.
+        var rx = new LockResource();
+        sim.LockManager.Acquire(rx, LockMode.IntentShared, a, 0);
+        _ = Throws<DbException>(() => sim.LockManager.Acquire(rx, LockMode.Exclusive, b, 0));
+        sim.LockManager.Release(rx, LockMode.IntentShared, a);
+    }
+
+    [TestMethod]
+    public void IX_ConflictsWith_S_U_SIX_X()
+    {
+        var sim = new Simulation();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        a.CurrentExecutingThreadId = -1;
+        foreach (var conflict in new[] { LockMode.Shared, LockMode.Update, LockMode.SharedIntentExclusive, LockMode.Exclusive })
+        {
+            var resource = new LockResource();
+            sim.LockManager.Acquire(resource, LockMode.IntentExclusive, a, 0);
+            _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, conflict, b, 0));
+            sim.LockManager.Release(resource, LockMode.IntentExclusive, a);
+        }
+    }
+
+    [TestMethod]
+    public void SIX_OnlyCompatibleWith_IS()
+    {
+        var sim = new Simulation();
+        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        a.CurrentExecutingThreadId = -1;
+        // SIX × IS: compatible.
+        var r1 = new LockResource();
+        sim.LockManager.Acquire(r1, LockMode.SharedIntentExclusive, a, 0);
+        sim.LockManager.Acquire(r1, LockMode.IntentShared, b, 0);
+        sim.LockManager.Release(r1, LockMode.IntentShared, b);
+        sim.LockManager.Release(r1, LockMode.SharedIntentExclusive, a);
+        // SIX × everything else: conflict.
+        foreach (var conflict in new[] { LockMode.IntentExclusive, LockMode.SharedIntentExclusive, LockMode.Shared, LockMode.Update, LockMode.Exclusive })
+        {
+            var resource = new LockResource();
+            sim.LockManager.Acquire(resource, LockMode.SharedIntentExclusive, a, 0);
+            _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, conflict, b, 0));
+            sim.LockManager.Release(resource, LockMode.SharedIntentExclusive, a);
+        }
+    }
+
+    [TestMethod]
+    public void RowLockEscalation_Above5000_PromotesToTableX()
+    {
+        // Insert >5000 rows in one transaction; the per-row X acquisitions
+        // bump the per-tx per-table count past the threshold, triggering
+        // promotion to a single table-X. After commit, the table-X is
+        // released and the per-row dict entries are no longer tracked
+        // against any tx.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        ExecuteNonQuery(conn, "begin tran");
+        for (var i = 0; i < SimulatedDbTransaction.RowLockEscalationThreshold + 2; i++)
+            ExecuteNonQuery(conn, $"insert t values ({i})");
+        // After escalation, the active transaction holds table-X on this
+        // table; row-lock count is zeroed.
+        var tx = ((SimulatedDbConnection)conn).CurrentTransaction;
+        IsNotNull(tx);
+        Contains(table, tx.EscalatedTables);
+        ExecuteNonQuery(conn, "commit tran");
+        IsEmpty(table.TableDataLock.Holders);
     }
 }

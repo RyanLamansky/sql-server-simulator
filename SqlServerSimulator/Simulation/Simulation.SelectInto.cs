@@ -88,7 +88,7 @@ partial class Simulation
             var encoded = RowEncoder.EncodeRow(destTable.StoredColumns, sourceValues, destTable.Heap);
             // Use the active undo log so a containing tx's ROLLBACK unwinds
             // the row writes alongside the table creation entry.
-            destTable.Heap.Insert(encoded, undoLog);
+            _ = destTable.Heap.Insert(encoded, undoLog);
             rowCount++;
         }
 

@@ -58,7 +58,7 @@ partial class Simulation
         // BEGIN TRAN is active. Skipped when leadingTable is null (multi-
         // source alias form — target determined post-FROM, deferred to 1b).
         if (leadingTable is not null)
-            context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
+            _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
         // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-
@@ -280,11 +280,18 @@ partial class Simulation
                 var historyRow = new SqlValue[oldFull.Length];
                 Array.Copy(oldFull, historyRow, oldFull.Length);
                 historyRow[pc.EndOrdinal] = stampedNow;
-                historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+                _ = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
             }
         }
+        var lockableTable = !table.IsTableVariable
+            && !BatchContext.IsLocalTempName(table.Name)
+            && !Simulation.SystemHeapTables.ContainsValue(table);
         foreach (var (pageIndex, slotIndex, _) in deleted)
+        {
+            if (lockableTable)
+                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
+        }
 
         // Incoming-FK cascade: parent-side DELETE fires the matching FK's
         // DELETE action on every child table whose FK columns reference one

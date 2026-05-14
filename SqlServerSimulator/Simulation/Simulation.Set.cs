@@ -140,20 +140,52 @@ partial class Simulation
             return false;
         }
         // The level itself: 1 token (SNAPSHOT, SERIALIZABLE) or 2 tokens
-        // (READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ). Permissive
-        // acceptance — invalid level names would fail at semantic time on
-        // real SQL Server but the simulator doesn't model isolation anyway.
+        // (READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ).
         context.MoveNextRequired();
-        switch (context.Token)
+        var (newLevel, consumeAnother) = context.Token switch
         {
-            case ReservedKeyword { Keyword: Keyword.Read }:
-                context.MoveNextRequired();
-                break;
-            case UnquotedString { Value: var firstWord } when Collation.Default.Equals(firstWord, "REPEATABLE"):
-                context.MoveNextRequired();
-                break;
-        }
+            ReservedKeyword { Keyword: Keyword.Read } =>
+                ResolveReadIsolationLevel(context),
+            UnquotedString { Value: var name } when Collation.Default.Equals(name, "REPEATABLE") =>
+                (System.Data.IsolationLevel.RepeatableRead, true),
+            UnquotedString { Value: var name } when Collation.Default.Equals(name, "SNAPSHOT") =>
+                (System.Data.IsolationLevel.Snapshot, false),
+            UnquotedString { Value: var name } when Collation.Default.Equals(name, "SERIALIZABLE") =>
+                (System.Data.IsolationLevel.Serializable, false),
+            _ => (System.Data.IsolationLevel.Unspecified, false),
+        };
+        if (consumeAnother)
+            context.MoveNextRequired();
+        if (newLevel != System.Data.IsolationLevel.Unspecified)
+            context.Batch.Connection.SessionIsolationLevel = newLevel;
         return true;
+    }
+
+    /// <summary>
+    /// Peeks the token after <c>READ</c> to decide between
+    /// <c>READ UNCOMMITTED</c> and <c>READ COMMITTED</c>; defaults to
+    /// READ COMMITTED if the peek isn't a recognizable trailer (parser
+    /// continues to consume the trailer either way for the canonical form).
+    /// </summary>
+    private static (System.Data.IsolationLevel Level, bool ConsumeAnother) ResolveReadIsolationLevel(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if (context.Token is UnquotedString { Value: var name })
+        {
+            if (Collation.Default.Equals(name, "UNCOMMITTED"))
+            {
+                context.RestoreCheckpoint(checkpoint);
+                return (System.Data.IsolationLevel.ReadUncommitted, true);
+            }
+            if (Collation.Default.Equals(name, "COMMITTED"))
+            {
+                context.RestoreCheckpoint(checkpoint);
+                return (System.Data.IsolationLevel.ReadCommitted, true);
+            }
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return (System.Data.IsolationLevel.ReadCommitted, true);
     }
 
     /// <summary>

@@ -265,7 +265,7 @@ partial class Simulation
         foreach (var row in rows)
         {
             var stored = ProjectStoredValuesForColumns(columns, pseudo.StorageOrdinals, row);
-            pseudo.Heap.Insert(RowEncoder.EncodeRow(pseudo.StoredColumns, stored, pseudo.Heap), undoLog: null);
+            _ = pseudo.Heap.Insert(RowEncoder.EncodeRow(pseudo.StoredColumns, stored, pseudo.Heap), undoLog: null);
         }
         return pseudo;
     }

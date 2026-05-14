@@ -300,4 +300,261 @@ public sealed class LockingTests
         var dbException = IsInstanceOfType<DbException>(loserError);
         AreEqual("3701", dbException.Data["HelpLink.EvtID"]);
     }
+
+    [TestMethod]
+    public async Task RowLevelRC_ReaderOfDifferentRow_DoesNotBlockOnWritersRow()
+    {
+        // Phase 1b: the writer's row-X is on row id=1; the reader scans
+        // for id=2 which is a different RID. Under phase-1a's table-only
+        // granularity the reader would have blocked on the writer's
+        // table-X; under phase 1b the reader only blocks on the specific
+        // row-X being held. With READPAST it could even read past blocked
+        // rows, but without it the reader simply finds no conflict on
+        // row 2 and proceeds.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1), (2)");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update t set id = 11 where id = 1").ExecuteNonQuery();
+
+        // Reader scans for id=2 — the writer's row-X is on row id=1's RID,
+        // not row id=2's. The reader probes id=1 and waits (or skips with
+        // READPAST). Without READPAST, the reader still gets blocked on
+        // row id=1's probe. So this test uses READPAST to demonstrate row-
+        // level granularity isolation.
+        var readResult = await Task.Run(() =>
+            reader.CreateCommand("select count(*) from t with (readpast) where id = 2").ExecuteScalar(),
+            TestContext.CancellationToken);
+        AreEqual(1, readResult);
+
+        _ = writer.CreateCommand("commit tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task ReadPastHint_SkipsBlockedRowsInsteadOfWaiting()
+    {
+        // READPAST: when a row's RID has a conflicting row-X holder, the
+        // reader skips it rather than blocking. Probe-confirmed semantic.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1), (2), (3)");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update t set id = 10 where id = 1").ExecuteNonQuery();
+
+        // Without READPAST, the reader would block on row 1's row-X.
+        // With READPAST, it skips row 1 and yields rows 2 and 3 only.
+        var readCount = await Task.Run(() =>
+            reader.CreateCommand("select count(*) from t with (readpast)").ExecuteScalar(),
+            TestContext.CancellationToken);
+        AreEqual(2, readCount);
+
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task UpdLockHint_RowU_BlocksAnotherUpdLockOnSameRow()
+    {
+        // UPDLOCK: SELECT WITH (UPDLOCK) takes row-U tx-scoped. Another
+        // connection's UPDLOCK on the same row conflicts (U × U) until the
+        // first holder commits. EF Core's pessimistic-concurrency pattern
+        // uses this idiom to serialize "read-and-then-update" sequences.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; select * from t with (updlock)").ExecuteScalar();
+
+        var otherStarted = new ManualResetEventSlim();
+        var otherTask = Task.Run(() =>
+        {
+            otherStarted.Set();
+            _ = other.CreateCommand("select * from t with (updlock)").ExecuteScalar();
+        }, TestContext.CancellationToken);
+
+        IsTrue(otherStarted.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(100, TestContext.CancellationToken);
+        IsFalse(otherTask.IsCompleted);
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        await otherTask;
+    }
+
+    [TestMethod]
+    public async Task XLockHint_RowX_BlocksConcurrentRead()
+    {
+        // XLOCK: SELECT WITH (XLOCK) takes row-X tx-scoped. A concurrent
+        // reader of the same row blocks (the X-X conflict via probe-and-
+        // wait under RC) until commit.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var holder = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; select * from t with (xlock)").ExecuteScalar();
+
+        var readStarted = new ManualResetEventSlim();
+        var readResult = (int?)null;
+        var readTask = Task.Run(() =>
+        {
+            readStarted.Set();
+            readResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
+        }, TestContext.CancellationToken);
+
+        IsTrue(readStarted.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(100, TestContext.CancellationToken);
+        IsNull(readResult);
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        await readTask;
+        AreEqual(1, readResult);
+    }
+
+    [TestMethod]
+    public async Task TabLockXHint_TableX_BlocksAllOtherAccess()
+    {
+        // TABLOCKX: write takes table-X tx-scoped instead of table-IX +
+        // row-X. Every other connection — read or write — blocks until
+        // commit.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        using var holder = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert t with (tablockx) values (1)").ExecuteNonQuery();
+
+        var readStarted = new ManualResetEventSlim();
+        var readResult = (int?)null;
+        var readTask = Task.Run(() =>
+        {
+            readStarted.Set();
+            readResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
+        }, TestContext.CancellationToken);
+
+        IsTrue(readStarted.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(100, TestContext.CancellationToken);
+        IsNull(readResult);
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        await readTask;
+        AreEqual(1, readResult);
+    }
+
+    [TestMethod]
+    public async Task SerializableIsolation_BlocksConcurrentInsertForPhantomPrevention()
+    {
+        // SET TRANSACTION ISOLATION LEVEL SERIALIZABLE: a read scan takes
+        // table-S tx-scoped (the simulator's phantom-prevention
+        // approximation — real SQL Server uses key-range locks; without
+        // indexes that degenerates to table-level). A concurrent INSERT
+        // can't acquire table-IX while the SERIALIZABLE reader holds
+        // table-S, so the INSERT blocks until the reader's tx commits.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select * from t").ExecuteScalar();
+
+        var writeStarted = new ManualResetEventSlim();
+        var writeTask = Task.Run(() =>
+        {
+            writeStarted.Set();
+            _ = writer.CreateCommand("insert t values (2)").ExecuteNonQuery();
+        }, TestContext.CancellationToken);
+
+        IsTrue(writeStarted.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(100, TestContext.CancellationToken);
+        IsFalse(writeTask.IsCompleted);
+
+        _ = reader.CreateCommand("commit tran").ExecuteNonQuery();
+        await writeTask;
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public async Task RepeatableReadIsolation_BlocksUpdateOfReadRow_AllowsInsert()
+    {
+        // SET TRANSACTION ISOLATION LEVEL REPEATABLE READ: a read scan
+        // takes row-S tx-scoped per row read. A concurrent UPDATE of one
+        // of those rows blocks (row-S × row-X conflict). But a concurrent
+        // INSERT of a new row succeeds — REPEATABLE READ doesn't prevent
+        // phantoms, only "non-repeatable read" of existing rows.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level repeatable read; begin tran; select * from t").ExecuteScalar();
+
+        // Concurrent INSERT of a NEW row — should succeed (no phantom
+        // prevention under RR).
+        _ = await Task.Run(() =>
+            writer.CreateCommand("insert t values (2)").ExecuteNonQuery(),
+            TestContext.CancellationToken);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t with (nolock)"));
+
+        // Concurrent UPDATE of the ALREADY-READ row — should block.
+        var upStarted = new ManualResetEventSlim();
+        var upTask = Task.Run(() =>
+        {
+            upStarted.Set();
+            _ = writer.CreateCommand("update t set id = 10 where id = 1").ExecuteNonQuery();
+        }, TestContext.CancellationToken);
+
+        IsTrue(upStarted.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(100, TestContext.CancellationToken);
+        IsFalse(upTask.IsCompleted);
+
+        _ = reader.CreateCommand("commit tran").ExecuteNonQuery();
+        await upTask;
+    }
+
+    [TestMethod]
+    public async Task ReadUncommittedIsolation_AllowsDirtyRead()
+    {
+        // SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED: reader skips
+        // every conflict check, sees uncommitted writes. Equivalent to
+        // WITH (NOLOCK) on every read.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; insert t values (42)").ExecuteNonQuery();
+
+        var readValue = await Task.Run(() =>
+            reader.CreateCommand("set transaction isolation level read uncommitted; select count(*) from t").ExecuteScalar(),
+            TestContext.CancellationToken);
+        AreEqual(1, readValue);
+
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task UpdateOfDifferentRows_DoesNotBlock_AtRowGranularity()
+    {
+        // Phase 1b's row-X grants per RID: two writers on different rows
+        // of the same table proceed in parallel (both take table-IX, then
+        // disjoint row-X on disjoint RIDs).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v int); insert t values (1, 10), (2, 20)");
+        using var connA = sim.CreateOpenConnection();
+        using var connB = sim.CreateOpenConnection();
+
+        _ = connA.CreateCommand("begin tran; update t set v = 100 where id = 1").ExecuteNonQuery();
+
+        // Connection B updates the OTHER row — should not block.
+        await Task.Run(() =>
+        {
+            _ = connB.CreateCommand("update t set v = 200 where id = 2").ExecuteNonQuery();
+        }, TestContext.CancellationToken).WaitAsync(TimeSpan.FromSeconds(3), TestContext.CancellationToken);
+
+        _ = connA.CreateCommand("commit tran").ExecuteNonQuery();
+
+        AreEqual(100, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(200, sim.ExecuteScalar("select v from t where id = 2"));
+    }
 }

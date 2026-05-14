@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace SqlServerSimulator.Storage;
@@ -250,6 +251,39 @@ internal sealed class HeapTable : SchemaObject
     /// (Msg 3726) when this table is still referenced.
     /// </summary>
     public readonly List<ForeignKey> IncomingForeignKeys = [];
+
+    /// <summary>
+    /// Lazily-interned per-row <see cref="LockResource"/>s keyed by
+    /// <c>(pageIndex, slotIndex)</c> — the RID (row id) that
+    /// <see cref="Heap.EnumerateRowsWithAddress"/> yields and that
+    /// <see cref="Heap.DeleteAt"/> consumes. Accessed via
+    /// <see cref="GetOrCreateRowLock"/>; <see cref="ConcurrentDictionary{TKey, TValue}"/>
+    /// makes the lookup itself thread-safe without taking the lock
+    /// manager's gate (the gate only protects mutations to
+    /// <see cref="LockResource.Holders"/>). Entries leak on
+    /// <see cref="Heap.DeleteAt"/> — same pattern as the heap's existing
+    /// slot / payload leaks. Skipped entirely for table variables / local
+    /// temp tables / system tables, which never participate in
+    /// cross-connection contention.
+    /// </summary>
+    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), LockResource> RowLocks = new();
+
+    /// <summary>
+    /// Returns the <see cref="LockResource"/> for <paramref name="pageIndex"/>
+    /// / <paramref name="slotIndex"/>, allocating one on first reference.
+    /// </summary>
+    public LockResource GetOrCreateRowLock(int pageIndex, int slotIndex) =>
+        this.RowLocks.GetOrAdd((pageIndex, slotIndex), static _ => new LockResource());
+
+    /// <summary>
+    /// Table-level data lock used when an INSERT / UPDATE / DELETE / MERGE
+    /// has escalated its per-row X locks to a single table-X (the escalation
+    /// threshold lives in <see cref="SimulatedDbTransaction.RowLockEscalationThreshold"/>),
+    /// or when <c>WITH (TABLOCK)</c> / <c>WITH (TABLOCKX)</c> was specified.
+    /// Distinct from <see cref="SchemaObject.SchemaLock"/> — the schema lock
+    /// only takes Sch-S / Sch-M; this one takes IS / IX / SIX / S / U / X.
+    /// </summary>
+    public readonly LockResource TableDataLock = new();
 
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();

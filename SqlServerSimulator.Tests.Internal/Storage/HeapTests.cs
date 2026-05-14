@@ -23,7 +23,7 @@ public class HeapTests
     public void Insert_SingleRow_AllocatesFirstPage()
     {
         var heap = new Heap();
-        heap.Insert([1, 2, 3]);
+        _ = heap.Insert([1, 2, 3]);
         HasCount(1, heap.Pages);
         AreEqual(1, heap.RowCount);
     }
@@ -33,8 +33,8 @@ public class HeapTests
     {
         var heap = new Heap();
         var big = new byte[Heap.MaxRowSize];
-        heap.Insert(big);                 // page 0 holds one max-sized row
-        heap.Insert(big);                 // forces a new page
+        _ = heap.Insert(big);                 // page 0 holds one max-sized row
+        _ = heap.Insert(big);                 // forces a new page
 
         HasCount(2, heap.Pages);
         AreEqual(1, heap.Pages[0].NextPageIndex);
@@ -57,7 +57,7 @@ public class HeapTests
             var row = new byte[512];
             row[0] = (byte)i;
             rowsInserted.Add(row);
-            heap.Insert(row);
+            _ = heap.Insert(row);
         }
 
         IsGreaterThanOrEqualTo(2, heap.Pages.Count, "Expected the heap to span at least two pages.");
@@ -84,7 +84,7 @@ public class HeapTests
     {
         var heap = new Heap();
         var row = new byte[Heap.MaxRowSize];
-        heap.Insert(row);
+        _ = heap.Insert(row);
         AreEqual(1, heap.RowCount);
     }
 
@@ -94,9 +94,9 @@ public class HeapTests
         var heap = new Heap();
         var halfish = new byte[HeapPage.MaxRowPayload / 3];
 
-        heap.Insert(halfish);     // fits in page 0
-        heap.Insert(halfish);     // fits in page 0
-        heap.Insert(halfish);     // page 0 may or may not fit a third copy; either way row count is correct
+        _ = heap.Insert(halfish);     // fits in page 0
+        _ = heap.Insert(halfish);     // fits in page 0
+        _ = heap.Insert(halfish);     // page 0 may or may not fit a third copy; either way row count is correct
 
         AreEqual(3, heap.RowCount);
 

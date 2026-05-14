@@ -56,6 +56,34 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     /// </summary>
     internal readonly List<(LockResource Resource, LockMode Mode)> HeldLocks = [];
 
+    /// <summary>
+    /// Per-table count of currently-held tx-scoped row locks (row-X, row-U,
+    /// row-S-tx-scoped). Bumped at every row-lock acquire site; when a
+    /// table's count exceeds <see cref="RowLockEscalationThreshold"/>, the
+    /// acquire site promotes to a single table-X (releasing every row lock
+    /// it had previously held on that table). Matches real SQL Server's
+    /// lock-escalation behavior at the same ~5000-locks-per-table threshold
+    /// (probe-confirmed: real SQL Server defaults to escalation enabled with
+    /// the threshold around 5000; the exact value can vary by version /
+    /// memory pressure).
+    /// </summary>
+    internal readonly Dictionary<HeapTable, int> RowLockCountsByTable = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
+    /// Set of tables whose per-tx row locks have been escalated to a single
+    /// table-X. Once a table is in this set, subsequent row-X acquires on
+    /// it short-circuit (the table-X already covers them) until COMMIT /
+    /// ROLLBACK clears the state.
+    /// </summary>
+    internal readonly HashSet<HeapTable> EscalatedTables = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
+    /// Row-count threshold above which a transaction's per-row X locks on
+    /// a single table get promoted to a single table-X. Matches real SQL
+    /// Server's ~5000 default; the simulator uses the same constant.
+    /// </summary>
+    internal const int RowLockEscalationThreshold = 5000;
+
     public override IsolationLevel IsolationLevel { get; } = isolationLevel;
 
     protected override DbConnection DbConnection => this.connection;
@@ -128,5 +156,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
             manager.Release(resource, mode, this.connection);
         }
         this.HeldLocks.Clear();
+        this.RowLockCountsByTable.Clear();
+        this.EscalatedTables.Clear();
     }
 }

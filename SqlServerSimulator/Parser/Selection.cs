@@ -1050,12 +1050,17 @@ internal sealed partial class Selection
 
                 var heapAlias = ConsumeOptionalAlias(context);
                 var heapHints = ParseOptionalTableHints(context);
-                // Phase 1a: acquire table-level S (or skip on NOLOCK, or
-                // upgrade to tx-scoped on HOLDLOCK/SERIALIZABLE/REPEATABLEREAD).
-                // No data lock on table variables / temp tables / system
-                // tables — none are cross-connection contention points.
-                context.Batch.AcquireDataLockIfApplicable(heapTable, heapHints, isWrite: false);
+                // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
+                // isolation level) and capture the per-row plan. Temporal
+                // FOR SYSTEM_TIME sources bypass the per-row probe (they
+                // materialize through a separate path that doesn't expose
+                // RIDs).
+                var heapPlan = context.Batch.AcquireDataLockIfApplicable(heapTable, heapHints, isWrite: false);
                 var heapQualifier = heapAlias ?? objectName.Leaf;
+                var heapRows = temporalRowSource
+                    ?? (heapPlan.NoLockReader
+                        ? heapTable.Rows
+                        : BatchContext.WrapWithRowConflictChecks(heapTable, context.Batch, heapPlan));
 
                 return new FromSource(
                     qualifier: heapQualifier,
@@ -1064,7 +1069,7 @@ internal sealed partial class Selection
                     storedSchema: heapTable.StoredColumns,
                     storageOrdinals: heapTable.StorageOrdinals,
                     lobStore: heapTable.Heap,
-                    rows: temporalRowSource ?? heapTable.Rows,
+                    rows: heapRows,
                     backingTable: heapTable);
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through

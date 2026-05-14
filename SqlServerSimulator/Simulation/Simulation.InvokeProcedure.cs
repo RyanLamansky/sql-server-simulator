@@ -133,7 +133,7 @@ partial class Simulation
                 if (boundTableValues[i] is { } supplied)
                 {
                     foreach (var row in supplied.Heap.EnumerateRows())
-                        clone.Heap.Insert(row);
+                        _ = clone.Heap.Insert(row);
                 }
                 tableVariables[param.Name] = clone;
                 continue;

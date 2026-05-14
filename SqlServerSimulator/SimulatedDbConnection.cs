@@ -32,6 +32,29 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal int LockTimeoutMillis = -1;
 
     /// <summary>
+    /// Session-scoped transaction-isolation level. Default is
+    /// <see cref="IsolationLevel.ReadCommitted"/> (matches SQL Server's
+    /// connection-default). Mutated by
+    /// <c>SET TRANSACTION ISOLATION LEVEL { READ UNCOMMITTED | READ COMMITTED |
+    /// REPEATABLE READ | SNAPSHOT | SERIALIZABLE }</c>; carries forward across
+    /// statements until the next SET or connection close. Drives:
+    /// <list type="bullet">
+    /// <item><c>READ UNCOMMITTED</c> — readers behave like <c>WITH (NOLOCK)</c>
+    /// (skip row-conflict check, dirty reads).</item>
+    /// <item><c>READ COMMITTED</c> (default) — readers conflict-check each
+    /// row against tx-scoped row-X holders; no row-S retained.</item>
+    /// <item><c>REPEATABLE READ</c> — readers acquire tx-scoped row-S per
+    /// row read (so reread sees the same value).</item>
+    /// <item><c>SERIALIZABLE</c> — REPEATABLE READ + tx-scoped table-S at
+    /// scan start (phantom protection at table granularity since the simulator
+    /// has no indexes to range-lock through).</item>
+    /// <item><c>SNAPSHOT</c> — parses-and-discards (MVCC is phase 3); behaves
+    /// as READ COMMITTED for now.</item>
+    /// </list>
+    /// </summary>
+    internal IsolationLevel SessionIsolationLevel = IsolationLevel.ReadCommitted;
+
+    /// <summary>
     /// Managed thread id of the OS thread currently executing a command
     /// against this connection, or <c>null</c> when no command is in flight.
     /// Set at the top of <see cref="Simulation.CreateResultSetsForCommand"/>'s

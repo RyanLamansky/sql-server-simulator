@@ -1,10 +1,15 @@
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Lock modes recognized by <see cref="LockManager"/>. Two orthogonal
+/// Lock modes recognized by <see cref="LockManager"/>. Three orthogonal
 /// families: schema-stability locks (Sch-S / Sch-M) protect against
-/// concurrent DDL on an object; data locks (Shared / Exclusive) protect
-/// against concurrent DML reads / writes. The compatibility matrix in
+/// concurrent DDL on an object; data locks (Shared / Update / Exclusive)
+/// protect against concurrent DML reads / writes at the row level (and at
+/// the table level when explicit TABLOCK / TABLOCKX is in play); intent
+/// locks (IS / IX / SIX) sit at the table level to signal "some children
+/// of this object are S- / U- / X-locked" so a TABLOCK / TABLOCKX
+/// requester at the parent can quickly check for child conflicts without
+/// scanning the row-lock dict. The compatibility matrix in
 /// <see cref="LockManager.IsCompatible"/> spells out the relationships.
 /// </summary>
 internal enum LockMode
@@ -13,9 +18,17 @@ internal enum LockMode
     SchemaStability,
     /// <summary>Schema modification — exclusive against every other mode.</summary>
     SchemaModification,
-    /// <summary>Data shared (S) — multiple holders allowed; blocks Exclusive.</summary>
+    /// <summary>Intent-shared (IS) — table-level signal that some row-S is held by this owner.</summary>
+    IntentShared,
+    /// <summary>Intent-exclusive (IX) — table-level signal that some row-X is held by this owner.</summary>
+    IntentExclusive,
+    /// <summary>Shared-with-intent-exclusive (SIX) — full table read + intent to write some rows.</summary>
+    SharedIntentExclusive,
+    /// <summary>Data shared (S) — non-exclusive read. Multiple S holders allowed; coexists with U.</summary>
     Shared,
-    /// <summary>Data exclusive (X) — exclusive against Shared and Exclusive.</summary>
+    /// <summary>Data update (U) — "I'm reading but plan to convert to X". One U at a time per resource; coexists with S and IS.</summary>
+    Update,
+    /// <summary>Data exclusive (X) — exclusive against every other data-family mode.</summary>
     Exclusive,
 }
 
@@ -23,9 +36,11 @@ internal enum LockMode
 /// Passive per-object lock state. Holds the current set of acquisitions
 /// (each a <see cref="Hold"/> entry with owner / mode / re-entrance
 /// count). Every <see cref="SchemaObject"/> carries one via the inherited
-/// <see cref="SchemaObject.SchemaLock"/>. All mutations to
-/// <see cref="Holders"/> happen under <see cref="LockManager"/>'s gate;
-/// the class itself has no logic.
+/// <see cref="SchemaObject.SchemaLock"/>; row-level locks live in
+/// <see cref="Storage.HeapTable.RowLocks"/>, lazily-interned per
+/// <c>(pageIndex, slotIndex)</c>. All mutations to <see cref="Holders"/>
+/// happen under <see cref="LockManager"/>'s gate; the class itself has no
+/// logic.
 /// </summary>
 internal sealed class LockResource
 {
@@ -62,19 +77,23 @@ internal sealed class LockResource
 /// </summary>
 /// <remarks>
 /// <para>
-/// Compatibility matrix (phase 1a):
+/// Compatibility matrix (phase 1b, full 8-mode SQL Server matrix):
 /// <list type="bullet">
-/// <item>Schema family (Sch-S / Sch-M) is orthogonal to the data family
-/// (S / X). Sch-S × S, Sch-S × X, Sch-M × Sch-M / S / X all compute
-/// independently — a Sch-M waits behind any other holder; a Sch-S
-/// coexists with S / X / other Sch-S.</item>
-/// <item>Data family: S × S compatible; S × X conflict; X × anything
+/// <item>Schema family (Sch-S / Sch-M) is orthogonal to data + intent
+/// families. Sch-S × anything-else compatible; Sch-M × anything =
 /// conflict.</item>
+/// <item>Intent family (IS / IX / SIX): IS × {IS, IX, SIX, S, U} OK; IX
+/// × {IS, IX} OK; SIX × {IS} OK only.</item>
+/// <item>Data family (S / U / X): S × {S, U, IS} OK; U × {S, IS} OK
+/// (note: U × U conflicts — only one upgrader); X × nothing.</item>
+/// <item>Cross-family (intent vs data, taken at different granularities
+/// but on the same resource — happens when a TABLOCK requester sees row-
+/// IX, etc.): S × IX conflict; S × SIX conflict; U × IX conflict; U × SIX
+/// conflict; X × any-intent conflict.</item>
 /// <item>Same-owner re-entrance is always compatible — the conflict check
-/// skips holders whose owner matches the requester. This handles the
-/// ALTER TABLE pattern (Sch-S then Sch-M from the same connection) and
-/// the multi-DML pattern (same connection updates the same row twice in
-/// one statement).</item>
+/// skips holders whose owner matches the requester. This handles
+/// ALTER-with-Sch-S-then-Sch-M, table-IS-then-row-S coexisting on the
+/// same owner, repeated row-touches in one statement, etc.</item>
 /// </list>
 /// </para>
 /// <para>
@@ -83,8 +102,8 @@ internal sealed class LockResource
 /// <see cref="SimulatedDbConnection.CurrentExecutingThreadId"/> equals
 /// the caller's managed thread id. If found, the wait is short-circuited
 /// since that thread can't release the conflicting hold while it's also
-/// the requester. The caller is the victim (per user's "always-the-
-/// requester" policy).
+/// the requester. The caller is the victim (per "always-the-requester"
+/// policy).
 /// </para>
 /// <para>
 /// Cross-thread cycle detection: when an acquire would block, the
@@ -178,6 +197,31 @@ internal sealed class LockManager
                     owner.WaitingOnResource = null;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Non-blocking compatibility probe: returns true if any holder other
+    /// than <paramref name="excludingOwner"/> holds <paramref name="resource"/>
+    /// in a mode incompatible with <paramref name="probedMode"/>. Used by the
+    /// reader's row-conflict-check path: a SELECT under READ COMMITTED
+    /// peeks for "is some other connection's tx-scoped row-X holding this
+    /// row?" without actually acquiring — if no, the row reads through;
+    /// if yes, the reader can either wait (the default) or skip
+    /// (<c>READPAST</c>).
+    /// </summary>
+    public bool HasIncompatibleHolderOtherThan(LockResource resource, LockMode probedMode, SimulatedDbConnection excludingOwner)
+    {
+        lock (this.gate)
+        {
+            foreach (var hold in resource.Holders)
+            {
+                if (ReferenceEquals(hold.Owner, excludingOwner))
+                    continue;
+                if (!IsCompatible(hold.Mode, probedMode))
+                    return true;
+            }
+            return false;
         }
     }
 
@@ -304,23 +348,55 @@ internal sealed class LockManager
     }
 
     /// <summary>
-    /// Static compatibility matrix. Schema family (Sch-S / Sch-M) and
-    /// data family (Shared / Exclusive) are orthogonal. Cross-family
-    /// pairs are compatible — a Sch-S holder doesn't block an X
-    /// requester and vice versa. Within each family the standard
-    /// reader/writer rules apply.
+    /// Static compatibility matrix. Schema family (Sch-S / Sch-M),
+    /// intent family (IS / IX / SIX), and data family (S / U / X) cover
+    /// 8 modes. Most cross-family pairs are compatible (Sch-S coexists
+    /// with everything; IS coexists with all data modes except X); a few
+    /// fail (S × IX, U × IX, X × any-intent). The full table is below.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Matrix (held → requested):
+    /// <code>
+    ///         Sch-S Sch-M IS    IX    SIX   S     U     X
+    /// Sch-S   ✓     ✗     ✓     ✓     ✓     ✓     ✓     ✓
+    /// Sch-M   ✗     ✗     ✗     ✗     ✗     ✗     ✗     ✗
+    /// IS      ✓     ✗     ✓     ✓     ✓     ✓     ✓     ✗
+    /// IX      ✓     ✗     ✓     ✓     ✗     ✗     ✗     ✗
+    /// SIX     ✓     ✗     ✓     ✗     ✗     ✗     ✗     ✗
+    /// S       ✓     ✗     ✓     ✗     ✗     ✓     ✓     ✗
+    /// U       ✓     ✗     ✓     ✗     ✗     ✓     ✗     ✗
+    /// X       ✓     ✗     ✗     ✗     ✗     ✗     ✗     ✗
+    /// </code>
+    /// </para>
+    /// </remarks>
     internal static bool IsCompatible(LockMode held, LockMode requested) =>
         (held, requested) switch
         {
             // Sch-M conflicts with everything.
             (LockMode.SchemaModification, _) => false,
             (_, LockMode.SchemaModification) => false,
-            // Sch-S is compatible with everything else (data locks orthogonal).
+            // Sch-S is compatible with everything else.
             (LockMode.SchemaStability, _) => true,
             (_, LockMode.SchemaStability) => true,
-            // Data family: only Shared × Shared is compatible.
+            // X is exclusive against every other data/intent mode.
+            (LockMode.Exclusive, _) => false,
+            (_, LockMode.Exclusive) => false,
+            // IS coexists with everything that isn't X (already excluded above).
+            (LockMode.IntentShared, _) => true,
+            (_, LockMode.IntentShared) => true,
+            // IX coexists with IX (already-handled above with IS).
+            (LockMode.IntentExclusive, LockMode.IntentExclusive) => true,
+            // SIX × IX, SIX × SIX, SIX × S/U all conflict.
+            (LockMode.SharedIntentExclusive, _) => false,
+            (_, LockMode.SharedIntentExclusive) => false,
+            // S / U cases. IX × S, IX × U all conflict (caught here).
+            (LockMode.IntentExclusive, _) => false,
+            (_, LockMode.IntentExclusive) => false,
+            // Data family: S × S, S × U, U × S compatible; U × U conflict.
             (LockMode.Shared, LockMode.Shared) => true,
+            (LockMode.Shared, LockMode.Update) => true,
+            (LockMode.Update, LockMode.Shared) => true,
             _ => false,
         };
 }

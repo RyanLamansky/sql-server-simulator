@@ -47,7 +47,7 @@ internal sealed class Heap
     /// columns off-row to honor that cap; this method only enforces it as
     /// a defensive guard against bypassed callers.
     /// </summary>
-    public void Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null)
+    public (int PageIndex, int SlotIndex) Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null)
     {
         if (row.Length > MaxRowSize)
             throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; the encoder should have pushed variable-length columns off-row.");
@@ -74,7 +74,9 @@ internal sealed class Heap
 
         // The new row went into the slot at SlotCount-1 of the chosen page —
         // TryInsert appends a new directory entry as the highest-index slot.
-        undoLog?.RecordInsert(this, pageIndex, this.Pages[pageIndex].SlotCount - 1);
+        var slotIndex = this.Pages[pageIndex].SlotCount - 1;
+        undoLog?.RecordInsert(this, pageIndex, slotIndex);
+        return (pageIndex, slotIndex);
     }
 
     /// <summary>

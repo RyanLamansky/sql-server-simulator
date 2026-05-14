@@ -376,7 +376,7 @@ partial class Simulation
                 };
             }
             childTable.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
-            childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
+            _ = childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
             newPairs.Add((oldClone, newRow));
         }
         // Recurse: the child rows just got their FK columns rewritten — if
@@ -407,7 +407,7 @@ partial class Simulation
                     : SqlValue.Null(childTable.Columns[ord].Type);
             }
             childTable.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
-            childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
+            _ = childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
             newPairs.Add((oldClone, newRow));
         }
         // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion

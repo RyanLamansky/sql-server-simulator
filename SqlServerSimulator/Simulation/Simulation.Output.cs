@@ -303,7 +303,7 @@ partial class Simulation
                     : SqlValue.Null(column.Type);
             }
             var undoLog = this.Target.IsTableVariable ? this.batch.CurrentTableVarUndoLog : this.batch.CurrentUndoLog;
-            this.Target.Heap.Insert(
+            _ = this.Target.Heap.Insert(
                 RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
                 undoLog);
         }

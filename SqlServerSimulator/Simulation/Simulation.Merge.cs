@@ -62,9 +62,9 @@ partial class Simulation
         context.MoveNextRequired();
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
             _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-        // Phase 1a: acquire X on the MERGE target. Tx-scoped when an
-        // explicit BEGIN TRAN is active.
-        context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
+        // Phase 1b: acquire table-IX on the MERGE target; row-X on each
+        // affected row at mutation time.
+        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
 
         // Optional target alias: AS <alias> or bare <alias>.
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
@@ -324,9 +324,9 @@ partial class Simulation
             var sourceTable = heapTable;
             var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
             var sourceHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-            // Phase 1a: MERGE bare-table source is a READ — acquire S unless
-            // NOLOCK/READUNCOMMITTED skips it; HOLDLOCK upgrades to tx-scope.
-            context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
+            // Phase 1b: MERGE bare-table source is a READ — table-IS plus
+            // per-row probe (or hint-driven row-S / row-U / row-X).
+            _ = context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
             materialize = batch =>
             {
                 var rows = new List<SqlValue[]>();
@@ -1173,22 +1173,41 @@ partial class Simulation
         }
 
         // Apply heap operations only for non-INSTEAD-OF actions.
+        var lockableTable = !destinationTable.IsTableVariable
+            && !BatchContext.IsLocalTempName(destinationTable.Name)
+            && !Simulation.SystemHeapTables.ContainsValue(destinationTable);
         if (!insteadOfDelete)
         {
             foreach (var (page, slot, _, _) in pendingDeletes)
+            {
+                if (lockableTable)
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
                 destinationTable.Heap.DeleteAt(page, slot, undoLog);
+            }
         }
         if (!insteadOfUpdate)
         {
             foreach (var (page, slot, _, _, _) in pendingUpdates)
+            {
+                if (lockableTable)
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
                 destinationTable.Heap.DeleteAt(page, slot, undoLog);
+            }
             foreach (var (_, _, _, newValues, _) in pendingUpdates)
-                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+            {
+                var (newPage, newSlot) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+                if (lockableTable)
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive);
+            }
         }
         if (!insteadOfInsert)
         {
             foreach (var (newValues, _) in pendingInserts)
-                destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+            {
+                var (newPage, newSlot) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+                if (lockableTable)
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive);
+            }
         }
 
         // Incoming-FK cascade for MERGE's DELETE/UPDATE actions on the

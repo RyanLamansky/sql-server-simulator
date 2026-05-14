@@ -40,9 +40,10 @@ partial class Simulation
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
-        // Phase 1a: acquire table-level X on the INSERT target. Tx-scoped
-        // when an explicit BEGIN TRAN is active; statement-scoped otherwise.
-        context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
+        // Phase 1b: acquire table-IX on the INSERT target (escalates to
+        // table-X via TABLOCK*); row-X is taken per inserted row in
+        // ProcessHeapInsert.
+        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
         return ProcessHeapInsert(destinationTable, context);
     }
 
@@ -426,7 +427,13 @@ partial class Simulation
                     EnforceKeyConstraints(destinationTable, storedValues);
                     EnforceUniqueIndexes(destinationTable, rowValues, storedValues, context.Batch);
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
-                    destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                    var (pageIndex, slotIndex) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                    if (!destinationTable.IsTableVariable
+                        && !BatchContext.IsLocalTempName(destinationTable.Name)
+                        && !Simulation.SystemHeapTables.ContainsValue(destinationTable))
+                    {
+                        context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive);
+                    }
                 }
 
                 if (output is { } o)

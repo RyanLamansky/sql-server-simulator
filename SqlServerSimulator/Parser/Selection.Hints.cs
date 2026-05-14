@@ -73,15 +73,40 @@ internal sealed partial class Selection
     };
 
     /// <summary>
-    /// Recognized hint modifiers that affect phase-1a data-lock acquisition.
+    /// Recognized hint modifiers that affect phase-1b data-lock acquisition.
     /// Every other hint is parse-and-discard.
     /// </summary>
     internal struct TableHintInfo
     {
         /// <summary><c>NOLOCK</c> or <c>READUNCOMMITTED</c> — read source skips S acquisition (dirty-read).</summary>
         public bool NoLock;
-        /// <summary><c>HOLDLOCK</c> / <c>REPEATABLEREAD</c> / <c>SERIALIZABLE</c> — S held until transaction end.</summary>
-        public bool HoldLock;
+        /// <summary>
+        /// <c>HOLDLOCK</c> / <c>SERIALIZABLE</c> — equivalent per SQL Server docs
+        /// ("Equivalent to SERIALIZABLE"). Acquires table-S tx-scoped, providing
+        /// phantom prevention at table granularity (the simulator approximates
+        /// SQL Server's key-range locks with a full table-S since no indexes
+        /// model range structure). Read in combination with <see cref="UpdLock"/>
+        /// or <see cref="XLock"/>, the row-mode wins but the lock is still
+        /// tx-scoped (which it would have been anyway).
+        /// </summary>
+        public bool Serializable;
+        /// <summary>
+        /// <c>REPEATABLEREAD</c> — promotes row-S to tx-scoped retention so a
+        /// re-read of the same row returns the same value. Does NOT prevent
+        /// phantoms — concurrent inserts of new rows still succeed. Distinct
+        /// from <see cref="Serializable"/>.
+        /// </summary>
+        public bool Repeatable;
+        /// <summary><c>UPDLOCK</c> — read source takes row-U (read-with-intent-to-update) instead of row-S. Tx-scoped.</summary>
+        public bool UpdLock;
+        /// <summary><c>XLOCK</c> — read source takes row-X (treat read as a write). Tx-scoped.</summary>
+        public bool XLock;
+        /// <summary><c>READPAST</c> — skip blocked rows during scan instead of waiting. Default RC behavior is wait.</summary>
+        public bool ReadPast;
+        /// <summary><c>TABLOCK</c> — escalate to table-S (read) or table-X (write) instead of row-level.</summary>
+        public bool TabLock;
+        /// <summary><c>TABLOCKX</c> — escalate to table-X regardless of read / write direction.</summary>
+        public bool TabLockX;
     }
 
     /// <summary>
@@ -177,22 +202,48 @@ internal sealed partial class Selection
         var sourceSpan = context.Token.Source;
         if (!TableHintNames.Contains(sourceSpan.ToString()))
             throw SimulatedSqlException.UnrecognizedTableHint(sourceSpan);
-        // Recognize the phase-1a lock-affecting hints. NOLOCK and
-        // READUNCOMMITTED both mean "skip S acquisition". HOLDLOCK /
-        // REPEATABLEREAD / SERIALIZABLE all mean "S held until tx end"
-        // (probe-confirmed: HOLDLOCK is a synonym for SERIALIZABLE on
-        // a single statement; at table-only granularity REPEATABLEREAD
-        // is indistinguishable). Everything else parses-and-discards.
+        // Recognize the phase-1b lock-affecting hints. NOLOCK / READUNCOMMITTED
+        // skip S acquisition (dirty-read). HOLDLOCK / REPEATABLEREAD /
+        // SERIALIZABLE retain row-S to transaction end (so re-read sees the
+        // same value). UPDLOCK takes row-U (read-with-intent-to-update) so
+        // a subsequent UPDATE inside the same tx doesn't deadlock with
+        // another connection's S-then-U upgrade. XLOCK treats the read like
+        // a write (row-X tx-scoped). TABLOCK / TABLOCKX escalates to table
+        // granularity. READPAST skips blocked rows instead of waiting.
+        // Everything else parses-and-discards.
         var nameText = sourceSpan.ToString();
         if (Collation.Default.Equals(nameText, "NOLOCK") || Collation.Default.Equals(nameText, "READUNCOMMITTED"))
         {
             info.NoLock = true;
         }
         else if (Collation.Default.Equals(nameText, "HOLDLOCK")
-            || Collation.Default.Equals(nameText, "REPEATABLEREAD")
             || Collation.Default.Equals(nameText, "SERIALIZABLE"))
         {
-            info.HoldLock = true;
+            info.Serializable = true;
+        }
+        else if (Collation.Default.Equals(nameText, "REPEATABLEREAD"))
+        {
+            info.Repeatable = true;
+        }
+        else if (Collation.Default.Equals(nameText, "UPDLOCK"))
+        {
+            info.UpdLock = true;
+        }
+        else if (Collation.Default.Equals(nameText, "XLOCK"))
+        {
+            info.XLock = true;
+        }
+        else if (Collation.Default.Equals(nameText, "READPAST"))
+        {
+            info.ReadPast = true;
+        }
+        else if (Collation.Default.Equals(nameText, "TABLOCK"))
+        {
+            info.TabLock = true;
+        }
+        else if (Collation.Default.Equals(nameText, "TABLOCKX"))
+        {
+            info.TabLockX = true;
         }
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '=' })
