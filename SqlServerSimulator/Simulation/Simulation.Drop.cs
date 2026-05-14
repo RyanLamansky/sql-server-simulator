@@ -38,6 +38,14 @@ partial class Simulation
         if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Index })
             return TryParseDropIndex(context);
 
+        // DROP USER / DROP ROLE go through dedicated parsers — they have
+        // their own [IF EXISTS] + comma-list-free grammar and live in
+        // Database.Principals rather than a per-schema dict.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.User })
+            return TryParseDropUser(context);
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Role })
+            return TryParseDropRole(context);
+
         var targetKind = context.Token switch
         {
             ReservedKeyword { Keyword: Keyword.Table } => DropTargetKind.Table,
@@ -158,13 +166,61 @@ partial class Simulation
 
     /// <summary>
     /// Removes one entry from the target schema's <see cref="Schema.Triggers"/>
-    /// dict. Missing trigger → Msg 3701 (trigger variant) unless
-    /// <paramref name="ifExists"/> is set. Probe-confirmed wording.
+    /// dict (DML trigger), or from <see cref="Database.DdlTriggers"/> if the
+    /// caller follows the trigger name with <c>ON DATABASE</c>. Missing
+    /// trigger → Msg 3701 (trigger variant) unless <paramref name="ifExists"/>
+    /// is set. Probe-confirmed wording.
     /// </summary>
+    /// <remarks>
+    /// SQL Server's <c>DROP TRIGGER</c> grammar requires <c>ON DATABASE</c>
+    /// for database-scope DDL triggers and forbids it for DML triggers
+    /// (probe-confirmed). The simulator peeks the next token to discriminate;
+    /// if it's <c>ON</c> followed by <c>DATABASE</c>, the DDL-trigger
+    /// dictionary is consulted, otherwise the per-schema DML-trigger dict.
+    /// </remarks>
     private static void DropOneTrigger(ParserContext context, MultiPartName name, bool ifExists)
     {
+        // Peek for the ON DATABASE trailer. The caller's loop normally
+        // advances after this returns; we capture the next token here to
+        // route correctly, and if not "ON DATABASE", leave the cursor on
+        // the name's last segment for the caller's advance step.
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        var isDdl = false;
+        if (next is ReservedKeyword { Keyword: Keyword.On })
+        {
+            var afterOn = context.GetNextOptional();
+            if (afterOn is ReservedKeyword { Keyword: Keyword.Database })
+            {
+                isDdl = true;
+            }
+            else
+            {
+                context.RestoreCheckpoint(checkpoint);
+            }
+        }
+        else
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+
         if (context.Batch.IsSkipping)
             return;
+
+        if (isDdl)
+        {
+            if (!context.CurrentDatabase.DdlTriggers.TryGetValue(name.Leaf, out var existingDdl))
+            {
+                if (ifExists)
+                    return;
+                throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+            }
+            context.Batch.AcquireStatementLock(existingDdl.SchemaLock, LockMode.SchemaModification);
+            if (!context.CurrentDatabase.DdlTriggers.TryRemove(name.Leaf, out _) && !ifExists)
+                throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+            return;
+        }
+
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
         if (schema is null || !schema.Triggers.TryGetValue(name.Leaf, out var existing))
         {

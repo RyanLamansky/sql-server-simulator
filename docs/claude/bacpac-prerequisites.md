@@ -237,16 +237,45 @@ The original probe scaffold lived at `/tmp/hierarchyid-probe/` and was deleted w
 
 **Deferred follow-ups** (for the BCP loader bundle or beyond): byte-identical CAST encoding (reverse-engineer the recursive Stern-Brocot bit pattern for all 6+ positive tiers + negative-mirror + decimal-segment cases), `.GetReparentedValue(oldRoot, newRoot)`, `.Read(BinaryReader)` / `.Write(BinaryWriter)` (CLR-stream surface), `GetDescendant`'s sub-ordinal placement algorithm for paths already carrying decimal sub-ordinals (current rule is "extend c1 with [+1] at the deepest sub-ordinal position" which produces a valid `c1 < result` result but may not exactly match SQL Server's choice for the rare `/1/2.1/` + `/1/2.2/` style inputs — AW doesn't exercise this path).
 
-### [ ] DDL trigger (`CREATE TRIGGER … ON DATABASE`) (small if scoped to parse-and-discard)
-1 in AW: `[ddlDatabaseTriggerLog]` — fires on `DDL_DATABASE_LEVEL_EVENTS`, writes to `dbo.DatabaseLog`. Surface: `CREATE TRIGGER … ON DATABASE … FOR <event_type_group> AS …` parser + storage + dispatch. Could legitimately be parse-and-store-but-never-fire for the baseline — the trigger only fires on DDL events the simulator may not even dispatch to a trigger loop in the first place. Worth a probe to confirm AW apps actually depend on its side effects.
+### [x] DDL trigger (`CREATE TRIGGER … ON DATABASE`) (shipped 2026-05-14)
+Parse-and-store-but-no-fire surface for database-scope DDL triggers. AW's `[ddlDatabaseTriggerLog]` (`FOR DDL_DATABASE_LEVEL_EVENTS`) loads end-to-end and surfaces in `sys.triggers` with the probe-confirmed shape: `parent_class=0`, `parent_class_desc='DATABASE'`, `parent_id=0`, `type_desc='SQL_TRIGGER'`, `is_instead_of_trigger=0`. The body source is captured verbatim for the eventual `sys.sql_modules` row (not yet modeled — see deferred work below).
 
-### [ ] Permission statements (`GRANT` / `REVOKE` / `DENY`) (medium — needs principal model)
-2 in AW. Real surface needs:
-- `CREATE USER` / `CREATE ROLE` / `ALTER ROLE … ADD MEMBER` (or accept-as-no-op for the principals AW references — `public` and the schema authorizers)
-- `GRANT <perm> ON <object> TO <principal>` / `REVOKE` / `DENY`
-- `sys.database_principals`, `sys.database_permissions`, `sys.database_role_members`
+**Storage**: new `DdlTrigger` class (`SqlServerSimulator/DdlTrigger.cs`) carries name + object_id + event-type list + body source + is_disabled flag. `Database.DdlTriggers` is the per-database `ConcurrentDictionary<string, DdlTrigger>` (case-insensitive keys); not per-schema because DDL triggers belong to the database itself. The class extends `SchemaObject` for the object-id + create-date pattern but doesn't participate in any schema's shared namespace except for name collision detection at CREATE time (probe-confirmed: a DDL trigger named `foo` collides with a same-named DML trigger / table / view / proc in the same schema).
 
-For the loader's "baseline AW load" goal, parse-and-discard is probably enough — the simulator has no permission enforcement, so GRANT/REVOKE are no-ops semantically. The catalog views surface as empty/synthesized. Real feature work deferred.
+**Parser**: `Simulation.CreateTrigger.cs::TryParseCreateTrigger` extended with a branch — after the `ON` keyword, if the next token is `DATABASE`, dispatch to a new `ParseDdlTriggerBody` helper that handles `[WITH options] {FOR|AFTER} <event_type_list> AS <body>`. Event types parse as bare identifiers (Name / UnquotedString) and store verbatim in `DdlTrigger.EventTypes`. The `DROP TRIGGER name ON DATABASE` form lives in `Simulation.Drop.cs::DropOneTrigger`, which peeks the next tokens via `SaveCheckpoint` / `RestoreCheckpoint` to decide between the DML-trigger and DDL-trigger paths.
+
+**Catalog**: `sys.triggers` enumerator in `BuiltInResources.cs::EnumerateSysTriggers` now yields rows for `Database.DdlTriggers` after the per-schema DML trigger loop, with the probe-confirmed `parent_class=0` / `parent_class_desc='DATABASE'` / `parent_id=0` shape.
+
+**Deferred**: trigger firing (the simulator doesn't dispatch DDL events to any trigger loop — accepted as a documented behavior gap; AW's trigger body is an audit-log writer, not a load-bearing dependency). `sys.sql_modules` to surface the body — not modeled yet, on the follow-up list. `DISABLE/ENABLE TRIGGER … ON DATABASE` not wired (the per-schema disable / enable path doesn't extend to the per-database dict).
+
+7 new tests in `DdlTriggerTests.cs` cover CREATE / DROP / DROP IF EXISTS / multi-event / collision / CREATE OR ALTER plus the catalog-view row shape.
+
+### [x] Permission statements (`GRANT` / `REVOKE` / `DENY` + principal DDL) (shipped 2026-05-14)
+AW emits 2 GRANTs (`GRANT VIEW ANY COLUMN ENCRYPTION KEY DEFINITION TO public` + `GRANT VIEW ANY COLUMN MASTER KEY DEFINITION TO public`) — both database-scope, both to the built-in `public` role. No `CREATE USER` / `CREATE ROLE` in AW. The bundle ships the full parse-and-store surface so the model.xml round-trips: principal DDL, the GRANT/REVOKE/DENY trio, and three new catalog views.
+
+**Storage**: `DatabasePrincipal` (`SqlServerSimulator/DatabasePrincipal.cs`) carries principal_id + name + type_code (`S` = SQL_USER, `R` = DATABASE_ROLE) + type_desc + is_fixed_role + create_date. `DatabasePermission` (`SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + permission_name + 4-char type code + state (`G`/`W`/`D`/`R`). Both live on `Database`: a `ConcurrentDictionary<string, DatabasePrincipal>` keyed by name, a `List<DatabasePermission>` for grants/denies, and a `List<(int RoleId, int MemberId)>` for role membership. Five fixed principals are pre-seeded at construction time matching real SQL Server's `sys.database_principals` ids (probe-confirmed 2026-05-14): public=0, dbo=1, guest=2, INFORMATION_SCHEMA=3, sys=4. User principals start at 5 via `Database.AllocatePrincipalId`.
+
+**Parser** (`Simulation/Simulation.GrantRevokeDeny.cs` + `Simulation/Simulation.PrincipalDdl.cs`):
+- `GRANT <perm_list> [ON <securable>] TO <principal_list> [WITH GRANT OPTION] [AS <grantor>]` — permission list eats word sequences ending at comma / ON / TO / AS / WITH (a sequence of bare identifiers fuses into one permission name); ON clause accepts `<name>`, `OBJECT::<name>`, `SCHEMA::<name>`, `DATABASE::<name>`, `TYPE::<name>` via a peek-restore pattern for the `::` operator pair. Grantee names accept either `Name` or `ReservedKeyword` raw text (so `public` — tokenized as `ReservedKeyword.Public` — works without special-casing).
+- `REVOKE [GRANT OPTION FOR] <perm_list> [ON <securable>] FROM <principal_list> [CASCADE] [AS <grantor>]` — same shape; REVOKE GRANT OPTION FOR consumes-and-tracks (removes the W-state row only); CASCADE parses-and-discards.
+- `DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]` — same shape; produces D-state rows.
+- `CREATE USER name [{FOR | FROM} ...] [WITH ...]` — parses the name, allocates a principal_id, stores with `type_code='S'` / `type_desc='SQL_USER'`. The full optional-clause grammar (FROM LOGIN / WITH PASSWORD / DEFAULT_SCHEMA / etc.) parses-and-discards through the next statement boundary via a shared `ConsumeToStatementBoundary` helper.
+- `CREATE ROLE name [AUTHORIZATION owner]` — same shape; `type_code='R'` / `type_desc='DATABASE_ROLE'`. AUTHORIZATION clause parse-and-discards.
+- `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` to `Database.RoleMembers`. WITH NAME parses-and-discards.
+- `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals` and cascade-remove `Database.RoleMembers` entries that reference the removed id. The DROP USER / DROP ROLE paths are dispatched ahead of the generic DROP-target switch in `Simulation.Drop.cs` because principals don't live in a per-schema dict.
+
+**Catalog views** in `BuiltInResources.cs`:
+- `sys.database_principals` (12-col probe-confirmed shipped subset): name / principal_id / type / type_desc / default_schema_name (NULL — not tracked) / create_date / modify_date / owning_principal_id (NULL) / sid (NULL — no SID model) / is_fixed_role / authentication_type / authentication_type_desc (both NULL).
+- `sys.database_permissions` (10-col probe-confirmed shipped subset): class / class_desc / major_id / minor_id / grantee_principal_id / grantor_principal_id / type (4-char code) / permission_name / state (1-char) / state_desc.
+- `sys.database_role_members` (2-col, the full row): role_principal_id / member_principal_id.
+
+**Permission type code derivation**: 4-char code is the first-letter-of-each-word right-padded with spaces (e.g. `VIEW ANY COLUMN MASTER KEY DEFINITION` → `VACM`). Approximate — real SQL Server's mapping uses a per-permission lookup that diverges for short names (`SELECT` → `SL`, `UPDATE` → `UP`); a polish pass would import the canonical table. Class_desc / state_desc are spelled out per the probe-confirmed enum (`DATABASE` / `OBJECT_OR_COLUMN` / `SCHEMA` / `DATABASE_PRINCIPAL`; `GRANT` / `GRANT_WITH_GRANT_OPTION` / `DENY` / `REVOKE`).
+
+**Errors enforced verbatim**: `Msg 15151` for unknown principal in GRANT/REVOKE/DENY/ALTER ROLE; `Msg 15023` for duplicate CREATE USER / CREATE ROLE name. Both probe-confirmed against SQL Server 2025.
+
+**Deferred**: server-scope grants (`GRANT … TO public ON SERVER`), schema-scope grants, column-scope grants, `WITH GRANT OPTION` cascading semantics (parses + records the W state, but doesn't propagate). The exact 4-char permission type codes for the full permission catalog (vs the simulator's first-letter heuristic). CREATE LOGIN / ALTER LOGIN / DROP LOGIN (server-scope, not database-scope). The full `CREATE USER … FROM EXTERNAL PROVIDER` / `WITH PASSWORD` semantic — currently parse-and-discard.
+
+15 new tests in `PermissionStatementTests.cs` cover GRANT / REVOKE / DENY happy paths, WITH GRANT OPTION, multi-permission comma lists, object-scope ON, unknown-principal Msg 15151, CREATE USER / CREATE ROLE happy + duplicate Msg 15023, ALTER ROLE ADD MEMBER landing in role_members, DROP USER / DROP ROLE happy + IF EXISTS + cascade-drop-membership, and fixed-principal pre-seed visibility.
 
 ### [ ] Full-text catalog + index (large — likely skip-with-diagnostic)
 1 catalog (`[AW2025FullTextCatalog]`) + 3 indexes in AW. Full surface: `CREATE FULLTEXT CATALOG` / `CREATE FULLTEXT INDEX … ON tbl(col LANGUAGE 1033) KEY INDEX <pk> ON <catalog>`, `CONTAINS()` / `FREETEXT()` predicates, `CONTAINSTABLE` / `FREETEXTTABLE` rowset functions, `sys.fulltext_catalogs` / `sys.fulltext_indexes`.
@@ -295,10 +324,9 @@ Encoding-edge probes needed (carve out tiny custom BACPACs locally via `SqlPacka
 
 Rough sequence — work each bundle to completion, update this checklist, then revisit BACPAC scoping once the prerequisites land:
 
-1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ (all shipped 2026-05-14)
-2. **DDL trigger + permission statements** as parse-and-store-but-no-enforce (smallest scope; both end up as catalog-view-visible no-ops)
-3. **Loader baseline implementation**, with `xml` / `geography` / full-text **loaded in degraded mode** (xml/geography → nvarchar(MAX), full-text indexes → parse-and-discard). Diagnostics report which features were degraded. **Re-probe the hierarchyid BCP wire format** at the start of this bundle and either confirm CAST-byte-identical or implement a separate BCP decoder; replace the current simulator-native CAST encoder/decoder with the documented variable-bit ordinal encoding at the same time.
-4. **Real xml + spatial + full-text** as separate post-baseline initiatives, each promoted from degraded-mode-via-diagnostic to first-class as bundles complete.
+1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ + ~~**DDL trigger + permission statements**~~ (all shipped 2026-05-14)
+2. **Loader baseline implementation**, with `xml` / `geography` / full-text **loaded in degraded mode** (xml/geography → nvarchar(MAX), full-text indexes → parse-and-discard). Diagnostics report which features were degraded. **Re-probe the hierarchyid BCP wire format** at the start of this bundle and either confirm CAST-byte-identical or implement a separate BCP decoder; replace the current simulator-native CAST encoder/decoder with the documented variable-bit ordinal encoding at the same time.
+3. **Real xml + spatial + full-text** as separate post-baseline initiatives, each promoted from degraded-mode-via-diagnostic to first-class as bundles complete.
 
 Loader code layout (target, when baseline lands):
 - `SqlServerSimulator/Storage/Bacpac/BacpacReader.cs` — OPC zip walker, dispatches to model + data readers

@@ -804,6 +804,57 @@ internal static class BuiltInResources
         };
         var extendedPropertiesView = new CatalogView("extended_properties", extendedPropertiesColumns, EnumerateSysExtendedProperties);
 
+        // sys.database_principals: probe-confirmed shipped subset of columns
+        // (real SQL Server's full row is ~16 cols). The simulator's principal
+        // model is a thin name + id + type triple; columns we don't track
+        // (authentication_type, default_schema_name, default_language_name,
+        // owning_principal_id, modify_date) are emitted as NULL.
+        var databasePrincipalsColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("default_schema_name", SqlType.SystemName, 128, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("owning_principal_id", SqlType.Int32, null, true),
+            new("sid", SqlType.Varbinary, 85, true),
+            new("is_fixed_role", SqlType.Bit, null, false),
+            new("authentication_type", SqlType.TinyInt, null, true),
+            new("authentication_type_desc", SqlType.NVarchar, 60, true),
+        };
+        var databasePrincipalsView = new CatalogView("database_principals", databasePrincipalsColumns, EnumerateSysDatabasePrincipals);
+
+        // sys.database_permissions: probe-confirmed 8-col shipped subset.
+        // Real SQL Server's row carries a few additional internal columns
+        // (e.g. revert_audit_flag); the simulator surfaces the user-visible
+        // set only.
+        var charOne = SqlType.GetChar(1);
+        var databasePermissionsColumns = new HeapColumn[]
+        {
+            new("class", SqlType.TinyInt, null, false),
+            new("class_desc", SqlType.NVarchar, 60, true),
+            new("major_id", SqlType.Int32, null, false),
+            new("minor_id", SqlType.Int32, null, false),
+            new("grantee_principal_id", SqlType.Int32, null, false),
+            new("grantor_principal_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("permission_name", NVarcharSqlType.Get(128), 128, true),
+            new("state", charOne, 1, false),
+            new("state_desc", SqlType.NVarchar, 60, true),
+        };
+        var databasePermissionsView = new CatalogView("database_permissions", databasePermissionsColumns, EnumerateSysDatabasePermissions);
+
+        // sys.database_role_members: 2-col shipped subset (real SQL Server
+        // surfaces just these two — no additional internal columns).
+        var databaseRoleMembersColumns = new HeapColumn[]
+        {
+            new("role_principal_id", SqlType.Int32, null, false),
+            new("member_principal_id", SqlType.Int32, null, false),
+        };
+        var databaseRoleMembersView = new CatalogView("database_role_members", databaseRoleMembersColumns, EnumerateSysDatabaseRoleMembers);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -830,6 +881,9 @@ internal static class BuiltInResources
             ["sys.dm_tran_version_store_space_usage"] = dmTranVersionStoreSpaceUsageView,
             ["sys.dm_tran_active_snapshot_database_transactions"] = dmTranActiveSnapshotDbTxView,
             ["sys.extended_properties"] = extendedPropertiesView,
+            ["sys.database_principals"] = databasePrincipalsView,
+            ["sys.database_permissions"] = databasePermissionsView,
+            ["sys.database_role_members"] = databaseRoleMembersView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -1518,6 +1572,9 @@ internal static class BuiltInResources
         // avoid one SqlValue allocation per row.
         var triggerType = SqlValue.FromChar(charTwo, "TR");
         var triggerTypeDesc = SqlValue.FromNVarchar("SQL_TRIGGER");
+        var parentClassDatabase = SqlValue.FromByte(0);
+        var parentClassDatabaseDesc = SqlValue.FromNVarchar("DATABASE");
+        var parentIdZero = SqlValue.FromInt32(0);
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
@@ -1538,6 +1595,108 @@ internal static class BuiltInResources
                     falseBit,
                 ];
             }
+        }
+        // DDL triggers: stored on Database, not per-schema. parent_class=0
+        // (DATABASE), parent_class_desc='DATABASE', parent_id=0 — probe-
+        // confirmed against SQL Server 2025's sys.triggers for AW's
+        // [ddlDatabaseTriggerLog].
+        foreach (var ddl in batch.CurrentDatabase.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+        {
+            var createDate = SqlValue.FromDateTime(ddl.CreateDate);
+            yield return [
+                SqlValue.FromSystemName(ddl.Name),
+                SqlValue.FromInt32(ddl.ObjectId),
+                parentClassDatabase,
+                parentClassDatabaseDesc,
+                parentIdZero,
+                triggerType,
+                triggerTypeDesc,
+                createDate,
+                createDate,
+                ddl.IsDisabled ? trueBit : falseBit,
+                falseBit,
+                falseBit,
+            ];
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabasePrincipals(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullSchemaName = SqlValue.Null(SqlType.SystemName);
+        var nullOwningId = SqlValue.Null(SqlType.Int32);
+        var nullSid = SqlValue.Null(SqlType.Varbinary);
+        var nullAuthType = SqlValue.Null(SqlType.TinyInt);
+        var nullAuthDesc = SqlValue.Null(SqlType.NVarchar);
+        // 4-letter padding to fit char(2) — the type column is 2 bytes in
+        // real SQL Server's catalog. SqlValue.FromChar pads to declared length.
+        var charTwo = SqlType.GetChar(2);
+        foreach (var p in batch.CurrentDatabase.Principals.Values.OrderBy(p => p.PrincipalId))
+        {
+            var createDate = SqlValue.FromDateTime(p.CreateDate);
+            yield return [
+                SqlValue.FromSystemName(p.Name),
+                SqlValue.FromInt32(p.PrincipalId),
+                SqlValue.FromChar(charTwo, p.TypeCode),
+                SqlValue.FromNVarchar(p.TypeDescription),
+                nullSchemaName,
+                createDate,
+                createDate,
+                nullOwningId,
+                nullSid,
+                p.IsFixedRole ? trueBit : falseBit,
+                nullAuthType,
+                nullAuthDesc,
+            ];
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabasePermissions(Parser.BatchContext batch)
+    {
+        var charTwo = SqlType.GetChar(2);
+        var charOne = SqlType.GetChar(1);
+        foreach (var perm in batch.CurrentDatabase.Permissions)
+        {
+            var classDesc = perm.Class switch
+            {
+                0 => "DATABASE",
+                1 => "OBJECT_OR_COLUMN",
+                3 => "SCHEMA",
+                4 => "DATABASE_PRINCIPAL",
+                _ => "DATABASE",
+            };
+            var stateDesc = perm.State switch
+            {
+                "G" => "GRANT",
+                "W" => "GRANT_WITH_GRANT_OPTION",
+                "D" => "DENY",
+                "R" => "REVOKE",
+                _ => "GRANT",
+            };
+            yield return [
+                SqlValue.FromByte(perm.Class),
+                SqlValue.FromNVarchar(classDesc),
+                SqlValue.FromInt32(perm.MajorId),
+                SqlValue.FromInt32(perm.MinorId),
+                SqlValue.FromInt32(perm.GranteePrincipalId),
+                SqlValue.FromInt32(perm.GrantorPrincipalId),
+                SqlValue.FromChar(charTwo, perm.TypeCode),
+                SqlValue.FromNVarchar(perm.PermissionName),
+                SqlValue.FromChar(charOne, perm.State),
+                SqlValue.FromNVarchar(stateDesc),
+            ];
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabaseRoleMembers(Parser.BatchContext batch)
+    {
+        foreach (var (roleId, memberId) in batch.CurrentDatabase.RoleMembers)
+        {
+            yield return [
+                SqlValue.FromInt32(roleId),
+                SqlValue.FromInt32(memberId),
+            ];
         }
     }
 

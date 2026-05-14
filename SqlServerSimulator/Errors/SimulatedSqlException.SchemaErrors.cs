@@ -955,4 +955,21 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException AlterColumnNullInNonNullColumn(string columnName, string qualifiedTableName) =>
         new($"Cannot insert the value NULL into column '{columnName}', table '{qualifiedTableName}'; column does not allow nulls. UPDATE fails.", 515, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151: an unknown principal name was referenced
+    /// (GRANT/REVOKE/DENY ... TO &lt;unknown&gt;, ALTER ROLE ... ADD MEMBER &lt;unknown&gt;,
+    /// CREATE USER ... FROM LOGIN &lt;unknown&gt;, etc.). Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindPrincipal(string name) =>
+        new($"Cannot find the user, login, role, or principal '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15023: <c>CREATE USER name</c> or <c>CREATE ROLE name</c>
+    /// when a principal of that name already exists in the database. Probe-confirmed
+    /// wording (the message is identical for the two CREATE cases; SQL Server uses
+    /// the principal-type column to disambiguate in catalog views).
+    /// </summary>
+    internal static SimulatedSqlException PrincipalAlreadyExists(string name) =>
+        new($"User, group, or role '{name}' already exists in the current database.", 15023, 16, 1);
 }

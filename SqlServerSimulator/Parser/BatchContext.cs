@@ -54,10 +54,10 @@ internal sealed class BatchContext
     /// mutating statement when there is no active <see cref="SimulatedDbTransaction"/>
     /// — entries route to <see cref="SimulatedDbTransaction.PendingVersionEntries"/>
     /// instead when a tx is active. Drained on statement success via
-    /// <see cref="Storage.VersionStore.FinalizePendingEntries"/> and on
-    /// statement failure via <see cref="Storage.VersionStore.DiscardPendingEntries"/>.
+    /// <see cref="VersionStore.FinalizePendingEntries"/> and on
+    /// statement failure via <see cref="VersionStore.DiscardPendingEntries"/>.
     /// </summary>
-    public List<Storage.PendingVersionEntry>? CurrentStatementVersionEntries;
+    public List<PendingVersionEntry>? CurrentStatementVersionEntries;
 
     /// <summary>
     /// Per-statement snapshot Xid used by READ_COMMITTED_SNAPSHOT readers.
@@ -75,9 +75,9 @@ internal sealed class BatchContext
     /// any, otherwise to the statement-scoped
     /// <see cref="CurrentStatementVersionEntries"/>. No-op when no list is
     /// active (the caller already short-circuited via the
-    /// <see cref="Storage.VersionStore.IsVersioningEnabled"/> guard).
+    /// <see cref="VersionStore.IsVersioningEnabled"/> guard).
     /// </summary>
-    internal void AppendPendingVersionEntry(Storage.PendingVersionEntry entry)
+    internal void AppendPendingVersionEntry(PendingVersionEntry entry)
     {
         var tx = this.Connection.CurrentTransaction;
         if (tx is not null)

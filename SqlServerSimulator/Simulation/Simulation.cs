@@ -699,6 +699,9 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Drop } when TryParseDrop(context):
             case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
+            case ReservedKeyword { Keyword: Keyword.Grant } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant):
+            case ReservedKeyword { Keyword: Keyword.Revoke } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke):
+            case ReservedKeyword { Keyword: Keyword.Deny } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Deny):
             case UnquotedString { ContextualKeyword: ContextualKeyword.Disable } when TryParseEnableOrDisableTrigger(context, disable: true):
             case UnquotedString { ContextualKeyword: ContextualKeyword.Enable } when TryParseEnableOrDisableTrigger(context, disable: false):
                 if (!batch.IsSkipping)
@@ -751,7 +754,7 @@ public sealed partial class Simulation
                 or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
                 or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
                 or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
-                or Keyword.Truncate
+                or Keyword.Truncate or Keyword.Grant or Keyword.Revoke or Keyword.Deny
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.
@@ -959,7 +962,7 @@ public sealed partial class Simulation
         // atomic mid-execution failure can discard only the entries this
         // statement added.
         var versionEntriesMarker = tx?.PendingVersionEntries.Count ?? 0;
-        var statementVersionEntries = tx is null ? new List<Storage.PendingVersionEntry>() : null;
+        var statementVersionEntries = tx is null ? new List<PendingVersionEntry>() : null;
 
         var savedLog = context.Batch.CurrentUndoLog;
         var savedTableVarLog = context.Batch.CurrentTableVarUndoLog;

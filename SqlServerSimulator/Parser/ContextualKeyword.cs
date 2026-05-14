@@ -74,6 +74,7 @@ enum ContextualKeyword
     Replication,
     Restart,
     Returns,
+    Role,
     Rollup,
     Row,
     Rows,

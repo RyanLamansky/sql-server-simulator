@@ -48,6 +48,17 @@ internal sealed class Database
         this.Schemas[DefaultSchemaName] = new Schema(DefaultSchemaName, DboSchemaId);
         this.Schemas["INFORMATION_SCHEMA"] = new Schema("INFORMATION_SCHEMA", InformationSchemaId);
         this.Schemas["sys"] = new Schema("sys", SysSchemaId);
+        // Pre-seed the fixed database principals so AW's GRANT … TO public
+        // resolves at parse time without a CREATE USER / CREATE ROLE
+        // prologue. Principal ids match real SQL Server's convention
+        // (probe-confirmed against sys.database_principals on 2026-05-14):
+        // public=0, dbo=1, guest=2, INFORMATION_SCHEMA=3, sys=4.
+        var seedDate = DateTime.UtcNow;
+        this.Principals["public"] = new DatabasePrincipal(0, "public", "R", "DATABASE_ROLE", isFixedRole: true, seedDate);
+        this.Principals["dbo"] = new DatabasePrincipal(1, "dbo", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["guest"] = new DatabasePrincipal(2, "guest", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["INFORMATION_SCHEMA"] = new DatabasePrincipal(3, "INFORMATION_SCHEMA", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["sys"] = new DatabasePrincipal(4, "sys", "S", "SQL_USER", isFixedRole: false, seedDate);
     }
 
     /// <summary>
@@ -184,7 +195,7 @@ internal sealed class Database
     /// Per-database extended-properties dictionary. Keyed by
     /// <see cref="ExtendedPropertyKey"/> (<c>class</c> + <c>major_id</c> +
     /// <c>minor_id</c> + <c>name</c>); the value is the user-supplied
-    /// <see cref="Storage.SqlValue"/> attached to that target. Populated by
+    /// <see cref="SqlValue"/> attached to that target. Populated by
     /// <c>sp_addextendedproperty</c>, mutated by
     /// <c>sp_updateextendedproperty</c>, drained by
     /// <c>sp_dropextendedproperty</c>; surfaced by
@@ -192,7 +203,55 @@ internal sealed class Database
     /// Probe-confirmed against SQL Server 2025: the catalog view is per-
     /// database (not per-schema), and names are case-insensitive.
     /// </summary>
-    public readonly ConcurrentDictionary<ExtendedPropertyKey, Storage.SqlValue> ExtendedProperties = new();
+    public readonly ConcurrentDictionary<ExtendedPropertyKey, SqlValue> ExtendedProperties = new();
+
+    /// <summary>
+    /// Per-database DDL triggers. Database-scope DDL triggers are stored
+    /// here rather than in any per-schema dict because their parent is
+    /// the database itself (<c>sys.triggers.parent_class = 0</c>).
+    /// Populated by <c>CREATE TRIGGER … ON DATABASE</c>; drained by
+    /// <c>DROP TRIGGER … ON DATABASE</c>; surfaced by <c>sys.triggers</c>
+    /// and <c>sys.sql_modules</c>. <strong>Not fired</strong> — see
+    /// <see cref="DdlTrigger"/> for the no-enforcement rationale.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, DdlTrigger> DdlTriggers = new(Collation.Default);
+
+    /// <summary>
+    /// Per-database principals (users + roles). Pre-seeded with the fixed
+    /// principals (<c>public</c>, <c>dbo</c>, <c>guest</c>, <c>INFORMATION_SCHEMA</c>,
+    /// <c>sys</c>); populated by <c>CREATE USER</c> / <c>CREATE ROLE</c>;
+    /// drained by <c>DROP USER</c> / <c>DROP ROLE</c>; surfaced by
+    /// <c>sys.database_principals</c>. The simulator has no permission
+    /// model; this dict exists for catalog-view round-trip and for
+    /// resolving <c>GRANT … TO &lt;name&gt;</c> at parse time.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, DatabasePrincipal> Principals = new(Collation.Default);
+
+    /// <summary>
+    /// Per-database permission grants/denies. Populated by
+    /// <c>GRANT</c> / <c>DENY</c>; drained by <c>REVOKE</c>; surfaced by
+    /// <c>sys.database_permissions</c>. The simulator has no permission
+    /// model; this list exists for catalog-view round-trip only.
+    /// </summary>
+    public readonly List<DatabasePermission> Permissions = [];
+
+    /// <summary>
+    /// Role-membership records: each entry is a (role_principal_id,
+    /// member_principal_id) pair. Populated by
+    /// <c>ALTER ROLE name ADD MEMBER name</c>; drained by
+    /// <c>ALTER ROLE name DROP MEMBER name</c>; surfaced by
+    /// <c>sys.database_role_members</c>.
+    /// </summary>
+    public readonly List<(int RoleId, int MemberId)> RoleMembers = [];
+
+    private int nextPrincipalId = 4;
+
+    /// <summary>
+    /// Allocates the next user principal id. Counter is seeded at 4 so the
+    /// first allocation returns 5 — real SQL Server reserves ids 0..4 for
+    /// the fixed principals seeded in this database's constructor.
+    /// </summary>
+    public int AllocatePrincipalId() => Interlocked.Increment(ref this.nextPrincipalId);
 }
 
 /// <summary>

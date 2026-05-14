@@ -45,6 +45,15 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+
+        // Branch on the parent-scope token: ON DATABASE → database-scope
+        // DDL trigger (parse-and-store-no-fire, see DdlTrigger.cs); a
+        // Name → DML trigger attached to a heap-table or view parent.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Database })
+        {
+            return ParseDdlTriggerBody(context, triggerName, triggerSchema, isAlter, createOrAlter);
+        }
+
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var parentName = BatchContext.ParseObjectName(context);
@@ -274,6 +283,101 @@ partial class Simulation
             throw SimulatedSqlException.InvalidObjectName(triggerName);
         }
         matchedTrigger.IsDisabled = disable;
+        return true;
+    }
+
+    /// <summary>
+    /// Parses the body of a database-scope DDL trigger. Cursor enters on
+    /// the <c>DATABASE</c> keyword (already matched by the caller); on
+    /// successful return the trigger is registered in
+    /// <see cref="Database.DdlTriggers"/>. Grammar:
+    /// <c>… ON DATABASE [WITH …] { FOR | AFTER } &lt;event_type [, …]&gt; AS &lt;body&gt;</c>.
+    /// </summary>
+    /// <remarks>
+    /// Event types parse as bare identifiers (e.g. <c>DDL_DATABASE_LEVEL_EVENTS</c>,
+    /// <c>CREATE_TABLE</c>, <c>ALTER_PROCEDURE</c>). The simulator stores
+    /// the list verbatim for <c>sys.trigger_events</c> round-trip; no
+    /// validation against SQL Server's actual event-type catalog is done.
+    /// </remarks>
+    private static bool ParseDdlTriggerBody(ParserContext context, MultiPartName triggerName, Schema triggerSchema, bool isAlter, bool createOrAlter)
+    {
+        // Cursor on DATABASE. Advance to the next significant token.
+        context.MoveNextRequired();
+
+        // Optional WITH option list (parse-and-ignore — mirrors the DML
+        // trigger path; AW emits no WITH options on its DDL trigger).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            while (context.Token is not (null or
+                ReservedKeyword { Keyword: Keyword.For } or
+                UnquotedString { ContextualKeyword: ContextualKeyword.After }))
+            {
+                context.MoveNextRequired();
+            }
+        }
+
+        if (context.Token is not (ReservedKeyword { Keyword: Keyword.For } or
+            UnquotedString { ContextualKeyword: ContextualKeyword.After }))
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        context.MoveNextRequired();
+
+        // Event-type list — bare identifiers, comma-separated. UnquotedString
+        // (which carries identifiers like DDL_DATABASE_LEVEL_EVENTS) is a
+        // Name subclass; the Name arm covers both quoted and unquoted forms.
+        var eventTypes = new List<string>();
+        while (true)
+        {
+            if (context.Token is not Name eventToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            eventTypes.Add(eventToken.Value);
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
+        }
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Same body-capture pattern as TryParseCreateTrigger above: consume
+        // through end of batch, slice the raw text for sys.sql_modules.
+        var commandText = context.Command.CommandText;
+        context.MoveNextOptional();
+        var bodyStart = context.Token?.StartIndex ?? commandText.Length;
+        var bodyEnd = commandText.Length;
+        while (context.Token is not null)
+        {
+            bodyEnd = context.Token.EndIndex;
+            context.MoveNextOptional();
+        }
+        var bodyText = commandText[bodyStart..bodyEnd];
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        // DDL triggers live in their own per-database dict, but the NAME
+        // collision check still applies against the per-schema shared
+        // namespace (probe-confirmed: a DDL trigger named [foo] collides
+        // with a DML trigger or any other schema object named [foo] in
+        // the same schema). triggerSchema is the resolved owner schema
+        // from the caller (default dbo for unqualified names).
+        var existed = context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var existing);
+        if (!isAlter && !createOrAlter && (existed || triggerSchema.HasNameInSharedNamespace(triggerName.Leaf)))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
+        if (isAlter && !existed)
+            throw SimulatedSqlException.InvalidObjectName(triggerName);
+
+        var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
+        var trigger = new DdlTrigger(
+            triggerName.Leaf,
+            objectId,
+            triggerSchema.SchemaId,
+            eventTypes,
+            bodyText,
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow);
+        context.CurrentDatabase.DdlTriggers[triggerName.Leaf] = trigger;
         return true;
     }
 }
