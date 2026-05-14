@@ -261,6 +261,82 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Walks <see cref="HeapTable.Indexes"/> for every UNIQUE entry and
+    /// raises Msg 2601 on the first key-tuple collision against existing
+    /// rows. When an index has a <c>Index.Filter</c>, only rows for
+    /// which the filter evaluates true on both sides participate in the
+    /// uniqueness check (filtered-unique-index semantic). Mirrors
+    /// <see cref="EnforceKeyConstraints"/>'s linear-scan shape; called
+    /// alongside it after a successful row build.
+    /// </summary>
+    private static void EnforceUniqueIndexes(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch)
+    {
+        if (destinationTable.Indexes.Count == 0)
+            return;
+
+        var hasUnique = false;
+        foreach (var ix in destinationTable.Indexes)
+        {
+            if (ix.IsUnique)
+            {
+                hasUnique = true;
+                break;
+            }
+        }
+        if (!hasUnique)
+            return;
+
+        var storedColumns = destinationTable.StoredColumns;
+        var lobStore = destinationTable.Heap;
+        SqlValue[]? existingRowValues = null;
+        var qualifiedTableName = $"{Database.DefaultSchemaName}.{destinationTable.Name}";
+
+        foreach (var index in destinationTable.Indexes)
+        {
+            if (!index.IsUnique)
+                continue;
+            if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, destinationTable, rowValues, batch) != true)
+                continue;
+
+            foreach (var rowBytes in destinationTable.Heap.EnumerateRows())
+            {
+                if (index.Filter is { } filter)
+                {
+                    existingRowValues ??= new SqlValue[destinationTable.Columns.Length];
+                    for (var c = 0; c < destinationTable.Columns.Length; c++)
+                    {
+                        var storageOrd = destinationTable.StorageOrdinals[c];
+                        existingRowValues[c] = storageOrd >= 0
+                            ? RowDecoder.DecodeColumn(storedColumns, rowBytes, storageOrd, lobStore)
+                            : SqlValue.Null(destinationTable.Columns[c].Type);
+                    }
+                    if (Simulation.EvaluateIndexFilter(filter, destinationTable, existingRowValues, batch) != true)
+                        continue;
+                }
+
+                var allEqual = true;
+                for (var i = 0; i < index.KeyColumns.Length; i++)
+                {
+                    var ord = index.KeyColumns[i].StorageOrdinal;
+                    var existing = RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
+                    if (!existing.Equals(storedRowValues[ord]))
+                    {
+                        allEqual = false;
+                        break;
+                    }
+                }
+                if (allEqual)
+                {
+                    var key = new SqlValue[index.KeyColumns.Length];
+                    for (var i = 0; i < index.KeyColumns.Length; i++)
+                        key[i] = storedRowValues[index.KeyColumns[i].StorageOrdinal];
+                    throw SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedTableName, Simulation.FormatIndexKeyValues(key));
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// Renders a key-tuple slot the way SQL Server's Msg 2627 does: NULL as
     /// <c>&lt;NULL&gt;</c>, strings raw (no enclosing quotes), numerics in
     /// invariant culture, byte arrays as <c>0x</c>-prefixed hex, date/time

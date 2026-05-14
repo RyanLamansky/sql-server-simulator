@@ -1033,7 +1033,10 @@ partial class Simulation
                     pseudoAffected.Add((-1, i, pendingInserts[i].NewValues, FullOld: null));
             }
             if (pseudoAffected.Count > 0)
+            {
                 EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected);
+                EnforceUniqueIndexesForUpdate(destinationTable, pseudoAffected, context.Batch);
+            }
         }
 
         var undoLog = destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;

@@ -84,13 +84,27 @@ partial class SimulatedSqlException
     /// PRIMARY KEY or UNIQUE-constraint key tuple already existed in the
     /// table. SQL Server uses Msg 2627 for both PK and UNIQUE *constraint*
     /// violations (Msg 2601 is for unique-index violations from
-    /// <c>CREATE UNIQUE INDEX</c>, which the simulator doesn't model).
+    /// <c>CREATE UNIQUE INDEX</c>, raised via
+    /// <see cref="ViolationOfUniqueIndex"/>).
     /// <paramref name="kindWord"/> selects between <c>"PRIMARY KEY"</c> and
     /// <c>"UNIQUE KEY"</c>; <paramref name="formattedKeyValues"/> is the
     /// rendered tuple text without enclosing parens (e.g. <c>"1, &lt;NULL&gt;"</c>).
     /// </summary>
     internal static SimulatedSqlException ViolationOfKeyConstraint(string kindWord, string constraintName, string tableName, string formattedKeyValues) =>
         new($"Violation of {kindWord} constraint '{constraintName}'. Cannot insert duplicate key in object 'dbo.{tableName}'. The duplicate key value is ({formattedKeyValues}).", 2627, 14, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2601: an INSERT or UPDATE produced a row
+    /// whose key tuple already existed in a <c>CREATE UNIQUE INDEX</c>-
+    /// declared index. Distinct from Msg 2627 (unique <em>constraint</em>
+    /// violation) — same scenario semantically, different error number
+    /// per the surface. Probe-confirmed wording (the trailing
+    /// <c>"The statement has been terminated."</c> phrase is emitted as a
+    /// separate informational line by real SQL Server; the simulator
+    /// folds it into the primary error message).
+    /// </summary>
+    internal static SimulatedSqlException ViolationOfUniqueIndex(string indexName, string qualifiedTableName, string formattedKeyValues) =>
+        new($"Cannot insert duplicate key row in object '{qualifiedTableName}' with unique index '{indexName}'. The duplicate key value is ({formattedKeyValues}).", 2601, 14, 1);
 
     /// <summary>
     /// Mimics SQL Server error 547 on the child side: an <c>INSERT</c> /

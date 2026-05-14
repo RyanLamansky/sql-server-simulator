@@ -651,6 +651,62 @@ internal static class BuiltInResources
         };
         var defaultConstraintsView = new CatalogView("default_constraints", defaultConstraintsColumns, EnumerateSysDefaultConstraints);
 
+        // sys.indexes: probe-confirmed 24-column shape against SQL Server
+        // 2025 (2026-05-14). One row per (table, index) — PK / UQ
+        // constraints surface alongside CREATE-INDEX rows, and a HEAP row
+        // (index_id = 0, type = 0, name = NULL) appears for any table with
+        // no PRIMARY KEY (matching SQL Server's "the table itself is the
+        // heap" semantic). EF Migrations introspection reads name /
+        // is_unique / is_primary_key / is_unique_constraint /
+        // has_filter / filter_definition.
+        var indexesColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("is_unique", SqlType.Bit, null, false),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, false),
+            new("is_primary_key", SqlType.Bit, null, false),
+            new("is_unique_constraint", SqlType.Bit, null, false),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("is_hypothetical", SqlType.Bit, null, false),
+            new("is_ignored_in_optimization", SqlType.Bit, null, false),
+            new("allow_row_locks", SqlType.Bit, null, false),
+            new("allow_page_locks", SqlType.Bit, null, false),
+            new("has_filter", SqlType.Bit, null, false),
+            new("filter_definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("compression_delay", SqlType.Int32, null, false),
+            new("suppress_dup_key_messages", SqlType.Bit, null, false),
+            new("auto_created", SqlType.Bit, null, false),
+            new("optimize_for_sequential_key", SqlType.Bit, null, false),
+            new("statistics_incremental", SqlType.Bit, null, true),
+        };
+        var indexesView = new CatalogView("indexes", indexesColumns, EnumerateSysIndexes);
+
+        // sys.index_columns: probe-confirmed 10-column shape. One row per
+        // (index, column) pair — KEY columns get key_ordinal = 1..N and
+        // index_column_id = 1..N; INCLUDE columns get key_ordinal = 0 and
+        // index_column_id continuing past the key column count.
+        var indexColumnsColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("index_column_id", SqlType.Int32, null, false),
+            new("column_id", SqlType.Int32, null, false),
+            new("key_ordinal", SqlType.TinyInt, null, false),
+            new("partition_ordinal", SqlType.TinyInt, null, false),
+            new("is_descending_key", SqlType.Bit, null, false),
+            new("is_included_column", SqlType.Bit, null, false),
+            new("column_store_order_ordinal", SqlType.TinyInt, null, true),
+            new("data_clustering_ordinal", SqlType.TinyInt, null, true),
+        };
+        var indexColumnsView = new CatalogView("index_columns", indexColumnsColumns, EnumerateSysIndexColumns);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -669,6 +725,8 @@ internal static class BuiltInResources
             ["sys.check_constraints"] = checkConstraintsView,
             ["sys.key_constraints"] = keyConstraintsView,
             ["sys.default_constraints"] = defaultConstraintsView,
+            ["sys.indexes"] = indexesView,
+            ["sys.index_columns"] = indexColumnsView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -1016,6 +1074,276 @@ internal static class BuiltInResources
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.indexes</c>: one row per (table, index) — PK / UQ
+    /// from <see cref="HeapTable.KeyConstraints"/>, plus
+    /// <c>CREATE INDEX</c>-declared entries from <see cref="HeapTable.Indexes"/>.
+    /// PK gets index_id = 1 with type_desc = CLUSTERED; tables without a
+    /// PK emit a HEAP row (index_id = 0, name = NULL). Remaining UQ /
+    /// user indexes get index_id starting at 2 in <c>ObjectId</c> order
+    /// (the simulator allocates object ids monotonically, so this matches
+    /// declaration order).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysIndexes(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var zeroByte = SqlValue.FromByte(0);
+        var zeroInt = SqlValue.FromInt32(0);
+        var nullName = SqlValue.Null(SqlType.SystemName);
+        var nullFilter = SqlValue.Null(SqlType.NVarchar);
+        var heapDesc = SqlValue.FromNVarchar("HEAP");
+        var clusteredDesc = SqlValue.FromNVarchar("CLUSTERED");
+        var nonClusteredDesc = SqlValue.FromNVarchar("NONCLUSTERED");
+        var primaryDataSpace = SqlValue.FromInt32(1);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableObjectId = SqlValue.FromInt32(table.ObjectId);
+                KeyConstraint? primaryKey = null;
+                foreach (var k in table.KeyConstraints)
+                {
+                    if (k.Kind == KeyConstraintKind.PrimaryKey)
+                    {
+                        primaryKey = k;
+                        break;
+                    }
+                }
+                var hasPk = primaryKey is not null;
+                var nextIndexId = hasPk ? 2 : 1;
+                yield return BuildIndexRow(
+                    name: hasPk ? SqlValue.FromSystemName(primaryKey!.Name) : nullName,
+                    objectId: tableObjectId,
+                    indexId: SqlValue.FromInt32(hasPk ? 1 : 0),
+                    type: hasPk ? SqlValue.FromByte(1) : zeroByte,
+                    typeDesc: hasPk ? clusteredDesc : heapDesc,
+                    isUnique: hasPk ? trueBit : falseBit,
+                    dataSpaceId: primaryDataSpace,
+                    isPrimaryKey: hasPk ? trueBit : falseBit,
+                    isUniqueConstraint: falseBit,
+                    hasFilter: falseBit,
+                    filterDefinition: nullFilter,
+                    falseBit, trueBit, zeroByte);
+
+                var others = new List<(int ObjectId, KeyConstraint? Key, Storage.Index? Index)>();
+                foreach (var k in table.KeyConstraints)
+                {
+                    if (!ReferenceEquals(k, primaryKey))
+                        others.Add((k.ObjectId, k, null));
+                }
+                foreach (var ix in table.Indexes)
+                    others.Add((ix.ObjectId, null, ix));
+                others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+
+                foreach (var (_, key, index) in others)
+                {
+                    if (key is not null)
+                    {
+                        yield return BuildIndexRow(
+                            name: SqlValue.FromSystemName(key.Name),
+                            objectId: tableObjectId,
+                            indexId: SqlValue.FromInt32(nextIndexId++),
+                            type: SqlValue.FromByte(2),
+                            typeDesc: nonClusteredDesc,
+                            isUnique: trueBit,
+                            dataSpaceId: primaryDataSpace,
+                            isPrimaryKey: falseBit,
+                            isUniqueConstraint: trueBit,
+                            hasFilter: falseBit,
+                            filterDefinition: nullFilter,
+                            falseBit, trueBit, zeroByte);
+                    }
+                    else
+                    {
+                        var hasFilter = index!.Filter is not null;
+                        yield return BuildIndexRow(
+                            name: SqlValue.FromSystemName(index.Name),
+                            objectId: tableObjectId,
+                            indexId: SqlValue.FromInt32(nextIndexId++),
+                            type: SqlValue.FromByte(2),
+                            typeDesc: nonClusteredDesc,
+                            isUnique: index.IsUnique ? trueBit : falseBit,
+                            dataSpaceId: primaryDataSpace,
+                            isPrimaryKey: falseBit,
+                            isUniqueConstraint: falseBit,
+                            hasFilter: hasFilter ? trueBit : falseBit,
+                            filterDefinition: index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter,
+                            falseBit, trueBit, zeroByte);
+                    }
+                }
+            }
+        }
+
+        SqlValue[] BuildIndexRow(
+            SqlValue name, SqlValue objectId, SqlValue indexId, SqlValue type, SqlValue typeDesc,
+            SqlValue isUnique, SqlValue dataSpaceId, SqlValue isPrimaryKey, SqlValue isUniqueConstraint,
+            SqlValue hasFilter, SqlValue filterDefinition, SqlValue isPadded, SqlValue allowLocks, SqlValue fillFactor) =>
+            [
+                name,
+                objectId,
+                indexId,
+                type,
+                typeDesc,
+                isUnique,
+                dataSpaceId,
+                falseBit, // ignore_dup_key
+                isPrimaryKey,
+                isUniqueConstraint,
+                fillFactor,
+                isPadded,
+                falseBit, // is_disabled
+                falseBit, // is_hypothetical
+                falseBit, // is_ignored_in_optimization
+                allowLocks, // allow_row_locks
+                allowLocks, // allow_page_locks
+                hasFilter,
+                filterDefinition,
+                zeroInt, // compression_delay
+                falseBit, // suppress_dup_key_messages
+                falseBit, // auto_created
+                falseBit, // optimize_for_sequential_key
+                falseBit, // statistics_incremental
+            ];
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.index_columns</c>: one row per (index, column) for
+    /// every index reported by <see cref="EnumerateSysIndexes"/>. KEY
+    /// columns get key_ordinal = 1..N and index_column_id = 1..N; INCLUDE
+    /// columns get key_ordinal = 0 and index_column_id continuing past
+    /// the key column count. HEAP rows (index_id = 0) don't appear here —
+    /// real SQL Server's catalog omits them and the simulator matches.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysIndexColumns(Parser.BatchContext batch)
+    {
+        var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
+        var zeroByte = SqlValue.FromByte(0);
+        var nullByte = SqlValue.Null(SqlType.TinyInt);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableObjectId = SqlValue.FromInt32(table.ObjectId);
+                KeyConstraint? primaryKey = null;
+                foreach (var k in table.KeyConstraints)
+                {
+                    if (k.Kind == KeyConstraintKind.PrimaryKey)
+                    {
+                        primaryKey = k;
+                        break;
+                    }
+                }
+                var nextIndexId = primaryKey is null ? 1 : 1;
+                if (primaryKey is not null)
+                {
+                    foreach (var row in EmitKeyConstraintColumns(tableObjectId, SqlValue.FromInt32(nextIndexId), primaryKey, table, falseBit, zeroByte, nullByte))
+                        yield return row;
+                    nextIndexId++;
+                }
+
+                var others = new List<(int ObjectId, KeyConstraint? Key, Storage.Index? Index)>();
+                foreach (var k in table.KeyConstraints)
+                {
+                    if (!ReferenceEquals(k, primaryKey))
+                        others.Add((k.ObjectId, k, null));
+                }
+                foreach (var ix in table.Indexes)
+                    others.Add((ix.ObjectId, null, ix));
+                others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+
+                foreach (var (_, key, index) in others)
+                {
+                    var indexIdValue = SqlValue.FromInt32(nextIndexId++);
+                    if (key is not null)
+                    {
+                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, falseBit, zeroByte, nullByte))
+                            yield return row;
+                    }
+                    else
+                    {
+                        for (var i = 0; i < index!.KeyColumns.Length; i++)
+                        {
+                            var keyCol = index.KeyColumns[i];
+                            yield return [
+                                tableObjectId,
+                                indexIdValue,
+                                SqlValue.FromInt32(i + 1),
+                                SqlValue.FromInt32(StorageOrdinalToColumnId(table, keyCol.StorageOrdinal)),
+                                SqlValue.FromByte((byte)(i + 1)),
+                                zeroByte,
+                                keyCol.IsDescending ? trueBit : falseBit,
+                                falseBit,
+                                nullByte,
+                                nullByte,
+                            ];
+                        }
+                        for (var i = 0; i < index.IncludedColumns.Length; i++)
+                        {
+                            yield return [
+                                tableObjectId,
+                                indexIdValue,
+                                SqlValue.FromInt32(index.KeyColumns.Length + i + 1),
+                                SqlValue.FromInt32(StorageOrdinalToColumnId(table, index.IncludedColumns[i])),
+                                zeroByte,
+                                zeroByte,
+                                falseBit,
+                                trueBit,
+                                nullByte,
+                                nullByte,
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Materializes one row per key column of a PRIMARY KEY / UNIQUE
+    /// <see cref="KeyConstraint"/> for <c>sys.index_columns</c>. Shared
+    /// between the PK-at-index_id-1 emission and the non-PK UQ entries
+    /// in the ordered emission pass.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EmitKeyConstraintColumns(
+        SqlValue tableObjectId, SqlValue indexIdValue, KeyConstraint constraint, HeapTable table,
+        SqlValue falseBit, SqlValue zeroByte, SqlValue nullByte)
+    {
+        for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
+        {
+            yield return [
+                tableObjectId,
+                indexIdValue,
+                SqlValue.FromInt32(i + 1),
+                SqlValue.FromInt32(StorageOrdinalToColumnId(table, constraint.StorageOrdinals[i])),
+                SqlValue.FromByte((byte)(i + 1)),
+                zeroByte,
+                falseBit,
+                falseBit,
+                nullByte,
+                nullByte,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Converts a storage ordinal back to the 1-based <c>column_id</c>
+    /// reported by <c>sys.columns</c>. The simulator's column_id is the
+    /// 1-based full-column ordinal (matching real SQL Server), so we walk
+    /// <see cref="HeapTable.StorageOrdinals"/> looking for the full
+    /// ordinal that maps to the given storage ordinal.
+    /// </summary>
+    private static int StorageOrdinalToColumnId(HeapTable table, int storageOrdinal)
+    {
+        for (var i = 0; i < table.StorageOrdinals.Length; i++)
+        {
+            if (table.StorageOrdinals[i] == storageOrdinal)
+                return i + 1;
+        }
+        return storageOrdinal + 1;
     }
 
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(

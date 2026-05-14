@@ -27,6 +27,8 @@ partial class Simulation
                 return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.Trigger }:
                 return Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.Unique or Keyword.Clustered or Keyword.NonClustered or Keyword.Index }:
+                return Simulation.TryParseCreateIndex(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
                 return TryParseCreateType(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:

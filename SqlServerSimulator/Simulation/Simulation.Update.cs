@@ -371,6 +371,7 @@ partial class Simulation
         }
 
         EnforceKeyConstraintsForUpdate(table, affected);
+        EnforceUniqueIndexesForUpdate(table, affected, context.Batch);
 
         // Outgoing FK check on the post-update rows (UPDATE may have rewritten
         // the child's FK columns to point at a parent that doesn't exist).
@@ -842,6 +843,120 @@ partial class Simulation
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// UPDATE-time counterpart to <see cref="EnforceUniqueIndexes"/>:
+    /// walks each <see cref="HeapTable.Indexes"/> UNIQUE entry and raises
+    /// Msg 2601 on the first key collision among updated rows or against
+    /// other (non-affected) heap rows. Filter-aware in the same shape as
+    /// the INSERT path — rows excluded by an index's <c>Index.Filter</c>
+    /// are skipped on both sides of the comparison.
+    /// </summary>
+    private static void EnforceUniqueIndexesForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch)
+    {
+        if (table.Indexes.Count == 0)
+            return;
+
+        var hasUnique = false;
+        foreach (var ix in table.Indexes)
+        {
+            if (ix.IsUnique)
+            {
+                hasUnique = true;
+                break;
+            }
+        }
+        if (!hasUnique)
+            return;
+
+        var affectedAddrs = new HashSet<(int, int)>();
+        var storedSnapshots = new SqlValue[affected.Count][];
+        for (var i = 0; i < affected.Count; i++)
+        {
+            _ = affectedAddrs.Add((affected[i].PageIndex, affected[i].SlotIndex));
+            storedSnapshots[i] = ProjectStoredValues(table, affected[i].FullNew);
+        }
+
+        var storedColumns = table.StoredColumns;
+        var lobStore = table.Heap;
+        SqlValue[]? existingRowValues = null;
+        var qualifiedTableName = $"{Database.DefaultSchemaName}.{table.Name}";
+
+        for (var i = 0; i < affected.Count; i++)
+        {
+            var myStored = storedSnapshots[i];
+            var myFull = affected[i].FullNew;
+
+            foreach (var index in table.Indexes)
+            {
+                if (!index.IsUnique)
+                    continue;
+                if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, table, myFull, batch) != true)
+                    continue;
+
+                for (var j = 0; j < affected.Count; j++)
+                {
+                    if (i == j)
+                        continue;
+                    if (index.Filter is { } f2 && Simulation.EvaluateIndexFilter(f2, table, affected[j].FullNew, batch) != true)
+                        continue;
+                    if (UniqueKeyEqualsStored(myStored, storedSnapshots[j], index))
+                        throw UniqueIndexViolationForUpdate(index, qualifiedTableName, myStored);
+                }
+
+                foreach (var (p, s, bytes) in table.Heap.EnumerateRowsWithAddress())
+                {
+                    if (affectedAddrs.Contains((p, s)))
+                        continue;
+                    if (index.Filter is { } filter)
+                    {
+                        existingRowValues ??= new SqlValue[table.Columns.Length];
+                        for (var c = 0; c < table.Columns.Length; c++)
+                        {
+                            var storageOrd = table.StorageOrdinals[c];
+                            existingRowValues[c] = storageOrd >= 0
+                                ? RowDecoder.DecodeColumn(storedColumns, bytes, storageOrd, lobStore)
+                                : SqlValue.Null(table.Columns[c].Type);
+                        }
+                        if (Simulation.EvaluateIndexFilter(filter, table, existingRowValues, batch) != true)
+                            continue;
+                    }
+                    var allEqual = true;
+                    for (var k = 0; k < index.KeyColumns.Length; k++)
+                    {
+                        var ord = index.KeyColumns[k].StorageOrdinal;
+                        var existing = RowDecoder.DecodeColumn(storedColumns, bytes, ord, lobStore);
+                        if (!existing.Equals(myStored[ord]))
+                        {
+                            allEqual = false;
+                            break;
+                        }
+                    }
+                    if (allEqual)
+                        throw UniqueIndexViolationForUpdate(index, qualifiedTableName, myStored);
+                }
+            }
+        }
+    }
+
+    private static bool UniqueKeyEqualsStored(SqlValue[] a, SqlValue[] b, Storage.Index index)
+    {
+        for (var i = 0; i < index.KeyColumns.Length; i++)
+        {
+            var ord = index.KeyColumns[i].StorageOrdinal;
+            if (!a[ord].Equals(b[ord]))
+                return false;
+        }
+        return true;
+    }
+
+    private static SimulatedSqlException UniqueIndexViolationForUpdate(Storage.Index index, string qualifiedTableName, SqlValue[] storedValues)
+    {
+        var key = new SqlValue[index.KeyColumns.Length];
+        for (var i = 0; i < index.KeyColumns.Length; i++)
+            key[i] = storedValues[index.KeyColumns[i].StorageOrdinal];
+        return SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedTableName, Simulation.FormatIndexKeyValues(key));
     }
 
     private static bool KeyTuplesEqualStored(SqlValue[] a, SqlValue[] b, KeyConstraint constraint)

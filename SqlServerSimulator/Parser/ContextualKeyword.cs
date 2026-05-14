@@ -44,6 +44,7 @@ enum ContextualKeyword
     Grouping,
     Hidden,
     History_Table,
+    Include,
     Increment,
     Input,
     Instead,

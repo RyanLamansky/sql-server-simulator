@@ -741,4 +741,41 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ConstraintDoesNotExist(string name) =>
         new($"Constraint '{name}' does not exist.", 4917, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1913: <c>CREATE INDEX</c> with a name that
+    /// already exists on the target table. Probe-confirmed verbatim
+    /// against SQL Server 2025 — message names the index and the
+    /// qualified table.
+    /// </summary>
+    internal static SimulatedSqlException IndexAlreadyExists(string indexName, string qualifiedTableName) =>
+        new($"The operation failed because an index or statistics with name '{indexName}' already exists on table '{qualifiedTableName}'.", 1913, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1088: <c>CREATE INDEX</c> (or any
+    /// catalog-scoped reference) named a target object that doesn't exist.
+    /// Distinct from Msg 208 (which surfaces from DML) — Msg 1088 is the
+    /// CREATE-INDEX / sp_help-shaped diagnostic. State 12 probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindObjectForCreateIndex(string qualifiedName) =>
+        new($"Cannot find the object \"{qualifiedName}\" because it does not exist or you do not have permissions.", 1088, 16, 12);
+
+    /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>index</c> wording variant:
+    /// <c>DROP INDEX name ON table</c> targeted an index that doesn't
+    /// exist. State 6 when the parent table itself is missing; State 7
+    /// when the table exists but has no such index. Probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropIndexDoesNotExist(string qualifiedTableName, string indexName, byte state) =>
+        new($"Cannot drop the index '{qualifiedTableName}.{indexName}', because it does not exist or you do not have permission.", 3701, 11, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 3723: <c>DROP INDEX</c> targeted a system
+    /// index that backs a PRIMARY KEY or UNIQUE constraint. Real SQL
+    /// Server forbids dropping the index directly; the caller must
+    /// <c>ALTER TABLE … DROP CONSTRAINT</c> instead. Probe-confirmed
+    /// wording.
+    /// </summary>
+    internal static SimulatedSqlException ExplicitDropIndexNotAllowed(string qualifiedTableName, string indexName, string constraintKindWord) =>
+        new($"An explicit DROP INDEX is not allowed on index '{qualifiedTableName}.{indexName}'. It is being used for {constraintKindWord} constraint enforcement.", 3723, 16, 4);
 }

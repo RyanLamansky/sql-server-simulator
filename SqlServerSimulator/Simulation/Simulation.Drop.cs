@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -31,7 +32,13 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseDrop(ParserContext context)
     {
-        var targetKind = context.GetNextRequired() switch
+        // DROP INDEX has a distinct grammar — `name ON table [, name ON table, …]`
+        // (not just `name`). Route it through its own parser before the
+        // shared comma-list path below.
+        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Index })
+            return TryParseDropIndex(context);
+
+        var targetKind = context.Token switch
         {
             ReservedKeyword { Keyword: Keyword.Table } => DropTargetKind.Table,
             ReservedKeyword { Keyword: Keyword.Function } => DropTargetKind.Function,
@@ -342,6 +349,98 @@ partial class Simulation
                 _ = fk.ReferencedTable.IncomingForeignKeys.RemoveAll(other => ReferenceEquals(other, fk));
             CascadeDropTriggers(context.CurrentDatabase, removedTable);
         }
+    }
+
+    /// <summary>
+    /// Parses <c>DROP INDEX [IF EXISTS] name ON table [, name ON table, …]</c>.
+    /// Cursor on entry: <c>INDEX</c> keyword (already consumed by
+    /// <see cref="TryParseDrop"/>). Each entry resolves independently:
+    /// missing parent table raises Msg 3701 St 6; missing index on a found
+    /// table raises Msg 3701 St 7; dropping a system index that backs a
+    /// PRIMARY KEY or UNIQUE constraint raises Msg 3723. <c>IF EXISTS</c>
+    /// suppresses the missing-index branches; the dup-on-PK rejection
+    /// fires regardless (real SQL Server's behavior — IF EXISTS only
+    /// gates the does-not-exist path).
+    /// </summary>
+    private static bool TryParseDropIndex(ParserContext context)
+    {
+        context.MoveNextRequired();
+        var ifExists = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.If })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Exists })
+                return false;
+            ifExists = true;
+            context.MoveNextRequired();
+        }
+
+        while (true)
+        {
+            if (context.Token is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var indexName = ((Name)context.Token).Value;
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            var tableName = BatchContext.ParseObjectName(context);
+            DropOneIndex(context, indexName, tableName, ifExists);
+
+            context.MoveNextOptional();
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves the target table, then removes the matching entry from
+    /// <see cref="HeapTable.Indexes"/>. Surfaces:
+    /// <list type="bullet">
+    /// <item>Msg 3701 St 6 when the parent table itself doesn't exist
+    /// (unless <c>IF EXISTS</c>).</item>
+    /// <item>Msg 3701 St 7 when the table exists but has no such index
+    /// (unless <c>IF EXISTS</c>).</item>
+    /// <item>Msg 3723 when the named index is a PK/UQ-backing constraint
+    /// (fires regardless of <c>IF EXISTS</c> — probed against SQL Server
+    /// 2025).</item>
+    /// </list>
+    /// </summary>
+    private static void DropOneIndex(ParserContext context, string indexName, MultiPartName tableName, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+
+        string qualifiedTableName;
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+        {
+            if (ifExists)
+                return;
+            qualifiedTableName = tableName.Count >= 2
+                ? $"{tableName.ImmediateQualifier}.{tableName.Leaf}"
+                : $"{Database.DefaultSchemaName}.{tableName.Leaf}";
+            throw SimulatedSqlException.CannotDropIndexDoesNotExist(qualifiedTableName, indexName, state: 6);
+        }
+
+        qualifiedTableName = FormatQualifiedTableName(tableName, table);
+        foreach (var kc in table.KeyConstraints)
+        {
+            if (Collation.Default.Equals(kc.Name, indexName))
+                throw SimulatedSqlException.ExplicitDropIndexNotAllowed(qualifiedTableName, indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE");
+        }
+
+        for (var i = 0; i < table.Indexes.Count; i++)
+        {
+            if (Collation.Default.Equals(table.Indexes[i].Name, indexName))
+            {
+                table.Indexes.RemoveAt(i);
+                return;
+            }
+        }
+
+        if (ifExists)
+            return;
+        throw SimulatedSqlException.CannotDropIndexDoesNotExist(qualifiedTableName, indexName, state: 7);
     }
 
     /// <summary>

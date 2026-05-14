@@ -184,6 +184,16 @@ internal sealed class HeapTable : SchemaObject
     public readonly List<ForeignKey> OutgoingForeignKeys = [];
 
     /// <summary>
+    /// CREATE INDEX-declared secondary indexes on this table, in creation
+    /// order. UNIQUE entries (with their optional WHERE filter) participate
+    /// in INSERT / UPDATE enforcement alongside <see cref="KeyConstraints"/>;
+    /// non-UNIQUE entries are catalog-only (visible through
+    /// <c>sys.indexes</c> / <c>sys.index_columns</c>) since the simulator
+    /// has no B-tree storage.
+    /// </summary>
+    public readonly List<Index> Indexes = [];
+
+    /// <summary>
     /// FOREIGN KEY constraints from other tables that reference this table.
     /// The mirror of <see cref="OutgoingForeignKeys"/>: every FK whose
     /// <see cref="ForeignKey.ReferencedTable"/> is this table appears here on
