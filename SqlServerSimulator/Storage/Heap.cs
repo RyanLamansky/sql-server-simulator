@@ -134,6 +134,15 @@ internal sealed class Heap
             ? this.Pages[pageIndex].ReadSlotBytes(slotIndex)
             : null;
 
+    /// <summary>
+    /// Returns true when the slot at the given Rid is past the page's high-
+    /// water mark or has been tombstoned. Snapshot-aware iteration uses this
+    /// to identify chain entries whose live slot is no longer in the heap's
+    /// live row stream and surface a historical version instead.
+    /// </summary>
+    public bool IsSlotTombstoned(int pageIndex, int slotIndex) =>
+        pageIndex < 0 || pageIndex >= this.Pages.Count || this.Pages[pageIndex].IsSlotTombstoned(slotIndex);
+
     /// <summary>Total row count across all pages.</summary>
     public int RowCount
     {

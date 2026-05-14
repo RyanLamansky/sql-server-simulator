@@ -194,6 +194,15 @@ internal sealed class HeapPage
         return this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray();
     }
 
+    /// <summary>
+    /// Returns true when the slot is past the slot directory's high-water
+    /// mark or has been tombstoned. The version store's snapshot-aware
+    /// readers consult this to decide whether to substitute a chain's
+    /// historical version for a slot the live heap iteration skipped.
+    /// </summary>
+    public bool IsSlotTombstoned(int slotIndex) =>
+        slotIndex < 0 || slotIndex >= this.SlotCount || this.IsSlotDeleted(slotIndex);
+
     private bool IsSlotDeleted(int slotIndex) =>
         (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotTombstoneBit) != 0;
 

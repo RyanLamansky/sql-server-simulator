@@ -242,6 +242,77 @@ public sealed class SnapshotIsolationTests
     }
 
     [TestMethod]
+    public void SnapshotReader_SeesDeletedRow_AfterConcurrentCommittedDelete()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table t (id int not null primary key, v int);
+            insert t values (1, 100), (2, 200), (3, 300)
+            """);
+
+        using var siConn = sim.CreateOpenConnection();
+        // First read takes the snapshot at all 3 rows visible.
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from t").ExecuteScalar();
+
+        using (var rc = sim.CreateOpenConnection())
+            _ = rc.CreateCommand("delete from t where id = 2").ExecuteNonQuery();
+
+        // SI snapshot still sees the deleted row's pre-delete payload.
+        var v = siConn.CreateCommand("select v from t where id = 2").ExecuteScalar();
+        AreEqual(200, v);
+        var count = siConn.CreateCommand("select count(*) from t").ExecuteScalar();
+        AreEqual(3, count);
+
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void Msg3960_SnapshotUpdate_OnRcDeletedRow_ThrowsWithAutoRollback()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table t (id int not null primary key, v int);
+            insert t values (1, 100)
+            """);
+
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+
+        using (var rc = sim.CreateOpenConnection())
+            _ = rc.CreateCommand("delete from t where id = 1").ExecuteNonQuery();
+
+        // SI snapshot still sees id=1; UPDATE on it must raise Msg 3960
+        // (not silently succeed with 0 affected rows).
+        var ex = Throws<System.Data.Common.DbException>(() =>
+            siConn.CreateCommand("update t set v = 999 where id = 1").ExecuteNonQuery());
+        AreEqual("3960", ex.Data["HelpLink.EvtID"]);
+        AreEqual(0, siConn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Msg3960_SnapshotDelete_OnRcDeletedRow_Throws()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table t (id int not null primary key, v int);
+            insert t values (1, 100)
+            """);
+
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+
+        using (var rc = sim.CreateOpenConnection())
+            _ = rc.CreateCommand("delete from t where id = 1").ExecuteNonQuery();
+
+        var ex = Throws<System.Data.Common.DbException>(() =>
+            siConn.CreateCommand("delete from t where id = 1").ExecuteNonQuery());
+        AreEqual("3960", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
     public void SnapshotReader_AfterCommit_SeesNewBaseline()
     {
         var sim = new Simulation();

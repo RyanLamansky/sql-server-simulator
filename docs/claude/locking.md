@@ -456,18 +456,22 @@ at the target Rid shows `LiveXmin > snapshotXid` or a foreign
 `WriterTx`. Auto-rolls back the SI transaction before throwing
 (probe-confirmed `@@TRANCOUNT = 0` in the CATCH block).
 
+### Tombstoned-slot snapshot pass
+SI / RCSI iteration walks tombstoned slots in a second pass after the
+live-heap pass so deleted rows whose pre-delete payload is still
+visible at the snapshot surface correctly. Same per-row visibility
+check (`VersionStore.ResolveTombstonedSlotForSnapshot`) used at both
+sites — readers (via `WrapWithRowConflictChecks`) and writers (via
+`Simulation.CheckSnapshotConflictOnTombstonedRows`, called at the top
+of UPDATE / DELETE before the affected-rows mutation loop). The
+writer-side scan decodes each candidate, evaluates the WHERE predicate
+against it, and raises Msg 3960 + auto-rolls back if WHERE matches a
+tombstoned-but-visible row. `Heap.IsSlotTombstoned(pageIndex,
+slotIndex)` (and the underlying `HeapPage.IsSlotTombstoned`) exposes
+the per-slot tombstone bit so the snapshot-aware iterators filter
+duplicate yields against the live-heap pass.
+
 ### Known phase-3 limitations
-- **DELETE not visible to SI snapshots that pre-date the DELETE**:
-  the simulator's heap iteration skips tombstoned slots, so an SI
-  reader can't see a committed-deleted row through its snapshot.
-  Surfaces as: SI tx reads row A; RC tx deletes A and commits; SI
-  tx's second read returns no row. Real SQL Server would return the
-  historical payload. Mirroring this requires iterating tombstoned
-  slots union'd with the live ones — deferred.
-- **SI writer attempting to modify a row deleted by a concurrent
-  committed tx**: should raise Msg 3960; the simulator's iteration
-  skips the tombstoned row, so the affected-rows count is 0 and the
-  UPDATE silently succeeds. Same root cause as the previous bullet.
 - **Multi-update-within-one-tx history collapse**: real SQL Server
   collapses intra-tx intermediate states (only the pre-tx + post-tx
   states are visible). The simulator currently records every

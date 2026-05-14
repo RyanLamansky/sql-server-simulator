@@ -274,6 +274,30 @@ internal static class VersionStore
             : chain.LiveXmin <= snapshotXid ? livePayload : WalkHistory(chain.Head, snapshotXid);
     }
 
+    /// <summary>
+    /// Resolves the historical version visible to <paramref name="snapshotXid"/>
+    /// for a slot whose live heap entry is tombstoned. Reached by snapshot-
+    /// aware iteration as a second pass over <see cref="HeapTable.RowVersions"/>
+    /// — the live-heap pass naturally skips tombstoned slots, so this hook
+    /// surfaces deleted rows whose pre-delete state is still visible at the
+    /// caller's snapshot. Returns the historical payload or <c>null</c>
+    /// (slot's delete is visible — row should not appear at this snapshot).
+    /// </summary>
+    internal static byte[]? ResolveTombstonedSlotForSnapshot(RowVersionChain chain, long snapshotXid, SimulatedDbTransaction? readerTx)
+    {
+        // In-flight delete by another writer: the delete commit hasn't
+        // landed yet, so my snapshot must walk history (chain.LiveXmin still
+        // reflects the pre-delete commit). Committed delete: my snapshot
+        // sees the row iff it pre-dates the delete (LiveXmin = delete
+        // commit Xid). Walking history finds the entry with Xmax = delete
+        // Xid in both cases.
+        return chain.WriterTx is { } writer && !ReferenceEquals(writer, readerTx)
+            ? WalkHistory(chain.Head, snapshotXid)
+            : chain.IsDeletedLive && chain.LiveXmin > snapshotXid
+                ? WalkHistory(chain.Head, snapshotXid)
+                : null;
+    }
+
     private static byte[]? WalkHistory(HistoricalVersion? head, long snapshotXid)
     {
         for (var hv = head; hv is not null; hv = hv.Next)

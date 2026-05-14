@@ -163,6 +163,14 @@ partial class Simulation
             deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers && !needsFullForHistory && !needsFullForFk) ? null : fullValues));
         }
 
+        // SI writer pre-flight: scan the version chain for snapshot-visible
+        // tombstoned rows. A pre-delete payload matching WHERE means
+        // another tx already removed a row our snapshot still sees —
+        // Msg 3960 with auto-rollback (probe-confirmed against SQL Server
+        // 2025; mirrors the SI UPDATE-on-RC-deleted case). Helper lives
+        // in Simulation.Update.cs and the partial-class scope shares it.
+        CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+
         return CommitDelete(context, table, deleted, output, sourceView);
     }
 

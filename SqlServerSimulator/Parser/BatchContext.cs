@@ -654,6 +654,25 @@ internal sealed class BatchContext
             if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
                 yield return bytes;
         }
+        // Second pass: under snapshot, surface tombstoned slots whose chain
+        // carries a still-visible historical version. The live-heap pass
+        // skips these (heap iteration skips tombstoned slots), but the
+        // SI / RCSI snapshot may pre-date the delete, in which case the
+        // pre-delete payload is the visible version. Walks the per-table
+        // version dict directly; live slots are filtered out by the
+        // tombstone check so we don't double-yield.
+        if (snapshotXid is { } sx2)
+        {
+            foreach (var kv in table.RowVersions)
+            {
+                if (!table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex))
+                    continue;
+                var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx2, batch.Connection.CurrentTransaction);
+                if (resolved is null)
+                    continue;
+                yield return resolved;
+            }
+        }
     }
 
     /// <summary>

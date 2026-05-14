@@ -261,7 +261,75 @@ partial class Simulation
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
 
+        // SI writer pre-flight: any row visible at our snapshot but
+        // deleted by a concurrent committed tx (or in-flight foreign
+        // delete) whose pre-delete payload matches WHERE is a conflict.
+        // Msg 3960 fires before any heap mutation; auto-rolls back the SI
+        // tx. Probe-confirmed against SQL Server 2025: UPDATE / DELETE on
+        // an RC-deleted row that matches our snapshot raises 3960 even
+        // though the live row is tombstoned.
+        CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+
         return CommitUpdate(context, table, affected, output, sourceView);
+    }
+
+    /// <summary>
+    /// SI writer's tombstoned-slot pre-flight: walks the version chain
+    /// dict for entries whose live heap slot is tombstoned, decodes each
+    /// snapshot-visible historical payload, evaluates the UPDATE / DELETE
+    /// WHERE predicate against it, and raises Msg 3960 (with auto-rollback)
+    /// if any match. Closes the SI-vs-RC-deleted-row conflict path the
+    /// regular live-heap iteration misses (heap iteration skips tombstoned
+    /// slots). No-op for non-SI sessions and for sessions whose snapshot
+    /// hasn't been allocated yet.
+    /// </summary>
+    private static void CheckSnapshotConflictOnTombstonedRows(ParserContext context, HeapTable table, BooleanExpression? where, View? sourceView)
+    {
+        var batch = context.Batch;
+        if (batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.Snapshot)
+            return;
+        var snapshotXid = batch.Connection.CurrentTransaction?.SnapshotXid;
+        if (snapshotXid is not { } sx)
+            return;
+        foreach (var kv in table.RowVersions)
+        {
+            if (!table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex))
+                continue;
+            var hist = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.CurrentTransaction);
+            if (hist is null)
+                continue;
+            var fullValues = DecodeFullRow(table, hist);
+            EvaluateComputedColumns(table, fullValues, batch);
+            if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues, batch))
+                continue;
+            SqlValue Resolve(MultiPartName name)
+            {
+                if (sourceView is not null)
+                {
+                    for (var v = 0; v < sourceView.OutputColumns.Length; v++)
+                    {
+                        if (Collation.Default.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
+                        {
+                            var baseOrd = sourceView.BaseColumnOrdinals[v];
+                            return baseOrd < 0
+                                ? throw SimulatedSqlException.InvalidColumnName(name)
+                                : fullValues[baseOrd];
+                        }
+                    }
+                    throw SimulatedSqlException.InvalidColumnName(name);
+                }
+                for (var k = 0; k < table.Columns.Length; k++)
+                {
+                    if (Collation.Default.Equals(table.Columns[k].Name, name.Leaf))
+                        return fullValues[k];
+                }
+                throw SimulatedSqlException.InvalidColumnName(name);
+            }
+            if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
+                continue;
+            batch.Connection.CurrentTransaction?.Rollback();
+            throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.CurrentDatabase.Name);
+        }
     }
 
     /// <summary>
