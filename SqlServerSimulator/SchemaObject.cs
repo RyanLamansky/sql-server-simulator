@@ -34,6 +34,20 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public readonly int ObjectId = objectId;
 
     /// <summary>
+    /// Per-object lock resource backing schema-stability (Sch-S) /
+    /// schema-modification (Sch-M) acquisition. Every read of this object
+    /// (DML, FROM-source, EXEC, NEXT VALUE FOR, DECLARE @t MyType, etc.)
+    /// acquires Sch-S for the duration of the statement; every DDL on the
+    /// object (DROP / ALTER / TRUNCATE) acquires Sch-M. Owner = the running
+    /// <see cref="SimulatedDbConnection"/>. The resource is allocated once
+    /// at object construction and lives for the object's lifetime; DROP
+    /// discards the object reference entirely, so any pending Sch-S waits
+    /// behind the DROP's Sch-M resolve naturally — the post-DROP dict
+    /// lookup will miss and the caller surfaces Msg 208.
+    /// </summary>
+    public readonly LockResource SchemaLock = new();
+
+    /// <summary>
     /// Schema-id of the schema this object lives in. Surfaces in
     /// <c>sys.objects.schema_id</c> / <c>sys.tables.schema_id</c> /
     /// <c>sys.views.schema_id</c> / <c>sys.procedures.schema_id</c>.

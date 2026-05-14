@@ -80,6 +80,25 @@ public sealed partial class Simulation
     private readonly byte[] newSequentialIdAnchor = new byte[12];
 
     /// <summary>
+    /// Per-Simulation monotonic counter for session ids. Each
+    /// <see cref="SimulatedDbConnection"/> claims a fresh SPID on construction
+    /// via <see cref="AllocateSpid"/>. Real SQL Server reserves SPIDs 1-50
+    /// for system / internal use and starts user sessions at 51; the counter
+    /// here is seeded so the first allocation also returns 51, matching
+    /// the deadlock-victim message convention.
+    /// </summary>
+    private int nextSpid = 50;
+
+    /// <summary>
+    /// Allocates the next session id (SPID) for a freshly-constructed
+    /// <see cref="SimulatedDbConnection"/>. Used to fill the <c>Process ID
+    /// &lt;N&gt;</c> slot in Msg 1205 (deadlock victim) and to identify
+    /// lock holders / waiters in any future <c>sys.dm_tran_locks</c> /
+    /// <c>sys.dm_exec_sessions</c> projection.
+    /// </summary>
+    internal int AllocateSpid() => Interlocked.Increment(ref this.nextSpid);
+
+    /// <summary>
     /// Monotonic counter for <see cref="GenerateNewSequentialId"/>; each call
     /// reserves the next value via <see cref="Interlocked.Increment(ref long)"/>
     /// and packs it into raw bytes [0..3] of the produced GUID.
@@ -343,18 +362,37 @@ public sealed partial class Simulation
         // structural workaround. Materialization is cheap — every statement
         // produces ≤ 1 outcome and SELECT already materializes its rows to
         // a List before yielding the result set.
+        //
+        // Statement-scoped Sch-S / Sch-M locks released in `finally` here so
+        // they unwind on success, error, or TRY-caught exception alike.
+        // The connection's `CurrentExecutingThreadId` is set to the current
+        // managed thread for the statement's duration so concurrent acquirers
+        // on the same thread can short-circuit to Msg 1205 (no progress is
+        // possible while this thread is the executor). Save+restore handles
+        // the nested-body case (proc / trigger / UDF dispatch enters this
+        // method recursively under the same connection).
+        var connection = batch.Connection;
+        var savedThreadId = connection.CurrentExecutingThreadId;
+        connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         List<SimulatedStatementOutcome>? outcomes = null;
         SimulatedSqlException? caught = null;
         try
         {
-            outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte)];
+            try
+            {
+                outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte)];
+            }
+            catch (SimulatedSqlException ex) when (batch.TryFrameDepth > 0)
+            {
+                caught = ex;
+            }
         }
-        catch (SimulatedSqlException ex) when (batch.TryFrameDepth > 0)
+        finally
         {
-            caught = ex;
+            batch.ReleaseStatementSchemaLocks();
+            connection.CurrentExecutingThreadId = savedThreadId;
         }
 
-        var connection = batch.Connection;
         if (caught is not null)
         {
             // First error in this TRY body wins; subsequent throws while

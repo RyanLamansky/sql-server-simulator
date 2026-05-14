@@ -1,6 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -60,6 +61,7 @@ partial class Simulation
         if (!RecognizedOptions.TryGetValue(unquoted.Value, out var firstKind))
             return TryRaiseUnrecognizedSetOption(context, unquoted);
 
+        var firstName = unquoted.Value;
         context.MoveNextRequired();
 
         // Multi-option comma form is OnOff-only: SET opt1, opt2, ... ON|OFF.
@@ -76,7 +78,21 @@ partial class Simulation
             return context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
         }
 
-        return ConsumeValueForKind(context, firstKind);
+        if (!ConsumeValueForKind(context, firstKind))
+            return false;
+
+        // LOCK_TIMEOUT is the one Integer-shape option that has semantic
+        // effect — it drives lock-acquisition wait via
+        // SimulatedDbConnection.LockTimeoutMillis. Every other Integer /
+        // Identifier / Binary option parses-and-discards (the simulator
+        // doesn't model the underlying behavior). Probe-confirmed default
+        // is -1 (wait forever); positive N = wait up to N ms; 0 = fail-fast.
+        if (Collation.Default.Equals(firstName, "LOCK_TIMEOUT") && !context.Batch.IsSkipping)
+        {
+            if (context.Token is Numeric { Value: { IsNull: false, Type: var t } literal } && t == SqlType.Int32)
+                context.Connection.LockTimeoutMillis = literal.AsInt32;
+        }
+        return true;
     }
 
     /// <summary>

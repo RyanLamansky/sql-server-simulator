@@ -320,6 +320,59 @@ internal sealed class BatchContext
     /// </summary>
     public IReadOnlyList<Expression>? AllGroupingExpressions;
 
+    /// <summary>
+    /// Schema-stability and schema-modification locks acquired during the
+    /// current statement's dispatch. Each successful TryResolve*-side
+    /// acquisition (Sch-S on the resolved schema object) and each DDL-side
+    /// acquisition (Sch-M on the target before mutation) appends here; the
+    /// dispatch loop releases every entry in a <c>finally</c> at statement
+    /// end so locks are returned regardless of success / error / TRY-catch
+    /// outcome. Re-entrance (same object resolved twice in one statement —
+    /// e.g. <c>FROM t a JOIN t b</c>) is handled inside
+    /// <see cref="LockResource"/> via per-owner counting; this list just
+    /// tracks every acquisition by reference so Release runs the matching
+    /// number of times.
+    /// </summary>
+    public readonly List<(LockResource Resource, LockMode Mode)> StatementSchemaLocks = [];
+
+    /// <summary>
+    /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
+    /// the current connection, honoring the connection's
+    /// <see cref="SimulatedDbConnection.LockTimeoutMillis"/>, and records the
+    /// acquisition in <see cref="StatementSchemaLocks"/> so the dispatch
+    /// loop releases it at statement end. The two-phase split (acquire then
+    /// record) is fine because <see cref="LockResource.Acquire"/> can only
+    /// fail by throwing — on success the lock IS held, and we always reach
+    /// the append. On throw the lock isn't held, no cleanup needed.
+    /// </summary>
+    public void AcquireStatementLock(LockResource resource, LockMode mode)
+    {
+        var connection = this.Connection;
+        resource.Acquire(mode, connection, connection.LockTimeoutMillis);
+        this.StatementSchemaLocks.Add((resource, mode));
+    }
+
+    /// <summary>
+    /// Releases every lock acquired during the current statement. Called by
+    /// the dispatch loop in a <c>finally</c> at statement end. Safe to call
+    /// even when the list is empty; safe to call multiple times (the list
+    /// clears between calls so the second is a no-op).
+    /// </summary>
+    public void ReleaseStatementSchemaLocks()
+    {
+        var connection = this.Connection;
+        // Release in reverse acquisition order — symmetric to a stack of
+        // acquires. Phase 0 has no order-dependent semantics in release
+        // (every Sch-S / Sch-M release pulses the gate independently), but
+        // the LIFO discipline matches structured-locking convention.
+        for (var i = this.StatementSchemaLocks.Count - 1; i >= 0; i--)
+        {
+            var (resource, mode) = this.StatementSchemaLocks[i];
+            resource.Release(mode, connection);
+        }
+        this.StatementSchemaLocks.Clear();
+    }
+
     public bool IsSkipping =>
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None
@@ -704,6 +757,8 @@ internal sealed class BatchContext
         // Trigger pseudo-tables INSERTED / DELETED resolve first when a
         // trigger body is in flight. 1-part names only (probe-confirmed:
         // qualified `dbo.inserted` raises Msg 208 in real SQL Server).
+        // Pseudo-tables are batch-local materializations — no Sch-S needed
+        // (no DDL can target them).
         if (this.TriggerFrame is { } triggerFrame && name.Count == 1)
         {
             if (Collation.Default.Equals(name.Leaf, "inserted") && triggerFrame.Inserted is { } ins)
@@ -719,11 +774,17 @@ internal sealed class BatchContext
         }
 
         if (IsLocalTempName(name.Leaf))
+        {
+            // Temp tables are session-local; no other connection can DROP
+            // them, so Sch-S acquisition is unnecessary (and would be a
+            // self-conflict-free no-op anyway).
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
+        }
 
         // Table-variable routing: @-prefixed leaves are per-batch, 1-part-only
         // (probe-confirmed: dbo.@t raises Msg 102 at parse). Dict key is the
-        // @-stripped name (matches Variables dict convention).
+        // @-stripped name (matches Variables dict convention). Table variables
+        // are per-batch — no concurrency, no Sch-S.
         if (IsTableVariableName(name.Leaf))
         {
             if (name.Count > 1)
@@ -738,19 +799,28 @@ internal sealed class BatchContext
         {
             // 1-part fallback to system tables when the default schema lookup
             // misses; matches the legacy bare-`systypes` access path.
-            if (name.Count == 1)
-                return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
+            if (name.Count == 1 && Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table))
+            {
+                this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
+                return true;
+            }
             table = null;
             return false;
         }
 
         if (schema.HeapTables.TryGetValue(name.Leaf, out table))
+        {
+            this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
             return true;
+        }
 
         // Bare 1-part also falls through to system tables when the default
         // schema doesn't hold the table.
-        if (name.Count == 1)
-            return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
+        if (name.Count == 1 && Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table))
+        {
+            this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
+            return true;
+        }
 
         table = null;
         return false;
@@ -795,9 +865,14 @@ internal sealed class BatchContext
     public bool TryResolveFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function)
     {
         function = null;
-        return name.Count >= 2
-            && this.TryResolveSchema(name, out var schema)
-            && schema.Functions.TryGetValue(name.Leaf, out function);
+        if (name.Count < 2
+            || !this.TryResolveSchema(name, out var schema)
+            || !schema.Functions.TryGetValue(name.Leaf, out function))
+        {
+            return false;
+        }
+        this.AcquireStatementLock(function.SchemaLock, LockMode.SchemaStability);
+        return true;
     }
 
     /// <summary>
@@ -811,8 +886,13 @@ internal sealed class BatchContext
     public bool TryResolveView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
     {
         view = null;
-        return this.TryResolveSchema(name, out var schema)
-            && schema.Views.TryGetValue(name.Leaf, out view);
+        if (!this.TryResolveSchema(name, out var schema)
+            || !schema.Views.TryGetValue(name.Leaf, out view))
+        {
+            return false;
+        }
+        this.AcquireStatementLock(view.SchemaLock, LockMode.SchemaStability);
+        return true;
     }
 
     /// <summary>
@@ -825,8 +905,13 @@ internal sealed class BatchContext
     public bool TryResolveProcedure(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Procedure? procedure)
     {
         procedure = null;
-        return this.TryResolveSchema(name, out var schema)
-            && schema.Procedures.TryGetValue(name.Leaf, out procedure);
+        if (!this.TryResolveSchema(name, out var schema)
+            || !schema.Procedures.TryGetValue(name.Leaf, out procedure))
+        {
+            return false;
+        }
+        this.AcquireStatementLock(procedure.SchemaLock, LockMode.SchemaStability);
+        return true;
     }
 
     /// <summary>
@@ -840,8 +925,13 @@ internal sealed class BatchContext
     public bool TryResolveTableType(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TableType? tableType)
     {
         tableType = null;
-        return this.TryResolveSchema(name, out var schema)
-            && schema.TableTypes.TryGetValue(name.Leaf, out tableType);
+        if (!this.TryResolveSchema(name, out var schema)
+            || !schema.TableTypes.TryGetValue(name.Leaf, out tableType))
+        {
+            return false;
+        }
+        this.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaStability);
+        return true;
     }
 
     /// <summary>
@@ -855,8 +945,13 @@ internal sealed class BatchContext
     public bool TryResolveSequence(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Sequence? sequence)
     {
         sequence = null;
-        return this.TryResolveSchema(name, out var schema)
-            && schema.Sequences.TryGetValue(name.Leaf, out sequence);
+        if (!this.TryResolveSchema(name, out var schema)
+            || !schema.Sequences.TryGetValue(name.Leaf, out sequence))
+        {
+            return false;
+        }
+        this.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaStability);
+        return true;
     }
 
     /// <summary>

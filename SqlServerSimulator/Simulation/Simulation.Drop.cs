@@ -166,12 +166,15 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is null || !schema.Triggers.TryRemove(name.Leaf, out _))
+        if (schema is null || !schema.Triggers.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
         }
+        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        if (!schema.Triggers.TryRemove(name.Leaf, out _) && !ifExists)
+            throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
     }
 
     /// <summary>
@@ -184,12 +187,15 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is null || !schema.Sequences.TryRemove(name.Leaf, out _))
+        if (schema is null || !schema.Sequences.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
         }
+        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        if (!schema.Sequences.TryRemove(name.Leaf, out _) && !ifExists)
+            throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
     }
 
     /// <summary>
@@ -213,6 +219,7 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
         }
+        context.Batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
         // Scan every procedure in every schema of the current database for
         // a parameter that references this table type. Procedures are the
         // only object kind that can take a TVP today; views / functions
@@ -243,12 +250,15 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is null || !schema.Procedures.TryRemove(name.Leaf, out _))
+        if (schema is null || !schema.Procedures.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
         }
+        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        if (!schema.Procedures.TryRemove(name.Leaf, out _) && !ifExists)
+            throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
     }
 
     /// <summary>
@@ -261,7 +271,14 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is null || !schema.Views.TryRemove(name.Leaf, out var droppedView))
+        if (schema is null || !schema.Views.TryGetValue(name.Leaf, out var droppedView))
+        {
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
+        }
+        context.Batch.AcquireStatementLock(droppedView.SchemaLock, LockMode.SchemaModification);
+        if (!schema.Views.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
                 return;
@@ -283,12 +300,15 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is null || !schema.Functions.TryRemove(name.Leaf, out _))
+        if (schema is null || !schema.Functions.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         }
+        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        if (!schema.Functions.TryRemove(name.Leaf, out _) && !ifExists)
+            throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
     }
 
     private static void DropOneTable(ParserContext context, MultiPartName name, bool ifExists)
@@ -314,6 +334,14 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
         }
+        // Sch-M on the target table for the duration of the statement.
+        // Waits for any concurrent Sch-S holders (readers / writers) to drain
+        // before we proceed; honors the connection's @@LOCK_TIMEOUT so a
+        // stuck reader on another connection surfaces Msg 1222 instead of
+        // hanging this DROP indefinitely. Temp tables are session-local and
+        // not concurrency-reachable, but acquiring uniformly keeps the path
+        // simple and is effectively free for the single-owner case.
+        context.Batch.AcquireStatementLock(removedTable.SchemaLock, LockMode.SchemaModification);
         // DROP TABLE on a system-versioned temporal parent or its history
         // sibling is rejected — caller must ALTER TABLE … SET (SYSTEM_VERSIONING
         // = OFF) first (probe-confirmed Msg 13552 wording against SQL Server

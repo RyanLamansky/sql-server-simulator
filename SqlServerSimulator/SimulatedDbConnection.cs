@@ -11,6 +11,39 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal readonly Simulation Simulation = simulation;
 
     /// <summary>
+    /// Session id. Allocated once at connection construction via
+    /// <see cref="Simulation.AllocateSpid"/>; first user connection on a
+    /// fresh <see cref="Simulation"/> gets 51, matching SQL Server's
+    /// "user SPIDs start at 51" convention. Surfaced in Msg 1205's
+    /// deadlock-victim wording (<c>Process ID &lt;N&gt;</c>) and will surface
+    /// in <c>@@SPID</c> / <c>sys.dm_exec_sessions.session_id</c> if those
+    /// are ever projected.
+    /// </summary>
+    internal readonly int Spid = simulation.AllocateSpid();
+
+    /// <summary>
+    /// Session-scoped <c>@@LOCK_TIMEOUT</c>. Default is <c>-1</c> (wait
+    /// indefinitely — probe-confirmed against SQL Server 2025: a fresh
+    /// connection reads <c>@@LOCK_TIMEOUT = -1</c> before any explicit
+    /// <c>SET LOCK_TIMEOUT</c>). <c>0</c> = fail-fast on first conflict;
+    /// positive N = wait up to N ms before raising Msg 1222. Set via
+    /// <c>SET LOCK_TIMEOUT &lt;N&gt;</c>.
+    /// </summary>
+    internal int LockTimeoutMillis = -1;
+
+    /// <summary>
+    /// Managed thread id of the OS thread currently executing a command
+    /// against this connection, or <c>null</c> when no command is in flight.
+    /// Set at the top of <see cref="Simulation.CreateResultSetsForCommand"/>'s
+    /// outer wrapper and cleared in its <c>finally</c>. Drives
+    /// <see cref="LockResource"/>'s same-thread-deadlock detection: a
+    /// conflicting holder whose <see cref="CurrentExecutingThreadId"/>
+    /// matches the caller's thread can't release without the caller
+    /// releasing first, so Msg 1205 fires immediately instead of waiting.
+    /// </summary>
+    internal int? CurrentExecutingThreadId;
+
+    /// <summary>
     /// The database this session is pointed at. Defaults to the entry named
     /// <see cref="Simulation.DefaultDatabaseName"/> at connection construction;
     /// future <c>USE &lt;db&gt;</c> support will switch the pointer to a

@@ -64,6 +64,11 @@ partial class Simulation
         if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
             throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
 
+        // Sch-M on the target for the duration of the statement — waits for
+        // any concurrent Sch-S holders to drain before the destructive page-
+        // swap and identity reset proceed.
+        batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+
         var oldPages = new List<HeapPage>(table.Heap.Pages);
         var oldLobPages = new List<HeapLobPage>(table.Heap.LobPages);
 

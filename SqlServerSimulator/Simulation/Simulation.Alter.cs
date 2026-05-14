@@ -432,6 +432,19 @@ partial class Simulation
             return false;
         var tableName = BatchContext.ParseObjectName(context);
 
+        // Sch-M for the ALTER's lifetime — acquired here at the dispatcher
+        // entry so every sub-parser (ADD / DROP / ALTER COLUMN / ADD CONSTRAINT
+        // / DROP CONSTRAINT / CHECK / NOCHECK / SET SYSTEM_VERSIONING) runs
+        // under exclusive schema modification. Sub-parsers still call
+        // TryResolveTable themselves to surface their own context-specific
+        // missing-table error (Msg 4902 / 4904 / etc.); the additional Sch-S
+        // those acquires take is harmless under same-owner Sch-M reentrance.
+        // Skip the early acquire when the table doesn't exist — the sub-
+        // parser's TryResolveTable then raises the right error code without
+        // having acquired anything.
+        if (!context.Batch.IsSkipping && context.Batch.TryResolveTable(tableName, out var alterTarget))
+            context.Batch.AcquireStatementLock(alterTarget.SchemaLock, LockMode.SchemaModification);
+
         // Cursor is on the last name segment; advance to the post-name token.
         context.MoveNextRequired();
 
