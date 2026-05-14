@@ -739,6 +739,53 @@ internal static class BuiltInResources
         };
         var dmOsWaitingTasksView = new CatalogView("dm_os_waiting_tasks", dmOsWaitingTasksColumns, LockDmvs.EnumerateDmOsWaitingTasks);
 
+        // sys.dm_tran_version_store: one row per finalized HistoricalVersion
+        // across every per-table chain. Pending HVs (Xmax = PendingXmax)
+        // are excluded. Real SQL Server's exact column order is preserved
+        // so existing diagnostic queries port unchanged.
+        var dmTranVersionStoreColumns = new HeapColumn[]
+        {
+            new("transaction_sequence_num", SqlType.BigInt, null, false),
+            new("version_sequence_num", SqlType.BigInt, null, false),
+            new("database_id", SqlType.SmallInt, null, false),
+            new("rowset_id", SqlType.BigInt, null, false),
+            new("status", SqlType.TinyInt, null, false),
+            new("min_length_in_bytes", SqlType.SmallInt, null, false),
+            new("record_length_first_part_in_bytes", SqlType.SmallInt, null, false),
+            new("record_image_first_part", VarbinarySqlType.MaxForm, null, true),
+            new("record_length_second_part_in_bytes", SqlType.SmallInt, null, true),
+            new("record_image_second_part", VarbinarySqlType.MaxForm, null, true),
+        };
+        var dmTranVersionStoreView = new CatalogView("dm_tran_version_store", dmTranVersionStoreColumns, VersionStoreDmvs.EnumerateDmTranVersionStore);
+
+        // sys.dm_tran_version_store_space_usage: aggregate sizing per
+        // database. The simulator approximates pages as ceil(bytes / 8192)
+        // since HV payloads aren't backed by real pages.
+        var dmTranVersionStoreSpaceUsageColumns = new HeapColumn[]
+        {
+            new("database_id", SqlType.Int32, null, false),
+            new("reserved_page_count", SqlType.BigInt, null, false),
+            new("reserved_space_kb", SqlType.BigInt, null, false),
+        };
+        var dmTranVersionStoreSpaceUsageView = new CatalogView("dm_tran_version_store_space_usage", dmTranVersionStoreSpaceUsageColumns, VersionStoreDmvs.EnumerateDmTranVersionStoreSpaceUsage);
+
+        // sys.dm_tran_active_snapshot_database_transactions: one row per
+        // active SI tx with an allocated snapshot Xid. RCSI per-statement
+        // snapshots are not tracked here (matching real SQL Server).
+        var dmTranActiveSnapshotDbTxColumns = new HeapColumn[]
+        {
+            new("transaction_id", SqlType.BigInt, null, false),
+            new("transaction_sequence_num", SqlType.BigInt, null, false),
+            new("commit_sequence_num", SqlType.BigInt, null, true),
+            new("session_id", SqlType.Int32, null, false),
+            new("is_snapshot", SqlType.Bit, null, false),
+            new("first_snapshot_sequence_num", SqlType.BigInt, null, true),
+            new("max_version_chain_traversed", SqlType.Int32, null, false),
+            new("average_version_chain_traversed", SqlType.Float, null, false),
+            new("elapsed_time_seconds", SqlType.BigInt, null, false),
+        };
+        var dmTranActiveSnapshotDbTxView = new CatalogView("dm_tran_active_snapshot_database_transactions", dmTranActiveSnapshotDbTxColumns, VersionStoreDmvs.EnumerateDmTranActiveSnapshotDatabaseTransactions);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -761,6 +808,9 @@ internal static class BuiltInResources
             ["sys.index_columns"] = indexColumnsView,
             ["sys.dm_tran_locks"] = dmTranLocksView,
             ["sys.dm_os_waiting_tasks"] = dmOsWaitingTasksView,
+            ["sys.dm_tran_version_store"] = dmTranVersionStoreView,
+            ["sys.dm_tran_version_store_space_usage"] = dmTranVersionStoreSpaceUsageView,
+            ["sys.dm_tran_active_snapshot_database_transactions"] = dmTranActiveSnapshotDbTxView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,

@@ -225,6 +225,94 @@ internal static class VersionStore
         table.RowVersions.TryGetValue(rid, out var chain) ? chain : null;
 
     /// <summary>
+    /// Walks every per-table <see cref="HeapTable.RowVersions"/> chain in
+    /// the database and drops <see cref="HistoricalVersion"/> nodes whose
+    /// <c>Xmax &lt;= oldest_active_snapshot_xid</c> — no active SI
+    /// transaction needs that version anymore. When no SI tx is in flight,
+    /// the cutoff is <see cref="Database.CurrentTransactionCommitId"/>, so
+    /// every finalized HV becomes collectible. Chains that lose their only
+    /// HV AND aren't marked deleted-live AND have no in-flight writer are
+    /// dropped from the dict entirely; chains that retain at least one
+    /// fully-visible-to-no-active-snapshot HV stay (later GC passes may
+    /// shorten them further). Skips chains with non-null
+    /// <see cref="RowVersionChain.WriterTx"/> — those have an in-flight
+    /// writer whose pending HV uses the <c>PendingXmax</c> sentinel and
+    /// must not be touched.
+    /// </summary>
+    internal static void RunGarbageCollection(Database database)
+    {
+        var cutoff = OldestActiveSnapshotXid(database);
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.RowVersions.IsEmpty)
+                    continue;
+                foreach (var kv in table.RowVersions)
+                {
+                    var chain = kv.Value;
+                    if (chain.WriterTx is not null)
+                        continue;
+                    chain.Head = TrimHistory(chain.Head, cutoff);
+                    if (chain.Head is null && !chain.IsDeletedLive)
+                        _ = table.RowVersions.TryRemove(kv.Key, out _);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drops the trailing run of <see cref="HistoricalVersion"/> nodes
+    /// whose <c>Xmax &lt;= cutoff</c>. Returns the new chain head (may be
+    /// <c>null</c> when every node is collectible). Walks newest-first
+    /// (head → tail); SI / RCSI visibility uses <c>Xmin &lt;= SX &lt; Xmax</c>,
+    /// so an HV with <c>Xmax &lt;= SX</c> is invisible to that snapshot, and
+    /// an HV invisible to every active snapshot (Xmax &lt;= cutoff) is
+    /// invisible to all future snapshots too (cutoff only rises).
+    /// </summary>
+    private static HistoricalVersion? TrimHistory(HistoricalVersion? head, long cutoff)
+    {
+        var node = head;
+        HistoricalVersion? previous = null;
+        while (node is not null)
+        {
+            if (node.Xmax <= cutoff)
+            {
+                if (previous is null)
+                    return null;
+                previous.Next = null;
+                return head;
+            }
+            previous = node;
+            node = node.Next;
+        }
+        return head;
+    }
+
+    /// <summary>
+    /// Smallest <see cref="SimulatedDbTransaction.SnapshotXid"/> across the
+    /// database's <see cref="Database.ActiveSnapshotTxs"/> set, or the
+    /// current commit-id counter when no SI tx is in flight. The empty-set
+    /// case returns the latest stamp so the GC can drop every finalized
+    /// HV. RCSI per-statement snapshots aren't tracked in this set — they
+    /// have effectively-zero lifetime (allocated at first user-table read,
+    /// released at statement end), so the GC's once-per-tx-finalize cadence
+    /// won't observe them as load-bearing.
+    /// </summary>
+    private static long OldestActiveSnapshotXid(Database database)
+    {
+        if (database.ActiveSnapshotTxs.IsEmpty)
+            return database.CurrentTransactionCommitId;
+        var min = long.MaxValue;
+        foreach (var kv in database.ActiveSnapshotTxs)
+        {
+            if (kv.Key.SnapshotXid is { } xid && xid < min)
+                min = xid;
+        }
+        return min == long.MaxValue ? database.CurrentTransactionCommitId : min;
+    }
+
+    /// <summary>
     /// Pre-write conflict check for SNAPSHOT-isolation writers. Raises
     /// Msg 3960 (auto-rollback semantic — caller is responsible for
     /// calling <see cref="SimulatedDbTransaction.Rollback"/> after the

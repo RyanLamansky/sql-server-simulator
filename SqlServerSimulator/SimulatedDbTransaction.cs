@@ -146,9 +146,12 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         this.TranCount--;
         if (this.TranCount > 0)
             return;
-        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, this.connection.CurrentDatabase);
+        var db = this.connection.CurrentDatabase;
+        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, db);
         this.UndoLog.Clear();
         ReleaseAllLocks();
+        UnregisterActiveSnapshot(db);
+        Storage.VersionStore.RunGarbageCollection(db);
         RestoreSessionIsolation();
         this.connection.CurrentTransaction = null;
         this.finished = true;
@@ -158,10 +161,13 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     {
         if (this.finished)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+        var db = this.connection.CurrentDatabase;
         Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
         this.UndoLog.Rollback();
         this.TranCount = 0;
         ReleaseAllLocks();
+        UnregisterActiveSnapshot(db);
+        Storage.VersionStore.RunGarbageCollection(db);
         RestoreSessionIsolation();
         this.connection.CurrentTransaction = null;
         this.finished = true;
@@ -177,14 +183,23 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     {
         if (disposing && !this.finished)
         {
+            var db = this.connection.CurrentDatabase;
             Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
             this.UndoLog.Rollback();
             ReleaseAllLocks();
+            UnregisterActiveSnapshot(db);
+            Storage.VersionStore.RunGarbageCollection(db);
             RestoreSessionIsolation();
             this.connection.CurrentTransaction = null;
             this.finished = true;
         }
         base.Dispose(disposing);
+    }
+
+    private void UnregisterActiveSnapshot(Database db)
+    {
+        if (this.SnapshotXid is not null)
+            _ = db.ActiveSnapshotTxs.TryRemove(this, out _);
     }
 
     private void RestoreSessionIsolation()

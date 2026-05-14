@@ -142,6 +142,19 @@ internal sealed class Database
     /// </summary>
     public bool ReadCommittedSnapshot;
 
+    /// <summary>
+    /// Active SNAPSHOT-isolation transactions whose snapshot Xid is still
+    /// load-bearing — every entry's <see cref="SimulatedDbTransaction.SnapshotXid"/>
+    /// is non-null and the tx hasn't reached Commit / Rollback / Dispose yet.
+    /// Populated by <see cref="Parser.BatchContext.ResolveSnapshotXidForRead"/>
+    /// on first user-table read of an SI tx; drained by the corresponding
+    /// finalization path. Read by the version-store GC to compute the
+    /// oldest active snapshot Xid (HVs whose <c>Xmax &lt;= oldest_active</c>
+    /// are safe to drop), and by <c>sys.dm_tran_active_snapshot_database_transactions</c>
+    /// to enumerate per-session SI state.
+    /// </summary>
+    public readonly ConcurrentDictionary<SimulatedDbTransaction, byte> ActiveSnapshotTxs = new();
+
     private int nextObjectId = 100;
 
     /// <summary>

@@ -697,7 +697,11 @@ internal sealed class BatchContext
         {
             if (connection.CurrentTransaction is { } tx)
             {
-                tx.SnapshotXid ??= database.CurrentTransactionCommitId;
+                if (tx.SnapshotXid is null)
+                {
+                    tx.SnapshotXid = database.CurrentTransactionCommitId;
+                    database.ActiveSnapshotTxs[tx] = 0;
+                }
                 return tx.SnapshotXid;
             }
             // Auto-commit SI session — each read gets the latest commit

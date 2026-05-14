@@ -481,6 +481,60 @@ slotIndex)` (and the underlying `HeapPage.IsSlotTombstoned`) exposes
 the per-slot tombstone bit so the snapshot-aware iterators filter
 duplicate yields against the live-heap pass.
 
+### MVCC observability
+
+Three DMVs ship for diagnosing version-store state, with column shapes
+probe-confirmed against SQL Server 2025 (2026-05-14) so existing
+diagnostic queries port unchanged:
+
+- **`sys.dm_tran_version_store`**: one row per finalized
+  `HistoricalVersion` across every per-table chain. Columns:
+  `transaction_sequence_num` (= HV.Xmax, the commit Xid that retired
+  the version), `version_sequence_num` (per-tx sub-sequence synthesized
+  at enumeration time), `database_id`, `rowset_id` (= table.ObjectId),
+  `status` (0), `min_length_in_bytes` / `record_length_first_part_in_bytes`
+  (= payload byte count), `record_image_first_part` (raw payload bytes),
+  `record_length_second_part_in_bytes` (0) /
+  `record_image_second_part` (NULL — payloads always fit in the first
+  part since the simulator stores them as a single `byte[]`). Pending
+  HVs (Xmax = `VersionStore.PendingXmax`) excluded.
+- **`sys.dm_tran_version_store_space_usage`**: one row per database
+  aggregating payload bytes — `reserved_page_count` = ceil(bytes /
+  8192) approximates the buffer-pool figure that real SQL Server
+  reports, `reserved_space_kb` = ceil(bytes / 1024). Always yields
+  one row (matches probe — empty stores show as `0` not row-empty).
+- **`sys.dm_tran_active_snapshot_database_transactions`**: one row
+  per active SI tx with `tx.SnapshotXid != null`. Columns:
+  `transaction_id` (synthesized from object hash code),
+  `transaction_sequence_num` (= `tx.SnapshotXid`),
+  `commit_sequence_num` (NULL — tx is still in flight),
+  `session_id` (= `tx.connection.Spid`), `is_snapshot` (always true —
+  RCSI per-statement snapshots aren't tracked, matching real server
+  behavior for this DMV), `first_snapshot_sequence_num` (NULL),
+  `max_version_chain_traversed` / `average_version_chain_traversed` /
+  `elapsed_time_seconds` (0 — simulator doesn't instrument those).
+
+### Version-store garbage collection
+
+`VersionStore.RunGarbageCollection(Database)` runs at every
+`SimulatedDbTransaction.Commit / Rollback / Dispose`. Walks every
+per-table `RowVersions` chain and drops trailing `HistoricalVersion`
+nodes whose `Xmax <= oldest_active_snapshot_xid` (no active SI
+transaction needs them anymore). When no SI tx is in flight, the
+cutoff is `Database.CurrentTransactionCommitId` so every finalized HV
+becomes collectible. Chains that lose their only HV AND aren't
+`IsDeletedLive` AND have no in-flight `WriterTx` get removed from the
+dict entirely; chains with non-null `WriterTx` are skipped (a
+`PendingXmax`-marked HV must not be disturbed mid-tx).
+
+The oldest active Xid comes from `Database.ActiveSnapshotTxs`, a
+`ConcurrentDictionary<SimulatedDbTransaction, byte>` populated at
+`BatchContext.ResolveSnapshotXidForRead` (first user-table read of an
+SI tx) and drained at tx finalization. RCSI per-statement snapshots
+don't register here — their sub-statement lifetime means the
+once-per-tx GC cadence won't observe them as load-bearing, and the
+short window of risk is bounded by statement execution time.
+
 ### Known phase-3 limitations
 - **Multi-update-within-one-tx history collapse**: real SQL Server
   collapses intra-tx intermediate states (only the pre-tx + post-tx
@@ -489,14 +543,6 @@ duplicate yields against the live-heap pass.
   committed transaction. Visibility outcome is identical for the
   common case (single UPDATE per tx); divergence surfaces only when
   a snapshot lands between intermediate states of a single tx.
-- **Garbage collection**: version chains grow unbounded — entries
-  are never reclaimed once superseded. Real SQL Server's tempdb
-  version store GC runs periodically; the simulator's in-memory dict
-  keeps every historical version for the simulation's lifetime. No
-  practical impact for test workloads; production-scale workloads
-  would notice.
-- **`sys.dm_tran_version_store` DMV**: not modeled (would expose the
-  chain state for diagnosis).
 
 ## Phase-0 + 1a carry-forwards
 
