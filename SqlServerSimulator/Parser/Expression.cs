@@ -444,6 +444,7 @@ internal abstract class Expression
                 "ATAN" => new TrigFunction(context, TrigKind.Atan),
                 "ATN2" => new Atn2(context),
                 "CAST" => new Cast(context),
+                "CHAR" => new CharFromCode(context),
                 "LEAD" => WindowExpression.ParseLead(context),
                 "LEFT" => new Left(context),
                 "RAND" => new Rand(context),
@@ -456,11 +457,13 @@ internal abstract class Expression
             },
             5 => uppercaseName switch
             {
+                "ASCII" => new Ascii(context),
                 "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
                 "FLOOR" => new Floor(context),
                 "LOG10" => new Log10(context),
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
+                "NCHAR" => new NCharFromCode(context),
                 "NEWID" => new NewId(context),
                 "NTILE" => WindowExpression.ParseNTile(context),
                 "POWER" => new Power(context),
@@ -496,6 +499,7 @@ internal abstract class Expression
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
                 "TYPE_ID" => new TypeId(context),
+                "UNICODE" => new UnicodeCodepoint(context),
                 _ => null
             },
             8 => uppercaseName switch

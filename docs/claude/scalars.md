@@ -59,6 +59,14 @@ Zone-name resolution via `TimeZoneInfo.FindSystemTimeZoneById` (accepts both Win
 
 **Precedence**: `AT TIME ZONE` binds tighter than `+`. The zone-name slot parses as a primary expression only — literals, `@variables`, single-segment column refs, or parenthesized full expressions. Multi-part dotted refs and binary chains in the zone slot aren't modeled; wrap in parens. `AT`/`TIME`/`ZONE` are contextual keywords (still valid identifiers).
 
+## Char-code scalars: `ASCII` / `UNICODE` / `CHAR` / `NCHAR`
+Basic one-arg conversions between a character and its code point.
+
+- **`ASCII(input)`** returns `int`. Reads the first character of `input` and returns its CP1252 byte value. NULL → NULL; empty string → NULL. Unicode input is CP1252-encoded first, so `ASCII(N'€')` returns 128 (CP1252's `€`); unrepresentable Unicode (emoji etc.) returns 63 via the encoder's `'?'` replacement fallback. Non-string inputs implicitly stringify *before* the first-char read, so `ASCII(65)` is 54 (the byte for `'6'`, the first char of `"65"`), not 65.
+- **`UNICODE(input)`** returns `int`. Same input-handling shape as `ASCII`, but reads the .NET `char` directly rather than CP1252-encoding it. Supplementary code points (above U+FFFF, e.g. `N'😀'`) return the high surrogate value (55357 for 😀) under the non-SC default collation — not the full Unicode code point. An SC-aware variant returning 128512 would need explicit collation modeling; matches the simulator's "default collation only" stance.
+- **`CHAR(code)`** returns `char(1)` (not `varchar(1)` — probe-confirmed via `sql_variant_property(CHAR(65), 'basetype')`). NULL → NULL; out-of-range (negative / > 255) → NULL. Non-integer inputs truncate-to-int (`CHAR(65.7)` → `'A'`, `CHAR('65')` → `'A'`). `CHAR(0)` is a valid NUL character with `DATALENGTH = 1`, not NULL.
+- **`NCHAR(code)`** returns `nchar(1)`. NULL / out-of-range (negative, > 65535) → NULL. Supplementary code points like `NCHAR(128512)` (😀) return NULL rather than emitting a surrogate pair — non-SC collation behavior.
+
 ## EF.Functions-driven string scalars: `PATINDEX` / `STUFF` / `QUOTENAME` / `REPLICATE` / `SPACE` / `FORMAT`
 Bundle that fills out the raw-SQL string surface that EF's `FromSqlInterpolated` and `DefaultValueSql` workloads commonly reach. None of these are exposed as `EF.Functions.X` LINQ extensions; coverage targets raw-SQL paths.
 

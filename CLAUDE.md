@@ -133,7 +133,7 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 
 Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger: read the linked file on demand when working in the matching area.
 
-- **Adding or modifying a built-in scalar** (math, date, current-time, `*FROMPARTS`/EOMONTH, AT TIME ZONE, CONCAT/CONCAT_WS, string `+`, PATINDEX/STUFF/QUOTENAME/REPLICATE/SPACE/FORMAT, ISNUMERIC/ISDATE/RAND, STRING_SPLIT) → [`docs/claude/scalars.md`](docs/claude/scalars.md).
+- **Adding or modifying a built-in scalar** (math, date, current-time, `*FROMPARTS`/EOMONTH, AT TIME ZONE, CONCAT/CONCAT_WS, string `+`, ASCII/UNICODE/CHAR/NCHAR char-code, PATINDEX/STUFF/QUOTENAME/REPLICATE/SPACE/FORMAT, ISNUMERIC/ISDATE/RAND, STRING_SPLIT) → [`docs/claude/scalars.md`](docs/claude/scalars.md).
 - **Touching `SqlType.Promote` / `PromoteForArithmetic` / decimal precision-scale formulas / int↔string promotion** → [`docs/claude/arithmetic.md`](docs/claude/arithmetic.md).
 - **Touching `Cast` or coercion error paths** (CAST/CONVERT narrow targets, TRY_CAST/TRY_CONVERT swallow set) → [`docs/claude/casting.md`](docs/claude/casting.md).
 - **Changing `Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH** → [`docs/claude/query.md`](docs/claude/query.md).
