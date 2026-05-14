@@ -276,6 +276,6 @@ public sealed class TemporalTableTests
         var simulation = new Simulation();
         simulation.ExecuteBatches(CreateTemporalCustomers);
         _ = ThrowsExactly<NotSupportedException>(
-            () => simulation.ExecuteNonQuery("alter table Customers add NewCol int"));
+            () => simulation.ExecuteNonQuery("alter table Customers alter column SomeCol int"));
     }
 }

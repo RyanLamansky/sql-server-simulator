@@ -475,206 +475,7 @@ partial class Simulation
                 continue;
             }
 
-            if (context.Token is not Name columnName)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-
-            if (context.Token is ReservedKeyword { Keyword: Keyword.As })
-            {
-                context.MoveNextRequired();
-                var computed = Expression.Parse(context);
-                var (persisted, computedNullable) = ParseComputedSuffix(context);
-                pendingComputed.Add((heapColumns.Count, columnName.Value, computed, persisted, computedNullable));
-                heapColumns.Add(null);
-                explicitNull.Add(false);
-                continue;
-            }
-
-            if (context.Token is not Name typeName)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-
-            int? declaredMaxLength = null;
-            int? declaredScale = null;
-            if (context.Token is Operator { Character: '(' })
-            {
-                var lengthToken = context.GetNextRequired();
-                declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
-                    ? numericValue.AsInt32
-                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
-                        ? SqlType.MaxLengthSentinel
-                        : throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                switch (context.GetNextRequired())
-                {
-                    case Operator { Character: ',' }:
-                        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        declaredScale = scaleValue.AsInt32;
-                        if (context.GetNextRequired() is not Operator { Character: ')' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        break;
-                    case Operator { Character: ')' }:
-                        break;
-                    default:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
-
-                context.MoveNextRequired();
-            }
-
-            // Loop over the column-constraint clauses (IDENTITY, NULL/NOT NULL,
-            // DEFAULT, PRIMARY KEY/UNIQUE/CHECK, optional CONSTRAINT-named
-            // forms) in any order. Each branch leaves Token at the first
-            // un-consumed token; the loop exits when that token isn't a
-            // recognized constraint keyword (typically the comma separating
-            // columns or the column-list's closing paren). REFERENCES inside
-            // a table-variable column raises Msg 102 explicitly (real SQL
-            // Server's grammar disallows FKs there); CONSTRAINT-named likewise.
-            IdentityState? identity = null;
-            bool? nullable = null;
-            Expression? defaultExpression = null;
-            var generatedAs = GeneratedAlwaysAsRow.None;
-            var isHidden = false;
-            var inlineKeyKind = (KeyConstraintKind?)null;
-            string? inlineKeyName = null;
-            string? inlineFkName = null;
-            while (true)
-            {
-                switch (context.Token)
-                {
-                    case ReservedKeyword { Keyword: Keyword.Identity } when identity is null:
-                        identity = ParseIdentitySpec(context, columnName.Value);
-                        continue;
-                    case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
-                        if (isTableVariable || isTableType || pendingPeriod is null)
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Always })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        generatedAs = context.GetNextRequired() switch
-                        {
-                            UnquotedString { ContextualKeyword: ContextualKeyword.Start } => GeneratedAlwaysAsRow.Start,
-                            ReservedKeyword { Keyword: Keyword.End } => GeneratedAlwaysAsRow.End,
-                            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                        };
-                        context.MoveNextRequired();
-                        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Hidden })
-                        {
-                            isHidden = true;
-                            context.MoveNextRequired();
-                        }
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Not } when !nullable.HasValue:
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        nullable = false;
-                        context.MoveNextRequired();
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
-                        nullable = true;
-                        context.MoveNextRequired();
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
-                        context.MoveNextRequired();
-                        context.InDefaultClause = true;
-                        try { defaultExpression = Expression.Parse(context); }
-                        finally { context.InDefaultClause = false; }
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null && inlineFkName is null:
-                        if (isTableType)
-                            throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
-                        if (isTableVariable)
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not Name namedConstraint)
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        context.MoveNextRequired();
-                        switch (context.Token)
-                        {
-                            case ReservedKeyword { Keyword: Keyword.Check }:
-                                pendingChecks.Add((namedConstraint.Value, ParseInlineCheckPredicate(context), columnName.Value));
-                                continue;
-                            case ReservedKeyword { Keyword: Keyword.References }:
-                                inlineFkName = namedConstraint.Value;
-                                continue;
-                            case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
-                                inlineKeyName = namedConstraint.Value;
-                                inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
-                                continue;
-                            default:
-                                throw SimulatedSqlException.SyntaxErrorNear(context);
-                        }
-                    case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
-                        inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.Check }:
-                        pendingChecks.Add((null, ParseInlineCheckPredicate(context), columnName.Value));
-                        continue;
-                    case ReservedKeyword { Keyword: Keyword.References } referencesKw when isTableVariable || isTableType:
-                        throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
-                    case ReservedKeyword { Keyword: Keyword.References }:
-                        ParseInlineForeignKeyTail(context, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
-                        inlineFkName = null;
-                        continue;
-                }
-                break;
-            }
-
-            if (inlineKeyKind == KeyConstraintKind.PrimaryKey)
-            {
-                if (nullable == true)
-                    throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
-                nullable = false;
-            }
-
-            var actualNullable = nullable ?? (identity is null);
-            var (resolvedType, maxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, heapColumns.Count + 1, columnName.Value);
-
-            if (inlineKeyKind is KeyConstraintKind kind)
-                pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count]));
-
-            if (identity is not null)
-            {
-                if (++identityCount > 1)
-                    throw SimulatedSqlException.MultipleIdentityColumns(tableName);
-                if (actualNullable)
-                    throw SimulatedSqlException.IdentityOnNullableColumn(columnName.Value, tableName);
-                if (resolvedType != SqlType.Int32 && resolvedType != SqlType.BigInt && resolvedType != SqlType.SmallInt && resolvedType != SqlType.TinyInt)
-                    throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
-            }
-
-            if (resolvedType == SqlType.RowVersion)
-            {
-                // SQL Server allows at most one rowversion / timestamp column per
-                // table; the second declaration raises Msg 2738. Implicit NOT NULL
-                // (no nullable form is reachable through the type itself).
-                for (var i = 0; i < heapColumns.Count; i++)
-                {
-                    if (heapColumns[i] is { } existing && existing.Type == SqlType.RowVersion)
-                        throw SimulatedSqlException.MultipleTimestampColumns(tableName, columnName.Value);
-                }
-                actualNullable = false;
-            }
-
-            var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden);
-            if (defaultExpression is not null)
-            {
-                // Inline DEFAULT (with or without an explicit CONSTRAINT name)
-                // surfaces in sys.default_constraints — auto-name when no
-                // CONSTRAINT name was given. Real SQL Server's inline-DEFAULT
-                // names look like DF__<table8>__<col>__<8hex>.
-                newColumn.DefaultConstraint = new DefaultConstraint(
-                    AutoDefaultName(tableName, columnName.Value),
-                    defaultExpression,
-                    context.CurrentDatabase.AllocateObjectId(),
-                    isSystemNamed: true,
-                    definition: null);
-            }
-            heapColumns.Add(newColumn);
-            explicitNull.Add(nullable == true);
+            ParseOneColumnIntoLists(context, tableName, isTableVariable, isTableType, heapColumns, explicitNull, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, ref identityCount);
         } while (context.Token is Operator { Character: ',' });
 
         // Table-level PK promotion: probe-confirmed against SQL Server 2025
@@ -709,6 +510,235 @@ partial class Simulation
         }
 
         return context.Token is Operator { Character: ')' };
+    }
+
+    /// <summary>
+    /// Parses a single column definition starting at the column-name token
+    /// and appends a <see cref="HeapColumn"/> entry to <paramref name="heapColumns"/>
+    /// (or a <c>null</c> placeholder when the column is a non-persisted
+    /// computed column awaiting resolution). Shared between
+    /// <see cref="ParseColumnList"/> (CREATE TABLE / DECLARE @t TABLE /
+    /// CREATE TYPE) and the ALTER-TABLE-ADD-COLUMN parser; the inline
+    /// table-level constraint forks and the PERIOD form remain in the
+    /// caller because ADD COLUMN doesn't admit them.
+    /// </summary>
+    internal static void ParseOneColumnIntoLists(
+        ParserContext context,
+        string tableName,
+        bool isTableVariable,
+        bool isTableType,
+        List<HeapColumn?> heapColumns,
+        List<bool> explicitNull,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
+        List<(string StartCol, string EndCol)>? pendingPeriod,
+        List<PendingForeignKey>? pendingForeignKeys,
+        ref int identityCount)
+    {
+        if (context.Token is not Name columnName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+        {
+            context.MoveNextRequired();
+            var computed = Expression.Parse(context);
+            var (persisted, computedNullable) = ParseComputedSuffix(context);
+            pendingComputed.Add((heapColumns.Count, columnName.Value, computed, persisted, computedNullable));
+            heapColumns.Add(null);
+            explicitNull.Add(false);
+            return;
+        }
+
+        if (context.Token is not Name typeName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        int? declaredMaxLength = null;
+        int? declaredScale = null;
+        if (context.Token is Operator { Character: '(' })
+        {
+            var lengthToken = context.GetNextRequired();
+            declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
+                ? numericValue.AsInt32
+                : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
+                    ? SqlType.MaxLengthSentinel
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            switch (context.GetNextRequired())
+            {
+                case Operator { Character: ',' }:
+                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    declaredScale = scaleValue.AsInt32;
+                    if (context.GetNextRequired() is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case Operator { Character: ')' }:
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+
+            // Optional advance: CREATE TABLE always has a `)` or constraint
+            // after the length, but ALTER TABLE ADD COLUMN may end the
+            // statement here.
+            context.MoveNextOptional();
+        }
+
+        // Loop over the column-constraint clauses (IDENTITY, NULL/NOT NULL,
+        // DEFAULT, PRIMARY KEY/UNIQUE/CHECK, optional CONSTRAINT-named
+        // forms) in any order. Each branch leaves Token at the first
+        // un-consumed token; the loop exits when that token isn't a
+        // recognized constraint keyword (typically the comma separating
+        // columns or the column-list's closing paren). REFERENCES inside
+        // a table-variable column raises Msg 102 explicitly (real SQL
+        // Server's grammar disallows FKs there); CONSTRAINT-named likewise.
+        IdentityState? identity = null;
+        bool? nullable = null;
+        Expression? defaultExpression = null;
+        var generatedAs = GeneratedAlwaysAsRow.None;
+        var isHidden = false;
+        var inlineKeyKind = (KeyConstraintKind?)null;
+        string? inlineKeyName = null;
+        string? inlineFkName = null;
+        while (true)
+        {
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Identity } when identity is null:
+                    identity = ParseIdentitySpec(context, columnName.Value);
+                    continue;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
+                    if (isTableVariable || isTableType || pendingPeriod is null)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Always })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    generatedAs = context.GetNextRequired() switch
+                    {
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Start } => GeneratedAlwaysAsRow.Start,
+                        ReservedKeyword { Keyword: Keyword.End } => GeneratedAlwaysAsRow.End,
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    };
+                    context.MoveNextRequired();
+                    if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Hidden })
+                    {
+                        isHidden = true;
+                        context.MoveNextRequired();
+                    }
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Not } when !nullable.HasValue:
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    nullable = false;
+                    context.MoveNextOptional();
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
+                    nullable = true;
+                    context.MoveNextOptional();
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
+                    context.MoveNextRequired();
+                    context.InDefaultClause = true;
+                    try { defaultExpression = Expression.Parse(context); }
+                    finally { context.InDefaultClause = false; }
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null && inlineFkName is null:
+                    if (isTableType)
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
+                    if (isTableVariable)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not Name namedConstraint)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                    switch (context.Token)
+                    {
+                        case ReservedKeyword { Keyword: Keyword.Check }:
+                            pendingChecks.Add((namedConstraint.Value, ParseInlineCheckPredicate(context), columnName.Value));
+                            continue;
+                        case ReservedKeyword { Keyword: Keyword.References }:
+                            inlineFkName = namedConstraint.Value;
+                            continue;
+                        case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
+                            inlineKeyName = namedConstraint.Value;
+                            inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                            continue;
+                        default:
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
+                    inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Check }:
+                    pendingChecks.Add((null, ParseInlineCheckPredicate(context), columnName.Value));
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.References } referencesKw when isTableVariable || isTableType:
+                    throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
+                case ReservedKeyword { Keyword: Keyword.References }:
+                    ParseInlineForeignKeyTail(context, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
+                    inlineFkName = null;
+                    continue;
+            }
+            break;
+        }
+
+        if (inlineKeyKind == KeyConstraintKind.PrimaryKey)
+        {
+            if (nullable == true)
+                throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
+            nullable = false;
+        }
+
+        var actualNullable = nullable ?? (identity is null);
+        var (resolvedType, maxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, heapColumns.Count + 1, columnName.Value);
+
+        if (inlineKeyKind is KeyConstraintKind kind)
+            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count]));
+
+        if (identity is not null)
+        {
+            if (++identityCount > 1)
+                throw SimulatedSqlException.MultipleIdentityColumns(tableName);
+            if (actualNullable)
+                throw SimulatedSqlException.IdentityOnNullableColumn(columnName.Value, tableName);
+            if (resolvedType != SqlType.Int32 && resolvedType != SqlType.BigInt && resolvedType != SqlType.SmallInt && resolvedType != SqlType.TinyInt)
+                throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
+        }
+
+        if (resolvedType == SqlType.RowVersion)
+        {
+            // SQL Server allows at most one rowversion / timestamp column per
+            // table; the second declaration raises Msg 2738. Implicit NOT NULL
+            // (no nullable form is reachable through the type itself).
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { } existing && existing.Type == SqlType.RowVersion)
+                    throw SimulatedSqlException.MultipleTimestampColumns(tableName, columnName.Value);
+            }
+            actualNullable = false;
+        }
+
+        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden);
+        if (defaultExpression is not null)
+        {
+            // Inline DEFAULT (with or without an explicit CONSTRAINT name)
+            // surfaces in sys.default_constraints — auto-name when no
+            // CONSTRAINT name was given. Real SQL Server's inline-DEFAULT
+            // names look like DF__<table8>__<col>__<8hex>.
+            newColumn.DefaultConstraint = new DefaultConstraint(
+                AutoDefaultName(tableName, columnName.Value),
+                defaultExpression,
+                context.CurrentDatabase.AllocateObjectId(),
+                isSystemNamed: true,
+                definition: null);
+        }
+        heapColumns.Add(newColumn);
+        explicitNull.Add(nullable == true);
     }
 
     /// <summary>
@@ -768,7 +798,7 @@ partial class Simulation
             increment = EvaluateLiteralBigInt(Expression.Parse(context), context.Batch);
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
+            context.MoveNextOptional();
         }
         return increment == 0
             ? throw SimulatedSqlException.IdentityInvalidIncrement(columnName)
@@ -795,7 +825,10 @@ partial class Simulation
         var predicate = BooleanExpression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        // Optional advance: CREATE TABLE always has a `)` or constraint after
+        // a CHECK predicate; ALTER TABLE ADD COLUMN's inline CHECK may end
+        // the statement.
+        context.MoveNextOptional();
         return predicate;
     }
 

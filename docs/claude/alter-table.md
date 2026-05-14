@@ -1,6 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships four modeled shapes: `SET (SYSTEM_VERSIONING = OFF)` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, and `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling). ADD / DROP COLUMN, ALTER COLUMN, REBUILD, SWITCH PARTITION, and the SET-versioning-on direction raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-13.
+`ALTER TABLE` ships six modeled shapes: `SET (SYSTEM_VERSIONING = OFF)` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), and `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection). ALTER COLUMN, REBUILD, SWITCH PARTITION, and the SET-versioning-on direction raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-14.
 
 ## Grammar
 
@@ -159,3 +159,90 @@ Three new views ship with this bundle:
 ## EF Core integration
 
 EF Migrations emit FK adds via `ALTER TABLE` heavily (separate from `CREATE TABLE`). The simulator accepts that emit shape, but no EFCore-specific test ships in this bundle — once the FK is in place (whether declared inline at CREATE TABLE or added via ALTER), EF Core sees the same database state either way, so the `EFCoreForeignKey` test already covers the LINQ surface. The simulator-side `AlterTableConstraintTests` covers the parser / validation / catalog surface for ALTER directly.
+
+## Column ops
+
+`ALTER TABLE … ADD [COLUMN] col TYPE [, …]` and `ALTER TABLE … DROP COLUMN [IF EXISTS] col [, …]` ship as part of the EF Migrations parity workstream. Probe-confirmed against SQL Server 2025 on 2026-05-14.
+
+### Grammar — ADD COLUMN
+
+```sql
+ALTER TABLE [schema.]table ADD [COLUMN] col TYPE [(N | MAX [, scale])]
+    [NULL | NOT NULL]
+    [DEFAULT expr]
+    [IDENTITY [(seed, increment)]]
+    [CONSTRAINT name (CHECK (predicate) | UNIQUE | PRIMARY KEY | REFERENCES parent(cols))]
+    [, col2 TYPE …]
+```
+
+Inline column-level constraints (CHECK / UNIQUE / PRIMARY KEY / REFERENCES, with or without `CONSTRAINT name`) all parse through the shared `ParseOneColumnIntoLists` helper that backs CREATE TABLE. Computed columns via `col AS expr [PERSISTED [NOT NULL]]` are supported and resolve against the combined (existing + new) column view.
+
+The optional `COLUMN` keyword between `ADD` and the column name is accepted (probe-confirmed real SQL Server accepts both shapes); the simulator's grammar recognizes `COLUMN` as a reserved keyword here.
+
+### Backfill semantic
+
+Existing rows are re-encoded against the new schema. Per-column backfill values:
+
+| Column kind | Backfill for existing rows |
+|-------------|----------------------------|
+| Nullable (regardless of DEFAULT) | NULL — DEFAULT only applies to future INSERTs |
+| NOT NULL with DEFAULT | DEFAULT expression evaluated once at ALTER time, snapshotted to every row |
+| NOT NULL IDENTITY | Sequential allocation: seed, seed+increment, seed+2·increment, … in heap-scan order |
+| NOT NULL ROWVERSION / TIMESTAMP | Per-row from the database-scoped rowversion counter |
+| NOT NULL without DEFAULT/IDENTITY/ROWVERSION on non-empty table | Msg 4901 (probe-confirmed) |
+| Computed (non-persisted) | No backfill — evaluated on read |
+
+The DEFAULT-evaluated-once rule is a probe-confirmed SQL Server quirk: `ALTER TABLE t ADD created datetime NOT NULL DEFAULT GETUTCDATE()` produces a single timestamp for every existing row, not a per-row evaluation. The simulator matches.
+
+### Error paths — ADD COLUMN
+
+| Msg | Trigger |
+|-----|---------|
+| **2744** | Adding a second IDENTITY column to a table that already has one (existing-identity count tracked from `HeapTable.IdentityOrdinal`). |
+| **2705** | Duplicate column name — against any existing column or another column in the same multi-column ADD. |
+| **4901** | NOT NULL without DEFAULT / IDENTITY / ROWVERSION on a non-empty table. |
+| **8111** | Existing PrimaryKeyOnNullableColumn for inline `PRIMARY KEY` on an explicit-`NULL` column (inherited from CREATE TABLE shared parser). |
+| **1505** | Inline `UNIQUE` constraint when existing rows have duplicate values — the resolver runs the existing-data validation on the combined column set. |
+| **547** | Inline FK / CHECK rejecting existing rows during the post-mutation enforcement scan. |
+
+### Grammar — DROP COLUMN
+
+```sql
+ALTER TABLE [schema.]table DROP COLUMN [IF EXISTS] col [, col2, …]
+```
+
+Two-pass apply: every name is resolved + dependency-checked before any mutation, so a single Msg 5074 or Msg 4924 leaves the table unchanged.
+
+### Dependency rejection — DROP COLUMN
+
+Probe-confirmed: dropping a column referenced by ANY of the following raises **Msg 5074** with one line per blocker:
+
+- `PRIMARY KEY` / `UNIQUE` constraint (`KeyConstraint` storage ordinals)
+- Outgoing `FOREIGN KEY` (child side — the FK's child column references the to-be-dropped column)
+- Incoming `FOREIGN KEY` (parent side — another table's FK references this column)
+- `CHECK` constraint (inline `InlineColumn` match OR table-level predicate walked structurally for column refs by name)
+- `DEFAULT` constraint attached to the column
+- `INDEX` (`CREATE INDEX`-declared — either KEY column or INCLUDE column)
+
+Each blocker emits its line with the appropriate prefix: `The object 'X' is dependent on column 'col'.` for constraints, `The index 'X' is dependent on column 'col'.` for indexes. Multiple blockers on one column emit one line each.
+
+`IF EXISTS` suppresses Msg 4924 (column doesn't exist) but does NOT suppress Msg 5074 (dependencies block) — matches real SQL Server.
+
+### Storage rewrite
+
+DROP COLUMN walks every surviving `KeyConstraint` / `Index` / `ForeignKey` (outgoing + incoming) and in-place remaps their storage / full ordinals through an `oldStorageToNew[]` / `oldFullToNew[]` map. The mutation patterns:
+
+- `KeyConstraint.StorageOrdinals[i]` — array element reassignment
+- `Index.KeyColumns[i]` — slot replacement with new `IndexKeyColumn(newOrdinal, oldDescending)`
+- `Index.IncludedColumns[i]` — array element reassignment
+- `ForeignKey.ChildColumnOrdinals[i]` — array element reassignment (outgoing)
+- `ForeignKey.ReferencedColumnOrdinals[i]` — array element reassignment (incoming, since this table is the referenced side)
+
+The heap is re-encoded: each row is decoded under the old `StoredColumns` layout, projected through the surviving ordinals, and re-encoded against the new `StoredColumns`. The old `Heap` is replaced wholesale (via the now-mutable `HeapTable.Heap` field).
+
+### Fidelity gaps — Column ops
+
+- **Eager row rewrite vs metadata-only**: Real SQL Server 2012+ optimizes many ADD COLUMN cases (nullable adds, NOT NULL constant-default adds) to metadata-only — no physical row updates. The simulator always rewrites every row. Behavior is identical; performance differs (acceptable for simulator workload sizes).
+- **DROP COLUMN inside transaction**: Real SQL Server makes column-level DDL transactional. The simulator's regular-DDL non-logging pattern (see existing CREATE/DROP TABLE quirk) extends here: ALTER TABLE ADD / DROP COLUMN doesn't participate in the undo log, so a `BEGIN TRAN` / `ROLLBACK` won't undo a column mutation. Matches the existing CREATE/DROP TABLE asymmetry.
+- **Table variable column ops**: `DECLARE @t TABLE` then `ALTER TABLE @t ADD …` raises Msg 102 at parse — real SQL Server's grammar also doesn't allow ALTER on table variables.
+- **Single primary error**: Real SQL Server's Msg 5074 path may pair with a trailing Msg 4922 informational; the simulator emits only the primary Msg 5074.

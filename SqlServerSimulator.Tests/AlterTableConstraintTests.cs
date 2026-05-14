@@ -364,13 +364,4 @@ public sealed class AlterTableConstraintTests
         AreEqual("df_b", sim.ExecuteScalar("select name from sys.default_constraints where parent_column_id = 3"));
     }
 
-    // --- Unmodeled paths ---
-
-    [TestMethod]
-    public void AlterTableAddColumn_RaisesNotSupported()
-    {
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
-        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("alter table t add new_col int"));
-    }
 }

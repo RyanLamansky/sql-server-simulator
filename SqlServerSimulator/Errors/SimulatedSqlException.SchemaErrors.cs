@@ -778,4 +778,56 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ExplicitDropIndexNotAllowed(string qualifiedTableName, string indexName, string constraintKindWord) =>
         new($"An explicit DROP INDEX is not allowed on index '{qualifiedTableName}.{indexName}'. It is being used for {constraintKindWord} constraint enforcement.", 3723, 16, 4);
+
+    /// <summary>
+    /// Mimics SQL Server error 4901: <c>ALTER TABLE ADD col TYPE NOT NULL</c>
+    /// against a non-empty table when the column is neither nullable, has
+    /// a DEFAULT, nor is IDENTITY / TIMESTAMP. Probe-confirmed verbatim
+    /// against SQL Server 2025. Wording is the full canonical paragraph;
+    /// it's one string by design.
+    /// </summary>
+    internal static SimulatedSqlException AddColumnRequiresDefaultOrNullable(string columnName, string tableName) =>
+        new($"ALTER TABLE only allows columns to be added that can contain nulls, or have a DEFAULT definition specified, or the column being added is an identity or timestamp column, or alternatively if none of the previous conditions are satisfied the table must be empty to allow addition of this column. Column '{columnName}' cannot be added to non-empty table '{tableName}' because it does not satisfy these conditions.", 4901, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4924: <c>ALTER TABLE DROP COLUMN</c> named
+    /// a column that doesn't exist on the target table. Probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException DropColumnDoesNotExist(string columnName, string tableName) =>
+        new($"ALTER TABLE DROP COLUMN failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5074: <c>ALTER TABLE DROP COLUMN</c>
+    /// targeted a column referenced by at least one constraint, index, or
+    /// other dependent object. The message body lists every blocker on
+    /// its own line, in the form <c>"The object 'X' is dependent on
+    /// column 'col'.\n[…]
+    /// ALTER TABLE DROP COLUMN col failed because one or more objects
+    /// access this column."</c>. Constraints surface as <c>The object</c>;
+    /// indexes surface as <c>The index</c>. Probe-confirmed verbatim
+    /// against SQL Server 2025; blocker enumeration order matches PK /
+    /// UQ → FK → CHECK → DEFAULT → index in the simulator.
+    /// </summary>
+    internal static SimulatedSqlException DropColumnHasDependenciesMixed(string columnName, IReadOnlyList<(string Name, bool IsIndex)> blockers)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < blockers.Count; i++)
+        {
+            _ = sb.Append(blockers[i].IsIndex ? "The index '" : "The object '");
+            _ = sb.Append(blockers[i].Name);
+            _ = sb.Append("' is dependent on column '");
+            _ = sb.Append(columnName);
+            _ = sb.Append("'.\r\n");
+        }
+        _ = sb.Append("ALTER TABLE DROP COLUMN ").Append(columnName).Append(" failed because one or more objects access this column.");
+        return new(sb.ToString(), 5074, 16, 1);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 2705: <c>ALTER TABLE ADD col</c> named a
+    /// column that already exists on the target table (or a duplicate
+    /// within the same multi-column ADD). Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException ColumnNamesMustBeUnique(string columnName, string qualifiedTableName) =>
+        new($"Column names in each table must be unique. Column name '{columnName}' in table '{qualifiedTableName}' is specified more than once.", 2705, 16, 4);
 }

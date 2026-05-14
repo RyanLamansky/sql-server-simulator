@@ -56,16 +56,20 @@ internal sealed class HeapTable : SchemaObject
     /// Full column set in declaration order, the surface area used for name
     /// binding and SQL-ordinal addressing. Includes non-persisted computed
     /// columns; those have <see cref="StorageOrdinals"/> entry <c>-1</c>.
+    /// Mutated only by <c>ALTER TABLE ADD COLUMN</c> / <c>DROP COLUMN</c>
+    /// (and the storage rewrite invoked from those paths) — every other
+    /// site treats the array as effectively immutable.
     /// </summary>
-    public readonly HeapColumn[] Columns;
+    public HeapColumn[] Columns;
 
     /// <summary>
     /// Subset of <see cref="Columns"/> that participates in row storage —
     /// regular columns plus persisted computed columns. The schema passed
     /// to <see cref="RowEncoder"/> and <see cref="RowDecoder"/>; ordinals
-    /// here index into the encoded row's column slots.
+    /// here index into the encoded row's column slots. Mutated by ALTER
+    /// TABLE column ops alongside <see cref="Columns"/>.
     /// </summary>
-    public readonly HeapColumn[] StoredColumns;
+    public HeapColumn[] StoredColumns;
 
     /// <summary>
     /// Ordinal of the table's identity column, or <c>-1</c> if there isn't
@@ -89,16 +93,17 @@ internal sealed class HeapTable : SchemaObject
     /// <see cref="StoredColumns"/> of <c>Columns[i]</c>, or <c>-1</c> when
     /// <c>Columns[i]</c> is a non-persisted computed column with no row
     /// slot. Identity on regular tables (no computed columns) collapses to
-    /// <c>StorageOrdinals[i] == i</c>.
+    /// <c>StorageOrdinals[i] == i</c>. Mutated by ALTER TABLE column ops.
     /// </summary>
-    public readonly int[] StorageOrdinals;
+    public int[] StorageOrdinals;
 
     /// <summary>
     /// Stored-column types in storage order; the array passed to
     /// <see cref="RowEncoder"/> and <see cref="RowDecoder"/>. Length matches
-    /// <see cref="StoredColumns"/>, not <see cref="Columns"/>.
+    /// <see cref="StoredColumns"/>, not <see cref="Columns"/>. Mutated by
+    /// ALTER TABLE column ops.
     /// </summary>
-    public readonly SqlType[] Schema;
+    public SqlType[] Schema;
 
     /// <summary>
     /// PRIMARY KEY and UNIQUE constraints declared in the CREATE TABLE
@@ -119,8 +124,51 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public readonly List<CheckConstraint> CheckConstraints;
 
-    /// <summary>The page-backed row store. Insert via <see cref="Heap.Insert"/>; iterate via <see cref="Heap.EnumerateRows"/>.</summary>
-    public readonly Heap Heap = new();
+    /// <summary>
+    /// The page-backed row store. Insert via <see cref="Heap.Insert"/>;
+    /// iterate via <see cref="Heap.EnumerateRows"/>. Replaced wholesale by
+    /// ALTER TABLE ADD / DROP COLUMN when existing rows are re-encoded
+    /// against the new schema — every other site reads it as fixed.
+    /// </summary>
+    public Heap Heap = new();
+
+    /// <summary>
+    /// Recomputes <see cref="StoredColumns"/> / <see cref="StorageOrdinals"/>
+    /// / <see cref="Schema"/> from the current <see cref="Columns"/> array.
+    /// Called by ALTER TABLE column-mutation paths after they've assigned
+    /// the new <see cref="Columns"/>; encapsulates the storage-projection
+    /// invariant the constructor also relies on.
+    /// </summary>
+    public void RecomputeStorageProjections()
+    {
+        var storedCount = 0;
+        for (var i = 0; i < this.Columns.Length; i++)
+        {
+            if (this.Columns[i].IsStored)
+                storedCount++;
+        }
+        var storedColumns = new HeapColumn[storedCount];
+        var schema = new SqlType[storedCount];
+        var storageOrdinals = new int[this.Columns.Length];
+        var s = 0;
+        for (var i = 0; i < this.Columns.Length; i++)
+        {
+            if (this.Columns[i].IsStored)
+            {
+                storedColumns[s] = this.Columns[i];
+                schema[s] = this.Columns[i].Type;
+                storageOrdinals[i] = s;
+                s++;
+            }
+            else
+            {
+                storageOrdinals[i] = -1;
+            }
+        }
+        this.StoredColumns = storedColumns;
+        this.Schema = schema;
+        this.StorageOrdinals = storageOrdinals;
+    }
 
     /// <summary>
     /// True for a <c>DECLARE @t TABLE (...)</c>-backed table. Routes a few

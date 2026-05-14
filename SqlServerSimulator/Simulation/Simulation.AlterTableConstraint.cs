@@ -50,10 +50,16 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Foreign } => ParseAddForeignKeyConstraint(context, tableName, explicitName, withNoCheck),
             ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } => ParseAddKeyConstraint(context, tableName, explicitName),
             ReservedKeyword { Keyword: Keyword.Default } => ParseAddDefaultConstraint(context, tableName, explicitName),
-            // ADD COLUMN (the unmodeled sibling) starts with an identifier
-            // token — route there explicitly so callers see the consistent
-            // unmodeled signal rather than the parser's syntax-error path.
-            Name when explicitName is null => throw new NotSupportedException("ALTER TABLE ADD COLUMN isn't modeled — only ADD [CONSTRAINT] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) and DROP CONSTRAINT."),
+            // ADD COLUMN routes to the column-list parser. The grammar is
+            // ambiguous at the leading-token level: any non-constraint
+            // identifier starts a column-name declaration. The leading
+            // explicit-CONSTRAINT-name fork is incompatible with ADD COLUMN
+            // (real SQL Server's grammar doesn't allow naming a column-add
+            // with CONSTRAINT), so explicitName must be null to enter this
+            // branch.
+            Name when explicitName is null => ParseAddColumns(context, tableName),
+            UnquotedString when explicitName is null => ParseAddColumns(context, tableName),
+            ReservedKeyword { Keyword: Keyword.Column } when explicitName is null => ParseAddColumns(context, tableName),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
     }
@@ -523,8 +529,13 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseAlterTableDropConstraint(ParserContext context, MultiPartName tableName)
     {
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Constraint })
-            throw new NotSupportedException("ALTER TABLE supports only DROP CONSTRAINT … among its DROP shapes.");
+        var afterDrop = context.GetNextRequired();
+        // DROP COLUMN routes through the same dispatch. COLUMN is a reserved
+        // keyword in the simulator's grammar.
+        if (afterDrop is ReservedKeyword { Keyword: Keyword.Column })
+            return ParseDropColumns(context, tableName);
+        if (afterDrop is not ReservedKeyword { Keyword: Keyword.Constraint })
+            throw new NotSupportedException("ALTER TABLE supports only DROP CONSTRAINT and DROP COLUMN among its DROP shapes.");
 
         var ifExists = false;
         context.MoveNextRequired();
