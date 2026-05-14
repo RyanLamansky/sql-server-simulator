@@ -49,6 +49,44 @@ internal sealed class BatchContext
     public UndoLog? CurrentTableVarUndoLog;
 
     /// <summary>
+    /// Statement-scoped version-store pending list for auto-commit DML.
+    /// Allocated by <see cref="Simulation.RunMutation"/> at the top of each
+    /// mutating statement when there is no active <see cref="SimulatedDbTransaction"/>
+    /// — entries route to <see cref="SimulatedDbTransaction.PendingVersionEntries"/>
+    /// instead when a tx is active. Drained on statement success via
+    /// <see cref="Storage.VersionStore.FinalizePendingEntries"/> and on
+    /// statement failure via <see cref="Storage.VersionStore.DiscardPendingEntries"/>.
+    /// </summary>
+    public List<Storage.PendingVersionEntry>? CurrentStatementVersionEntries;
+
+    /// <summary>
+    /// Per-statement snapshot Xid used by READ_COMMITTED_SNAPSHOT readers.
+    /// Allocated lazily at the first user-table access inside the
+    /// statement when the current database has
+    /// <see cref="Database.ReadCommittedSnapshot"/> enabled and the
+    /// session iso is <see cref="System.Data.IsolationLevel.ReadCommitted"/>.
+    /// Cleared between statements by the dispatch loop.
+    /// </summary>
+    public long? RcsiStatementSnapshotXid;
+
+    /// <summary>
+    /// Routes a captured version entry to the active transaction's
+    /// <see cref="SimulatedDbTransaction.PendingVersionEntries"/> list if
+    /// any, otherwise to the statement-scoped
+    /// <see cref="CurrentStatementVersionEntries"/>. No-op when no list is
+    /// active (the caller already short-circuited via the
+    /// <see cref="Storage.VersionStore.IsVersioningEnabled"/> guard).
+    /// </summary>
+    internal void AppendPendingVersionEntry(Storage.PendingVersionEntry entry)
+    {
+        var tx = this.Connection.CurrentTransaction;
+        if (tx is not null)
+            tx.PendingVersionEntries.Add(entry);
+        else
+            this.CurrentStatementVersionEntries?.Add(entry);
+    }
+
+    /// <summary>
     /// Per-statement scratch frame, allocated once per batch and overwritten
     /// in place by the dispatch loop at the top of each statement iteration.
     /// See <see cref="StatementContext"/> for the fields it carries.
@@ -435,6 +473,16 @@ internal sealed class BatchContext
         var connection = this.Connection;
         var isolation = connection.SessionIsolationLevel;
 
+        // SNAPSHOT isolation reaching a user table in a database where
+        // ALLOW_SNAPSHOT_ISOLATION is OFF raises Msg 3952. Probe-confirmed
+        // the rejection point is the first user-table access, not the SET
+        // statement and not BeginTransaction. The bypass paths above
+        // (table-variable / local-temp / system table) are the same ones
+        // real SQL Server doesn't apply Msg 3952 to — system catalogs work
+        // fine inside an SI session regardless of the database flag.
+        if (isolation == System.Data.IsolationLevel.Snapshot && !this.CurrentDatabase.AllowSnapshotIsolation)
+            throw SimulatedSqlException.SnapshotIsolationNotAllowed(this.CurrentDatabase.Name);
+
         // Read uncommitted / NOLOCK: skip everything. Dirty-read semantics.
         if (!isWrite && (hints.NoLock || isolation == System.Data.IsolationLevel.ReadUncommitted))
             return DataLockPlan.NoLock;
@@ -592,11 +640,60 @@ internal sealed class BatchContext
     /// </summary>
     public static IEnumerable<byte[]> WrapWithRowConflictChecks(HeapTable table, BatchContext batch, DataLockPlan plan)
     {
+        var snapshotXid = batch.ResolveSnapshotXidForRead(table);
         foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
         {
+            if (snapshotXid is { } sx)
+            {
+                var resolved = Storage.VersionStore.ResolveVisibleVersion(table, (pageIndex, slotIndex), bytes, sx, batch.Connection.CurrentTransaction);
+                if (resolved is null)
+                    continue;
+                yield return resolved;
+                continue;
+            }
             if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
                 yield return bytes;
         }
+    }
+
+    /// <summary>
+    /// Returns the snapshot Xid governing this read, or <c>null</c> when
+    /// the read should use the standard lock-based path (default RC without
+    /// RCSI, RR, SERIALIZABLE, etc). Allocates the per-transaction SI Xid
+    /// lazily on first call; allocates the per-statement RCSI Xid lazily
+    /// on first user-table read inside the statement.
+    /// </summary>
+    internal long? ResolveSnapshotXidForRead(HeapTable table)
+    {
+        if (table.IsTableVariable || IsLocalTempName(table.Name))
+            return null;
+        if (Simulation.SystemHeapTables.ContainsValue(table))
+            return null;
+
+        var connection = this.Connection;
+        var isolation = connection.SessionIsolationLevel;
+        var database = this.CurrentDatabase;
+
+        if (isolation == System.Data.IsolationLevel.Snapshot)
+        {
+            if (connection.CurrentTransaction is { } tx)
+            {
+                tx.SnapshotXid ??= database.CurrentTransactionCommitId;
+                return tx.SnapshotXid;
+            }
+            // Auto-commit SI session — each read gets the latest commit
+            // stamp (effectively current state). Rare path, mostly a
+            // grammar-level use.
+            return database.CurrentTransactionCommitId;
+        }
+
+        if (isolation == System.Data.IsolationLevel.ReadCommitted && database.ReadCommittedSnapshot)
+        {
+            this.RcsiStatementSnapshotXid ??= database.CurrentTransactionCommitId;
+            return this.RcsiStatementSnapshotXid;
+        }
+
+        return null;
     }
 
     /// <summary>

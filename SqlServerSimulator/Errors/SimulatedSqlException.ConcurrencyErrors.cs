@@ -54,4 +54,33 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException IndexHintsOnlyInFromOrOption() =>
         new("Index hints are only allowed in a FROM or OPTION clause.", 1069, 15, 1);
+
+    /// <summary>
+    /// Msg 3952 — raised when a session whose
+    /// <see cref="SimulatedDbConnection.SessionIsolationLevel"/> is
+    /// <see cref="System.Data.IsolationLevel.Snapshot"/> accesses a user
+    /// table in a database where
+    /// <see cref="Database.AllowSnapshotIsolation"/> is <c>false</c>.
+    /// Probe-confirmed verbatim wording (Cls 16, State 1) against SQL Server
+    /// 2025: fires at first user-table access, not at <c>SET TRANSACTION
+    /// ISOLATION LEVEL SNAPSHOT</c> and not at <c>BeginTransaction(Snapshot)</c>.
+    /// System-catalog reads (<c>sys.tables</c>, <c>sys.objects</c>) and
+    /// statements that never touch a user table both succeed silently
+    /// regardless of the ASI flag.
+    /// </summary>
+    internal static SimulatedSqlException SnapshotIsolationNotAllowed(string databaseName) =>
+        new($"Snapshot isolation transaction failed accessing database '{databaseName}' because snapshot isolation is not allowed in this database. Use ALTER DATABASE to allow snapshot isolation.", 3952, 16, 1);
+
+    /// <summary>
+    /// Msg 3960 — raised when a SNAPSHOT-isolation transaction attempts to
+    /// write a row whose live version was committed by a different
+    /// transaction after this transaction's snapshot was taken. Probe-
+    /// confirmed verbatim wording (Cls 16, State 2) against SQL Server 2025
+    /// — the message embeds the offending table's two-part name and the
+    /// containing database. The probed real server auto-rolls back the
+    /// failing SI transaction (<c>@@TRANCOUNT</c> drops to 0); the simulator
+    /// matches that auto-rollback behavior.
+    /// </summary>
+    internal static SimulatedSqlException SnapshotIsolationUpdateConflict(string qualifiedTableName, string databaseName) =>
+        new($"Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '{qualifiedTableName}' directly or indirectly in database '{databaseName}' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.", 3960, 16, 2);
 }

@@ -309,7 +309,20 @@ sealed class SimulatedDbConnection : DbConnection
     {
         if (this.CurrentTransaction is not null)
             throw new InvalidOperationException("SqlConnection does not support parallel transactions.");
-        var tx = new SimulatedDbTransaction(this.Simulation, this, isolationLevel);
+        // Explicit iso level on BeginTransaction overrides the session-wide
+        // default for the duration of this transaction; restored on
+        // Commit/Rollback/Dispose. Unspecified keeps the existing session
+        // value. Matches SqlClient's "the transaction inherits the session
+        // iso unless an override is specified at BeginTransaction time"
+        // behavior.
+        var previousIsolation = this.SessionIsolationLevel;
+        if (isolationLevel != IsolationLevel.Unspecified)
+            this.SessionIsolationLevel = isolationLevel;
+        var tx = new SimulatedDbTransaction(this.Simulation, this, isolationLevel)
+        {
+            PreviousSessionIsolationLevel = previousIsolation,
+            OverrodeSessionIsolation = isolationLevel != IsolationLevel.Unspecified,
+        };
         this.CurrentTransaction = tx;
         return tx;
     }

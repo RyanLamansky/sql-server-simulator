@@ -59,9 +59,17 @@ partial class Simulation
             return false;
 
         context.MoveNextRequired();
-        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level })
-            return false;
+        return context.Token switch
+        {
+            UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level } => TryParseAlterDatabaseSetCompatibilityLevel(context),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetSnapshotFlag(context, isRcsi: false),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetSnapshotFlag(context, isRcsi: true),
+            _ => false,
+        };
+    }
 
+    private static bool TryParseAlterDatabaseSetCompatibilityLevel(ParserContext context)
+    {
         if (context.GetNextRequired() is not Operator { Character: '=' })
             return false;
 
@@ -75,6 +83,30 @@ partial class Simulation
             throw SimulatedSqlException.InvalidCompatibilityLevel();
 
         context.CurrentDatabase.CompatibilityLevel = (CompatibilityLevel)requested;
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER DATABASE name SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT) { ON | OFF }</c>.
+    /// The probed real-server gates ALLOW_SNAPSHOT_ISOLATION ON behind a
+    /// brief stabilization wait and READ_COMMITTED_SNAPSHOT ON behind a
+    /// single-connection requirement; the simulator skips both — the flip
+    /// takes effect immediately. <c>WITH (NO_WAIT | ROLLBACK IMMEDIATE | ROLLBACK AFTER n)</c>
+    /// termination options are rejected by real SQL Server on versioning
+    /// state changes (Msg 5083); the simulator falls through and raises
+    /// <see cref="NotSupportedException"/> on the unexpected trailer.
+    /// </summary>
+    private static bool TryParseAlterDatabaseSetSnapshotFlag(ParserContext context, bool isRcsi)
+    {
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
+            return false;
+        if (context.Batch.IsSkipping)
+            return true;
+        var value = on == Keyword.On;
+        if (isRcsi)
+            context.CurrentDatabase.ReadCommittedSnapshot = value;
+        else
+            context.CurrentDatabase.AllowSnapshotIsolation = value;
         return true;
     }
 

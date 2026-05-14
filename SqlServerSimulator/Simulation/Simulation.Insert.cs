@@ -429,7 +429,10 @@ partial class Simulation
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
                     var (pageIndex, slotIndex) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
                     if (IsLockableTable(destinationTable))
+                    {
                         context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive);
+                        Storage.VersionStore.CaptureWrite(context.Batch, destinationTable, (pageIndex, slotIndex), oldRid: null, oldPayload: null, Storage.VersionWriteKind.Insert);
+                    }
                 }
 
                 if (output is { } o)

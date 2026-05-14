@@ -288,5 +288,83 @@ internal sealed class HeapTable : SchemaObject
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();
 
+    /// <summary>
+    /// Per-row version chains used by SNAPSHOT and READ_COMMITTED_SNAPSHOT
+    /// readers. Each entry maps a slot's <c>(PageIndex, SlotIndex)</c> tuple
+    /// to a <see cref="RowVersionChain"/> that records the slot's commit
+    /// timeline (live-row Xmin + history of superseded payloads, oldest
+    /// first walked newest-first by visibility logic). Populated lazily on
+    /// the first INSERT / UPDATE / DELETE the slot participates in; pre-
+    /// existing rows that have never been touched have no entry and are
+    /// implicitly committed at Xmin = 0 (visible to every snapshot). Skipped
+    /// for table variables / local temp tables / system tables — same set
+    /// that bypasses <see cref="RowLocks"/>. Concurrent dict for the same
+    /// reason: visibility lookups must run without the lock-manager gate so
+    /// SNAPSHOT readers don't serialize behind writers.
+    /// </summary>
+    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
+
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
+}
+
+/// <summary>
+/// Tracks the commit timeline for a single heap slot. The live heap row
+/// represents the most-recent version (or the in-flight writer's
+/// pre-commit version when <see cref="WriterTx"/> is non-null);
+/// <see cref="Head"/> chains older committed payloads newest-first.
+/// Readers under SNAPSHOT / READ_COMMITTED_SNAPSHOT walk this structure
+/// to find the version visible at their snapshot timestamp.
+/// </summary>
+internal sealed class RowVersionChain
+{
+    /// <summary>
+    /// Commit Xid that made the live heap row current. Zero for rows
+    /// that pre-date the simulator's first version-aware operation
+    /// (implicitly committed at Xid 0, visible to every snapshot).
+    /// Updated atomically alongside <see cref="WriterTx"/> = null at
+    /// the writer's commit-time finalization step.
+    /// </summary>
+    internal long LiveXmin;
+
+    /// <summary>
+    /// Non-null while a transaction is currently writing to this slot —
+    /// the live heap payload reflects the writer's pre-commit value and
+    /// must not be returned to SI / RCSI readers. Cleared on writer
+    /// commit (with <see cref="LiveXmin"/> bumped to the new commit
+    /// stamp) or rollback (with <see cref="LiveXmin"/> left at its
+    /// pre-tx value — the undo log restores the heap row).
+    /// </summary>
+    internal SimulatedDbTransaction? WriterTx;
+
+    /// <summary>
+    /// True after a committed DELETE tombstones the live heap slot. SI /
+    /// RCSI readers with snapshot &lt; <see cref="LiveXmin"/> still see
+    /// the historical pre-delete version through <see cref="Head"/>;
+    /// readers with snapshot &gt;= <see cref="LiveXmin"/> see the row as
+    /// deleted. Pre-existing tombstoned slots (deleted before version
+    /// tracking existed) have no chain entry at all.
+    /// </summary>
+    internal bool IsDeletedLive;
+
+    /// <summary>
+    /// Head of the history linked list — newest historical version
+    /// first. Each entry's <c>Xmax</c> equals the commit stamp of the
+    /// transaction that superseded it; the SI visibility predicate
+    /// (<c>Xmin &lt;= SX &lt; Xmax</c>) selects the appropriate entry.
+    /// </summary>
+    internal HistoricalVersion? Head;
+}
+
+/// <summary>
+/// One older committed version of a heap row. Linked list node;
+/// <see cref="RowVersionChain.Head"/> points to the newest entry and the
+/// list walks newest-first via <see cref="Next"/>. Once attached to a
+/// chain, an entry is immutable.
+/// </summary>
+internal sealed class HistoricalVersion
+{
+    internal byte[] Payload = [];
+    internal long Xmin;
+    internal long Xmax;
+    internal HistoricalVersion? Next;
 }

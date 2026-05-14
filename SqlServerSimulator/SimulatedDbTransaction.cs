@@ -89,6 +89,49 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     protected override DbConnection DbConnection => this.connection;
 
     /// <summary>
+    /// The session's <see cref="SimulatedDbConnection.SessionIsolationLevel"/>
+    /// value captured before this transaction overrode it (when the
+    /// caller passed an explicit non-<see cref="IsolationLevel.Unspecified"/>
+    /// level to <c>BeginTransaction</c>). Restored on
+    /// <see cref="Commit"/> / <see cref="Rollback"/> / dispose so the
+    /// session-wide setting survives the transaction's lifetime.
+    /// </summary>
+    internal IsolationLevel PreviousSessionIsolationLevel;
+
+    /// <summary>
+    /// Whether <see cref="SimulatedDbConnection"/>'s BeginDbTransaction
+    /// actually overrode the session iso (true) or left it untouched
+    /// (false — caller passed <see cref="IsolationLevel.Unspecified"/>).
+    /// Drives the restore step on <see cref="Commit"/> / <see cref="Rollback"/>
+    /// / dispose.
+    /// </summary>
+    internal bool OverrodeSessionIsolation;
+
+    /// <summary>
+    /// Stable per-transaction snapshot timestamp used by SNAPSHOT-isolation
+    /// readers. Allocated lazily at the first user-table access inside the
+    /// transaction (via <see cref="Database.CurrentTransactionCommitId"/>),
+    /// immutable for the transaction's lifetime, and consulted by every
+    /// subsequent SI read to walk the row's version chain. Null while the
+    /// transaction has not yet read any user table; null for transactions
+    /// whose iso is not SNAPSHOT.
+    /// </summary>
+    internal long? SnapshotXid;
+
+    /// <summary>
+    /// Pending version-store entries captured by INSERT / UPDATE / DELETE
+    /// during this transaction. <see cref="Commit"/> hands the list to
+    /// <see cref="VersionStore.FinalizePendingEntries"/> which
+    /// stamps each entry with the commit Xid and propagates payloads into
+    /// the per-table <see cref="HeapTable.RowVersions"/>;
+    /// <see cref="Rollback"/> hands the list to
+    /// <see cref="VersionStore.DiscardPendingEntries"/> which clears
+    /// the in-flight writer marks without touching the heap (the undo log
+    /// has already restored it).
+    /// </summary>
+    internal readonly List<PendingVersionEntry> PendingVersionEntries = [];
+
+    /// <summary>
     /// True once <see cref="Commit"/> or <see cref="Rollback"/> has run.
     /// Subsequent calls are no-ops; <see cref="Dispose"/> uses this to skip
     /// the implicit rollback that fires for a transaction left "open" at
@@ -103,8 +146,10 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         this.TranCount--;
         if (this.TranCount > 0)
             return;
+        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, this.connection.CurrentDatabase);
         this.UndoLog.Clear();
         ReleaseAllLocks();
+        RestoreSessionIsolation();
         this.connection.CurrentTransaction = null;
         this.finished = true;
     }
@@ -113,9 +158,11 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     {
         if (this.finished)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+        Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
         this.UndoLog.Rollback();
         this.TranCount = 0;
         ReleaseAllLocks();
+        RestoreSessionIsolation();
         this.connection.CurrentTransaction = null;
         this.finished = true;
     }
@@ -130,12 +177,20 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     {
         if (disposing && !this.finished)
         {
+            Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
             this.UndoLog.Rollback();
             ReleaseAllLocks();
+            RestoreSessionIsolation();
             this.connection.CurrentTransaction = null;
             this.finished = true;
         }
         base.Dispose(disposing);
+    }
+
+    private void RestoreSessionIsolation()
+    {
+        if (this.OverrodeSessionIsolation)
+            this.connection.SessionIsolationLevel = this.PreviousSessionIsolationLevel;
     }
 
     /// <summary>

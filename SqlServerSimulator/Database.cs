@@ -96,6 +96,52 @@ internal sealed class Database
     /// </summary>
     public long AllocateRowVersion() => Interlocked.Increment(ref this.rowVersionCounter);
 
+    private long transactionCommitCounter;
+
+    /// <summary>
+    /// Allocates the next transaction commit id used by SNAPSHOT and
+    /// READ_COMMITTED_SNAPSHOT visibility. Monotonic, database-scoped,
+    /// never reused. Each committing transaction reads one stamp; readers
+    /// under SI or RCSI compare against this stamp to decide which version
+    /// of a row to return. The counter starts at zero so the implicit
+    /// "Xmin = 0" for rows that pre-date the first SI/RCSI read is always
+    /// visible to any snapshot.
+    /// </summary>
+    public long AllocateTransactionCommitId() => Interlocked.Increment(ref this.transactionCommitCounter);
+
+    /// <summary>
+    /// Reads the current value of the commit-id counter without advancing
+    /// it. Used to stamp a snapshot at first read under SNAPSHOT isolation
+    /// and at each statement start under READ_COMMITTED_SNAPSHOT. Returning
+    /// the latest committed stamp guarantees readers see every transaction
+    /// that committed before the snapshot was taken.
+    /// </summary>
+    public long CurrentTransactionCommitId => Interlocked.Read(ref this.transactionCommitCounter);
+
+    /// <summary>
+    /// <c>ALLOW_SNAPSHOT_ISOLATION</c> per-database setting. Default <c>false</c>;
+    /// flipped by <c>ALTER DATABASE … SET ALLOW_SNAPSHOT_ISOLATION { ON | OFF }</c>.
+    /// When <c>false</c>, any user-table access by a session whose
+    /// <see cref="SimulatedDbConnection.SessionIsolationLevel"/> is
+    /// <see cref="System.Data.IsolationLevel.Snapshot"/> raises Msg 3952.
+    /// Independent of <see cref="ReadCommittedSnapshot"/> — both can be on or
+    /// off in any combination.
+    /// </summary>
+    public bool AllowSnapshotIsolation;
+
+    /// <summary>
+    /// <c>READ_COMMITTED_SNAPSHOT</c> per-database setting. Default
+    /// <c>false</c>; flipped by <c>ALTER DATABASE … SET
+    /// READ_COMMITTED_SNAPSHOT { ON | OFF }</c>. When <c>true</c>, sessions
+    /// at the default <see cref="System.Data.IsolationLevel.ReadCommitted"/>
+    /// take a per-statement snapshot instead of acquiring row-S locks for
+    /// reads. Writers under RCSI behave identically to vanilla RC (row-X
+    /// tx-scoped). The probed real-server requirement that all other
+    /// connections close before the flip is relaxed in the simulator — the
+    /// flip takes effect immediately.
+    /// </summary>
+    public bool ReadCommittedSnapshot;
+
     private int nextObjectId = 100;
 
     /// <summary>

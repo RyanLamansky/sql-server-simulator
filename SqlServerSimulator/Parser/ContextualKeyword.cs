@@ -23,6 +23,7 @@ enum ContextualKeyword
     _,              // Classified: not a contextual keyword.
     Action,
     After,
+    Allow_Snapshot_Isolation,
     Always,
     Apply,
     At,
@@ -67,6 +68,7 @@ enum ContextualKeyword
     Persisted,
     Preceding,
     Range,
+    Read_Committed_Snapshot,
     ReadOnly,
     Recompile,
     Replication,

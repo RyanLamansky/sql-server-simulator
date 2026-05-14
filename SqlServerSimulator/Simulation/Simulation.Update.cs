@@ -377,6 +377,16 @@ partial class Simulation
         if (affected.Count == 0)
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, []);
 
+        // SNAPSHOT isolation write-conflict: each affected row must have
+        // a live version no newer than my snapshot, otherwise Msg 3960
+        // fires and the SI tx auto-rolls-back. Probe-confirmed against
+        // SQL Server 2025.
+        if (context.Batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot)
+        {
+            foreach (var (pageIndex, slotIndex, _, _) in affected)
+                Storage.VersionStore.CheckSnapshotUpdateConflict(context.Batch, table, (pageIndex, slotIndex));
+        }
+
         if (insteadOfActive)
         {
             FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
@@ -406,17 +416,36 @@ partial class Simulation
         if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
             WriteHistoryRowsForUpdate(table, historyTable, pc, affected, context, undoLog);
         var lockableTable = IsLockableTable(table);
+        // Capture pre-delete payloads in parallel with the affected list so
+        // the version-store CaptureWrite call after re-Insert can pair
+        // each new Rid with its pre-update bytes.
+        var oldBytesPerAffected = Storage.VersionStore.IsVersioningEnabled(context.CurrentDatabase) && lockableTable
+            ? new byte[affected.Count][]
+            : null;
+        if (oldBytesPerAffected is not null)
+        {
+            for (var i = 0; i < affected.Count; i++)
+            {
+                var (pageIndex, slotIndex, _, _) = affected[i];
+                oldBytesPerAffected[i] = table.Heap.ReadSlotBytes(pageIndex, slotIndex) ?? [];
+            }
+        }
         foreach (var (pageIndex, slotIndex, _, _) in affected)
         {
             if (lockableTable)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
         }
-        foreach (var (_, _, fullNew, _) in affected)
+        for (var i = 0; i < affected.Count; i++)
         {
+            var (oldPage, oldSlot, fullNew, _) = affected[i];
             var (newPageIndex, newSlotIndex) = table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
             if (lockableTable)
+            {
                 context.Batch.AcquireRowLockTxScoped(table, newPageIndex, newSlotIndex, LockMode.Exclusive);
+                if (oldBytesPerAffected is not null)
+                    Storage.VersionStore.CaptureWrite(context.Batch, table, (newPageIndex, newSlotIndex), (oldPage, oldSlot), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
+            }
         }
 
         // Incoming-FK cascade: if any of the updated rows participate in a

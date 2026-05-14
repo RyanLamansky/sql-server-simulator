@@ -263,6 +263,14 @@ partial class Simulation
         var insteadOfParent = (SchemaObject?)sourceView ?? table;
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
 
+        // SNAPSHOT isolation write-conflict: a DELETE on a row modified
+        // since this SI tx's snapshot raises Msg 3960 and auto-rolls-back.
+        if (context.Batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot)
+        {
+            foreach (var (pageIndex, slotIndex, _) in deleted)
+                Storage.VersionStore.CheckSnapshotUpdateConflict(context.Batch, table, (pageIndex, slotIndex));
+        }
+
         if (insteadOfActive)
         {
             FireInsteadOfDeleteTrigger(context, table, sourceView, deleted);
@@ -291,11 +299,15 @@ partial class Simulation
             }
         }
         var lockableTable = IsLockableTable(table);
+        var captureVersions = Storage.VersionStore.IsVersioningEnabled(context.CurrentDatabase) && lockableTable;
         foreach (var (pageIndex, slotIndex, _) in deleted)
         {
             if (lockableTable)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+            var oldBytes = captureVersions ? table.Heap.ReadSlotBytes(pageIndex, slotIndex) : null;
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
+            if (oldBytes is not null)
+                Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, Storage.VersionWriteKind.Delete);
         }
 
         // Incoming-FK cascade: parent-side DELETE fires the matching FK's

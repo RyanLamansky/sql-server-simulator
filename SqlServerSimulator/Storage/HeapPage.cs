@@ -176,6 +176,24 @@ internal sealed class HeapPage
         BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue & ~SlotTombstoneBit));
     }
 
+    /// <summary>
+    /// Returns a fresh copy of the row bytes at <paramref name="slotIndex"/>,
+    /// ignoring the tombstone bit (so callers reading a deleted slot get
+    /// the still-resident payload — useful for the version store's
+    /// post-DELETE history capture). Returns null when the slot is past
+    /// <see cref="SlotCount"/>.
+    /// </summary>
+    public byte[]? ReadSlotBytes(int slotIndex)
+    {
+        if (slotIndex < 0 || slotIndex >= this.SlotCount)
+            return null;
+        var rowStart = this.ReadSlotOffset(slotIndex);
+        var rowEnd = slotIndex + 1 < this.SlotCount
+            ? this.ReadSlotOffset(slotIndex + 1)
+            : this.FreeSpacePointer;
+        return this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray();
+    }
+
     private bool IsSlotDeleted(int slotIndex) =>
         (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotTombstoneBit) != 0;
 

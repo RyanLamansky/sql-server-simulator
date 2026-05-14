@@ -123,6 +123,17 @@ internal sealed class Heap
         this.Pages[pageIndex].DeleteSlot(slotIndex);
     }
 
+    /// <summary>
+    /// Returns a fresh copy of the row bytes at the given Rid (whether the
+    /// slot is currently tombstoned or not). Used by the version store to
+    /// snapshot the pre-mutation payload before <see cref="DeleteAt"/> /
+    /// in-place rewrites.
+    /// </summary>
+    public byte[]? ReadSlotBytes(int pageIndex, int slotIndex) =>
+        pageIndex >= 0 && pageIndex < this.Pages.Count
+            ? this.Pages[pageIndex].ReadSlotBytes(slotIndex)
+            : null;
+
     /// <summary>Total row count across all pages.</summary>
     public int RowCount
     {

@@ -393,6 +393,10 @@ public sealed partial class Simulation
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.SuppressErrorReset = false;
+        // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
+        // clearing here ensures the next statement allocates a new Xid on its
+        // first user-table read.
+        batch.RcsiStatementSnapshotXid = null;
         // Per-statement stamp bump — establishes a fresh "row" context for
         // NEXT VALUE FOR caching at the statement boundary. Multi-row DML
         // and SELECT iterators bump again per-row, but one-shot statements
@@ -938,7 +942,8 @@ public sealed partial class Simulation
 
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
-        var log = context.Connection.CurrentTransaction?.UndoLog ?? new UndoLog();
+        var tx = context.Connection.CurrentTransaction;
+        var log = tx?.UndoLog ?? new UndoLog();
         var marker = log.Position;
         // Table variables get a parallel per-statement undo log so multi-row
         // mutations roll back atomically on mid-statement failure (probe-
@@ -947,17 +952,40 @@ public sealed partial class Simulation
         // ROLLBACK TRAN never sees these entries — matches the non-
         // transactional invariant.
         var tableVarLog = new UndoLog();
+        // Auto-commit statements get a statement-scoped pending-version
+        // list; explicit transactions route entries onto the tx's
+        // accumulating list (finalized at COMMIT, discarded at ROLLBACK).
+        // The marker captures the tx-list size on entry so a statement-
+        // atomic mid-execution failure can discard only the entries this
+        // statement added.
+        var versionEntriesMarker = tx?.PendingVersionEntries.Count ?? 0;
+        var statementVersionEntries = tx is null ? new List<Storage.PendingVersionEntry>() : null;
 
         var savedLog = context.Batch.CurrentUndoLog;
         var savedTableVarLog = context.Batch.CurrentTableVarUndoLog;
+        var savedStatementVersionEntries = context.Batch.CurrentStatementVersionEntries;
         context.Batch.CurrentUndoLog = log;
         context.Batch.CurrentTableVarUndoLog = tableVarLog;
+        context.Batch.CurrentStatementVersionEntries = statementVersionEntries;
         try
         {
-            return body(context);
+            var outcome = body(context);
+            if (statementVersionEntries is { } autoCommitEntries)
+                Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, context.CurrentDatabase);
+            return outcome;
         }
         catch
         {
+            if (statementVersionEntries is { } autoCommitEntries)
+            {
+                Storage.VersionStore.DiscardPendingEntries(autoCommitEntries);
+            }
+            else if (tx is not null && tx.PendingVersionEntries.Count > versionEntriesMarker)
+            {
+                var added = tx.PendingVersionEntries.GetRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
+                tx.PendingVersionEntries.RemoveRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
+                Storage.VersionStore.DiscardPendingEntries(added);
+            }
             log.RollbackTo(marker);
             tableVarLog.Rollback();
             throw;
@@ -966,6 +994,7 @@ public sealed partial class Simulation
         {
             context.Batch.CurrentUndoLog = savedLog;
             context.Batch.CurrentTableVarUndoLog = savedTableVarLog;
+            context.Batch.CurrentStatementVersionEntries = savedStatementVersionEntries;
         }
     }
 }
