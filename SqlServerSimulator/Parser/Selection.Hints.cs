@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
 
@@ -116,6 +117,32 @@ internal sealed partial class Selection
         /// parse-and-discard.
         /// </summary>
         public bool IndexHint;
+        /// <summary>
+        /// Captured <c>INDEX(arg [, …])</c> / <c>INDEX = arg</c> argument list,
+        /// each entry either an integer index_id or a string index name. Null
+        /// when no <c>INDEX</c> hint was seen, or for <c>FORCESEEK</c> /
+        /// <c>FORCESCAN</c> (those have their own nested syntax that the
+        /// simulator parse-and-discards). The caller validates existence
+        /// against the resolved <c>HeapTable</c> via
+        /// <see cref="ValidateIndexHintArguments(TableHintInfo, HeapTable, string)"/>.
+        /// </summary>
+        public List<IndexHintArgument>? IndexArguments;
+    }
+
+    /// <summary>
+    /// One argument to an <c>INDEX(...)</c> / <c>INDEX = ...</c> hint:
+    /// either an index_id (integer literal) or an index name (identifier or
+    /// quoted string). Captured during table-hint parsing; validated at the
+    /// FROM-source / JOIN-RHS call site once the target table is resolved
+    /// (Msg 307 / Msg 308 verbatim).
+    /// </summary>
+    internal readonly struct IndexHintArgument
+    {
+        public readonly int? Id;
+        public readonly string? Name;
+        private IndexHintArgument(int? id, string? name) { Id = id; Name = name; }
+        public static IndexHintArgument ForId(int id) => new(id, null);
+        public static IndexHintArgument ForName(string name) => new(null, name);
     }
 
     /// <summary>
@@ -233,6 +260,62 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Validates the captured <c>INDEX</c>-hint arguments against the
+    /// resolved target table. Called from FROM-source / JOIN-RHS heap-table
+    /// paths after the table has been resolved (DML targets short-circuit
+    /// earlier via <see cref="ValidateDmlTargetHints"/> / Msg 1069 — index
+    /// existence is never reached on those sites). Integer-form id rules
+    /// (probe-confirmed against SQL Server 2025): <c>0</c> is always valid
+    /// (the "heap scan" reference, accepted even on clustered tables);
+    /// <c>N &gt;= 1</c> is valid iff <c>N &lt;= sys.indexes</c> row-count for the
+    /// table excluding the heap row, equivalently
+    /// <c>KeyConstraints.Count + Indexes.Count</c>. Name form matches
+    /// case-insensitively against PRIMARY KEY / UNIQUE constraint names
+    /// (<see cref="HeapTable.KeyConstraints"/>) plus <c>CREATE INDEX</c>
+    /// entries (<see cref="HeapTable.Indexes"/>). The first failing
+    /// argument raises Msg 307 (id form) or Msg 308 (name form) verbatim;
+    /// remaining arguments don't run.
+    /// </summary>
+    internal static void ValidateIndexHintArguments(TableHintInfo info, HeapTable table, string qualifiedTableName)
+    {
+        if (info.IndexArguments is not { } args)
+            return;
+        var maxValidId = table.KeyConstraints.Count + table.Indexes.Count;
+        foreach (var arg in args)
+        {
+            if (arg.Id is { } id)
+            {
+                if (id != 0 && (id < 1 || id > maxValidId))
+                    throw SimulatedSqlException.IndexHintIdNotFound(id, qualifiedTableName);
+                continue;
+            }
+            var name = arg.Name!;
+            var found = false;
+            foreach (var kc in table.KeyConstraints)
+            {
+                if (Collation.Default.Equals(kc.Name, name))
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                foreach (var idx in table.Indexes)
+                {
+                    if (Collation.Default.Equals(idx.Name, name))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found)
+                throw SimulatedSqlException.IndexHintNameNotFound(name, qualifiedTableName);
+        }
+    }
+
+    /// <summary>
     /// Validates and consumes a single table-hint entry: <c>name</c>,
     /// <c>name = literal</c>, or <c>name (arg-list)</c>. Unknown name →
     /// Msg 321. Cursor advances to the trailing <c>,</c> or <c>)</c>. Updates
@@ -288,8 +371,14 @@ internal sealed partial class Selection
         {
             info.TabLockX = true;
         }
-        else if (Collation.Default.Equals(nameText, "INDEX")
-            || Collation.Default.Equals(nameText, "FORCESEEK")
+        else if (Collation.Default.Equals(nameText, "INDEX"))
+        {
+            info.IndexHint = true;
+            context.MoveNextRequired();
+            ConsumeIndexHintArguments(context, ref info);
+            return;
+        }
+        else if (Collation.Default.Equals(nameText, "FORCESEEK")
             || Collation.Default.Equals(nameText, "FORCESCAN"))
         {
             info.IndexHint = true;
@@ -305,6 +394,68 @@ internal sealed partial class Selection
         {
             SkipBalancedParens(context);
             context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
+    /// Captures the argument list for an <c>INDEX</c> hint. Cursor on entry:
+    /// the token immediately after <c>INDEX</c> (the opening <c>(</c> or
+    /// <c>=</c>). Cursor on exit: the next un-consumed token after the
+    /// closing <c>)</c> (paren form) or after the single literal (=-form).
+    /// Each argument is a non-negative integer literal (captured as
+    /// <see cref="IndexHintArgument.ForId"/>) or an identifier (captured as
+    /// <see cref="IndexHintArgument.ForName"/>). Real SQL Server rejects
+    /// negative-int and other shapes with Msg 102; the simulator surfaces
+    /// the same via <c>SimulatedSqlException.SyntaxErrorNear</c>.
+    /// </summary>
+    private static void ConsumeIndexHintArguments(ParserContext context, ref TableHintInfo info)
+    {
+        if (context.Token is Operator { Character: '=' })
+        {
+            context.MoveNextRequired();
+            CaptureOneIndexArgument(context, ref info);
+            context.MoveNextRequired();
+            return;
+        }
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        while (true)
+        {
+            CaptureOneIndexArgument(context, ref info);
+            context.MoveNextRequired();
+            if (context.Token is Operator { Character: ')' })
+            {
+                context.MoveNextRequired();
+                return;
+            }
+            if (context.Token is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
+    /// Reads exactly one <c>INDEX</c>-hint argument at the current cursor
+    /// position: a non-negative integer literal becomes
+    /// <see cref="IndexHintArgument.ForId"/>; an identifier (or quoted
+    /// string) becomes <see cref="IndexHintArgument.ForName"/>. Anything
+    /// else raises Msg 102. Does not advance the cursor — the caller does
+    /// that after capture so the comma / paren walk happens in one place.
+    /// </summary>
+    private static void CaptureOneIndexArgument(ParserContext context, ref TableHintInfo info)
+    {
+        info.IndexArguments ??= [];
+        switch (context.Token)
+        {
+            case Numeric { Value: { IsNull: false } value }:
+                info.IndexArguments.Add(IndexHintArgument.ForId(value.AsInt32));
+                return;
+            case Name nameToken:
+                info.IndexArguments.Add(IndexHintArgument.ForName(nameToken.Source.ToString()));
+                return;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
     }
 

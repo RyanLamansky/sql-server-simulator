@@ -56,6 +56,30 @@ partial class SimulatedSqlException
         new("Index hints are only allowed in a FROM or OPTION clause.", 1069, 15, 1);
 
     /// <summary>
+    /// Msg 307 — raised when an <c>INDEX(N)</c> hint references an
+    /// <c>index_id</c> that doesn't exist on the target table. Probe-confirmed
+    /// verbatim wording against SQL Server 2025 (2026-05-14): the message
+    /// embeds the (decimal) id and the qualified table name, both 1-part /
+    /// 2-part qualified consistently with the <c>FROM</c>-clause spelling. The
+    /// rejection only fires for <c>FROM</c>-source / JOIN-RHS positions
+    /// because DML targets short-circuit on <see cref="IndexHintsOnlyInFromOrOption"/>
+    /// (Msg 1069) before any per-index validation runs.
+    /// </summary>
+    internal static SimulatedSqlException IndexHintIdNotFound(int indexId, string qualifiedTableName) =>
+        new($"Index ID {indexId} on table '{qualifiedTableName}' (specified in the FROM clause) does not exist.", 307, 16, 1);
+
+    /// <summary>
+    /// Msg 308 — raised when an <c>INDEX(name)</c> or <c>INDEX = name</c>
+    /// hint references an index name that doesn't exist on the target table.
+    /// Matched case-insensitively against PRIMARY KEY / UNIQUE constraint
+    /// names plus the table's <c>Indexes</c> list. Probe-confirmed verbatim
+    /// wording — same single-quote convention and "(specified in the FROM
+    /// clause)" suffix as Msg 307.
+    /// </summary>
+    internal static SimulatedSqlException IndexHintNameNotFound(string indexName, string qualifiedTableName) =>
+        new($"Index '{indexName}' on table '{qualifiedTableName}' (specified in the FROM clause) does not exist.", 308, 16, 1);
+
+    /// <summary>
     /// Msg 3952 — raised when a session whose
     /// <see cref="SimulatedDbConnection.SessionIsolationLevel"/> is
     /// <see cref="System.Data.IsolationLevel.Snapshot"/> accesses a user

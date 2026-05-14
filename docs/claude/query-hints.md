@@ -145,24 +145,56 @@ The only OPTION hint with observable simulator behavior is
 recursive-CTE executor reads the per-binding cap; `MAXRECURSION 0`
 disables the cap. Every other recognized OPTION hint is a pure no-op.
 
+## Enforced rejections
+
+- **Conflict detection** — `Msg 1047` ("Conflicting locking hints
+  specified.") fires when `NOLOCK` / `READUNCOMMITTED` appears in the
+  same hint list as any of `XLOCK` / `UPDLOCK` / `HOLDLOCK` /
+  `SERIALIZABLE` / `REPEATABLEREAD` / `TABLOCKX`. The wording is fixed
+  regardless of which pair conflicted (probe-confirmed). Raised at
+  parse-time inside `ValidateHintCombinations`.
+- **DML-target rejections** — `Msg 1065` ("The NOLOCK and
+  READUNCOMMITTED lock hints are not allowed for target tables of
+  INSERT, UPDATE, DELETE or MERGE statements.") for `NOLOCK` /
+  `READUNCOMMITTED` on any DML target; `Msg 1069` ("Index hints are
+  only allowed in a FROM or OPTION clause.") for `INDEX(…)` /
+  `FORCESEEK` / `FORCESCAN` on the same. Both probe-confirmed verbatim.
+  Raised inside `ValidateDmlTargetHints` at every INSERT / UPDATE /
+  DELETE / MERGE target site. **Order matters**: Msg 1069 fires before
+  any per-index validation, so `UPDATE t WITH (INDEX(name))` always
+  raises 1069 — never reaches Msg 308.
+- **Per-table index existence** — `Msg 307` ("Index ID N on table
+  '<schema>.<table>' (specified in the FROM clause) does not exist.")
+  for an out-of-range `INDEX(N)` id; `Msg 308` ("Index '<name>' on
+  table '<schema>.<table>' …") for an unknown `INDEX(name)` /
+  `INDEX = name`. Validation rule for the integer form: `N == 0` is
+  always valid (the "heap scan" reference, accepted even on clustered
+  tables); `N >= 1` is valid iff `N <= KeyConstraints.Count +
+  Indexes.Count`. Name form matches case-insensitively against
+  `HeapTable.KeyConstraints[].Name` (PRIMARY KEY / UNIQUE) plus
+  `HeapTable.Indexes[].Name` (CREATE INDEX). Wired only into the
+  FROM-source / JOIN-RHS heap-table path (`ValidateIndexHintArguments`
+  in `Selection.Hints.cs`); arguments are captured at parse time into
+  `TableHintInfo.IndexArguments` via the dedicated
+  `ConsumeIndexHintArguments` walker (handles both `INDEX(arg [, …])`
+  and `INDEX = arg` forms; negative integer arg raises Msg 102 at
+  parse, matching probe). Multi-arg `INDEX(bad, good)` raises Msg 308
+  on the first failing argument and skips the rest.
+
 ## Not enforced
 
-- **Conflict detection** (`Msg 1047` for `NOLOCK + XLOCK` etc.) — no
-  lock state to conflict over. Apps that exercise this in real SQL
-  Server hit rejection there; the simulator silently parses both.
-- **DML-target-specific hint rejections** (`Msg 1065` for `NOLOCK` /
-  `READUNCOMMITTED` on INSERT / UPDATE / DELETE / MERGE targets,
-  `Msg 1069` for `INDEX(…)` on the same) — these are real SQL Server
-  diagnostics with no lock / index state to back them. Probe-confirmed
-  (2026-05-14) that both fire on real SQL Server; the simulator parses
-  every hint name uniformly via the closed accept-list.
-- **INDEX-name validity** (`Msg 308`) — the simulator doesn't model
-  index usage, so `INDEX(IX_does_not_exist)` parses successfully.
-- **FORCESEEK plan rejection** (`Msg 8622`) — same posture.
+- **`FORCESEEK(index_name(col_list))` nested-form index-name
+  validation** — the simulator skip-parses the nested syntax via
+  `SkipBalancedParens` rather than capturing the leading name, so
+  `FORCESEEK(bad_name(c))` parses silently where real SQL Server
+  raises Msg 308. The common bare `FORCESEEK` ships unaffected.
+- **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server
+  when planner can't honor the directive; the simulator has no planner
+  state to conflict over.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real
-  SQL Server raises `Msg 102` on the equals-form anyway (the docs
-  notwithstanding), so the simulator's rejection happens to match by
-  accident.
+  SQL Server raises `Msg 102` on the equals-with-multiple-values form
+  anyway (the docs notwithstanding), so the simulator's "= takes one
+  literal" rule matches by parsing as well.
 
 `FROM t NOLOCK` without parens is *not* a deprecated hint shape — it
 parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server
@@ -180,9 +212,24 @@ findings:
 - `Msg 321` for unknown table hint, with surrounding double-quotes on
   the offending name.
 - `Msg 102` for unknown OPTION hint — no dedicated code.
-- `Msg 1047` for conflicting locking hints (out of scope here).
+- `Msg 1047` for conflicting locking hints — fixed wording ("Conflicting
+  locking hints specified.") regardless of which pair conflicted.
 - `Msg 1065` for `NOLOCK` / `READUNCOMMITTED` on any DML target.
-- `Msg 1069` for `INDEX(…)` on any DML target.
+- `Msg 1069` for `INDEX(…)` / `FORCESEEK` / `FORCESCAN` on any DML
+  target — fires *before* per-index validation, so unknown-name on a
+  DML target surfaces as 1069 not 308.
+- `Msg 307` for out-of-range `INDEX(N)` id — the suffix `(specified in
+  the FROM clause)` is hard-coded in the wording even though the hint
+  can appear on JOIN-RHS too.
+- `Msg 308` for unknown `INDEX(name)` / `INDEX = name`, including
+  PRIMARY KEY and UNIQUE constraint names which both qualify as valid
+  arguments. Case-insensitive lookup. Schema-qualified table reference
+  surfaces in the message as `'<schema>.<leaf>'`.
+- `INDEX(0)` is always valid — accepted on heap-only tables and on
+  PK-tables alike, even though sys.indexes only synthesizes a HEAP row
+  (index_id=0) for heap tables.
+- `INDEX(-1)` raises generic Msg 102 — negative integer literal isn't
+  in the hint-argument grammar.
 - Legacy `(hint)` form without `WITH` works on **FROM / JOIN-RHS only** —
   rejected on every DML target.
 - MERGE target uses **hint-then-alias** placement; alias-then-hint

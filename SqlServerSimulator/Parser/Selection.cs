@@ -1050,6 +1050,7 @@ internal sealed partial class Selection
 
                 var heapAlias = ConsumeOptionalAlias(context);
                 var heapHints = ParseOptionalTableHints(context);
+                ValidateIndexHintArguments(heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
                 // isolation level) and capture the per-row plan. Temporal
                 // FOR SYSTEM_TIME sources bypass the per-row probe (they

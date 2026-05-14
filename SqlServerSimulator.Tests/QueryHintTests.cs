@@ -117,18 +117,124 @@ public sealed class QueryHintTests
             select count(*) from t with (index(0))
             """));
 
-    /// <summary>
-    /// Simulator doesn't model indexes, so the named-index reference parses
-    /// and is discarded. Real SQL Server raises Msg 308 on a wrong name;
-    /// the parse-and-ignore stance is the consistent posture for hints.
-    /// </summary>
     [TestMethod]
-    public void Select_IndexHint_NamedArg_ReturnsRows()
+    public void Select_IndexHint_KnownNamedArg_ReturnsRows()
         => AreEqual(3, new Simulation().ExecuteScalar("""
-            create table t (id int primary key);
-            insert t values (1), (2), (3);
-            select count(*) from t with (index(IX_does_not_exist))
+            create table t (id int primary key, v int);
+            create index ix_v on t(v);
+            insert t values (1, 10), (2, 20), (3, 30);
+            select count(*) from t with (index(ix_v))
             """));
+
+    [TestMethod]
+    public void Select_IndexHint_UnknownNamedArg_RaisesMsg308()
+        => new Simulation().AssertSqlError("""
+            create table t (id int primary key);
+            insert t values (1);
+            select * from t with (index(IX_does_not_exist))
+            """, 308, "Index 'IX_does_not_exist' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void Select_IndexHint_PkConstraintName_ReturnsRows()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (id int constraint pk_t primary key);
+            insert t values (1), (2), (3);
+            select count(*) from t with (index(pk_t))
+            """));
+
+    [TestMethod]
+    public void Select_IndexHint_UqConstraintName_ReturnsRows()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, u int constraint uq_u unique);
+            insert t values (1, 10), (2, 20), (3, 30);
+            select count(*) from t with (index(uq_u))
+            """));
+
+    [TestMethod]
+    public void Select_IndexHint_NamedArg_CaseInsensitive_ReturnsRows()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, v int);
+            create index ix_v on t(v);
+            insert t values (1, 10), (2, 20), (3, 30);
+            select count(*) from t with (index(IX_V))
+            """));
+
+    [TestMethod]
+    public void Select_IndexHint_EqForm_KnownName_ReturnsRows()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (id int constraint pk_t primary key);
+            insert t values (1), (2), (3);
+            select count(*) from t with (index = pk_t)
+            """));
+
+    [TestMethod]
+    public void Select_IndexHint_EqForm_UnknownName_RaisesMsg308()
+        => new Simulation().AssertSqlError("""
+            create table t (id int primary key);
+            insert t values (1);
+            select * from t with (index = nope)
+            """, 308, "Index 'nope' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void Select_IndexHint_BadIdOnPkTable_RaisesMsg307()
+        => new Simulation().AssertSqlError("""
+            create table t (id int primary key);
+            insert t values (1);
+            select * from t with (index(99))
+            """, 307, "Index ID 99 on table 'dbo.t' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void Select_IndexHint_Id1OnHeapTable_RaisesMsg307()
+        => new Simulation().AssertSqlError("""
+            create table t (id int, v int);
+            insert t values (1, 10);
+            select * from t with (index(1))
+            """, 307, "Index ID 1 on table 'dbo.t' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void Select_IndexHint_Id0OnHeapTable_ReturnsRows()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (id int, v int);
+            insert t values (1, 10), (2, 20);
+            select count(*) from t with (index(0))
+            """));
+
+    [TestMethod]
+    public void Select_IndexHint_MixedGoodBadInOneList_RaisesMsg308_OnFirstBad()
+        => new Simulation().AssertSqlError("""
+            create table t (id int constraint pk_t primary key);
+            insert t values (1);
+            select * from t with (index(nope, pk_t))
+            """, 308, "Index 'nope' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void Select_IndexHint_MultipleKnown_ReturnsRows()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (id int constraint pk_t primary key, v int);
+            create index ix_v on t(v);
+            insert t values (1, 10), (2, 20), (3, 30);
+            select count(*) from t with (index(pk_t, ix_v))
+            """));
+
+    [TestMethod]
+    public void Select_IndexHint_SchemaQualified_ErrorEmbedsQualifier()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create schema au;
+            create table au.t (id int primary key);
+            """);
+        sim.AssertSqlError(
+            "select * from au.t with (index(nope))",
+            308, "Index 'nope' on table 'au.t' (specified in the FROM clause) does not exist.");
+    }
+
+    [TestMethod]
+    public void Select_IndexHint_NegativeIntegerArg_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            create table t (id int primary key);
+            select * from t with (index(-1))
+            """, 102);
 
     [TestMethod]
     public void Select_ForceSeek_BareForm_ReturnsRows()
