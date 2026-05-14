@@ -33,6 +33,19 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 195: a <c>SET</c> statement names an option
+    /// that isn't in the recognized set — and the parser saw enough of the
+    /// rest of the shape (ON/OFF or a value token) to recognize it was meant
+    /// as a SET option. Wording is probe-confirmed verbatim against SQL Server
+    /// 2025 (2026-05-14): the offending name is preserved verbatim (uppercase
+    /// in the probe) inside single quotes. The narrower failure mode where the
+    /// name isn't followed by anything parseable falls through to the generic
+    /// Msg 102 path instead.
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedSetOption(string name) =>
+        new($"'{name}' is not a recognized SET option.", 195, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 111: the given <paramref name="statementKind"/>
     /// (e.g. <c>"CREATE/ALTER PROCEDURE"</c>, <c>"CREATE VIEW"</c>) must be
     /// the first statement in a query batch. Probe-confirmed wording per

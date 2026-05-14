@@ -6,36 +6,232 @@ namespace SqlServerSimulator;
 
 partial class Simulation
 {
-    private static bool TryParseSet(ParserContext context)
+    /// <summary>
+    /// Dispatches the four <c>SET</c> shapes: <c>SET @v = expr</c>
+    /// (variable assignment, has runtime effect via
+    /// <see cref="TryParseSetVariable"/>), <c>SET IDENTITY_INSERT t ON|OFF</c>
+    /// (session-state mutation, see <see cref="TryParseSetIdentityInsert"/>),
+    /// and the closed-list session / connection / planner option family
+    /// (<see cref="TryParseSetSessionOption"/>). The last family is
+    /// parse-and-discard: the simulator doesn't model locking / isolation /
+    /// language / dateformat / planner choice / warnings-on-rounding, so the
+    /// honest stance is to accept the canonical shapes and ignore. Returning
+    /// <c>false</c> falls through to the caller's <see cref="SimulatedSqlException.SyntaxErrorNear(ParserContext)"/>
+    /// (Msg 102); explicit Msg 195 fires when an unrecognized option name
+    /// appears followed by a recognizable value (ON/OFF/literal).
+    /// </summary>
+    private static bool TryParseSet(ParserContext context) =>
+        context.GetNextRequired() switch
+        {
+            ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
+            AtPrefixedString variableToken => TryParseSetVariable(context, variableToken),
+            var afterSet => TryParseSetSessionOption(context, afterSet),
+        };
+
+    /// <summary>
+    /// Parses <c>SET &lt;option&gt; ...</c> for every option in the closed
+    /// accept-list. Includes the multi-option comma form
+    /// (<c>SET ANSI_NULLS, QUOTED_IDENTIFIER, … ON</c>) restricted to bool-
+    /// shaped options, plus the multi-word
+    /// <c>SET TRANSACTION ISOLATION LEVEL …</c> and
+    /// <c>SET STATISTICS {IO|TIME|XML|PROFILE} ON|OFF</c> sub-forms.
+    /// Unrecognized option name followed by a recognizable value → Msg 195
+    /// (probe-confirmed verbatim).
+    /// </summary>
+    private static bool TryParseSetSessionOption(ParserContext context, Token afterSet)
     {
-        var afterSet = context.GetNextRequired();
-
-        if (afterSet is ReservedKeyword { Keyword: Keyword.Identity_Insert })
-            return TryParseSetIdentityInsert(context);
-
-        if (afterSet is AtPrefixedString variableToken)
-            return TryParseSetVariable(context, variableToken);
+        // Multi-word sub-forms whose leading token is a ReservedKeyword.
+        switch (afterSet)
+        {
+            case ReservedKeyword { Keyword: Keyword.Transaction }:
+                return TryParseSetTransactionIsolationLevel(context);
+            case ReservedKeyword { Keyword: Keyword.Statistics }:
+                return TryParseSetStatistics(context);
+            // ReservedKeyword options that take an integer (ROWCOUNT / TEXTSIZE).
+            // They tokenize as ReservedKeyword because the words appear in the
+            // T-SQL reserved set; the SET parser accepts them by Keyword check.
+            case ReservedKeyword { Keyword: Keyword.RowCount or Keyword.TextSize }:
+                return ConsumeIntegerValue(context);
+        }
 
         if (afterSet is not UnquotedString unquoted)
             return false;
 
-        var setTarget = unquoted.Value;
-        Span<char> upper = stackalloc char[setTarget.Length];
-        return setTarget.ToUpperInvariant(upper) switch
+        if (!RecognizedOptions.TryGetValue(unquoted.Value, out var firstKind))
+            return TryRaiseUnrecognizedSetOption(context, unquoted);
+
+        context.MoveNextRequired();
+
+        // Multi-option comma form is OnOff-only: SET opt1, opt2, ... ON|OFF.
+        if (firstKind == SetOptionKind.OnOff && context.Token is Operator { Character: ',' })
         {
-            7 => upper switch
+            while (context.Token is Operator { Character: ',' })
             {
-                "NOCOUNT" => context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
-                _ => false
-            },
-            21 => upper switch
-            {
-                "IMPLICIT_TRANSACTIONS" => context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
-                _ => false
-            },
-            _ => false
-        };
+                if (context.GetNextRequired() is not UnquotedString next)
+                    return false;
+                if (!RecognizedOptions.TryGetValue(next.Value, out var nextKind) || nextKind != SetOptionKind.OnOff)
+                    throw SimulatedSqlException.UnrecognizedSetOption(next.Value);
+                context.MoveNextRequired();
+            }
+            return context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
+        }
+
+        return ConsumeValueForKind(context, firstKind);
     }
+
+    /// <summary>
+    /// Distinguishes Msg 195 (clearly meant as a SET option — unknown name
+    /// followed by a recognizable ON/OFF/value) from Msg 102 (unknown name
+    /// followed by nothing recognizable — propagates through the caller's
+    /// fallthrough). Probe-confirmed split: <c>SET BANANA ON</c> raises 195,
+    /// <c>SET BANANA</c> (no trailing tokens) raises 102.
+    /// </summary>
+    private static bool TryRaiseUnrecognizedSetOption(ParserContext context, UnquotedString unrecognized)
+    {
+        // Peek one token past the unknown name with a checkpoint/restore so
+        // a Msg 102 fallthrough reports the offending name verbatim
+        // (probe-confirmed: `SET BANANA` → `Incorrect syntax near 'BANANA'`).
+        // Recognizable value-like next-tokens raise the dedicated Msg 195.
+        var nameValue = unrecognized.Value;
+        var checkpoint = context.SaveCheckpoint();
+        var peeked = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        if (peeked is ReservedKeyword { Keyword: Keyword.On or Keyword.Off }
+            or Numeric or Literal or UnquotedString or BracketDelimitedString)
+        {
+            throw SimulatedSqlException.UnrecognizedSetOption(nameValue);
+        }
+        throw SimulatedSqlException.SyntaxErrorNear(unrecognized);
+    }
+
+    /// <summary>
+    /// <c>SET TRANSACTION ISOLATION LEVEL {READ UNCOMMITTED | READ COMMITTED |
+    /// REPEATABLE READ | SNAPSHOT | SERIALIZABLE}</c>. Token shapes are mixed
+    /// (READ is reserved; SNAPSHOT/SERIALIZABLE/REPEATABLE/UNCOMMITTED/COMMITTED
+    /// are not), so the parser accepts 1–2 trailing tokens after LEVEL by
+    /// token-class rather than enumerated keyword.
+    /// </summary>
+    private static bool TryParseSetTransactionIsolationLevel(ParserContext context)
+    {
+        if (context.GetNextRequired() is not UnquotedString isolation
+            || !Collation.Default.Equals(isolation.Value, "ISOLATION"))
+        {
+            return false;
+        }
+        if (context.GetNextRequired() is not UnquotedString level
+            || !Collation.Default.Equals(level.Value, "LEVEL"))
+        {
+            return false;
+        }
+        // The level itself: 1 token (SNAPSHOT, SERIALIZABLE) or 2 tokens
+        // (READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ). Permissive
+        // acceptance — invalid level names would fail at semantic time on
+        // real SQL Server but the simulator doesn't model isolation anyway.
+        context.MoveNextRequired();
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Read }:
+                context.MoveNextRequired();
+                break;
+            case UnquotedString { Value: var firstWord } when Collation.Default.Equals(firstWord, "REPEATABLE"):
+                context.MoveNextRequired();
+                break;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// <c>SET STATISTICS {IO | TIME | XML | PROFILE} ON|OFF</c>. The
+    /// sub-option (IO/TIME/XML/PROFILE) tokenizes as <c>UnquotedString</c>;
+    /// neither IO nor PROFILE is in the reserved list, and TIME is a
+    /// <see cref="ContextualKeyword"/> but the value position accepts it as
+    /// a bare identifier without semantic dispatch.
+    /// </summary>
+    private static bool TryParseSetStatistics(ParserContext context)
+    {
+        var subOption = context.GetNextRequired();
+        var onOff = context.GetNextRequired();
+        return subOption is StringToken && onOff is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
+    }
+
+    /// <summary>
+    /// Reads the value token following a ReservedKeyword SET option that
+    /// takes an integer (ROWCOUNT / TEXTSIZE). Cursor on entry is positioned
+    /// at the option keyword; advances once and validates the next token is
+    /// a non-NULL <see cref="Numeric"/>.
+    /// </summary>
+    private static bool ConsumeIntegerValue(ParserContext context)
+        => context.GetNextRequired() is Numeric { Value.IsNull: false };
+
+    /// <summary>
+    /// Reads the value token for an option's value-shape. Cursor on entry
+    /// is positioned at the value token (already advanced past the name).
+    /// </summary>
+    private static bool ConsumeValueForKind(ParserContext context, SetOptionKind kind) => kind switch
+    {
+        SetOptionKind.OnOff => context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
+        SetOptionKind.Integer => context.Token is Numeric { Value.IsNull: false },
+        SetOptionKind.Identifier => context.Token is Name or Literal,
+        SetOptionKind.IntegerOrIdent => context.Token is Numeric or Name or Literal,
+        SetOptionKind.Binary => context.Token is Literal,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Value-shape of each recognized SET option. Determines how many tokens
+    /// to consume after the option name and what the legal shapes look like.
+    /// </summary>
+    private enum SetOptionKind
+    {
+        OnOff,
+        Integer,
+        Identifier,
+        IntegerOrIdent,
+        Binary,
+    }
+
+    /// <summary>
+    /// Closed accept-list of SET-option names whose name token is an
+    /// <see cref="UnquotedString"/> (i.e. not a reserved keyword). Each
+    /// maps to its value-shape. Reserved-keyword-named options (ROWCOUNT,
+    /// TEXTSIZE, TRANSACTION, STATISTICS) dispatch separately in
+    /// <see cref="TryParseSetSessionOption"/>. Sourced from the SQL Server
+    /// "SET Statements" docs and probe-confirmed against SQL Server 2025
+    /// (2026-05-14) for the canonical-shape entries.
+    /// </summary>
+    private static readonly Dictionary<string, SetOptionKind> RecognizedOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ANSI_NULLS"] = SetOptionKind.OnOff,
+        ["QUOTED_IDENTIFIER"] = SetOptionKind.OnOff,
+        ["ANSI_WARNINGS"] = SetOptionKind.OnOff,
+        ["ANSI_PADDING"] = SetOptionKind.OnOff,
+        ["CONCAT_NULL_YIELDS_NULL"] = SetOptionKind.OnOff,
+        ["ARITHABORT"] = SetOptionKind.OnOff,
+        ["ARITHIGNORE"] = SetOptionKind.OnOff,
+        ["NUMERIC_ROUNDABORT"] = SetOptionKind.OnOff,
+        ["XACT_ABORT"] = SetOptionKind.OnOff,
+        ["FMTONLY"] = SetOptionKind.OnOff,
+        ["NOEXEC"] = SetOptionKind.OnOff,
+        ["FORCEPLAN"] = SetOptionKind.OnOff,
+        ["PARSEONLY"] = SetOptionKind.OnOff,
+        ["CURSOR_CLOSE_ON_COMMIT"] = SetOptionKind.OnOff,
+        ["ANSI_DEFAULTS"] = SetOptionKind.OnOff,
+        ["REMOTE_PROC_TRANSACTIONS"] = SetOptionKind.OnOff,
+        ["NO_BROWSETABLE"] = SetOptionKind.OnOff,
+        ["NOCOUNT"] = SetOptionKind.OnOff,
+        ["IMPLICIT_TRANSACTIONS"] = SetOptionKind.OnOff,
+        ["SHOWPLAN_ALL"] = SetOptionKind.OnOff,
+        ["SHOWPLAN_TEXT"] = SetOptionKind.OnOff,
+        ["SHOWPLAN_XML"] = SetOptionKind.OnOff,
+        ["DISABLE_DEF_CNST_CHK"] = SetOptionKind.OnOff,
+        ["LOCK_TIMEOUT"] = SetOptionKind.Integer,
+        ["DATEFIRST"] = SetOptionKind.Integer,
+        ["QUERY_GOVERNOR_COST_LIMIT"] = SetOptionKind.Integer,
+        ["DATEFORMAT"] = SetOptionKind.Identifier,
+        ["LANGUAGE"] = SetOptionKind.Identifier,
+        ["DEADLOCK_PRIORITY"] = SetOptionKind.IntegerOrIdent,
+        ["CONTEXT_INFO"] = SetOptionKind.Binary,
+    };
 
     /// <summary>
     /// Parses <c>SET @v = expr</c> and the compound forms <c>SET @v += expr</c>
