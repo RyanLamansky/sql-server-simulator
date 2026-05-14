@@ -123,9 +123,6 @@ internal abstract class Expression
 
                 case Operator { Character: '.' }:
                     {
-                        if (expression is not Reference reference)
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-
                         var afterDot = context.GetNextRequired();
                         if (afterDot is Operator { Character: '*' })
                         {
@@ -135,10 +132,32 @@ internal abstract class Expression
                             // it survives into a non-projection context, the
                             // placeholder's Run / GetSqlType raise the
                             // surface-not-supported error.
-                            expression = new StarProjection(reference.Name);
+                            if (expression is not Reference starQualifier)
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                            expression = new StarProjection(starQualifier.Name);
                         }
                         else if (afterDot is Name name)
                         {
+                            // Hierarchyid instance-method shape:
+                            // <expr>.MethodName(args). When the method-name
+                            // matches the closed accept-list AND the next
+                            // token is '(', dispatch as a method call so
+                            // expressions like @h.GetLevel() or column.GetAncestor(1)
+                            // don't get rewritten as a multipart Reference
+                            // that would later fail UDF resolution.
+                            if (HierarchyIdMethodCall.IsKnownMethodName(name.Value))
+                            {
+                                var checkpoint = context.SaveCheckpoint();
+                                var probe = context.GetNextOptional();
+                                if (probe is Operator { Character: '(' })
+                                {
+                                    expression = HierarchyIdMethodCall.Parse(expression, name.Value, context);
+                                    continue;
+                                }
+                                context.RestoreCheckpoint(checkpoint);
+                            }
+                            if (expression is not Reference reference)
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
                             reference.AddMultiPartComponent(name);
                         }
                         else
@@ -147,6 +166,25 @@ internal abstract class Expression
                         }
                     }
                     continue;
+                case Operator { Character: ':' }:
+                    {
+                        // Type-scope `::` operator. The only modeled
+                        // type-scope is `hierarchyid::` (Parse / GetRoot).
+                        // First ':' already consumed by GetNextOptional;
+                        // require a second to confirm the `::` shape.
+                        if (expression is not Reference colonRef
+                            || colonRef.ReferencedName.Count != 1
+                            || !Collation.Default.Equals(colonRef.ReferencedName.Leaf, "hierarchyid"))
+                        {
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
+                        var secondColon = context.GetNextRequired();
+                        if (secondColon is not Operator { Character: ':' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                        expression = HierarchyIdStaticCall.Parse(context);
+                        continue;
+                    }
                 case Operator { Character: ')' }:
                     break;
                 case Operator { Character: '(' }:

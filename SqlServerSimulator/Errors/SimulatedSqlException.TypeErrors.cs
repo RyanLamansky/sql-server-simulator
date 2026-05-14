@@ -412,6 +412,19 @@ partial class SimulatedSqlException
         new($"Invalid length parameter passed to the {function} function.", 537, 16, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 6522: an input to a hierarchyid method
+    /// (<c>Parse</c>, <c>GetAncestor</c> with out-of-range depth,
+    /// <c>GetDescendant</c> with mismatched children, etc.) violates the
+    /// hierarchyid contract. Real SQL Server wraps these as ".NET Framework
+    /// error … during execution of user-defined routine or aggregate
+    /// 'hierarchyid'"; the simulator surfaces a concise actionable message
+    /// with the same number so apps doing <c>TRY/CATCH</c> on Msg 6522 still
+    /// see the same code.
+    /// </summary>
+    internal static SimulatedSqlException InvalidHierarchyIdInput(string detail) =>
+        new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": Microsoft.SqlServer.Types.HierarchyIdException: 24001: SqlHierarchyId operation failed because input '{detail}' was not valid.", 6522, 16, 1);
+
+    /// <summary>
     /// Returns the type name SQL Server uses in Msg 402 / 206 / 529 for a
     /// date/time type: the family root (e.g. <c>datetime2</c>,
     /// <c>datetimeoffset</c>) without a precision suffix, matching

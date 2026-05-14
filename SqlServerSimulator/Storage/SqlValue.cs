@@ -346,6 +346,19 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public static SqlValue FromGuid(Guid value) => new(SqlType.UniqueIdentifier, 0, value, isNull: false);
 
     /// <summary>
+    /// Non-NULL SQL <c>hierarchyid</c> value. The segment-array path lives
+    /// in the reference slot; equality and ordering compare path lexicographically
+    /// via <see cref="HierarchyIdSqlType.ComparePaths"/>. The caller transfers
+    /// ownership of the array (and its inner arrays) at construction; mutation
+    /// after construction breaks identity.
+    /// </summary>
+    public static SqlValue FromHierarchyId(int[][] path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        return new(SqlType.HierarchyId, 0, path, isNull: false);
+    }
+
+    /// <summary>
     /// Non-NULL SQL <c>decimal(p, s)</c> value. The .NET <see cref="decimal"/>
     /// payload is boxed in the reference slot; <paramref name="type"/> carries
     /// the precision and scale identity. Caller is responsible for ensuring
@@ -461,6 +474,16 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return bytes;
     }
 
+    private static byte[] HierarchyIdToBytes(int[][] path)
+    {
+        var len = 2;
+        foreach (var segment in path)
+            len += 2 + (segment.Length * 4);
+        var bytes = new byte[len];
+        _ = SqlType.HierarchyId.Encode(FromHierarchyId(path), bytes);
+        return bytes;
+    }
+
     /// <summary>Returns the value as <see cref="DateOnly"/>. Throws if NULL or wrong type.</summary>
     public DateOnly AsDate => this.As(SqlType.Date, p => DateOnly.FromDayNumber((int)p));
 
@@ -490,6 +513,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type != SqlType.UniqueIdentifier
             ? throw new InvalidOperationException($"Value is {this.Type}, not uniqueidentifier.")
             : (Guid)this.reference!;
+
+    /// <summary>Returns the value as the segment-array hierarchyid path. Throws if NULL or not a hierarchyid value.</summary>
+    public int[][] AsHierarchyId => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type != SqlType.HierarchyId
+            ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")
+            : (int[][])this.reference!;
 
     /// <summary>Returns the value as <see cref="decimal"/>. Throws if NULL or not a decimal-typed value.</summary>
     public decimal AsDecimal => this.IsNull
@@ -551,6 +581,12 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         TimeSqlType => this.AsTime,
         DateTimeOffsetSqlType => this.AsDateTimeOffset,
         var t when t == SqlType.UniqueIdentifier => this.AsGuid,
+        // hierarchyid surfaces as varbinary bytes via untyped accessors —
+        // SqlClient's UDT-wire-format handling isn't modeled here, so the
+        // simulator hands back its internal byte encoding (a deferred
+        // gap from the byte-identical-CAST limitation documented on the
+        // SqlType.HierarchyId remarks).
+        var t when t == SqlType.HierarchyId => HierarchyIdToBytes(this.AsHierarchyId),
         DecimalSqlType => this.AsDecimal,
         var t when t == SqlType.Float => this.AsDouble,
         var t when t == SqlType.Real => this.AsSingle,
@@ -571,7 +607,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                         ? (Guid)this.reference! == (Guid)other.reference!
                         : this.Type is DecimalSqlType
                             ? (decimal)this.reference! == (decimal)other.reference!
-                            : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
+                            : this.Type == SqlType.HierarchyId
+                                ? HierarchyIdSqlType.ComparePaths((int[][])this.reference!, (int[][])other.reference!) == 0
+                                : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
 
     /// <summary>
     /// Object equality that respects content for <c>byte[]</c> (varbinary) and
@@ -627,6 +665,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type is TimeSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is DateTimeOffsetSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type == SqlType.UniqueIdentifier ? new SqlGuid(this.AsGuid).CompareTo(new SqlGuid(other.AsGuid))
+        : this.Type == SqlType.HierarchyId ? HierarchyIdSqlType.ComparePaths(this.AsHierarchyId, other.AsHierarchyId)
         : this.Type is DecimalSqlType ? this.AsDecimal.CompareTo(other.AsDecimal)
         : this.Type == SqlType.Float ? this.AsDouble.CompareTo(other.AsDouble)
         : this.Type == SqlType.Real ? this.AsSingle.CompareTo(other.AsSingle)
@@ -662,6 +701,12 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         else if (this.Type is DecimalSqlType)
         {
             hash.Add((decimal)this.reference!);
+        }
+        else if (this.Type == SqlType.HierarchyId)
+        {
+            // Hash on the canonical string form so equal paths (regardless
+            // of array identity) hash identically.
+            hash.Add(HierarchyIdSqlType.PathToString((int[][])this.reference!));
         }
         else if (this.reference is byte[] bytes)
         {
@@ -712,6 +757,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         TimeSqlType tt => $"'{FormatTime(this.AsTime, tt.precision)}'",
         DateTimeOffsetSqlType dto => $"'{FormatDateTimeOffset(this.AsDateTimeOffset, dto.precision)}'",
         _ when this.Type == SqlType.UniqueIdentifier => $"'{this.AsGuid:D}'",
+        _ when this.Type == SqlType.HierarchyId => $"'{HierarchyIdSqlType.PathToString(this.AsHierarchyId)}'",
         DecimalSqlType d => this.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Float => this.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Real => this.AsSingle.ToString("G7", CultureInfo.InvariantCulture),

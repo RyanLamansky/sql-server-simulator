@@ -132,6 +132,7 @@ internal abstract partial class SqlType
     /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-type-precedence-transact-sql</remarks>
     public int Precedence => this switch
     {
+        _ when this == HierarchyId => 17,
         _ when this == UniqueIdentifier => 16,
         _ when this == SystemName => 15,
         _ when this == NText => 14,
@@ -192,15 +193,18 @@ internal abstract partial class SqlType
         NVarcharSqlType => 231,
         _ when this == SystemName => 231,
         NCharSqlType => 239,
+        _ when this == HierarchyId => 240,
         _ => throw new NotSupportedException($"No SystemTypeId defined for {this}."),
     };
 
     /// <summary>
     /// User-type id matching real SQL Server's <c>sys.columns.user_type_id</c>.
     /// Equal to <see cref="SystemTypeId"/> for every shipped type except
-    /// <see cref="SystemName"/>, which carries its alias id <c>256</c>.
+    /// <see cref="SystemName"/> (alias id <c>256</c>) and <see cref="HierarchyId"/>
+    /// (well-known CLR-UDT alias id <c>128</c>, probe-confirmed against
+    /// SQL Server 2025 <c>sys.types</c>).
     /// </summary>
-    public int UserTypeId => this == SystemName ? 256 : this.SystemTypeId;
+    public int UserTypeId => this == SystemName ? 256 : this == HierarchyId ? 128 : this.SystemTypeId;
 
     /// <summary>True for SQL integer-family types (bit, tinyint, smallint, int, bigint).</summary>
     public static bool IsIntegerCategory(SqlType type) => type.Category == SqlTypeCategory.Integer;
@@ -419,6 +423,15 @@ internal abstract partial class SqlType
     /// for the auto-generation contract.
     /// </remarks>
     public static readonly RowVersionSqlType RowVersion = new();
+
+    /// <remarks>
+    /// SQL Server's <c>hierarchyid</c>: variable-length CLR UDT for tree
+    /// paths. Internal byte form is simulator-specific; CAST round-trips
+    /// inside the simulator are byte-stable, cross-engine transport (BCP /
+    /// SqlClient UDT wire) is deferred. See <see cref="HierarchyIdSqlType"/>
+    /// for the segment-array internal representation and string-form rules.
+    /// </remarks>
+    public static readonly HierarchyIdSqlType HierarchyId = new();
 
     /// <remarks>
     /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
@@ -815,6 +828,11 @@ internal abstract partial class SqlType
         13 => upper switch
         {
             "SMALLDATETIME" => SmallDateTime,
+            _ => null,
+        },
+        11 => upper switch
+        {
+            "HIERARCHYID" => HierarchyId,
             _ => null,
         },
         16 => upper switch
