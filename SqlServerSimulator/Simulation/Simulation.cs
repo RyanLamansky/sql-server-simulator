@@ -162,6 +162,7 @@ public sealed partial class Simulation
         foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
             yield return outcome;
         WriteBackOutputParameters(batch);
+        batch.FlushPrintMessages();
     }
 
     /// <summary>

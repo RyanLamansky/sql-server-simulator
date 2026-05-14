@@ -154,6 +154,25 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
         ?? (this.TraceFlags.Contains(460)
             || this.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql160);
 
+    /// <summary>
+    /// Fires once per batch when the batch contained at least one
+    /// <c>PRINT</c> statement that produced output (the un-taken-IF /
+    /// skip-mode path doesn't fire). Multiple <c>PRINT</c> calls in the
+    /// batch coalesce into a single event with the messages joined by
+    /// <c>\n</c> — matches SqlClient's <c>InfoMessage</c> probe behavior.
+    /// Internal-only until the consumer-facing event shape is settled
+    /// (<c>DbConnection</c> has no equivalent event in the base
+    /// class — going public means adding a new public-API surface).
+    /// </summary>
+    internal event EventHandler<SimulatedInfoMessageEventArgs>? InfoMessage;
+
+    /// <summary>
+    /// Delivers a buffered <c>PRINT</c> batch to <see cref="InfoMessage"/>
+    /// subscribers. Called from <see cref="Parser.BatchContext.FlushPrintMessages"/>
+    /// at the end of each command's dispatch.
+    /// </summary>
+    internal void RaiseInfoMessage(SimulatedInfoMessageEventArgs args) => this.InfoMessage?.Invoke(this, args);
+
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }
 

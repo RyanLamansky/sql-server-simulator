@@ -56,6 +56,63 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
+    /// Buffer of <c>PRINT</c>-emitted strings collected across this batch.
+    /// Probe-confirmed coalescing semantic: multiple <c>PRINT</c> statements
+    /// in one command join with <c>\n</c> separators into a single
+    /// <see cref="SimulatedDbConnection.InfoMessage"/> firing at end of
+    /// dispatch. Null when no PRINT has fired yet (avoids the per-batch
+    /// allocation for the typical PRINT-less batch).
+    /// </summary>
+    private List<string>? pendingPrintMessages;
+
+    /// <summary>
+    /// 1-based line of the first <c>PRINT</c> statement in this batch —
+    /// captured at the moment the first message is buffered. SqlClient
+    /// probe-confirmed: the coalesced <c>InfoMessage</c> event carries
+    /// the first contributing statement's line, even when later <c>PRINT</c>s
+    /// in the same batch live on different lines.
+    /// </summary>
+    private int firstPrintLine;
+
+    /// <summary>
+    /// Buffers a <c>PRINT</c>-emitted string against this batch's pending
+    /// output list. Caller has already formatted the operand value into its
+    /// display string (NULL → single space per probe). Skipped-IF / loop-
+    /// control suppression is decided by the caller (<see cref="IsSkipping"/>),
+    /// not here.
+    /// </summary>
+    internal void AppendPrintMessage(string text)
+    {
+        if (this.pendingPrintMessages is null)
+        {
+            this.pendingPrintMessages = [];
+            this.firstPrintLine = this.CurrentStatement.StartLine;
+        }
+        this.pendingPrintMessages.Add(text);
+    }
+
+    /// <summary>
+    /// If any <c>PRINT</c> statements buffered output during this batch,
+    /// delivers them to <see cref="SimulatedDbConnection.InfoMessage"/>
+    /// subscribers as a single event (messages joined with <c>\n</c>,
+    /// <see cref="SimulatedInfoMessageEventArgs.LineNumber"/> set to the
+    /// first contributing PRINT's line). No-op when the buffer is empty.
+    /// Called by <see cref="Simulation.CreateResultSetsForCommand"/> after
+    /// dispatch completes.
+    /// </summary>
+    internal void FlushPrintMessages()
+    {
+        if (this.pendingPrintMessages is not { Count: > 0 } list)
+            return;
+        var joined = string.Join('\n', list);
+        this.Connection.RaiseInfoMessage(new SimulatedInfoMessageEventArgs(
+            joined,
+            this.firstPrintLine,
+            source: "SqlServerSimulator"));
+        list.Clear();
+    }
+
+    /// <summary>
     /// Raw IF-skip flag: true while the dispatch loop is walking through an
     /// un-taken IF branch. The <see cref="IsSkipping"/> property OR's this
     /// with <see cref="LoopControl"/>-driven skipping (BREAK / CONTINUE in
