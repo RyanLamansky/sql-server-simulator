@@ -317,14 +317,138 @@ public sealed class KeyConstraintTests
         Assert.Contains("UNIQUE KEY constraint 'uq_t'", uqEx.Message);
     }
 
+    // --- PK / UNIQUE on computed columns ---
+
     [TestMethod]
-    public void PrimaryKey_OnComputedColumn_NotSupported()
+    public void PrimaryKey_OnNonPersistedComputed_RaisesMsg1711()
     {
-        // Real SQL Server allows PK/UNIQUE on a computed column; simulator's v1 doesn't model this.
-        var ex = Assert.Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create table t (a int not null, c as a + 1, primary key (c))"));
-        Assert.Contains("computed column", ex.Message);
+        // Probe-confirmed: real SQL Server raises Msg 1711 at CREATE TABLE when
+        // PK targets a non-persisted computed column.
+        var ex = new Simulation().AssertSqlError(
+            "create table t (a int not null, c as a + 1, primary key (c))", 1711);
+        Assert.Contains("computed column has to be persisted", ex.Message);
+        Assert.Contains("'c'", ex.Message);
     }
+
+    [TestMethod]
+    public void PrimaryKey_OnPersistedNullableComputed_RaisesMsg8111()
+    {
+        // PERSISTED without an explicit NOT NULL keeps the simulator's
+        // computed-column nullability defaulted to true; the existing PK
+        // nullable check catches it.
+        _ = new Simulation().AssertSqlError(
+            "create table t (a int null, c as a + 1 persisted, primary key (c))", 8111);
+    }
+
+    [TestMethod]
+    public void PrimaryKey_OnPersistedNotNullComputed_TableLevel_Succeeds()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, c as a + 1 persisted not null, primary key (c));
+            insert t(a) values (1), (2);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void PrimaryKey_OnPersistedNotNullComputed_Inline_Succeeds()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, c as a + 1 persisted not null primary key);
+            insert t(a) values (1), (2);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void PrimaryKey_OnPersistedComputed_EnforcesUniqueness()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, c as a + 1 persisted not null, primary key (c));
+            insert t(a) values (1), (2)
+            """);
+        // a=1 → c=2 collides with existing c=2 from a=1
+        var ex = simulation.AssertSqlError("insert t(a) values (1)", 2627);
+        Assert.Contains("PRIMARY KEY", ex.Message);
+        Assert.Contains("(2)", ex.Message);
+    }
+
+    [TestMethod]
+    public void PrimaryKey_OnPersistedComputed_Compound_Succeeds()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, c as a + 1 persisted not null, x int not null,
+                            primary key (a, c));
+            insert t(a, x) values (1, 100), (2, 200);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void Unique_OnPersistedComputed_TableLevel_Succeeds()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, c as a * 10 persisted, unique (c));
+            insert t(a) values (1), (2);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void Unique_OnPersistedComputed_EnforcesUniqueness()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, c as a * 10 persisted, unique (c));
+            insert t(a) values (1), (2)
+            """);
+        var ex = simulation.AssertSqlError("insert t(a) values (1)", 2627);
+        Assert.Contains("UNIQUE KEY", ex.Message);
+        Assert.Contains("(10)", ex.Message);
+    }
+
+    [TestMethod]
+    public void Unique_OnNonPersistedComputed_NotSupported()
+    {
+        // Real SQL Server allows this; the simulator defers UNIQUE-on-non-
+        // persisted because enforcement would need per-row expression
+        // evaluation rather than storage-ordinal lookup.
+        _ = Assert.Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
+            "create table t (a int not null, c as a * 10, unique (c))"));
+    }
+
+    [TestMethod]
+    public void AlterTable_AddPrimaryKey_OnPersistedComputed_Succeeds()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, c as a + 1 persisted not null);
+            insert t(a) values (1), (2);
+            alter table t add constraint pk_t primary key (c);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void AlterTable_AddPrimaryKey_OnPersistedComputed_RejectsExistingDuplicate()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (a int not null, c as a + 1 persisted not null);
+            insert t(a) values (1), (1);
+            alter table t add constraint pk_t primary key (c)
+            """, 1505);
+
+    [TestMethod]
+    public void AlterTable_AddPrimaryKey_OnNonPersistedComputed_RaisesMsg8111()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (a int not null, c as a + 1);
+            alter table t add constraint pk_t primary key (c)
+            """, 8111);
+
+    [TestMethod]
+    public void AlterTable_AddUnique_OnPersistedComputed_Succeeds()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, c as a + 1 persisted);
+            insert t(a) values (1), (2);
+            alter table t add unique (c);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void AlterTable_AddUnique_OnNonPersistedComputed_NotSupported()
+        => _ = Assert.Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("""
+            create table t (a int not null, c as a + 1);
+            alter table t add unique (c)
+            """));
 
     [TestMethod]
     public void MergeInsert_DuplicateKey_RaisesMsg2627()

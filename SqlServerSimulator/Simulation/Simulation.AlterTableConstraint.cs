@@ -261,6 +261,14 @@ partial class Simulation
             var col = table.Columns[fullOrdinals[i]];
             if (col.IsLob)
                 throw SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name);
+            // Non-persisted computed columns have no storage ordinal — UNIQUE
+            // on one would need expression evaluation in the enforcement loop
+            // (not modeled). PRIMARY KEY on a non-persisted computed already
+            // raised Msg 8111 above (computed columns are nullable by default
+            // and the existing nullable check catches it — probe-confirmed
+            // at ALTER ADD, the wording differs from CREATE TABLE's Msg 1711).
+            if (col.Computed is not null && !col.IsPersisted)
+                throw new NotSupportedException("UNIQUE on a non-persisted computed column isn't modeled.");
             storageOrdinals[i] = table.StorageOrdinals[fullOrdinals[i]];
         }
 

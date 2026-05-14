@@ -397,6 +397,15 @@ partial class SimulatedSqlException
         new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1711: <c>PRIMARY KEY</c> targeted a computed
+    /// column that isn't <c>PERSISTED</c>. Probe-confirmed at CREATE TABLE
+    /// (the ALTER-ADD-PK path raises Msg 8111 instead, via the non-persisted-
+    /// implies-nullable shortcut). Real SQL Server uses identical wording.
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnPkRequiresPersisted(string columnName, string tableName) =>
+        new($"Cannot define PRIMARY KEY constraint on column '{columnName}' in table '{tableName}'. The computed column has to be persisted and not nullable.", 1711, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8102: an UPDATE statement targeted an identity
     /// column. <c>SET IDENTITY_INSERT</c> only opens INSERT to identity
     /// values; UPDATE on an identity column is rejected unconditionally.

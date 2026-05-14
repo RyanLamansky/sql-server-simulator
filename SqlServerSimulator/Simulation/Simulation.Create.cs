@@ -545,9 +545,20 @@ partial class Simulation
             context.MoveNextRequired();
             var computed = Expression.Parse(context);
             var (persisted, computedNullable) = ParseComputedSuffix(context);
-            pendingComputed.Add((heapColumns.Count, columnName.Value, computed, persisted, computedNullable));
+            var computedIndex = heapColumns.Count;
+            pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable));
             heapColumns.Add(null);
             explicitNull.Add(false);
+            // Inline PRIMARY KEY / UNIQUE after a computed column's
+            // PERSISTED [NOT NULL] suffix — probe-confirmed: `c AS expr
+            // PERSISTED NOT NULL PRIMARY KEY` is legal at CREATE TABLE.
+            // ResolveKeyConstraints applies the persisted/nullability gate
+            // after computed-column materialization.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
+            {
+                var inlineKind = ParseInlineKeyKindAndModifiers(context);
+                pendingKeys.Add((inlineKind, null, [computedIndex]));
+            }
             return;
         }
 
@@ -1070,8 +1081,18 @@ partial class Simulation
                     foreach (var pending in pendingComputed)
                     {
                         if (pending.Index == i && Collation.Default.Equals(pending.Name, keyColumn.Value))
-                            throw new NotSupportedException("PRIMARY KEY/UNIQUE on a computed column.");
+                        {
+                            // Computed columns participate as key columns when
+                            // PERSISTED — validated in ResolveKeyConstraints
+                            // after computed-column materialization fills the
+                            // null slot. Record the ordinal; the persistence
+                            // gate fires later.
+                            found = i;
+                            break;
+                        }
                     }
+                    if (found >= 0)
+                        break;
                 }
             }
             if (found < 0)
@@ -1097,11 +1118,12 @@ partial class Simulation
     /// by storage ordinal. Enforces SQL Server's compile-time rules: at most
     /// one PRIMARY KEY per table (Msg 8110), no PK on a column whose declared
     /// nullability is NULL (Msg 8111 — also fires for table-level PK on a
-    /// column declared NULL), no key column of LOB type (Msg 1919). Generates
-    /// a SQL-Server-shaped auto name for any unnamed constraint
+    /// column declared NULL), no key column of LOB type (Msg 1919),
+    /// computed-column participation requires <see cref="HeapColumn.IsPersisted"/>
+    /// (PK on a non-persisted computed → Msg 1711; UNIQUE on a non-persisted
+    /// computed → <see cref="NotSupportedException"/>, deferred). Generates a
+    /// SQL-Server-shaped auto name for any unnamed constraint
     /// (<c>PK__&lt;table&gt;__&lt;hex&gt;</c> / <c>UQ__&lt;table&gt;__&lt;hex&gt;</c>).
-    /// Computed columns are not yet supported as key participants — those
-    /// raise <see cref="NotSupportedException"/>.
     /// </summary>
     internal static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
@@ -1125,8 +1147,12 @@ partial class Simulation
             {
                 var fullOrdinal = pending.FullOrdinals[i];
                 var column = heapColumns[fullOrdinal];
-                if (column.Computed is not null)
-                    throw new NotSupportedException("PRIMARY KEY/UNIQUE on a computed column.");
+                if (column.Computed is not null && !column.IsPersisted)
+                {
+                    if (pending.Kind == KeyConstraintKind.PrimaryKey)
+                        throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
+                    throw new NotSupportedException("UNIQUE on a non-persisted computed column isn't modeled.");
+                }
                 if (column.IsLob)
                     throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
                 if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)
