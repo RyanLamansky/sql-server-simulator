@@ -786,6 +786,24 @@ internal static class BuiltInResources
         };
         var dmTranActiveSnapshotDbTxView = new CatalogView("dm_tran_active_snapshot_database_transactions", dmTranActiveSnapshotDbTxColumns, VersionStoreDmvs.EnumerateDmTranActiveSnapshotDatabaseTransactions);
 
+        // sys.extended_properties: per-database user-defined annotations
+        // attached to schemas / tables / columns / etc. via the
+        // sp_addextendedproperty / sp_updateextendedproperty /
+        // sp_dropextendedproperty trio. Real SQL Server's `value` column is
+        // typed `sql_variant` — the simulator surfaces it as `nvarchar(MAX)`
+        // since sql_variant isn't modeled; AW's 538 properties are all
+        // nvarchar values so functional fidelity is preserved.
+        var extendedPropertiesColumns = new HeapColumn[]
+        {
+            new("class", SqlType.TinyInt, null, false),
+            new("class_desc", SqlType.SystemName, 60, true),
+            new("major_id", SqlType.Int32, null, false),
+            new("minor_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("value", NVarcharSqlType.MaxForm, SqlType.MaxLengthSentinel, true),
+        };
+        var extendedPropertiesView = new CatalogView("extended_properties", extendedPropertiesColumns, EnumerateSysExtendedProperties);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -811,6 +829,7 @@ internal static class BuiltInResources
             ["sys.dm_tran_version_store"] = dmTranVersionStoreView,
             ["sys.dm_tran_version_store_space_usage"] = dmTranVersionStoreSpaceUsageView,
             ["sys.dm_tran_active_snapshot_database_transactions"] = dmTranActiveSnapshotDbTxView,
+            ["sys.extended_properties"] = extendedPropertiesView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -890,6 +909,41 @@ internal static class BuiltInResources
                     alias.IsNullable ? trueBit : falseBit,
                 ];
             }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.extended_properties</c>. Walks every entry in
+    /// <see cref="Database.ExtendedProperties"/> (per-database flat dict)
+    /// and projects the 6-column shape. The <c>class_desc</c> string is
+    /// derived from the class number per real SQL Server's enum (0 =
+    /// DATABASE, 1 = OBJECT_OR_COLUMN, 3 = SCHEMA — the only classes the
+    /// simulator currently emits; others fall through as the string form
+    /// of the class number for forward compat). Value is coerced to
+    /// <c>nvarchar(MAX)</c> since the simulator doesn't model
+    /// <c>sql_variant</c>; for AW's all-nvarchar workload, this is a
+    /// lossless surfacing.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysExtendedProperties(Parser.BatchContext batch)
+    {
+        foreach (var kvp in batch.CurrentDatabase.ExtendedProperties)
+        {
+            var key = kvp.Key;
+            var classDesc = key.Class switch
+            {
+                0 => "DATABASE",
+                1 => "OBJECT_OR_COLUMN",
+                3 => "SCHEMA",
+                _ => key.Class.ToString(CultureInfo.InvariantCulture),
+            };
+            yield return [
+                SqlValue.FromByte(key.Class),
+                SqlValue.FromSystemName(classDesc),
+                SqlValue.FromInt32(key.MajorId),
+                SqlValue.FromInt32(key.MinorId),
+                SqlValue.FromSystemName(key.Name),
+                kvp.Value.IsNull ? SqlValue.Null(NVarcharSqlType.MaxForm) : kvp.Value.CoerceTo(NVarcharSqlType.MaxForm),
+            ];
         }
     }
 

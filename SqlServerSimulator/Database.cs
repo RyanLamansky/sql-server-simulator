@@ -179,4 +179,53 @@ internal sealed class Database
     /// invariant as <see cref="AllocateObjectId"/>.
     /// </summary>
     public int AllocateUserTypeId() => Interlocked.Increment(ref this.nextUserTypeId);
+
+    /// <summary>
+    /// Per-database extended-properties dictionary. Keyed by
+    /// <see cref="ExtendedPropertyKey"/> (<c>class</c> + <c>major_id</c> +
+    /// <c>minor_id</c> + <c>name</c>); the value is the user-supplied
+    /// <see cref="Storage.SqlValue"/> attached to that target. Populated by
+    /// <c>sp_addextendedproperty</c>, mutated by
+    /// <c>sp_updateextendedproperty</c>, drained by
+    /// <c>sp_dropextendedproperty</c>; surfaced by
+    /// <c>sys.extended_properties</c> and <c>fn_listextendedproperty</c>.
+    /// Probe-confirmed against SQL Server 2025: the catalog view is per-
+    /// database (not per-schema), and names are case-insensitive.
+    /// </summary>
+    public readonly ConcurrentDictionary<ExtendedPropertyKey, Storage.SqlValue> ExtendedProperties = new();
+}
+
+/// <summary>
+/// Identifies one entry in <see cref="Database.ExtendedProperties"/>.
+/// <see cref="Class"/> follows real SQL Server's <c>sys.extended_properties.class</c>:
+/// 0 = DATABASE, 1 = OBJECT_OR_COLUMN, 3 = SCHEMA (additional class numbers
+/// for PARAMETER, TYPE, INDEX, etc. exist in real SQL Server but aren't
+/// modeled in this bundle). <see cref="MajorId"/> identifies the target —
+/// schema_id for class 3, object_id for class 1, 0 for class 0
+/// (DATABASE-level uses no level args). <see cref="MinorId"/> is 0 for
+/// table / view / proc / func targets and the column ordinal (1-based) for
+/// column targets. <see cref="Name"/> is the user-supplied property name
+/// (e.g. <c>MS_Description</c>) — compared case-insensitively per real
+/// SQL Server semantics.
+/// </summary>
+internal readonly struct ExtendedPropertyKey(byte @class, int majorId, int minorId, string name) : IEquatable<ExtendedPropertyKey>
+{
+    public readonly byte Class = @class;
+    public readonly int MajorId = majorId;
+    public readonly int MinorId = minorId;
+    public readonly string Name = name;
+
+    public bool Equals(ExtendedPropertyKey other) =>
+        this.Class == other.Class
+        && this.MajorId == other.MajorId
+        && this.MinorId == other.MinorId
+        && Collation.Default.Equals(this.Name, other.Name);
+
+    public override bool Equals(object? obj) => obj is ExtendedPropertyKey other && this.Equals(other);
+
+    public override int GetHashCode() =>
+        HashCode.Combine(this.Class, this.MajorId, this.MinorId, Collation.Default.GetHashCode(this.Name));
+
+    public static bool operator ==(ExtendedPropertyKey left, ExtendedPropertyKey right) => left.Equals(right);
+    public static bool operator !=(ExtendedPropertyKey left, ExtendedPropertyKey right) => !left.Equals(right);
 }

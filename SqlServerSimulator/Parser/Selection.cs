@@ -893,6 +893,29 @@ internal sealed partial class Selection
                         lateralPlan: stringSplitPlan);
                 }
 
+                // fn_listextendedproperty: 7-arg system TVF projecting the
+                // (objtype, objname, name, value) tuples for extended
+                // properties matching the filter. Same shape as STRING_SPLIT
+                // / OPENJSON — a built-in rowset function that synthesizes
+                // a Selection plan inline.
+                if (string.Equals(tableName.Value, "fn_listextendedproperty", StringComparison.OrdinalIgnoreCase))
+                {
+                    var listExtPlan = ParseListExtendedProperty(context);
+                    var listExtColumns = new HeapColumn[listExtPlan.Schema.Length];
+                    for (var ci = 0; ci < listExtColumns.Length; ci++)
+                        listExtColumns[ci] = new HeapColumn(listExtPlan.ColumnNames[ci], listExtPlan.Schema[ci], maxLength: null, nullable: true);
+                    var listExtAlias = ConsumeOptionalAliasInPlace(context);
+                    return new FromSource(
+                        qualifier: listExtAlias,
+                        columnNames: listExtPlan.ColumnNames,
+                        columns: listExtColumns,
+                        storedSchema: listExtColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: listExtPlan);
+                }
+
                 // Multi-part name parse: advances the cursor past the last
                 // dotted segment, leaving Token on the first non-name token
                 // (alias / AS / WHERE / JOIN / etc.). CTE binding only fires

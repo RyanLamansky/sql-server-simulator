@@ -237,6 +237,44 @@ partial class SimulatedSqlException
         new($"Cannot drop type '{typeFullName}' because it is being referenced by object '{referencingObject}'. There may be other objects that reference this type.", 3732, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15233: <c>sp_addextendedproperty</c> rejected
+    /// a duplicate property name on the same target. Probe-confirmed verbatim
+    /// wording against SQL Server 2025 — the target label varies by level
+    /// (<c>'object specified'</c> for DB-level, <c>'&lt;schema&gt;'</c> for
+    /// schema, <c>'&lt;schema&gt;.&lt;name&gt;'</c> for table / view / proc / func,
+    /// <c>'&lt;schema&gt;.&lt;table&gt;.&lt;col&gt;'</c> for column).
+    /// </summary>
+    internal static SimulatedSqlException ExtendedPropertyAlreadyExists(string propertyName, string targetLabel) =>
+        new($"Property cannot be added. Property '{propertyName}' already exists for '{targetLabel}'.", 15233, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15217: <c>sp_updateextendedproperty</c> /
+    /// <c>sp_dropextendedproperty</c> targeted a missing property. Same
+    /// target-label convention as <see cref="ExtendedPropertyAlreadyExists"/>.
+    /// </summary>
+    internal static SimulatedSqlException ExtendedPropertyDoesNotExist(string propertyName, string targetLabel) =>
+        new($"Property cannot be updated or deleted. Property '{propertyName}' does not exist for '{targetLabel}'.", 15217, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15135: an extended-property sproc named an
+    /// object that doesn't exist. Probe-confirmed wording against SQL Server
+    /// 2025 — the target token is the missing-name (e.g. <c>'no_such_schema'</c>
+    /// for level0, <c>'dbo.no_such_table'</c> for level1, <c>'dbo.t1.no_such_col'</c>
+    /// for level2).
+    /// </summary>
+    internal static SimulatedSqlException ExtendedPropertyTargetMissing(string targetLabel) =>
+        new($"Object is invalid. Extended properties are not permitted on '{targetLabel}', or the object does not exist.", 15135, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15600: an extended-property sproc received an
+    /// unknown / unsupported parameter (positional rather than named, an
+    /// out-of-range level type like <c>'BOGUS'</c>, a missing required arg).
+    /// Verbatim wording probed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InvalidExtendedPropertyParameter(string procLabel) =>
+        new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2715: a <c>DECLARE</c> / <c>CREATE
     /// PROCEDURE</c> / <c>CREATE FUNCTION</c> parameter referenced a type
     /// name that doesn't resolve. Probe-confirmed two-line wording against

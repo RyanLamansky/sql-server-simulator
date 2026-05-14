@@ -55,14 +55,26 @@ Real-feature path landed: `CREATE TYPE schema.name FROM <builtin>[(N[, S])] [NUL
 - Alias-type max-length surfaces on `sys.types.max_length` aren't emitted (the catalog view's shipped subset doesn't include `max_length` yet — pre-existing gap from before this bundle, not specific to alias types).
 - Alias-of-alias not modeled — `CREATE TYPE T2 FROM T1` where T1 is itself an alias raises Msg 222 (matches probe: real SQL Server rejects alias-of-alias the same way).
 
-### [ ] Extended properties (`sp_addextendedproperty` + `sys.extended_properties`) (medium)
-538 in AW — they're how SQL Server attaches descriptions/metadata to schemas/tables/columns/etc. Surface needed:
-- `sp_addextendedproperty @name='MS_Description', @value='…', @level0type='SCHEMA', @level0name='dbo', @level1type='TABLE', @level1name='ErrorLog', @level2type='COLUMN', @level2name='ErrorMessage'` (the canonical EXEC form the loader would emit)
-- `sys.extended_properties` catalog view (read-back)
-- `fn_listextendedproperty` table-valued system function (often used by ORMs and Schema Compare tools)
-- Storage: probably a `Dictionary<(int class, int major_id, int minor_id), Dictionary<string, SqlValue>>` on `Database`.
+### [x] Extended properties (shipped 2026-05-14)
+Full sproc trio + `sys.extended_properties` catalog view + `fn_listextendedproperty` system TVF — pure metadata, no semantic effect on queries. 538 in AW (461 column + 69 table + 5 schema + 1 DB + 1 filegroup + 1 DDL-trigger; filegroup / DDL-trigger remain out of scope per the simulator's broader feature roster).
 
-Pure metadata — no semantic effect on queries. Probably one bundle on its own.
+**Storage** lives on `Database.ExtendedProperties` — a `ConcurrentDictionary<ExtendedPropertyKey, SqlValue>` keyed by `(byte class, int major_id, int minor_id, string name)` with case-insensitive name comparison (the `ExtendedPropertyKey` readonly-struct overrides `Equals` / `GetHashCode` through `Collation.Default`). Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape (not per-schema).
+
+**Sproc trio** in `Simulation.ExtendedProperties.cs` (new partial). `Simulation.Exec.cs` gains three dispatch branches after the existing `sp_executesql` route, each forwarding to the shared `InvokeSpExtendedProperty(batch, ExtendedPropertyOp)` body which parses the named-arg list (8 recognized args: `@name`, `@value`, `@level0type` / `@level0name` / `@level1type` / `@level1name` / `@level2type` / `@level2name`), resolves the target via `ResolveExtendedPropertyTarget`, and performs the add/update/drop op against the dict. Argument-name comparison drops the `@` prefix (the `AtPrefixedString` token's `Value` is already `@`-stripped).
+
+**Verbatim error wording** (probe-confirmed against SQL Server 2025 on 2026-05-14):
+- **Msg 15233** for duplicate add: `"Property cannot be added. Property 'X' already exists for 'Y'."` — `Y` is `'object specified'` for DB-level, `'<schema>'` for schema, `'<schema>.<name>'` for table/view/proc/func, `'<schema>.<table>.<col>'` for column.
+- **Msg 15217** for update/drop on missing: same target-label convention.
+- **Msg 15135** for missing target object: `"Object is invalid. Extended properties are not permitted on '<target>', or the object does not exist."` — target label uses the failing-level's value.
+- **Msg 15600** for invalid parameters (positional arg, unknown @-name, missing required arg, unknown level type).
+
+**`sys.extended_properties`** catalog view in `BuiltInResources.cs::EnumerateSysExtendedProperties` emits the shipped 6-column subset: `class` (tinyint), `class_desc` (sysname — 0→`DATABASE`, 1→`OBJECT_OR_COLUMN`, 3→`SCHEMA`), `major_id` (int), `minor_id` (int — 0 for tables/views/procs/funcs, 1-based column ordinal for columns), `name` (sysname), `value` (nvarchar(MAX) — sql_variant isn't modeled, so the value coerces to nvarchar; AW's all-nvarchar workload is lossless).
+
+**`fn_listextendedproperty`** in `Selection.ListExtendedProperty.cs` is a built-in system TVF dispatched alongside `OPENJSON` / `STRING_SPLIT` in `ParseSingleFromSource`. 7 args (`@name`, `@level0type`, `@level0name`, `@level1type`, `@level1name`, `@level2type`, `@level2name`), each may be NULL; returns 4 columns (`objtype`, `objname`, `name`, `value`). Filter pipeline: parse each arg expression; eval to nullable string; build `ExtendedPropertyListFilter` from the resolved target; walk `Database.ExtendedProperties` and project matches. The `'default'` wildcard at any level-name slot fans out across every object of that level-type under the parent (probe-confirmed). Missing target returns zero rows (distinct from the sproc path's Msg 15135). Unknown level0/1/2 type (other than `SCHEMA` / `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `TYPE` / `COLUMN`) raises `NotSupportedException`.
+
+21 new tests in `ExtendedPropertyTests.cs` cover: read-back via `sys.extended_properties` (schema / table / column / DB-level row shape + class+class_desc values), all four duplicate-add target-label variants for Msg 15233, update + drop happy paths, all three missing-target variants for Msg 15135, Msg 15217 / 15600 paths, plus 5 `fn_listextendedproperty` cases (table-level scalar read, name filter across levels, column-level filter, missing-target zero rows, `'default'` wildcard fanout). Full suite 4640 → 4661, all green Debug + Release.
+
+**Known gaps deferred**: PARAMETER / INDEX / TRIGGER / CONSTRAINT level types (Msg 15600 / `NotSupportedException` rather than full target resolution) — AW doesn't exercise them in extended-property declarations, and the bacpac-loader baseline doesn't need them. `sql_variant`-typed values are surfaced as nvarchar via lossy coercion (probe-confirmed: AW's 538 properties are all nvarchar inputs, so this is invisible in practice; non-nvarchar inputs from app code would lose their original type-tag on read-back).
 
 ### [ ] `hierarchyid` data type (medium)
 2 columns in AW (`[HumanResources].[Employee].[OrganizationNode]` + procedure parameter). hierarchyid is variable-length binary with a documented encoding for paths like `/1/2/3/`. Surface:
@@ -130,8 +142,8 @@ Encoding-edge probes needed (carve out tiny custom BACPACs locally via `SqlPacka
 
 Rough sequence — work each bundle to completion, update this checklist, then revisit BACPAC scoping once the prerequisites land:
 
-1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ (both shipped 2026-05-14)
-2. **Extended properties** (next — mid-size, self-contained)
+1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ (all shipped 2026-05-14)
+2. **`hierarchyid`** (next — large but self-contained, unblocks `HumanResources.Employee`)
 3. **`hierarchyid`** (large but self-contained, unblocks `HumanResources.Employee`)
 4. **DDL trigger + permission statements** as parse-and-store-but-no-enforce (smallest scope; both end up as catalog-view-visible no-ops)
 5. **Loader baseline implementation**, with `xml` / `geography` / full-text **loaded in degraded mode** (xml/geography → nvarchar(MAX), full-text indexes → parse-and-discard). Diagnostics report which features were degraded.

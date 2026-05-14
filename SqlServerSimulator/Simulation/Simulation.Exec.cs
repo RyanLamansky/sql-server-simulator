@@ -85,6 +85,29 @@ partial class Simulation
             yield break;
         }
 
+        // Extended-property sprocs — all 3 share argument parsing + target
+        // resolution via InvokeSpExtendedProperty. The bacpac loader emits
+        // `EXEC sp_addextendedproperty …` for every `<SqlExtendedProperty>`
+        // element in model.xml; the update/drop variants round out the API.
+        if (Collation.Default.Equals(procName.Leaf, "sp_addextendedproperty"))
+        {
+            foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add))
+                yield return outcome;
+            yield break;
+        }
+        if (Collation.Default.Equals(procName.Leaf, "sp_updateextendedproperty"))
+        {
+            foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update))
+                yield return outcome;
+            yield break;
+        }
+        if (Collation.Default.Equals(procName.Leaf, "sp_dropextendedproperty"))
+        {
+            foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop))
+                yield return outcome;
+            yield break;
+        }
+
         // Args + invocation. Skip-mode runs the arg parser (cursor advance,
         // syntax errors still fire), but suppresses the invocation itself.
         var arguments = ParseExecArguments(context, batch);
