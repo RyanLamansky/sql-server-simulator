@@ -28,7 +28,7 @@ partial class Simulation
         // dispatch since we don't call the hint parser for `@t`.
         context.MoveNextRequired();
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
 
         if (context.Batch.TryResolveView(destinationName, out var destinationView))
             return ProcessViewInsert(destinationView, context);
@@ -428,12 +428,8 @@ partial class Simulation
                     EnforceUniqueIndexes(destinationTable, rowValues, storedValues, context.Batch);
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
                     var (pageIndex, slotIndex) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
-                    if (!destinationTable.IsTableVariable
-                        && !BatchContext.IsLocalTempName(destinationTable.Name)
-                        && !Simulation.SystemHeapTables.ContainsValue(destinationTable))
-                    {
+                    if (IsLockableTable(destinationTable))
                         context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive);
-                    }
                 }
 
                 if (output is { } o)

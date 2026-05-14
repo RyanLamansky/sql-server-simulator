@@ -187,6 +187,7 @@ internal sealed class LockManager
                 // no stale wait state. Set under the gate, read under
                 // the gate — snapshot is consistent.
                 owner.WaitingOnResource = resource;
+                owner.WaitingForMode = mode;
                 try
                 {
                     if (!Monitor.Wait(this.gate, remaining))
@@ -195,6 +196,7 @@ internal sealed class LockManager
                 finally
                 {
                     owner.WaitingOnResource = null;
+                    owner.WaitingForMode = null;
                 }
             }
         }

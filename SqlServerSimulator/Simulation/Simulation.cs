@@ -90,6 +90,42 @@ public sealed partial class Simulation
     private int nextSpid = 50;
 
     /// <summary>
+    /// Live connection registry. Each <see cref="SimulatedDbConnection"/>
+    /// registers itself at construction and deregisters in
+    /// <see cref="SimulatedDbConnection.Dispose"/>. The
+    /// <c>sys.dm_tran_locks</c> / <c>sys.dm_os_waiting_tasks</c> DMVs
+    /// enumerate this list to surface waiter rows (waiters' state is on
+    /// the connection's <see cref="SimulatedDbConnection.WaitingOnResource"/>,
+    /// not on the resource itself).
+    /// </summary>
+    internal readonly HashSet<SimulatedDbConnection> Connections = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Registers a connection at construction time.</summary>
+    internal void RegisterConnection(SimulatedDbConnection connection)
+    {
+        lock (this.Connections)
+            _ = this.Connections.Add(connection);
+    }
+
+    /// <summary>Unregisters a connection at dispose time.</summary>
+    internal void UnregisterConnection(SimulatedDbConnection connection)
+    {
+        lock (this.Connections)
+            _ = this.Connections.Remove(connection);
+    }
+
+    /// <summary>
+    /// Snapshot of currently-registered connections. The caller iterates
+    /// the snapshot rather than the live set so concurrent open / dispose
+    /// during enumeration is safe.
+    /// </summary>
+    internal SimulatedDbConnection[] SnapshotConnections()
+    {
+        lock (this.Connections)
+            return [.. this.Connections];
+    }
+
+    /// <summary>
     /// Per-Simulation lock coordinator — single gate every
     /// <see cref="LockResource"/> acquisition / release serializes through,
     /// plus the cycle-detection walker. One instance per simulation;

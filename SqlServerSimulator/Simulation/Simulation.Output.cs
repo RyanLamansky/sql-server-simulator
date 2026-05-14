@@ -303,9 +303,11 @@ partial class Simulation
                     : SqlValue.Null(column.Type);
             }
             var undoLog = this.Target.IsTableVariable ? this.batch.CurrentTableVarUndoLog : this.batch.CurrentUndoLog;
-            _ = this.Target.Heap.Insert(
+            var (newPage, newSlot) = this.Target.Heap.Insert(
                 RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
                 undoLog);
+            if (Simulation.IsLockableTable(this.Target))
+                this.batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive);
         }
     }
 

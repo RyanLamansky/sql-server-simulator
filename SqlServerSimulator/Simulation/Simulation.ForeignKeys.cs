@@ -375,8 +375,12 @@ partial class Simulation
                     _ => throw new InvalidOperationException(),
                 };
             }
+            if (IsLockableTable(childTable))
+                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
             childTable.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
-            _ = childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
+            var (newPage, newSlot) = childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
+            if (IsLockableTable(childTable))
+                context.Batch.AcquireRowLockTxScoped(childTable, newPage, newSlot, LockMode.Exclusive);
             newPairs.Add((oldClone, newRow));
         }
         // Recurse: the child rows just got their FK columns rewritten — if
@@ -406,8 +410,12 @@ partial class Simulation
                     ? EvaluateColumnDefault(childTable.Columns[ord], context)
                     : SqlValue.Null(childTable.Columns[ord].Type);
             }
+            if (IsLockableTable(childTable))
+                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
             childTable.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
-            _ = childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
+            var (newPage, newSlot) = childTable.Heap.Insert(RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog);
+            if (IsLockableTable(childTable))
+                context.Batch.AcquireRowLockTxScoped(childTable, newPage, newSlot, LockMode.Exclusive);
             newPairs.Add((oldClone, newRow));
         }
         // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion

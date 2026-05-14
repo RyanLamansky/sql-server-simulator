@@ -133,6 +133,10 @@ partial class Simulation
 
         if (!context.Batch.TryResolveSequence(sequenceName, out var sequence))
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
+        // TryResolveSequence took Sch-S; upgrade to Sch-M before mutating
+        // the sequence's option fields. Other connections reading the
+        // sequence (NEXT VALUE FOR) will wait on the Sch-M acquire.
+        context.Batch.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaModification);
 
         while (context.MoveNext())
         {

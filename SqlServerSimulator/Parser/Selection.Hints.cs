@@ -107,6 +107,15 @@ internal sealed partial class Selection
         public bool TabLock;
         /// <summary><c>TABLOCKX</c> — escalate to table-X regardless of read / write direction.</summary>
         public bool TabLockX;
+        /// <summary>
+        /// <c>INDEX(…)</c>, <c>FORCESEEK</c>, <c>FORCESCAN</c> — index-selection
+        /// hints. Tracked for Msg 1069 rejection on DML targets (real SQL
+        /// Server forbids index hints on INSERT / UPDATE / DELETE / MERGE
+        /// targets — they're only valid in a FROM clause or OPTION clause).
+        /// The simulator has no index dispatch so the hint is otherwise
+        /// parse-and-discard.
+        /// </summary>
+        public bool IndexHint;
     }
 
     /// <summary>
@@ -181,12 +190,46 @@ internal sealed partial class Selection
             if (context.Token is Operator { Character: ')' })
             {
                 context.MoveNextOptional();
+                ValidateHintCombinations(info);
                 return;
             }
             if (context.Token is not Operator { Character: ',' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
+    }
+
+    /// <summary>
+    /// Cross-hint combination validation. Msg 1047 fires when
+    /// <c>NOLOCK</c> / <c>READUNCOMMITTED</c> appears alongside any locking
+    /// hint that would require a real lock (UPDLOCK, XLOCK, HOLDLOCK,
+    /// SERIALIZABLE, REPEATABLEREAD, TABLOCKX). Probe-confirmed against SQL
+    /// Server 2025 (2026-05-14): the message wording is fixed
+    /// ("Conflicting locking hints specified.") regardless of which pair
+    /// actually conflicted.
+    /// </summary>
+    private static void ValidateHintCombinations(TableHintInfo info)
+    {
+        if (!info.NoLock)
+            return;
+        if (info.UpdLock || info.XLock || info.Serializable || info.Repeatable || info.TabLockX)
+            throw SimulatedSqlException.ConflictingLockingHints();
+    }
+
+    /// <summary>
+    /// Validates DML-target-specific hint restrictions. Called by INSERT /
+    /// UPDATE / DELETE / MERGE target sites after
+    /// <see cref="ParseOptionalTableHints"/> returns. Msg 1065 rejects
+    /// <c>NOLOCK</c> / <c>READUNCOMMITTED</c>; Msg 1069 rejects
+    /// <c>INDEX(…)</c> / <c>FORCESEEK</c> / <c>FORCESCAN</c>. Both
+    /// probe-confirmed verbatim.
+    /// </summary>
+    internal static void ValidateDmlTargetHints(TableHintInfo info)
+    {
+        if (info.NoLock)
+            throw SimulatedSqlException.NoLockHintNotAllowedOnDmlTarget();
+        if (info.IndexHint)
+            throw SimulatedSqlException.IndexHintsOnlyInFromOrOption();
     }
 
     /// <summary>
@@ -244,6 +287,12 @@ internal sealed partial class Selection
         else if (Collation.Default.Equals(nameText, "TABLOCKX"))
         {
             info.TabLockX = true;
+        }
+        else if (Collation.Default.Equals(nameText, "INDEX")
+            || Collation.Default.Equals(nameText, "FORCESEEK")
+            || Collation.Default.Equals(nameText, "FORCESCAN"))
+        {
+            info.IndexHint = true;
         }
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '=' })

@@ -557,4 +557,92 @@ public sealed class LockingTests
         AreEqual(100, sim.ExecuteScalar("select v from t where id = 1"));
         AreEqual(200, sim.ExecuteScalar("select v from t where id = 2"));
     }
+
+    [TestMethod]
+    public void LockTimeoutScalar_Default_ReturnsMinusOne()
+        => AreEqual(-1, new Simulation().ExecuteScalar("select @@lock_timeout"));
+
+    [TestMethod]
+    public void LockTimeoutScalar_AfterSet_ReturnsAssignedValue()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("set lock_timeout 5000").ExecuteNonQuery();
+        AreEqual(5000, conn.CreateCommand("select @@lock_timeout").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SpidScalar_FirstUserConnection_Returns51()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        // @@SPID is smallint per probe — fits in short.
+        AreEqual((short)51, conn.CreateCommand("select @@spid").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DmTranLocks_EmptySimulation_ReturnsNoRowsForUserTables()
+    {
+        // Fresh Simulation, no tx in flight — sys.dm_tran_locks shows zero
+        // lock entries for any user table. (System tables / catalog views
+        // bypass the lock manager so they don't appear.)
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_tran_locks where resource_associated_entity_id = object_id('t')"));
+    }
+
+    [TestMethod]
+    public void DmTranLocks_InsideUncommittedTx_ShowsHeldRowAndTableLocks()
+    {
+        // BEGIN TRAN; INSERT t VALUES (...) holds table-IX on t plus a
+        // row-X on the inserted row. dm_tran_locks projects both.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("begin tran; insert t values (1)").ExecuteNonQuery();
+        var count = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where resource_associated_entity_id = object_id('t') and request_status = 'GRANT'").ExecuteScalar()!;
+        IsGreaterThanOrEqualTo(2, count);
+        // At least one IX entry (table-level) and at least one X entry (row-level).
+        var hasIx = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where request_mode = 'IX' and resource_associated_entity_id = object_id('t')").ExecuteScalar()! > 0;
+        var hasX = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where request_mode = 'X' and resource_associated_entity_id = object_id('t')").ExecuteScalar()! > 0;
+        IsTrue(hasIx);
+        IsTrue(hasX);
+        _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_tran_locks where resource_associated_entity_id = object_id('t')"));
+    }
+
+    [TestMethod]
+    public async Task DmOsWaitingTasks_DuringContention_ShowsWaiterRow()
+    {
+        // Connection A holds row-U on row 1 via SELECT WITH (UPDLOCK);
+        // Connection B tries SELECT WITH (UPDLOCK) on the same row → row-U
+        // × row-U conflict → B waits. While B is blocked, the observer
+        // connection queries sys.dm_os_waiting_tasks and sees one row
+        // whose session_id = B's SPID and blocking_session_id = A's SPID.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var holder = sim.CreateOpenConnection();
+        using var waiter = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; select * from t with (updlock)").ExecuteScalar();
+
+        var started = new ManualResetEventSlim();
+        var waitTask = Task.Run(() =>
+        {
+            started.Set();
+            _ = waiter.CreateCommand("select * from t with (updlock)").ExecuteScalar();
+        }, TestContext.CancellationToken);
+
+        IsTrue(started.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(150, TestContext.CancellationToken);
+
+        var holderSpid = (short)holder.CreateCommand("select @@spid").ExecuteScalar()!;
+        var waiterSpid = (short)waiter.CreateCommand("select @@spid").ExecuteScalar()!;
+        var rowsCount = (int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {waiterSpid} and blocking_session_id = {holderSpid}").ExecuteScalar()!;
+        AreEqual(1, rowsCount);
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        await waitTask;
+    }
 }

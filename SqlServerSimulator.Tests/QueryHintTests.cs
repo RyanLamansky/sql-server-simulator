@@ -26,8 +26,64 @@ public sealed class QueryHintTests
         => AreEqual(3, new Simulation().ExecuteScalar("""
             create table t (id int primary key);
             insert t values (1), (2), (3);
-            select count(*) from t with (nolock, holdlock, readpast)
+            select count(*) from t with (holdlock, readpast, rowlock)
             """));
+
+    [TestMethod]
+    public void Select_NoLockWithHoldLock_RaisesMsg1047_ConflictingHints()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            select * from t with (nolock, holdlock)
+            """, 1047, "Conflicting locking hints specified.");
+
+    [TestMethod]
+    public void Select_NoLockWithXLock_RaisesMsg1047_ConflictingHints()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            select * from t with (nolock, xlock)
+            """, 1047, "Conflicting locking hints specified.");
+
+    [TestMethod]
+    public void Select_NoLockWithUpdLock_RaisesMsg1047_ConflictingHints()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            select * from t with (nolock, updlock)
+            """, 1047, "Conflicting locking hints specified.");
+
+    [TestMethod]
+    public void Update_WithNoLock_RaisesMsg1065()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            update t with (nolock) set id = 1
+            """, 1065, "The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.");
+
+    [TestMethod]
+    public void Delete_WithReadUncommitted_RaisesMsg1065()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            delete from t with (readuncommitted)
+            """, 1065, "The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.");
+
+    [TestMethod]
+    public void Insert_WithNoLock_RaisesMsg1065()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            insert t with (nolock) values (1)
+            """, 1065, "The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.");
+
+    [TestMethod]
+    public void Update_WithIndexHint_RaisesMsg1069()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            update t with (index(0)) set id = 1
+            """, 1069, "Index hints are only allowed in a FROM or OPTION clause.");
+
+    [TestMethod]
+    public void Delete_WithIndexHint_RaisesMsg1069()
+        => new Simulation().AssertSqlError("""
+            create table t (id int);
+            delete from t with (index(0))
+            """, 1069, "Index hints are only allowed in a FROM or OPTION clause.");
 
     [TestMethod]
     public void Select_LegacyParenForm_NoWith_ReturnsRows()

@@ -28,4 +28,30 @@ partial class SimulatedSqlException
     /// into the message wording at the <c>Process ID &lt;N&gt;</c> slot.</param>
     internal static SimulatedSqlException TransactionDeadlocked(int victimSpid) =>
         new($"Transaction (Process ID {victimSpid}) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.", 1205, 13, 45);
+
+    /// <summary>
+    /// Msg 1047 — raised when an unsupported combination of locking hints
+    /// appears on the same source (e.g. <c>NOLOCK + XLOCK</c>,
+    /// <c>NOLOCK + UPDLOCK</c>, <c>NOLOCK + HOLDLOCK</c>). Probe-confirmed
+    /// verbatim wording against SQL Server 2025 (2026-05-14).
+    /// </summary>
+    internal static SimulatedSqlException ConflictingLockingHints() =>
+        new("Conflicting locking hints specified.", 1047, 15, 1);
+
+    /// <summary>
+    /// Msg 1065 — raised when <c>WITH (NOLOCK)</c> or <c>WITH (READUNCOMMITTED)</c>
+    /// appears on the target of an <c>INSERT</c> / <c>UPDATE</c> /
+    /// <c>DELETE</c> / <c>MERGE</c>. Probe-confirmed verbatim wording.
+    /// </summary>
+    internal static SimulatedSqlException NoLockHintNotAllowedOnDmlTarget() =>
+        new("The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.", 1065, 15, 1);
+
+    /// <summary>
+    /// Msg 1069 — raised when an <c>INDEX(…)</c> / <c>FORCESEEK</c> /
+    /// <c>FORCESCAN</c> hint appears on the target of an <c>INSERT</c> /
+    /// <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c>. Probe-confirmed verbatim
+    /// wording: "Index hints are only allowed in a FROM or OPTION clause."
+    /// </summary>
+    internal static SimulatedSqlException IndexHintsOnlyInFromOrOption() =>
+        new("Index hints are only allowed in a FROM or OPTION clause.", 1069, 15, 1);
 }

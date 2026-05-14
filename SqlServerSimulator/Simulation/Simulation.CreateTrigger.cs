@@ -176,6 +176,10 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(triggerName);
+        // Sch-M on the existing trigger instance's SchemaLock before
+        // replacement — same pattern as ALTER PROCEDURE.
+        if (existed)
+            context.Batch.AcquireStatementLock(existing!.SchemaLock, LockMode.SchemaModification);
 
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
         var trigger = new Trigger(

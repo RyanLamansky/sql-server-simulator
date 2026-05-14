@@ -88,7 +88,7 @@ partial class Simulation
         }
 
         context.MoveNextRequired();
-        _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
         // Phase 1a: when the leading identifier resolved to a concrete table
         // (the simple `UPDATE t SET …` case), acquire X on it. Tx-scoped via
         // AcquireDataLockIfApplicable when an explicit BEGIN TRAN is active.
@@ -297,6 +297,12 @@ partial class Simulation
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
 
+        // Alias-form UPDATE: table-IX wasn't pre-acquired because the target
+        // wasn't yet known. Now that the FROM clause identified it, acquire
+        // table-IX + the standard row-X-per-mutation will happen at the
+        // mutation site (matching the simple-form UPDATE path).
+        _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase);
 
         BooleanExpression? where = null;
@@ -399,9 +405,7 @@ partial class Simulation
         // statement's frozen UtcNow.
         if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
             WriteHistoryRowsForUpdate(table, historyTable, pc, affected, context, undoLog);
-        var lockableTable = !table.IsTableVariable
-            && !BatchContext.IsLocalTempName(table.Name)
-            && !Simulation.SystemHeapTables.ContainsValue(table);
+        var lockableTable = IsLockableTable(table);
         foreach (var (pageIndex, slotIndex, _, _) in affected)
         {
             if (lockableTable)
@@ -461,6 +465,7 @@ partial class Simulation
         UndoLog? undoLog)
     {
         var stampedNow = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+        var lockableHistory = IsLockableTable(historyTable);
         foreach (var (_, _, _, oldFull) in affected)
         {
             if (oldFull is null)
@@ -468,9 +473,22 @@ partial class Simulation
             var historyRow = new SqlValue[oldFull.Length];
             Array.Copy(oldFull, historyRow, oldFull.Length);
             historyRow[period.EndOrdinal] = stampedNow;
-            _ = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+            var (newPage, newSlot) = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+            if (lockableHistory)
+                context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive);
         }
     }
+
+    /// <summary>
+    /// Lockability predicate for heap-table mutation sites: row-X acquire
+    /// only applies to tables that participate in cross-connection
+    /// contention. Table variables, local temp tables, and system tables
+    /// all bypass.
+    /// </summary>
+    internal static bool IsLockableTable(HeapTable table) =>
+        !table.IsTableVariable
+        && !BatchContext.IsLocalTempName(table.Name)
+        && !Simulation.SystemHeapTables.ContainsValue(table);
 
     private static List<byte[]> ProjectMutationOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,

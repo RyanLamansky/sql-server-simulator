@@ -1,16 +1,23 @@
-# Locking — phases 0 + 1a + 1b
+# Locking — phases 0 + 1a + 1b + 2
 
 Phase 0 shipped schema-stability locks (Sch-S / Sch-M) on every schema-
 bound object plus the per-connection plumbing (SPID, `@@LOCK_TIMEOUT`,
 currently-executing thread). Phase 1a added table-level data locks
 (Shared / Exclusive), transaction-scoped X retention, NOLOCK / HOLDLOCK
 hint semantics, auto-rollback on Msg 1205, and cross-thread waiter-graph
-cycle detection. Phase 1b expands to **row-level data locks** with the
-full SQL Server 6-data-mode matrix (IS / IX / SIX / S / U / X), wires
-**SET TRANSACTION ISOLATION LEVEL** session state, adds **escalation**
-to table-X past the per-tx-per-table threshold, and ships the
+cycle detection. Phase 1b expanded to **row-level data locks** with the
+full SQL Server 6-data-mode matrix (IS / IX / SIX / S / U / X), wired
+**SET TRANSACTION ISOLATION LEVEL** session state, added **escalation**
+to table-X past the per-tx-per-table threshold, and shipped the
 **UPDLOCK / XLOCK / READPAST / TABLOCK / TABLOCKX** hint semantics plus
-**REPEATABLE READ / SERIALIZABLE** isolation-level effects.
+**REPEATABLE READ / SERIALIZABLE** isolation-level effects. Phase 2
+ships the observability + completeness surface: **`sys.dm_tran_locks`**
+and **`sys.dm_os_waiting_tasks`** DMVs, **`@@LOCK_TIMEOUT`** / **`@@SPID`**
+scalar functions, **hint-conflict detection** (Msg 1047 / 1065 / 1069),
+**`ALTER PROCEDURE` / `ALTER TRIGGER` / `ALTER SEQUENCE`** Sch-M wiring,
+**alias-form `UPDATE` / `DELETE`** row-X acquire on the FROM-identified
+target, and row-X on history-table / cascade-FK / OUTPUT-INTO / SELECT
+INTO mutations.
 
 User-visible behaviors after phase 1b:
 
@@ -246,6 +253,47 @@ behavior:
 | `SERIALIZABLE`     | Table-S tx-scoped (phantom prevention at table granularity).   |
 | `SNAPSHOT`         | Parses-and-discards (MVCC is phase 3); behaves as READ COMMITTED. |
 
+## Diagnostic DMVs (phase 2)
+
+- **`sys.dm_tran_locks`** — one row per held / waiting lock across every
+  schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, and every
+  per-row entry in `HeapTable.RowLocks`. Shipped column subset:
+  `resource_type` (`OBJECT` / `RID`), `resource_database_id`,
+  `resource_description`, `resource_associated_entity_id` (`object_id`),
+  `request_mode` (`Sch-S` / `Sch-M` / `IS` / `IX` / `SIX` / `S` / `U` /
+  `X`), `request_status` (`GRANT` / `WAIT`), `request_session_id`. Row
+  generator at `LockDmvs.EnumerateDmTranLocks`.
+- **`sys.dm_os_waiting_tasks`** — one row per currently-blocked
+  connection: `session_id` (waiter's SPID), `wait_type`
+  (`LCK_M_<mode>`), `resource_description`, `blocking_session_id` (one
+  conflicting holder's SPID). Row generator at
+  `LockDmvs.EnumerateDmOsWaitingTasks`. Waiter / mode state lives in
+  `SimulatedDbConnection.WaitingOnResource` / `WaitingForMode` (set
+  inside `LockManager.Acquire`'s wait, cleared in `finally`).
+
+Neither DMV takes the manager's gate during enumeration — concurrent
+acquires / releases may shift the result between rows, but per-resource
+snapshots stay consistent (Holders list is read field-by-field; the
+struct copy can't tear).
+
+## Hint-conflict detection (phase 2)
+
+- **Msg 1047** — `Conflicting locking hints specified.` Raised when
+  `NOLOCK` / `READUNCOMMITTED` appears alongside any of `UPDLOCK` /
+  `XLOCK` / `HOLDLOCK` / `SERIALIZABLE` / `REPEATABLEREAD` /
+  `TABLOCKX`. Fired at `Selection.ValidateHintCombinations` after the
+  hint-list parse. Probe-confirmed verbatim wording (SQL Server 2025,
+  2026-05-14).
+- **Msg 1065** — `The NOLOCK and READUNCOMMITTED lock hints are not
+  allowed for target tables of INSERT, UPDATE, DELETE or MERGE
+  statements.` Raised at INSERT / UPDATE / DELETE / MERGE target sites
+  via `Selection.ValidateDmlTargetHints` when the parsed hints carry
+  `NoLock`. Probe-confirmed verbatim.
+- **Msg 1069** — `Index hints are only allowed in a FROM or OPTION
+  clause.` Raised at the same DML target sites when the parsed hints
+  carry `IndexHint` (set on `INDEX(…)` / `FORCESEEK` / `FORCESCAN`).
+  Probe-confirmed verbatim.
+
 ## Phase-1b gaps (intentional)
 
 - **Key-range locks** — real SQL Server uses key-range locks for
@@ -260,32 +308,29 @@ behavior:
 - **Hint-conflict detection** — `Msg 1047` (NOLOCK + XLOCK on same
   source), `Msg 1065` / `Msg 1069` (lock hints on DML targets) aren't
   enforced.
-- **`sys.dm_tran_locks` / `sys.dm_os_waiting_tasks`** — diagnostic
-  views over the lock manager's state. Phase 2.
-- **`@@LOCK_TIMEOUT` scalar function** — the state lives on
-  `SimulatedDbConnection.LockTimeoutMillis` but isn't surfaced through
-  `SELECT @@LOCK_TIMEOUT`. Phase 2.
+- **`sys.dm_tran_locks` / `sys.dm_os_waiting_tasks`** — shipped (phase 2,
+  see Diagnostic DMVs section above).
+- **`@@LOCK_TIMEOUT` / `@@SPID` scalar functions** — shipped (phase 2).
 - **SNAPSHOT / READ_COMMITTED_SNAPSHOT** — phase 3 (requires MVCC
   version chain on every row).
-- **UPDATE / DELETE multi-table-alias form X acquire** — the table-
-  level acquisition fires only when the leading identifier resolves to
-  a concrete table directly. The alias-form
-  `UPDATE x SET … FROM t x JOIN …` defers X acquire to phase 2 when
-  proper target identification through the FROM clause lands.
+- **UPDATE / DELETE multi-table-alias form X acquire** — shipped
+  (phase 2): the alias-form `UPDATE x SET … FROM t x JOIN …` now
+  acquires table-IX on the FROM-identified target before the row-X
+  loop, matching the simple-form behavior.
 - **`ALTER PROCEDURE` / `ALTER TRIGGER` / `ALTER SEQUENCE` Sch-M
-  wiring** — only the immutable-object DDL (`ALTER TABLE`, `DROP X`,
-  `TRUNCATE`) acquires Sch-M; ALTER on the programmable surface
-  doesn't yet.
+  wiring** — shipped (phase 2). `ALTER SCHEMA TRANSFER` Sch-M on the
+  moved object is still deferred.
+- **History-table writes for system-versioned UPDATE / DELETE** —
+  shipped (phase 2): per-row history-table inserts now acquire row-X
+  tx-scoped.
+- **Cascade-FK SET NULL / SET DEFAULT / CASCADE writes on child
+  tables** — shipped (phase 2): each cascade-rewrite acquires row-X
+  on the old + new RID.
+- **OUTPUT INTO target / SELECT INTO destination row-X** — shipped
+  (phase 2): per-row row-X acquired on the destination table.
 - **Row-lock cleanup on DELETE** — leaked entries in
   `HeapTable.RowLocks` accumulate (same pattern as the heap's slot /
   payload leak). Practical impact is tiny since slots leak too.
-- **History-table writes for system-versioned UPDATE / DELETE** — the
-  history-table insert during temporal mutations doesn't acquire a
-  row-X. Cascade FK actions also skip row-X. Both are uncommon
-  multi-tx contention points; defer.
-- **OUTPUT INTO target / SELECT INTO destination row-X** — both
-  acquire only the table-level lock (via the dispatch path); per-row
-  X on the destination table isn't wired.
 
 ## Phase-0 + 1a carry-forwards
 

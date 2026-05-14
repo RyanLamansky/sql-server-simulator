@@ -68,6 +68,8 @@ internal abstract class Expression
                 AtAtKeyword.Identity => new LastIdentityExpression(),
                 AtAtKeyword.TranCount => new TranCountExpression(context),
                 AtAtKeyword.RowCount => new RowCountExpression(),
+                AtAtKeyword.LockTimeout => new LockTimeoutExpression(context),
+                AtAtKeyword.SpId => new SpidExpression(context),
                 _ => new Value(doubleAtPrefixedString),
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),

@@ -53,7 +53,7 @@ partial class Simulation
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
         }
         context.MoveNextOptional();
-        _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
         // Phase 1a: acquire X on the resolved DELETE target. Tx-scoped when
         // BEGIN TRAN is active. Skipped when leadingTable is null (multi-
         // source alias form — target determined post-FROM, deferred to 1b).
@@ -192,6 +192,11 @@ partial class Simulation
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
 
+        // Alias-form DELETE: table-IX wasn't pre-acquired (target identified
+        // post-FROM). Acquire it now; row-X per affected row fires at the
+        // mutation site below.
+        _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
@@ -280,12 +285,12 @@ partial class Simulation
                 var historyRow = new SqlValue[oldFull.Length];
                 Array.Copy(oldFull, historyRow, oldFull.Length);
                 historyRow[pc.EndOrdinal] = stampedNow;
-                _ = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+                var (newPage, newSlot) = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+                if (IsLockableTable(historyTable))
+                    context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive);
             }
         }
-        var lockableTable = !table.IsTableVariable
-            && !BatchContext.IsLocalTempName(table.Name)
-            && !Simulation.SystemHeapTables.ContainsValue(table);
+        var lockableTable = IsLockableTable(table);
         foreach (var (pageIndex, slotIndex, _) in deleted)
         {
             if (lockableTable)

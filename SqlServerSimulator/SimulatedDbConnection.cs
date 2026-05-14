@@ -6,9 +6,17 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
+sealed class SimulatedDbConnection : DbConnection
 {
-    internal readonly Simulation Simulation = simulation;
+    internal readonly Simulation Simulation;
+
+    public SimulatedDbConnection(Simulation simulation)
+    {
+        this.Simulation = simulation;
+        this.Spid = simulation.AllocateSpid();
+        this.CurrentDatabase = simulation.Databases[Simulation.DefaultDatabaseName];
+        simulation.RegisterConnection(this);
+    }
 
     /// <summary>
     /// Session id. Allocated once at connection construction via
@@ -19,7 +27,7 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     /// in <c>@@SPID</c> / <c>sys.dm_exec_sessions.session_id</c> if those
     /// are ever projected.
     /// </summary>
-    internal readonly int Spid = simulation.AllocateSpid();
+    internal readonly int Spid;
 
     /// <summary>
     /// Session-scoped <c>@@LOCK_TIMEOUT</c>. Default is <c>-1</c> (wait
@@ -79,6 +87,15 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     internal LockResource? WaitingOnResource;
 
     /// <summary>
+    /// Mode this connection is currently waiting to acquire on
+    /// <see cref="WaitingOnResource"/>, or <c>null</c> when not waiting.
+    /// Surfaced through <c>sys.dm_os_waiting_tasks.wait_type</c> as
+    /// <c>LCK_M_&lt;mode&gt;</c> (e.g. <c>LCK_M_X</c>, <c>LCK_M_S</c>) and
+    /// through <c>sys.dm_tran_locks.request_mode</c> for WAIT-status rows.
+    /// </summary>
+    internal LockMode? WaitingForMode;
+
+    /// <summary>
     /// The database this session is pointed at. Defaults to the entry named
     /// <see cref="Simulation.DefaultDatabaseName"/> at connection construction;
     /// future <c>USE &lt;db&gt;</c> support will switch the pointer to a
@@ -86,7 +103,7 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
     /// state (heap tables, compatibility level, rowversion counter) reads
     /// through this pointer.
     /// </summary>
-    internal Database CurrentDatabase = simulation.Databases[Simulation.DefaultDatabaseName];
+    internal Database CurrentDatabase;
 
     /// <summary>
     /// Local temp tables (<c>#foo</c>) created from this session. Real SQL
@@ -278,6 +295,7 @@ sealed class SimulatedDbConnection(Simulation simulation) : DbConnection
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
             this.TempTables.Clear();
+            this.Simulation.UnregisterConnection(this);
         }
         base.Dispose(disposing);
     }

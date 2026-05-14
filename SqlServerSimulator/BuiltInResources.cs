@@ -707,6 +707,38 @@ internal static class BuiltInResources
         };
         var indexColumnsView = new CatalogView("index_columns", indexColumnsColumns, EnumerateSysIndexColumns);
 
+        // sys.dm_tran_locks: per-Hold rows across every schema-bound
+        // SchemaLock, every HeapTable.TableDataLock, and every per-row
+        // entry in HeapTable.RowLocks. GRANT entries come from
+        // LockResource.Holders; WAIT entries from connection registry's
+        // WaitingOnResource / WaitingForMode. Shipped column subset is
+        // the most commonly read seven fields; the full real-SQL-Server
+        // shape has ~18 columns most apps never touch.
+        var dmTranLocksColumns = new HeapColumn[]
+        {
+            new("resource_type", SqlType.NVarchar, 60, false),
+            new("resource_database_id", SqlType.Int32, null, false),
+            new("resource_description", SqlType.NVarchar, 256, true),
+            new("resource_associated_entity_id", SqlType.BigInt, null, true),
+            new("request_mode", SqlType.NVarchar, 60, false),
+            new("request_status", SqlType.NVarchar, 60, false),
+            new("request_session_id", SqlType.Int32, null, false),
+        };
+        var dmTranLocksView = new CatalogView("dm_tran_locks", dmTranLocksColumns, LockDmvs.EnumerateDmTranLocks);
+
+        // sys.dm_os_waiting_tasks: one row per currently-waiting
+        // connection. session_id / blocking_session_id are smallint
+        // matching real SQL Server; wait_type is `LCK_M_<mode>` per
+        // SQL Server's convention.
+        var dmOsWaitingTasksColumns = new HeapColumn[]
+        {
+            new("session_id", SqlType.SmallInt, null, true),
+            new("wait_type", SqlType.NVarchar, 60, true),
+            new("resource_description", SqlType.NVarchar, 2000, true),
+            new("blocking_session_id", SqlType.SmallInt, null, true),
+        };
+        var dmOsWaitingTasksView = new CatalogView("dm_os_waiting_tasks", dmOsWaitingTasksColumns, LockDmvs.EnumerateDmOsWaitingTasks);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -727,6 +759,8 @@ internal static class BuiltInResources
             ["sys.default_constraints"] = defaultConstraintsView,
             ["sys.indexes"] = indexesView,
             ["sys.index_columns"] = indexColumnsView,
+            ["sys.dm_tran_locks"] = dmTranLocksView,
+            ["sys.dm_os_waiting_tasks"] = dmOsWaitingTasksView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,

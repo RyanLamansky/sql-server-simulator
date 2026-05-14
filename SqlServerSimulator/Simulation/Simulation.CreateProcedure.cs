@@ -135,6 +135,12 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(procName.Leaf);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(procName);
+        // ALTER (and the ALTER-leg of CREATE OR ALTER on an existing proc)
+        // acquires Sch-M on the existing instance's SchemaLock before
+        // replacement so concurrent EXEC (which holds Sch-S via
+        // TryResolveProcedure) blocks our mutation until it finishes.
+        if (existed)
+            context.Batch.AcquireStatementLock(existing!.SchemaLock, LockMode.SchemaModification);
 
         // ALTER preserves the existing object_id (probe-confirmed). CREATE
         // and CREATE OR ALTER (on a missing name) allocate a fresh id.

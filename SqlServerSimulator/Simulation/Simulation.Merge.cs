@@ -61,7 +61,7 @@ partial class Simulation
         // variable targets reject hints — skip the parser for `@t`.
         context.MoveNextRequired();
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
         // Phase 1b: acquire table-IX on the MERGE target; row-X on each
         // affected row at mutation time.
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
@@ -1173,9 +1173,7 @@ partial class Simulation
         }
 
         // Apply heap operations only for non-INSTEAD-OF actions.
-        var lockableTable = !destinationTable.IsTableVariable
-            && !BatchContext.IsLocalTempName(destinationTable.Name)
-            && !Simulation.SystemHeapTables.ContainsValue(destinationTable);
+        var lockableTable = IsLockableTable(destinationTable);
         if (!insteadOfDelete)
         {
             foreach (var (page, slot, _, _) in pendingDeletes)
