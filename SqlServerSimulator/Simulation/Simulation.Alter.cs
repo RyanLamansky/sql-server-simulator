@@ -48,22 +48,39 @@ partial class Simulation
             return TryParseAlterDatabaseScopedConfiguration(context);
 
         // Otherwise a database name (or CURRENT). The simulator has one
-        // database; accept anything that looks like an identifier.
+        // database; accept anything that looks like an identifier. After the
+        // name the only legal continuations are SET <option> and COLLATE
+        // <name>.
         return afterDatabase is Name or ReservedKeyword { Keyword: Keyword.Current }
-            && TryParseAlterDatabaseSet(context);
+            && context.GetNextRequired() switch
+            {
+                ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context),
+                ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context),
+                _ => false,
+            };
     }
 
+    /// <summary>
+    /// Dispatches <c>ALTER DATABASE name SET &lt;option&gt; …</c>. The three
+    /// historically-shipped options (COMPATIBILITY_LEVEL, ALLOW_SNAPSHOT_ISOLATION,
+    /// READ_COMMITTED_SNAPSHOT) carry semantic effect and route to dedicated
+    /// helpers; the remaining accept-list (RECOVERY, ANSI_NULLS, QUERY_STORE,
+    /// TARGET_RECOVERY_TIME, ACCELERATED_DATABASE_RECOVERY, …) is parse-and-
+    /// discard — see <see cref="RecognizedDatabaseOptions"/> for the closed
+    /// list, sourced from a probe matrix against SQL Server 2025 (2026-05-14).
+    /// </summary>
     private static bool TryParseAlterDatabaseSet(ParserContext context)
     {
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
-            return false;
-
         context.MoveNextRequired();
+        // Load-bearing options keep their dedicated handlers. Routing on
+        // ContextualKeyword first means the existing 3 paths are unchanged
+        // and the new parse-and-discard surface lives on a parallel dict.
         return context.Token switch
         {
             UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level } => TryParseAlterDatabaseSetCompatibilityLevel(context),
             UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetSnapshotFlag(context, isRcsi: false),
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetSnapshotFlag(context, isRcsi: true),
+            UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, kind),
             _ => false,
         };
     }
@@ -109,6 +126,253 @@ partial class Simulation
             context.CurrentDatabase.AllowSnapshotIsolation = value;
         return true;
     }
+
+    /// <summary>
+    /// Value-shape of each recognized parse-and-discard ALTER DATABASE option.
+    /// Sourced from a probe matrix against SQL Server 2025 (2026-05-14);
+    /// shapes that differ from the canonical T-SQL syntax raise Msg 156/102
+    /// at the offending token in <see cref="ConsumeDatabaseOptionTail"/>.
+    /// </summary>
+    private enum AlterDatabaseOptionKind
+    {
+        /// <summary>Bare ON/OFF after the option name (no <c>=</c>).</summary>
+        OnOff,
+        /// <summary><c>= ON|OFF</c> — the <c>=</c> is required.</summary>
+        EqualsOnOff,
+        /// <summary>Bare identifier value (RECOVERY FULL, CURSOR_DEFAULT GLOBAL, …).</summary>
+        EnumIdent,
+        /// <summary><c>= N {SECONDS|MINUTES}</c> — TARGET_RECOVERY_TIME.</summary>
+        IntegerWithUnit,
+        /// <summary>
+        /// <c>= ON [( opt = val [, …] )] | = OFF | CLEAR [ALL]</c> — QUERY_STORE.
+        /// The options block has its own closed accept-list, handled in
+        /// <see cref="ConsumeQueryStoreOptionsBlock"/>.
+        /// </summary>
+        QueryStore,
+    }
+
+    /// <summary>
+    /// Closed accept-list of ALTER DATABASE option names whose value shape
+    /// fits one of the <see cref="AlterDatabaseOptionKind"/> classes. The
+    /// three load-bearing options (COMPATIBILITY_LEVEL, ALLOW_SNAPSHOT_ISOLATION,
+    /// READ_COMMITTED_SNAPSHOT) are dispatched via their dedicated helpers
+    /// upstream and are intentionally absent here. Each entry mirrors the
+    /// option's syntax shape as probed against SQL Server 2025 — see
+    /// <c>/tmp/dbopts-probe</c> for the verification matrix.
+    /// </summary>
+    private static readonly Dictionary<string, AlterDatabaseOptionKind> RecognizedDatabaseOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ANSI_NULLS"] = AlterDatabaseOptionKind.OnOff,
+        ["ANSI_PADDING"] = AlterDatabaseOptionKind.OnOff,
+        ["ANSI_WARNINGS"] = AlterDatabaseOptionKind.OnOff,
+        ["ARITHABORT"] = AlterDatabaseOptionKind.OnOff,
+        ["CONCAT_NULL_YIELDS_NULL"] = AlterDatabaseOptionKind.OnOff,
+        ["NUMERIC_ROUNDABORT"] = AlterDatabaseOptionKind.OnOff,
+        ["QUOTED_IDENTIFIER"] = AlterDatabaseOptionKind.OnOff,
+        ["TORN_PAGE_DETECTION"] = AlterDatabaseOptionKind.OnOff,
+        ["TEMPORAL_HISTORY_RETENTION"] = AlterDatabaseOptionKind.OnOff,
+        ["RECOVERY"] = AlterDatabaseOptionKind.EnumIdent,
+        ["PAGE_VERIFY"] = AlterDatabaseOptionKind.EnumIdent,
+        ["CURSOR_DEFAULT"] = AlterDatabaseOptionKind.EnumIdent,
+        ["ACCELERATED_DATABASE_RECOVERY"] = AlterDatabaseOptionKind.EqualsOnOff,
+        ["OPTIMIZED_LOCKING"] = AlterDatabaseOptionKind.EqualsOnOff,
+        ["TARGET_RECOVERY_TIME"] = AlterDatabaseOptionKind.IntegerWithUnit,
+        ["QUERY_STORE"] = AlterDatabaseOptionKind.QueryStore,
+    };
+
+    /// <summary>
+    /// Recognized QUERY_STORE sub-option names inside <c>= ON ( … )</c>. Each
+    /// sub-option consumes <c>= &lt;value&gt;</c> after its name; for
+    /// CLEANUP_POLICY and QUERY_CAPTURE_POLICY the value is a parenthesized
+    /// sub-block, which <see cref="ConsumeQueryStoreOptionsBlock"/> recurses
+    /// into via <see cref="SkipBalancedParens"/>. Probed against SQL Server
+    /// 2025 — unknown sub-option names raise Msg 102.
+    /// </summary>
+    private static readonly HashSet<string> RecognizedQueryStoreSubOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "OPERATION_MODE",
+        "CLEANUP_POLICY",
+        "DATA_FLUSH_INTERVAL_SECONDS",
+        "MAX_STORAGE_SIZE_MB",
+        "INTERVAL_LENGTH_MINUTES",
+        "SIZE_BASED_CLEANUP_MODE",
+        "QUERY_CAPTURE_MODE",
+        "MAX_PLANS_PER_QUERY",
+        "WAIT_STATS_CAPTURE_MODE",
+        "QUERY_CAPTURE_POLICY",
+    };
+
+    /// <summary>
+    /// Cursor enters on the option name. Advances past the value tail per
+    /// <paramref name="kind"/>; returns true on shape match, false to fall
+    /// through to the caller's Msg 102 path on bad trailers.
+    /// </summary>
+    /// <remarks>
+    /// The enum value may tokenize as either a bare identifier (e.g.
+    /// BULK_LOGGED) or a reserved keyword (e.g. FULL, GLOBAL, NONE) —
+    /// both shapes occur across the RECOVERY / PAGE_VERIFY /
+    /// CURSOR_DEFAULT enums. No per-option closed value set is checked;
+    /// real SQL Server validates at execution time and the simulator
+    /// doesn't model the underlying behavior.
+    /// </remarks>
+    private static bool ConsumeDatabaseOptionTail(ParserContext context, AlterDatabaseOptionKind kind) => kind switch
+    {
+        AlterDatabaseOptionKind.OnOff =>
+            context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
+        AlterDatabaseOptionKind.EqualsOnOff => ConsumeEqualsOnOff(context),
+        AlterDatabaseOptionKind.EnumIdent =>
+            context.GetNextRequired() is Name or ReservedKeyword,
+        AlterDatabaseOptionKind.IntegerWithUnit => ConsumeIntegerWithUnit(context),
+        AlterDatabaseOptionKind.QueryStore => ConsumeQueryStoreTail(context),
+        _ => false,
+    };
+
+    private static bool ConsumeEqualsOnOff(ParserContext context) =>
+        context.GetNextRequired() switch
+        {
+            Operator { Character: '=' } => context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
+            _ => false,
+        };
+
+    private static bool ConsumeIntegerWithUnit(ParserContext context) =>
+        context.GetNextRequired() switch
+        {
+            Operator { Character: '=' } => context.GetNextRequired() switch
+            {
+                Numeric { Value.IsNull: false } => context.GetNextRequired() is UnquotedString,
+                _ => false,
+            },
+            _ => false,
+        };
+
+    /// <summary>
+    /// Cursor on the QUERY_STORE name token. Accepts three shapes per probe:
+    /// <c>= OFF</c>, <c>= ON</c> [optional <c>( … )</c> options block], and
+    /// <c>CLEAR [ALL]</c>. The options block consumes balanced parens with
+    /// per-sub-option name validation; runtime constraint enforcement
+    /// (e.g. INTERVAL_LENGTH_MINUTES values) is not modeled.
+    /// </summary>
+    private static bool ConsumeQueryStoreTail(ParserContext context)
+    {
+        // CLEAR / CLEAR ALL — no `=`.
+        var next = context.GetNextRequired();
+        if (next is UnquotedString clearToken && Collation.Default.Equals(clearToken.Value, "CLEAR"))
+        {
+            // Optional trailing ALL.
+            var checkpoint = context.SaveCheckpoint();
+            if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.All })
+                context.RestoreCheckpoint(checkpoint);
+            return true;
+        }
+        if (next is not Operator { Character: '=' })
+            return false;
+        switch (context.GetNextRequired())
+        {
+            case ReservedKeyword { Keyword: Keyword.Off }:
+                return true;
+            case ReservedKeyword { Keyword: Keyword.On }:
+                break;
+            default:
+                return false;
+        }
+        // Optional options block follows ON.
+        var afterOn = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not Operator { Character: '(' })
+        {
+            context.RestoreCheckpoint(afterOn);
+            return true;
+        }
+        return ConsumeQueryStoreOptionsBlock(context);
+    }
+
+    /// <summary>
+    /// Cursor on the opening <c>(</c> of a QUERY_STORE options block. Walks
+    /// comma-separated <c>SUB_OPTION = value</c> entries, validating each
+    /// sub-option name against <see cref="RecognizedQueryStoreSubOptions"/>;
+    /// values are consumed structurally (literal-or-identifier, or a nested
+    /// balanced-paren block for CLEANUP_POLICY / QUERY_CAPTURE_POLICY).
+    /// </summary>
+    private static bool ConsumeQueryStoreOptionsBlock(ParserContext context)
+    {
+        while (true)
+        {
+            // Sub-option name.
+            context.MoveNextRequired();
+            if (context.Token is not UnquotedString sub)
+                return false;
+            if (!RecognizedQueryStoreSubOptions.Contains(sub.Value))
+                throw SimulatedSqlException.SyntaxErrorNear(sub);
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                return false;
+            // Value: nested paren-block, identifier, literal, or numeric (with
+            // optional trailing unit token for HOURS-suffixed values inside
+            // QUERY_CAPTURE_POLICY).
+            context.MoveNextRequired();
+            if (context.Token is Operator { Character: '(' })
+            {
+                SkipBalancedParens(context);
+            }
+            else if (context.Token is Numeric)
+            {
+                // Probe-confirmed: a few sub-options accept a trailing unit
+                // identifier (e.g. STALE_CAPTURE_POLICY_THRESHOLD = N HOURS).
+                // Eat it if present without enforcing the unit set.
+                var unitCheckpoint = context.SaveCheckpoint();
+                if (context.GetNextOptional() is not UnquotedString)
+                    context.RestoreCheckpoint(unitCheckpoint);
+            }
+            else if (context.Token is not (Name or Literal or ReservedKeyword))
+            {
+                return false;
+            }
+            // Comma → another entry; ) → done.
+            var sep = context.GetNextRequired();
+            if (sep is Operator { Character: ',' })
+                continue;
+            return sep is Operator { Character: ')' };
+        }
+    }
+
+    /// <summary>
+    /// Cursor on the opening <c>(</c>. Walks tokens incrementing/decrementing
+    /// a paren counter, returning when the matching <c>)</c> closes. Used for
+    /// nested QUERY_STORE sub-option values whose grammar isn't worth
+    /// enforcing at parse-and-discard fidelity (CLEANUP_POLICY, QUERY_CAPTURE_POLICY).
+    /// </summary>
+    private static void SkipBalancedParens(ParserContext context)
+    {
+        var depth = 1;
+        while (depth > 0)
+        {
+            context.MoveNextRequired();
+            switch (context.Token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER DATABASE name COLLATE &lt;collation_name&gt;</c>.
+    /// The simulator is single-collation (SQL_Latin1_General_CP1_CI_AS) by
+    /// design; an attempt to flip to anything else raises
+    /// <see cref="NotSupportedException"/> rather than silently accepting
+    /// (a parse-and-discard would mean string comparisons diverge from
+    /// declared semantics).
+    /// </summary>
+    private static bool TryParseAlterDatabaseCollate(ParserContext context) =>
+        context.GetNextRequired() switch
+        {
+            UnquotedString token when context.Batch.IsSkipping
+                                       || Collation.Default.Equals(token.Value, Collation.Default.Name) => true,
+            UnquotedString token => throw new NotSupportedException($"ALTER DATABASE COLLATE: only '{Collation.Default.Name}' is supported (requested '{token.Value}')."),
+            _ => false,
+        };
 
     private static bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
     {
