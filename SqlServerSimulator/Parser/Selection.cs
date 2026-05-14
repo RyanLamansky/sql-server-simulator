@@ -230,53 +230,14 @@ internal sealed partial class Selection
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetCount, topLevelTail.FetchCount);
         }
 
-        // OPTION (MAXRECURSION N) — statement-level hint applied to all
-        // recursive CTEs in the surrounding statement. Only MAXRECURSION
-        // is modeled; other hints (OPTIMIZE FOR / RECOMPILE / etc.) are
-        // valid in real SQL Server but raise NotSupportedException here.
+        // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
+        // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
+        // scope recursive CTEs, everything else recognized is discarded
+        // (the simulator has nothing to dispatch on a hint against).
         if (context.Token is ReservedKeyword { Keyword: Keyword.Option })
             ParseOptionClause(context);
 
         return combined;
-    }
-
-    /// <summary>
-    /// Parses the trailing <c>OPTION (MAXRECURSION N)</c> hint clause and
-    /// applies the value to every <see cref="CteBinding"/> in scope. Only
-    /// MAXRECURSION is modeled; reaching any other hint raises
-    /// <see cref="NotSupportedException"/>.
-    /// </summary>
-    private static void ParseOptionClause(ParserContext context)
-    {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        while (true)
-        {
-            context.MoveNextRequired();
-            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.MaxRecursion })
-                throw new NotSupportedException("Only OPTION (MAXRECURSION N) is modeled in the OPTION clause.");
-
-            if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } limitValue })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var limit = limitValue.AsInt32;
-            if (limit is < 0 or > 32_767)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-
-            if (context.CteBindings is { } bindings)
-            {
-                foreach (var binding in bindings.Values)
-                    binding.MaxRecursion = limit;
-            }
-
-            context.MoveNextRequired();
-            if (context.Token is Operator { Character: ')' })
-            {
-                context.MoveNextOptional();
-                return;
-            }
-            if (context.Token is not Operator { Character: ',' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
     }
 
     /// <summary>
@@ -482,7 +443,7 @@ internal sealed partial class Selection
                 // Set-op keywords at the outer-switch position (i.e. after
                 // an `AS alias` continued the loop) terminate this branch
                 // so the set-op driver can chain.
-                case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except }:
+                case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except or Keyword.Option }:
                     goto ExitWhileTokenLoop;
 
                 // At the top level (depth 0), the start of another statement
@@ -631,7 +592,7 @@ internal sealed partial class Selection
 
                 // Set-op keywords terminate a branch parse so the outer
                 // driver (ParseQueryExpression) can chain branches.
-                case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except }:
+                case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except or Keyword.Option }:
                     goto ExitWhileTokenLoop;
 
                 // At the top level (depth 0), the start of another statement
@@ -1022,6 +983,7 @@ internal sealed partial class Selection
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
+                    ParseOptionalTableHints(context);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
@@ -1087,6 +1049,7 @@ internal sealed partial class Selection
                 var temporalRowSource = ParseOptionalForSystemTime(context, heapTable);
 
                 var heapAlias = ConsumeOptionalAlias(context);
+                ParseOptionalTableHints(context);
                 var heapQualifier = heapAlias ?? objectName.Leaf;
 
                 return new FromSource(
@@ -1112,6 +1075,7 @@ internal sealed partial class Selection
                 for (var ci = 0; ci < tvColumnNames.Length; ci++)
                     tvColumnNames[ci] = tvTable.Columns[ci].Name;
                 var tvAlias = ConsumeOptionalAlias(context);
+                ParseOptionalTableHints(context);
                 return new FromSource(
                     qualifier: tvAlias ?? tvName.Leaf,
                     columnNames: tvColumnNames,

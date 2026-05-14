@@ -87,7 +87,9 @@ partial class Simulation
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
         }
 
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
+        context.MoveNextRequired();
+        Selection.ParseOptionalTableHints(context);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // Phase-1 SET parsing: raw (columnName, expr) pairs without ordinal

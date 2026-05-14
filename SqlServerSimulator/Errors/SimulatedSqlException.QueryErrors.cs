@@ -453,4 +453,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException StringSplitInvalidEnableOrdinal(long value) =>
         new($"Argument value {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is invalid for argument 3 of string_split function.", 4199, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 321 — fired when a <c>WITH (...)</c> clause on
+    /// a table / view / table-variable source (or after an UPDATE / DELETE
+    /// target) names something that isn't a recognized table-hint keyword.
+    /// Wording is verbatim from the probe (2026-05-14 against SQL Server
+    /// 2025), including the surrounding double-quotes on the offending name.
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedTableHint(ReadOnlySpan<char> hintName) =>
+        new($"\"{new string(hintName)}\" is not a recognized table hints option.", 321, 15, 1);
 }
