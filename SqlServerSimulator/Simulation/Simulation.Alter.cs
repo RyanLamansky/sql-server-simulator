@@ -475,8 +475,12 @@ partial class Simulation
                 // validate"); probe shows real SQL Server accepts but ignores
                 // the prefix here.
                 return TryParseAlterTableTrustToggle(context, tableName, disable: true, revalidate: false);
+            case ReservedKeyword { Keyword: Keyword.Alter }:
+                if (withCheckExplicit.HasValue)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                return TryParseAlterTableAlterColumn(context, tableName);
             default:
-                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD / DROP CONSTRAINT, and CHECK / NOCHECK CONSTRAINT shapes.");
+                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, and CHECK / NOCHECK CONSTRAINT shapes.");
         }
     }
 

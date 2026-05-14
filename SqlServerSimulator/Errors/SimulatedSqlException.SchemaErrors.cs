@@ -812,13 +812,7 @@ partial class SimulatedSqlException
     {
         var sb = new System.Text.StringBuilder();
         for (var i = 0; i < blockers.Count; i++)
-        {
-            _ = sb.Append(blockers[i].IsIndex ? "The index '" : "The object '");
-            _ = sb.Append(blockers[i].Name);
-            _ = sb.Append("' is dependent on column '");
-            _ = sb.Append(columnName);
-            _ = sb.Append("'.\r\n");
-        }
+            _ = sb.Append(blockers[i].IsIndex ? "The index '" : "The object '").Append(blockers[i].Name).Append("' is dependent on column '").Append(columnName).Append("'.\r\n");
         _ = sb.Append("ALTER TABLE DROP COLUMN ").Append(columnName).Append(" failed because one or more objects access this column.");
         return new(sb.ToString(), 5074, 16, 1);
     }
@@ -830,4 +824,68 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ColumnNamesMustBeUnique(string columnName, string qualifiedTableName) =>
         new($"Column names in each table must be unique. Column name '{columnName}' in table '{qualifiedTableName}' is specified more than once.", 2705, 16, 4);
+
+    /// <summary>
+    /// Mimics SQL Server error 4924: <c>ALTER TABLE ALTER COLUMN</c> named
+    /// a column that doesn't exist on the target table. Probe-confirmed
+    /// (same error code as the DROP COLUMN variant, distinct phrasing).
+    /// </summary>
+    internal static SimulatedSqlException AlterColumnDoesNotExist(string columnName, string tableName) =>
+        new($"ALTER TABLE ALTER COLUMN failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4928: <c>ALTER TABLE ALTER COLUMN</c>
+    /// targeted a column kind that can't be altered. <paramref name="kindWord"/>
+    /// is the quoted descriptor (<c>"COMPUTED"</c> for computed columns,
+    /// <c>"timestamp"</c> for rowversion). Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterColumnOfKind(string columnName, string kindWord) =>
+        new($"Cannot alter column '{columnName}' because it is '{kindWord}'.", 4928, 16, 1);
+
+    /// <summary>
+    /// Distinguishes blocker kinds for <see cref="AlterColumnHasDependencies"/>'s
+    /// per-line prefix: <c>Object</c> renders as <c>"The object 'X'"</c>,
+    /// <c>Index</c> as <c>"The index 'X'"</c>, <c>Column</c> as <c>"The column 'X'"</c>.
+    /// </summary>
+    internal enum AlterColumnBlockerKind
+    {
+        Object,
+        Index,
+        Column,
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 5074: <c>ALTER TABLE ALTER COLUMN</c>
+    /// targeted a column referenced by at least one constraint, index, or
+    /// computed-column expression. Per-line prefix varies by blocker kind:
+    /// <c>The object</c> for PK / UQ / FK / CHECK, <c>The index</c> for
+    /// indexes, <c>The column</c> for computed-column dependencies.
+    /// Probe-confirmed verbatim against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException AlterColumnHasDependencies(string columnName, IReadOnlyList<(string Name, AlterColumnBlockerKind Kind)> blockers)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < blockers.Count; i++)
+        {
+            var prefix = blockers[i].Kind switch
+            {
+                AlterColumnBlockerKind.Index => "The index '",
+                AlterColumnBlockerKind.Column => "The column '",
+                _ => "The object '",
+            };
+            _ = sb.Append(prefix).Append(blockers[i].Name).Append("' is dependent on column '").Append(columnName).Append("'.\r\n");
+        }
+        _ = sb.Append("ALTER TABLE ALTER COLUMN ").Append(columnName).Append(" failed because one or more objects access this column.");
+        return new(sb.ToString(), 5074, 16, 1);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 515: <c>ALTER COLUMN</c> flipped a column to
+    /// NOT NULL but at least one existing row holds NULL in that column.
+    /// Probe-confirmed wording reuses the standard INSERT-NULL message
+    /// (<c>Cannot insert the value NULL into column 'X', table 'Y'</c>),
+    /// followed by the standard "statement has been terminated" line.
+    /// </summary>
+    internal static SimulatedSqlException AlterColumnNullInNonNullColumn(string columnName, string qualifiedTableName) =>
+        new($"Cannot insert the value NULL into column '{columnName}', table '{qualifiedTableName}'; column does not allow nulls. UPDATE fails.", 515, 16, 2);
 }

@@ -267,6 +267,17 @@ partial class SimulatedSqlException
         new($"Arithmetic overflow error for type {typeName}, value = {formattedValue}.", 232, 16, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 220: integer-family narrowing overflow during
+    /// ALTER COLUMN per-row coercion (e.g. <c>int</c> → <c>tinyint</c> on a
+    /// value &gt; 255). Probe-confirmed verbatim wording: <c>"Arithmetic
+    /// overflow error for data type tinyint, value = 500."</c>; embeds the
+    /// target type's SqlServer name (lowercase) and the offending value's
+    /// invariant-culture string form.
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowForDataType(string targetTypeName, string formattedValue) =>
+        new($"Arithmetic overflow error for data type {targetTypeName}, value = {formattedValue}.", 220, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 8170: a non-NULL <c>uniqueidentifier</c> was
     /// cast to a <c>char</c> / <c>varchar</c> destination too short to hold
     /// the 36-character formatted GUID. The <c>nchar</c> / <c>nvarchar</c>

@@ -369,4 +369,402 @@ public sealed class AlterTableColumnTests
         var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, 100)"));
         AreEqual("2601", ex.Data["HelpLink.EvtID"]);
     }
+
+    // --- ALTER COLUMN — type changes ---
+
+    [TestMethod]
+    public void AlterColumn_WidenVarchar_PreservesData()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int primary key, v varchar(10));
+            insert t values (1, 'hello');
+            alter table t alter column v varchar(50)
+            """);
+        AreEqual("hello", sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_WidenInt_PreservesData()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 42);
+            alter table t alter column v bigint
+            """);
+        AreEqual(42L, sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_VarcharToNvarchar_PreservesText()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(20));
+            insert t values (1, 'hello');
+            alter table t alter column v nvarchar(20)
+            """);
+        AreEqual("hello", sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_NarrowVarcharFitting_Succeeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(50));
+            insert t values (1, 'hi');
+            alter table t alter column v varchar(10)
+            """);
+        AreEqual("hi", sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_NarrowVarcharOverflow_Raises2628()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(50));
+            insert t values (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v varchar(10)"));
+        AreEqual("2628", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void AlterColumn_IntToTinyint_FittingValues_Succeeds()
+        => AreEqual((byte)5, new Simulation().ExecuteScalar("""
+            create table t (v int);
+            insert t values (5);
+            alter table t alter column v tinyint;
+            select v from t
+            """));
+
+    [TestMethod]
+    public void AlterColumn_IntToTinyint_Overflow_Raises220()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v int);
+            insert t values (5), (500)
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v tinyint"));
+        AreEqual("220", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("tinyint", ex.Message);
+        Assert.Contains("500", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_VarcharToInt_BadData_Raises245()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v varchar(20));
+            insert t values ('hello'), ('123')
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
+        AreEqual("245", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void AlterColumn_VarcharToInt_GoodData_Succeeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v varchar(20));
+            insert t values ('123'), ('456');
+            alter table t alter column v int
+            """);
+        AreEqual(579, sim.ExecuteScalar("select sum(v) from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_VarcharToDate_BadData_Raises241()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v varchar(20));
+            insert t values ('not-a-date')
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v date"));
+        AreEqual("241", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void AlterColumn_DecimalPrecisionNarrow_Fitting_Succeeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v decimal(10,2));
+            insert t values (99.99);
+            alter table t alter column v decimal(5,2)
+            """);
+        AreEqual(99.99m, sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_DecimalPrecisionNarrow_Overflow_Raises8115()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v decimal(10,2));
+            insert t values (999.99)
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v decimal(4,2)"));
+        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
+    }
+
+    // --- ALTER COLUMN — nullability ---
+
+    [TestMethod]
+    public void AlterColumn_NullToNotNull_WithNullData_Raises515()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(10) null);
+            insert t values (1, null), (2, 'x')
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v varchar(10) not null"));
+        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("v", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_NullToNotNull_NoNullData_Succeeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(10) null);
+            insert t values (1, 'a'), (2, 'b');
+            alter table t alter column v varchar(10) not null
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t where v is not null"));
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t (id) values (3)"));
+        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void AlterColumn_NotNullToNull_AlwaysSucceeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(10) not null);
+            insert t values (1, 'a');
+            alter table t alter column v varchar(10) null;
+            insert t (id) values (2)
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t where v is null"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_NoNullabilityKeyword_PreservesExistingNullability()
+    {
+        var sim = new Simulation();
+        // Probe-confirmed: omitting NULL/NOT NULL keeps the column's existing
+        // nullability. The simulator implements this by carrying over
+        // existingCol.Nullable when the parser produces null.
+        _ = sim.ExecuteNonQuery("""
+            create table t (v int not null);
+            alter table t alter column v bigint;
+            insert t values (1)
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (null)"));
+        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
+    // --- ALTER COLUMN — blockers (Msg 5074) ---
+
+    [TestMethod]
+    public void AlterColumn_UnderPrimaryKey_Raises5074()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column id bigint not null"));
+        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("object", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_UnderOutgoingForeignKey_Raises5074()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (cid int primary key, pid int, constraint fk_c foreign key (pid) references p(id))
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table c alter column pid bigint"));
+        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("fk_c", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_UnderIncomingForeignKey_Raises5074()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key, v varchar(10));
+            create table c (cid int primary key, pid int, foreign key (pid) references p(id))
+            """);
+        // p.v isn't referenced; alter should succeed.
+        _ = sim.ExecuteNonQuery("alter table p alter column v varchar(50)");
+        // p.id IS referenced — PK blocks first; both PK and incoming FK
+        // dependencies surface in the multi-blocker enumeration.
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table p alter column id bigint not null"));
+        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void AlterColumn_UnderNonUniqueIndex_TypeChange_Raises5074()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int primary key, v varchar(50));
+            create index ix_v on t(v)
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v nvarchar(50)"));
+        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("ix_v", ex.Message);
+        Assert.Contains("index", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_UnderIndex_LengthWidening_Succeeds()
+    {
+        // Probe-confirmed: length widening within same SqlType family
+        // (varchar(50) → varchar(100)) is allowed under an index.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int primary key, v varchar(50));
+            create index ix_v on t(v);
+            alter table t alter column v varchar(100)
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.indexes where name = 'ix_v'"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_UnderComputedDependency_Raises5074()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b as a * 2)");
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column a bigint"));
+        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("column 'b'", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_ComputedColumnItself_Raises4928()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b as a * 2)");
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column b bigint"));
+        AreEqual("4928", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("COMPUTED", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_RowVersion_Raises4928()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v rowversion)");
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v bigint"));
+        AreEqual("4928", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("timestamp", ex.Message);
+    }
+
+    // --- ALTER COLUMN — grammar / preservation ---
+
+    [TestMethod]
+    public void AlterColumn_MissingColumn_Raises4924()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column missing bigint"));
+        AreEqual("4924", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("missing", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_UnderCheck_AllowsTypeChange()
+    {
+        // Probe-confirmed: CHECK constraints don't block ALTER COLUMN.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(10), check (len(v) > 0));
+            insert t values (1, 'x');
+            alter table t alter column v varchar(20)
+            """);
+        AreEqual("x", sim.ExecuteScalar("select v from t"));
+        // CHECK constraint still enforced after the type change.
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, '')"));
+        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void AlterColumn_PreservesDefault()
+    {
+        // Inline named DEFAULT isn't supported in CREATE TABLE; add via
+        // ALTER ADD CONSTRAINT instead.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v varchar(10));
+            alter table t add constraint df_v default ('d') for v;
+            alter table t alter column v varchar(50);
+            insert t (id) values (1)
+            """);
+        AreEqual("d", sim.ExecuteScalar("select v from t"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.default_constraints where name = 'df_v'"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_PreservesIdentity_WidensIntToBigInt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity not null, v varchar(20));
+            insert t (v) values ('a'), ('b');
+            alter table t alter column id bigint not null
+            """);
+        // Identity advances post-alter (high-water mark survived the column
+        // instance swap).
+        _ = sim.ExecuteNonQuery("insert t (v) values ('c')");
+        AreEqual(3L, sim.ExecuteScalar("select id from t where v = 'c'"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_CollateClause_ParseAccepted()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v varchar(20));
+            insert t values ('hello');
+            alter table t alter column v varchar(50) collate Latin1_General_BIN
+            """);
+        AreEqual("hello", sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_NoOp_Succeeds()
+    {
+        // Same type, same nullability — should be a no-op pass-through.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v int not null);
+            insert t values (42);
+            alter table t alter column v int not null
+            """);
+        AreEqual(42, sim.ExecuteScalar("select v from t"));
+    }
+
+    [TestMethod]
+    public void AlterColumn_EmptyTable_TypeChangeSucceeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v varchar(10));
+            alter table t alter column v int;
+            insert t values (42)
+            """);
+        AreEqual(42, sim.ExecuteScalar("select v from t"));
+    }
 }

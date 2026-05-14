@@ -1,6 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships six modeled shapes: `SET (SYSTEM_VERSIONING = OFF)` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), and `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection). ALTER COLUMN, REBUILD, SWITCH PARTITION, and the SET-versioning-on direction raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-14.
+`ALTER TABLE` ships seven modeled shapes: `SET (SYSTEM_VERSIONING = OFF)` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), and `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)). REBUILD, SWITCH PARTITION, the SET-versioning-on direction, and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-14.
 
 ## Grammar
 
@@ -246,3 +246,80 @@ The heap is re-encoded: each row is decoded under the old `StoredColumns` layout
 - **DROP COLUMN inside transaction**: Real SQL Server makes column-level DDL transactional. The simulator's regular-DDL non-logging pattern (see existing CREATE/DROP TABLE quirk) extends here: ALTER TABLE ADD / DROP COLUMN doesn't participate in the undo log, so a `BEGIN TRAN` / `ROLLBACK` won't undo a column mutation. Matches the existing CREATE/DROP TABLE asymmetry.
 - **Table variable column ops**: `DECLARE @t TABLE` then `ALTER TABLE @t ADD …` raises Msg 102 at parse — real SQL Server's grammar also doesn't allow ALTER on table variables.
 - **Single primary error**: Real SQL Server's Msg 5074 path may pair with a trailing Msg 4922 informational; the simulator emits only the primary Msg 5074.
+
+## ALTER COLUMN
+
+### Grammar — ALTER COLUMN
+
+```sql
+ALTER TABLE [schema.]table
+    ALTER COLUMN col TYPE[(precision[, scale])] [COLLATE collation] [NULL | NOT NULL]
+```
+
+Single-column shape only (real SQL Server's grammar doesn't accept comma-separated multi-column ALTER COLUMN). Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlterColumn`. The trailing `NULL`/`NOT NULL` keyword is optional — omitting it preserves the column's existing nullability (probe-confirmed). `COLLATE` is parse-accepted and ignored (the simulator has a single default collation).
+
+The `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms aren't modeled — `Keyword.Add` / `Keyword.Drop` after the column name raises `NotSupportedException`.
+
+### Conversion fidelity
+
+Type and length changes flow per-row through `SqlValue.CoerceTo`, which is the same conversion path CAST / CONVERT use. Real SQL Server's error codes surface verbatim:
+
+| Path | Trigger | Code |
+|------|---------|------|
+| Integer narrowing overflow | `int → tinyint` with value 500 | Msg 220 (`Arithmetic overflow error for data type tinyint, value = 500.`) |
+| String → integer with non-numeric data | `varchar → int` with `'hello'` | Msg 245 (`Conversion failed when converting the varchar value 'hello' to data type int.`) |
+| String → date/time with bad format | `varchar → date` with `'not-a-date'` | Msg 241 (`Conversion failed when converting date and/or time from character string.`) |
+| Decimal precision narrow | `decimal(10,2) → decimal(4,2)` with 999.99 | Msg 8115 (`Arithmetic overflow error converting expression to data type numeric.`) |
+| Bounded-string narrow | `varchar(50) → varchar(10)` with 30-char value | Msg 2628 (`String or binary data would be truncated…`) |
+| `NULL → NOT NULL` with existing NULL | `varchar(10) null → varchar(10) not null` on a row with NULL | Msg 515 (`Cannot insert the value NULL into column 'X', table 'Y'; column does not allow nulls.`) |
+
+Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint`, `tinyint → smallint`) always succeeds; bounded-string narrowings succeed when every existing value fits the new length.
+
+### Blockers (Msg 5074)
+
+`CollectAlterColumnBlockers` walks the same constraint surface as DROP COLUMN, except CHECK and DEFAULT don't block (probe-confirmed: ALTER COLUMN under a CHECK constraint succeeds and the constraint stays in force against future inserts):
+
+| Source | Blocks ALTER COLUMN? | Prefix in Msg 5074 |
+|--------|----------------------|--------------------|
+| PRIMARY KEY on this column | Always | `The object 'X' is dependent…` |
+| UNIQUE constraint on this column | Always | `The object 'X' is dependent…` |
+| Outgoing FOREIGN KEY using this column as a child column | Always | `The object 'X' is dependent…` |
+| Incoming FOREIGN KEY referencing this column as a parent column | Always | `The object 'X' is dependent…` |
+| Computed column that references this column in its expression | Always | `The column 'X' is dependent…` |
+| Index whose key or include columns reference this column | Only when the `SqlType` subclass changes — length widening within the same family (`varchar(50) → varchar(100)`) passes | `The index 'X' is dependent…` |
+| CHECK constraint that references this column | Never (constraint survives the type change and continues to enforce against future inserts) | — |
+| DEFAULT constraint on this column | Never (default expression + constraint name survive the type change) | — |
+
+Multi-blocker enumeration follows the existing `DropColumnHasDependenciesMixed` pattern: one line per blocker, all surfaced in one Msg 5074 raise. Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs → indexes (when applicable).
+
+### Rejection paths (other than Msg 5074)
+
+| Condition | Code | Notes |
+|-----------|------|-------|
+| Column doesn't exist on the table | Msg 4924 | Shares the code with DROP COLUMN's missing-column path, distinct wording (`ALTER TABLE ALTER COLUMN failed because column 'X' does not exist…`). |
+| Column is a computed column | Msg 4928 | Phrasing: `Cannot alter column 'X' because it is 'COMPUTED'.` |
+| Column is rowversion / timestamp | Msg 4928 | Phrasing: `Cannot alter column 'X' because it is 'timestamp'.` |
+| Column is `GENERATED ALWAYS AS ROW START/END` | `NotSupportedException` | Real SQL Server has its own grammar rule here; not exercised by current EF Migrations emissions. |
+| ALTER COLUMN of an IDENTITY column to a non-integer type | `NotSupportedException` | Adding / removing identity itself is a parser-level Msg 156 in real SQL Server (the grammar excludes IDENTITY from the ALTER COLUMN clause). |
+
+### Preservation through the column instance swap
+
+`HeapColumn` instances are immutable for most fields; ALTER COLUMN constructs a fresh `HeapColumn` for the target ordinal and inherits identity / default / generated-as / hidden state from the prior instance. Specifically:
+
+- **Identity counter**: `existingCol.Identity` (the `IdentityState` reference) carries over verbatim. The high-water mark survives, so the next INSERT after `int identity` → `bigint not null` keeps incrementing from where it left off.
+- **DEFAULT expression + constraint name**: `existingCol.Default` and `existingCol.DefaultConstraint` both carry over. Probe-confirmed: a named DEFAULT keeps its name through the alter; sys.default_constraints shows the same entry post-ALTER.
+- **`is_hidden` / `GeneratedAs`**: Inherited but currently rejected up front (see table above).
+- **Inline CHECK constraints**: live on `HeapTable.CheckConstraints` keyed by `InlineColumn` name, not on the HeapColumn — so they remain wired to the column by name and continue to enforce after the rebuild.
+
+### Storage rewrite
+
+`RewriteHeapForAlterColumn` walks every row, decoding the target column under the pre-alter `HeapColumn` and re-encoding the whole row against the post-alter `StoredColumns`. The non-altered columns are decoded then re-encoded as-is (no coercion). Strategy: build the candidate post-alter Columns array, swap it onto the table (so `StoredColumns` / `Schema` reflect the new shape before re-encoding writes), walk rows; on any failure restore the original Columns + recompute. The Heap field replaces wholesale at the end.
+
+Like ADD / DROP COLUMN, the rewrite is unconditional — even pure length widening (`varchar(50) → varchar(100)`) walks every row through decode + re-encode, because the singleton `SqlType` reference differs between lengths and the StoredColumns / Schema arrays must mirror that. Storage cost is negligible at simulator workload sizes.
+
+### Fidelity gaps — ALTER COLUMN
+
+- **Eager rewrite even when bytes are identical**: As above — pure length widening within the same family rewrites every row, even though the encoded bytes are byte-for-byte identical between varchar(50) and varchar(100). Performance only; behavior matches.
+- **Index protection nuance**: Real SQL Server allows length widening AND length narrowing (when data fits) under an index — both pass with the same SqlType base. The simulator allows both only when the `SqlType` subclass matches; decimal precision narrowing under an index (same `DecimalSqlType` subclass) would pass in the simulator but is probably blocked in real SQL Server (not probed; EF Migrations drops indexes before significant type changes anyway, so the gap is application-unreachable through EF).
+- **No `ALTER COLUMN ADD/DROP` sub-clause**: PERSISTED, MASKED, ROWGUIDCOL, SPARSE sub-grammar forms raise `NotSupportedException` — none of these features are modeled at the simulator level.
+- **Non-transactional column DDL**: Same as ADD / DROP COLUMN — ALTER COLUMN bypasses the undo log; `BEGIN TRAN` / `ROLLBACK` doesn't undo the type change.

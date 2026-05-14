@@ -604,6 +604,424 @@ partial class Simulation
         return found;
     }
 
+    /// <summary>
+    /// Parses <c>ALTER TABLE … ALTER COLUMN col TYPE[(precision[,scale])]
+    /// [COLLATE coll] [NULL|NOT NULL]</c>. Cursor on the <c>ALTER</c>
+    /// keyword on entry. Single-column shape only (real SQL Server's
+    /// grammar doesn't accept comma-separated multi-column ALTER).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// COLLATE clause is parse-accepted and ignored — the simulator has
+    /// a single default collation. ADD/DROP sub-clause forms
+    /// (PERSISTED / MASKED / ROWGUIDCOL / SPARSE) are not modeled
+    /// and raise <see cref="NotSupportedException"/>.
+    /// </para>
+    /// <para>
+    /// Apply pipeline matches probe-confirmed SQL Server semantics:
+    /// computed and rowversion columns reject with Msg 4928; PK / UQ /
+    /// FK (in &amp; out) / computed-column dependencies always block (Msg 5074);
+    /// indexes block only on actual <see cref="SqlType"/>-subclass change
+    /// (length widening within the same family permitted); existing rows
+    /// are coerced per-row through <see cref="SqlValue.CoerceTo"/>, which
+    /// raises Msg 245 / 241 / 220 / 8115 for the matching conversion
+    /// failures; <c>NULL</c>→<c>NOT NULL</c> flips with existing NULL data
+    /// raise Msg 515; identity / DEFAULT / inline CHECK preserve through
+    /// the column instance swap.
+    /// </para>
+    /// </remarks>
+    private static bool TryParseAlterTableAlterColumn(ParserContext context, MultiPartName tableName)
+    {
+        // Cursor on ALTER; advance to COLUMN.
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Column })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not Name nameToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var columnName = nameToken.Value;
+
+        // Reject the ADD/DROP sub-clause forms early — `ALTER COLUMN col ADD
+        // {PERSISTED|MASKED|…}` and `ALTER COLUMN col DROP {…}` follow the
+        // column name directly without a type keyword. The simulator doesn't
+        // model these features, so the surface raises NotSupportedException
+        // rather than parse-accepting.
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop })
+            throw new NotSupportedException("ALTER TABLE ALTER COLUMN sub-clauses (ADD/DROP PERSISTED/MASKED/ROWGUIDCOL/SPARSE) aren't modeled.");
+
+        if (context.Token is not Name typeName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+
+        int? declaredMaxLength = null;
+        int? declaredScale = null;
+        if (context.Token is Operator { Character: '(' })
+        {
+            var lengthToken = context.GetNextRequired();
+            declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
+                ? numericValue.AsInt32
+                : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
+                    ? SqlType.MaxLengthSentinel
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            switch (context.GetNextRequired())
+            {
+                case Operator { Character: ',' }:
+                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    declaredScale = scaleValue.AsInt32;
+                    if (context.GetNextRequired() is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case Operator { Character: ')' }:
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            context.MoveNextOptional();
+        }
+
+        // Optional COLLATE clause — parse-accept and discard (simulator
+        // operates on the default collation only). The collation name is a
+        // single identifier token (e.g. `Latin1_General_BIN`).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Collate })
+        {
+            context.MoveNextRequired();
+            if (context.Token is not (Name or UnquotedString))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
+
+        bool? nullable = null;
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Not }:
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                nullable = false;
+                context.MoveNextOptional();
+                break;
+            case ReservedKeyword { Keyword: Keyword.Null }:
+                nullable = true;
+                context.MoveNextOptional();
+                break;
+        }
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+
+        var ordinal = -1;
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            {
+                ordinal = i;
+                break;
+            }
+        }
+        if (ordinal < 0)
+            throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name);
+
+        var existingCol = table.Columns[ordinal];
+        if (existingCol.Computed is not null)
+            throw SimulatedSqlException.CannotAlterColumnOfKind(columnName, "COMPUTED");
+        if (existingCol.Type == SqlType.RowVersion)
+            throw SimulatedSqlException.CannotAlterColumnOfKind(columnName, "timestamp");
+        if (existingCol.GeneratedAs != GeneratedAlwaysAsRow.None)
+            throw new NotSupportedException("ALTER COLUMN on a GENERATED ALWAYS AS ROW START/END column isn't modeled.");
+
+        var (newType, newMaxLength) = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, ordinal + 1, columnName);
+        var newNullable = nullable ?? existingCol.Nullable;
+
+        // Identity preservation: ALTER COLUMN keeps the IdentityState alive
+        // (probe-confirmed — INT IDENTITY → BIGINT keeps the counter), and
+        // SQL Server forbids changing identity to a non-integer type. The
+        // grammar already excludes IDENTITY in the ALTER COLUMN clause (Msg
+        // 156 from the parser), so we only need to validate that an existing
+        // identity column targets an integer family.
+        if (existingCol.Identity is not null && !SqlType.IsIntegerCategory(newType))
+            throw new NotSupportedException("ALTER COLUMN of an IDENTITY column to a non-integer type isn't modeled.");
+
+        // Blocker detection. PK/UQ, FK (both directions), and computed-column
+        // dependencies block unconditionally; indexes block only on actual
+        // SqlType-subclass change (varchar(50)→varchar(100) widening passes
+        // under an index, varchar→nvarchar doesn't).
+        var isSubclassChange = existingCol.Type.GetType() != newType.GetType();
+        var blockers = CollectAlterColumnBlockers(table, ordinal, existingCol, isSubclassChange);
+        if (blockers.Count > 0)
+            throw SimulatedSqlException.AlterColumnHasDependencies(columnName, blockers);
+
+        var newColumn = new HeapColumn(
+            existingCol.Name,
+            newType,
+            newMaxLength,
+            newNullable,
+            identity: existingCol.Identity,
+            defaultExpression: existingCol.Default,
+            generatedAs: existingCol.GeneratedAs,
+            isHidden: existingCol.IsHidden)
+        {
+            DefaultConstraint = existingCol.DefaultConstraint,
+        };
+
+        // Validate + rewrite. Even when the encoded bytes don't change (e.g.
+        // varchar(50)→varchar(100)), the per-column SqlType reference does, so
+        // the row decoder needs the new column's Type to be in StoredColumns
+        // / Schema before decoding. The strategy: build a candidate new
+        // Columns array, swap it in, then do the heap walk under the new
+        // schema. If the walk throws, restore the original.
+        var originalColumns = table.Columns;
+        var newColumns = (HeapColumn[])table.Columns.Clone();
+        newColumns[ordinal] = newColumn;
+        table.Columns = newColumns;
+        table.RecomputeStorageProjections();
+
+        try
+        {
+            RewriteHeapForAlterColumn(table, ordinal, newColumn, originalColumns);
+        }
+        catch
+        {
+            table.Columns = originalColumns;
+            table.RecomputeStorageProjections();
+            throw;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the list of constraints / indexes / computed-column references
+    /// that block <c>ALTER COLUMN</c> on the column at
+    /// <paramref name="ordinal"/>. PK / UQ / outgoing FK / incoming FK /
+    /// computed-column references block unconditionally;
+    /// <paramref name="includeIndexes"/> selects whether indexes block (true
+    /// when the alteration changes the column's <see cref="SqlType"/>
+    /// subclass — probe-confirmed that pure length widening within the same
+    /// SqlType family passes under an index).
+    /// </summary>
+    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectAlterColumnBlockers(HeapTable table, int ordinal, HeapColumn col, bool includeIndexes)
+    {
+        var blockers = new List<(string, SimulatedSqlException.AlterColumnBlockerKind)>();
+        var storageOrdinal = table.StorageOrdinals[ordinal];
+
+        foreach (var kc in table.KeyConstraints)
+        {
+            if (storageOrdinal < 0)
+                continue;
+            foreach (var so in kc.StorageOrdinals)
+            {
+                if (so == storageOrdinal)
+                {
+                    blockers.Add((kc.Name, SimulatedSqlException.AlterColumnBlockerKind.Object));
+                    break;
+                }
+            }
+        }
+
+        foreach (var fk in table.OutgoingForeignKeys)
+        {
+            foreach (var co in fk.ChildColumnOrdinals)
+            {
+                if (co == ordinal)
+                {
+                    blockers.Add((fk.Name, SimulatedSqlException.AlterColumnBlockerKind.Object));
+                    break;
+                }
+            }
+        }
+
+        foreach (var fk in table.IncomingForeignKeys)
+        {
+            foreach (var ro in fk.ReferencedColumnOrdinals)
+            {
+                if (ro == ordinal)
+                {
+                    blockers.Add((fk.Name, SimulatedSqlException.AlterColumnBlockerKind.Object));
+                    break;
+                }
+            }
+        }
+
+        foreach (var c in table.Columns)
+        {
+            if (c.Computed is { } expr && ComputedReferencesColumn(expr, col.Name))
+                blockers.Add((c.Name, SimulatedSqlException.AlterColumnBlockerKind.Column));
+        }
+
+        if (includeIndexes)
+        {
+            foreach (var ix in table.Indexes)
+            {
+                if (storageOrdinal < 0)
+                    continue;
+                var referenced = false;
+                foreach (var keyCol in ix.KeyColumns)
+                {
+                    if (keyCol.StorageOrdinal == storageOrdinal)
+                    {
+                        referenced = true;
+                        break;
+                    }
+                }
+                if (!referenced)
+                {
+                    foreach (var inc in ix.IncludedColumns)
+                    {
+                        if (inc == storageOrdinal)
+                        {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                }
+                if (referenced)
+                    blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index));
+            }
+        }
+
+        return blockers;
+    }
+
+    /// <summary>
+    /// Returns true when a computed-column expression references the named
+    /// column. Structural walk via <see cref="Expression.VisitColumnReferences"/>
+    /// — same shape <see cref="CheckPredicateReferencesColumn"/> uses.
+    /// </summary>
+    private static bool ComputedReferencesColumn(Expression computed, string columnName)
+    {
+        var found = false;
+        computed.VisitColumnReferences(reference =>
+        {
+            if (!found && Collation.Default.Equals(reference.Leaf, columnName))
+                found = true;
+        });
+        return found;
+    }
+
+    /// <summary>
+    /// Walks every row in the heap, decoding the target column under the old
+    /// <see cref="HeapColumn"/> layout, coercing to the new type via
+    /// <see cref="SqlValue.CoerceTo"/>, and re-encoding against the new
+    /// <c>StoredColumns</c> array. Enforces NOT NULL flips by raising Msg 515
+    /// on any pre-existing NULL. The conversion call lets <c>CoerceTo</c>'s
+    /// own error paths (Msg 220 / 245 / 241 / 8115) surface unchanged;
+    /// <see cref="OverflowException"/> from in-range integer narrowing is
+    /// translated to Msg 220 with the target type name + offending value.
+    /// </summary>
+    private static void RewriteHeapForAlterColumn(HeapTable table, int ordinal, HeapColumn newCol, HeapColumn[] originalColumns)
+    {
+        var oldStorageOrdinal = -1;
+        var preAddStoredCount = 0;
+        for (var i = 0; i < originalColumns.Length; i++)
+        {
+            if (!originalColumns[i].IsStored)
+                continue;
+            if (i == ordinal)
+                oldStorageOrdinal = preAddStoredCount;
+            preAddStoredCount++;
+        }
+        // Non-stored column ALTER (computed-without-PERSISTED) can't reach
+        // here — TryParseAlterTableAlterColumn rejects computed columns up
+        // front with Msg 4928. Assert for clarity; not a reachable runtime.
+        if (oldStorageOrdinal < 0)
+            return;
+
+        var anyRows = false;
+        foreach (var _ in table.Heap.EnumerateRows())
+        {
+            anyRows = true;
+            break;
+        }
+        if (!anyRows)
+            return;
+
+        // Build a snapshot of the pre-ALTER stored-column layout so the
+        // decoder reads with the old SqlType references.
+        var oldStoredColumns = new HeapColumn[preAddStoredCount];
+        var s = 0;
+        for (var i = 0; i < originalColumns.Length; i++)
+        {
+            if (originalColumns[i].IsStored)
+                oldStoredColumns[s++] = originalColumns[i];
+        }
+
+        var newStoredColumns = table.StoredColumns;
+        var newStorageOrdinal = table.StorageOrdinals[ordinal];
+        // newStorageOrdinal can't be < 0 since the new column inherits the
+        // stored-vs-computed shape from the old (we reject computed columns
+        // up front, and IsStored is true for everything else).
+
+        var qualifiedTableName = $"{Database.DefaultSchemaName}.{table.Name}";
+
+        var oldHeap = table.Heap;
+        var newHeap = new Heap();
+        foreach (var oldBytes in oldHeap.EnumerateRows())
+        {
+            var newStoredValues = new SqlValue[newStoredColumns.Length];
+            for (var i = 0; i < oldStoredColumns.Length; i++)
+            {
+                var decoded = RowDecoder.DecodeColumn(oldStoredColumns, oldBytes, i, oldHeap);
+                if (i == oldStorageOrdinal)
+                {
+                    if (decoded.IsNull)
+                    {
+                        if (!newCol.Nullable)
+                            throw SimulatedSqlException.AlterColumnNullInNonNullColumn(newCol.Name, qualifiedTableName);
+                        newStoredValues[newStorageOrdinal] = SqlValue.Null(newCol.Type);
+                    }
+                    else
+                    {
+                        SqlValue coerced;
+                        try
+                        {
+                            coerced = decoded.CoerceTo(newCol.Type);
+                        }
+                        catch (OverflowException)
+                        {
+                            // Msg 220's wording embeds the source's plain
+                            // value (e.g. `500` for int → tinyint overflow).
+                            // Overflow on a non-integer narrowing (decimal
+                            // precision change) routes through Msg 8115.
+                            if (!SqlType.IsIntegerCategory(decoded.Type))
+                                throw SimulatedSqlException.ArithmeticOverflowToNumeric();
+                            // Widen the source value to BigInt so AsInt64
+                            // works regardless of which integer subtype the
+                            // value carried — int→bigint widening can't
+                            // overflow.
+                            var formatted = decoded.CoerceTo(SqlType.BigInt).AsInt64.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                            throw SimulatedSqlException.ArithmeticOverflowForDataType(newCol.Type.SqlServerName, formatted);
+                        }
+                        // Bounded-length validation for narrowing varchar /
+                        // nvarchar / varbinary. The CoerceTo path itself is
+                        // length-agnostic at the SqlValue level — bounded vs
+                        // unspecified is a column-level distinction — so the
+                        // truncation check lives here.
+                        if (newCol.MaxLength is int max && max != SqlType.MaxLengthSentinel && coerced.AsString.Length > max)
+                            throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(table.Name, newCol.Name, coerced.AsString, max);
+                        newStoredValues[newStorageOrdinal] = coerced;
+                    }
+                }
+                else
+                {
+                    // Map old storage ordinal i to new storage ordinal — the
+                    // single-column ALTER doesn't reshuffle other ordinals,
+                    // so old i maps to new i for everything except the
+                    // altered column.
+                    newStoredValues[i] = decoded;
+                }
+            }
+
+            var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
+            newHeap.Insert(encoded);
+        }
+
+        table.Heap = newHeap;
+    }
+
     private static void RewriteHeapForDropColumns(HeapTable table, HeapColumn[] oldStoredColumns, int[] oldStorageToNew, int newStoredCount)
     {
         var anyRows = false;
