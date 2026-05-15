@@ -133,6 +133,7 @@ internal abstract partial class SqlType
     public int Precedence => this switch
     {
         _ when this == HierarchyId => 17,
+        XmlSqlType => 17,
         _ when this == UniqueIdentifier => 16,
         _ when this == SystemName => 15,
         _ when this == NText => 14,
@@ -194,6 +195,7 @@ internal abstract partial class SqlType
         _ when this == SystemName => 231,
         NCharSqlType => 239,
         _ when this == HierarchyId => 240,
+        XmlSqlType => 241,
         _ => throw new NotSupportedException($"No SystemTypeId defined for {this}."),
     };
 
@@ -432,6 +434,18 @@ internal abstract partial class SqlType
     /// for the segment-array internal representation and string-form rules.
     /// </remarks>
     public static readonly HierarchyIdSqlType HierarchyId = new();
+
+    /// <remarks>
+    /// SQL Server's <c>xml</c>: variable-length Unicode text with XPath /
+    /// XQuery method dispatch layered on top. The simulator stores payload
+    /// identically to <c>nvarchar(MAX)</c>; XML methods (<c>.value()</c> /
+    /// <c>.nodes()</c> / <c>.query()</c> / <c>.exist()</c> / <c>.modify()</c>)
+    /// raise <see cref="NotSupportedException"/> at execute time. See the
+    /// "Full-text catalog + index" and "xml" sections of
+    /// <c>docs/claude/bacpac-prerequisites.md</c> for the skip-with-diagnostic
+    /// rationale.
+    /// </remarks>
+    public static readonly XmlSqlType Xml = new();
 
     /// <remarks>
     /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
@@ -779,6 +793,7 @@ internal abstract partial class SqlType
         {
             "BIT" => Bit,
             "INT" => Int32,
+            "XML" => Xml,
             _ => null,
         },
         4 => upper switch

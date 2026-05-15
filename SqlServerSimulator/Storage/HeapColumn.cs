@@ -106,5 +106,14 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public bool IsStored => this.Computed is null || this.IsPersisted;
 
+    /// <summary>
+    /// Non-null when the column was declared with an
+    /// <c>xml(schema_collection)</c> type spec. Stores the schema-collection
+    /// reference for catalog-view round-trip via
+    /// <c>sys.columns.xml_collection_id</c>. The simulator does not validate
+    /// xml payloads against the schema — the link is metadata only.
+    /// </summary>
+    public XmlSchemaCollection? XmlSchemaCollection;
+
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

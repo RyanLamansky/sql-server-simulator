@@ -83,6 +83,18 @@ internal sealed class Schema(string name, int schemaId)
     public readonly ConcurrentDictionary<string, AliasType> AliasTypes = new(Collation.Default);
 
     /// <summary>
+    /// XML schema collections hosted by this schema. Created via
+    /// <c>CREATE XML SCHEMA COLLECTION schema.name AS '&lt;xsd:schema&gt;…'</c>,
+    /// referenced by per-column <c>xml(collection_name)</c> type
+    /// declarations. Shares the type-name namespace with
+    /// <see cref="TableTypes"/> / <see cref="AliasTypes"/> (Msg 219 on
+    /// duplicate). The simulator does not parse the XSD or validate xml
+    /// payloads against it — the schema collection is metadata only,
+    /// stored for <c>sys.xml_schema_collections</c> round-trip.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, XmlSchemaCollection> XmlSchemaCollections = new(Collation.Default);
+
+    /// <summary>
     /// Sequence objects hosted by this schema. Created via <c>CREATE
     /// SEQUENCE schema.name ...</c>, consumed via <c>NEXT VALUE FOR
     /// schema.name</c>. Shares the object-name namespace with tables /

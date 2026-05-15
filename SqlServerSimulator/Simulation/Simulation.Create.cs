@@ -39,6 +39,10 @@ partial class Simulation
                 return TryParseCreateRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
+                return Simulation.TryParseCreateXml(context);
+            case ReservedKeyword { Keyword: Keyword.Primary }:
+                return Simulation.TryParseCreatePrimaryXml(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })
@@ -576,34 +580,49 @@ partial class Simulation
 
         int? declaredMaxLength = null;
         int? declaredScale = null;
+        XmlSchemaCollection? xmlSchemaCollection = null;
         if (context.Token is Operator { Character: '(' })
         {
-            var lengthToken = context.GetNextRequired();
-            declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
-                ? numericValue.AsInt32
-                : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
-                    ? SqlType.MaxLengthSentinel
-                    : throw SimulatedSqlException.SyntaxErrorNear(context);
-
-            switch (context.GetNextRequired())
+            // xml(schema_collection) / xml(CONTENT name) / xml(DOCUMENT name)
+            // — the inner content is a name reference, not a length. Detected
+            // by the type name being "xml" (case-insensitive, 1-part). The
+            // rest of the branches treat the parens as a length/precision spec.
+            var isXmlTypeRef = qualifiedTypeName.Count == 1
+                && Collation.Default.Equals(typeName.Value, "xml");
+            if (isXmlTypeRef && PeekIsXmlSchemaArgument(context))
             {
-                case Operator { Character: ',' }:
-                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    declaredScale = scaleValue.AsInt32;
-                    if (context.GetNextRequired() is not Operator { Character: ')' })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    break;
-                case Operator { Character: ')' }:
-                    break;
-                default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                xmlSchemaCollection = ParseXmlSchemaCollectionArgument(context);
+                context.MoveNextOptional();
             }
+            else
+            {
+                var lengthToken = context.GetNextRequired();
+                declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
+                    ? numericValue.AsInt32
+                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
+                        ? SqlType.MaxLengthSentinel
+                        : throw SimulatedSqlException.SyntaxErrorNear(context);
 
-            // Optional advance: CREATE TABLE always has a `)` or constraint
-            // after the length, but ALTER TABLE ADD COLUMN may end the
-            // statement here.
-            context.MoveNextOptional();
+                switch (context.GetNextRequired())
+                {
+                    case Operator { Character: ',' }:
+                        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        declaredScale = scaleValue.AsInt32;
+                        if (context.GetNextRequired() is not Operator { Character: ')' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        break;
+                    case Operator { Character: ')' }:
+                        break;
+                    default:
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+
+                // Optional advance: CREATE TABLE always has a `)` or constraint
+                // after the length, but ALTER TABLE ADD COLUMN may end the
+                // statement here.
+                context.MoveNextOptional();
+            }
         }
 
         // Loop over the column-constraint clauses (IDENTITY, NULL/NOT NULL,
@@ -748,6 +767,8 @@ partial class Simulation
         }
 
         var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden);
+        if (xmlSchemaCollection is not null)
+            newColumn.XmlSchemaCollection = xmlSchemaCollection;
         if (defaultExpression is not null)
         {
             // Inline DEFAULT (with or without an explicit CONSTRAINT name)

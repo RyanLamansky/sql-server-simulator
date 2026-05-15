@@ -156,6 +156,24 @@ internal abstract class Expression
                                 }
                                 context.RestoreCheckpoint(checkpoint);
                             }
+                            // XML instance-method shape: <expr>.value(...) /
+                            // .nodes(...) / .query(...) / .exist(...) /
+                            // .modify(...). Parses cleanly so CREATE VIEW /
+                            // CREATE PROCEDURE bodies that reference XML
+                            // methods can be stored verbatim; runtime
+                            // evaluation throws NotSupportedException (see
+                            // XmlMethodCall.Run).
+                            if (XmlMethodCall.IsKnownMethodName(name.Value))
+                            {
+                                var checkpoint = context.SaveCheckpoint();
+                                var probe = context.GetNextOptional();
+                                if (probe is Operator { Character: '(' })
+                                {
+                                    expression = XmlMethodCall.Parse(expression, name.Value, context);
+                                    continue;
+                                }
+                                context.RestoreCheckpoint(checkpoint);
+                            }
                             if (expression is not Reference reference)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
                             reference.AddMultiPartComponent(name);

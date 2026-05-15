@@ -376,17 +376,29 @@ INDEX (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column)
 `sys.fulltext_stoplists` lookup catalogs aren't shipped — apps that
 introspect the language enum hit a missing-view error.
 
-### [ ] `xml` data type + XML schema collections + XML methods + XML indexes (very large)
-9 column uses in AW (`Production.Document.DocumentSummary`, `Person.Person.AdditionalContactInfo`, `HumanResources.JobCandidate.Resume`, etc.), 6 `SqlXmlSchemaCollection` (with embedded XSD schemas in `SchemaExpression`), 8 `SqlXmlIndex` (`PrimaryXmlIndexUsage` 3, secondary index types). Surface:
-- Storage type + `xml(SchemaCollection)` parametrization
-- `CREATE XML SCHEMA COLLECTION` (with XSD payload)
-- XML methods: `.value('xpath', 'sqltype')`, `.nodes('xpath')`, `.query('xpath')`, `.exist('xpath')`, `.modify('xml dml')`
-- Implicit/explicit cast between `xml` and `[n]varchar`
-- XML primary + secondary indexes (PATH / VALUE / PROPERTY)
-- `FOR XML` query-output clause (separate but related)
-- `sys.xml_schema_collections`, `sys.xml_indexes`
+### [x] `xml` data type + XML schema collections + XML methods + XML indexes (skip-with-diagnostic, shipped 2026-05-15)
+DDL + catalog views + xml-typed columns + xml(schema_collection) bindings all ship; query-time XPath/XQuery methods raise NotSupportedException at execute. AW's 9 xml columns, 6 SqlXmlSchemaCollection, 8 SqlXmlIndex elements all round-trip through model.xml; the existing `uspGetEmployeeCandidate`-style procs that exercise `.value()` parse cleanly at CREATE and surface the documented NotSupportedException on EXEC.
 
-Genuinely large — XPath + XML DML are independent sub-languages. Recommend **skip-with-diagnostic** in the loader for the baseline (load xml columns as `nvarchar(MAX)` containing the raw XML — preserves application read-back via `.ToString()`, breaks XPath methods). Real feature could be one or several bundles down the road.
+**Storage**: `XmlSqlType : SqlType` (singleton, SqlServerName="xml", SystemTypeId=241, IsLob=true) — payload stored identically to `nvarchar(MAX)` (raw UTF-16 LE bytes). Type identity preserved through `sys.columns.user_type_id` / `sys.types`. `XmlSchemaCollection` class carries id + name + schema_id + nullable principal_id + xsdText + create_date / modify_date; `Schema.XmlSchemaCollections` is the per-schema dict (shares the type-namespace with TableTypes / AliasTypes — Msg 219 on duplicate). `Database.AllocateXmlCollectionId` returns 65536 first (probe-confirmed). `HeapColumn.XmlSchemaCollection` is a nullable ref linking xml columns to their collection — metadata only; the simulator does not validate xml payloads against the XSD. `HeapTable.XmlIndexes` is a `List<XmlIndex>`; `XmlIndex` carries name + columnOrdinal + isPrimary + UsingPrimaryIndexName (for secondary) + nullable SecondaryType (PATH / VALUE / PROPERTY) + ObjectId.
+
+**Parsers** (`Simulation/Simulation.Xml.cs`):
+- `CREATE XML SCHEMA COLLECTION [schema.]name AS '<xsd:schema>…'` — XSD text stored verbatim. No XSD parsing; AW's 6 schema-collection xsd-text payloads (with embedded namespaces, complex types, restrictions, sequences) round-trip as opaque strings.
+- `DROP XML SCHEMA COLLECTION [schema.]name` — removes the entry.
+- `CREATE PRIMARY XML INDEX name ON table(col) [WITH (…)]` — primary index for an xml column.
+- `CREATE XML INDEX name ON table(col) USING XML INDEX primary_name FOR {PATH | VALUE | PROPERTY} [WITH (…)]` — secondary indexes that reference a primary index.
+- `WITH (…)` trailing options block parse-and-discards via the shared SkipBalancedParens helper.
+- xml column-type position: `xml`, `xml(name)`, `xml(CONTENT name)`, `xml(DOCUMENT name)` — the CONTENT / DOCUMENT discriminator parse-and-discards. Detection happens in `ParseOneColumnIntoLists` via a peek (`PeekIsXmlSchemaArgument`) that distinguishes the schema-collection-name form from a length / MAX spec; matched only when the bare 1-part type name is "xml". Unknown schema collection → Msg 208.
+- Statement dispatch: `Xml` added to `ContextualKeyword` enum; CREATE / DROP routes match `UnquotedString { ContextualKeyword: ContextualKeyword.Xml }` and `ReservedKeyword { Keyword: Keyword.Primary }` (the PRIMARY XML INDEX form). SCHEMA is reserved, so the sub-keyword check uses `Keyword.Schema` — COLLECTION is a bare identifier.
+
+**XML method execution rejection** (`Parser/Expressions/XmlMethodCall.cs`): instance methods `.value()` / `.nodes()` / `.query()` / `.exist()` / `.modify()` are intercepted in `Expression.cs`'s dotted-name dispatch (closed accept-list, matched only when followed by `(`). Parses cleanly so CREATE VIEW / CREATE PROCEDURE bodies that reference XML methods can be stored verbatim; runtime evaluation raises `NotSupportedException` with `"XML instance method '.NAME()' is not modeled."`. Static result-type inference still applies (`.exist()`→bit, `.value()`→nvarchar(MAX) stub, others→xml) so projection-schema resolution works at the parser level.
+
+**Catalog views** in `BuiltInResources.cs`:
+- `sys.xml_schema_collections` (6-col, probe-confirmed against SQL Server 2025): xml_collection_id / schema_id / principal_id (NULL — AUTHORIZATION clause not modeled) / name / create_date / modify_date.
+- `sys.xml_indexes` (9-col probe-derived shipped subset; real surface 26 cols): object_id / name / index_id / type (=3) / type_desc (='XML') / using_xml_index_id (NULL for primary) / secondary_type (char(1): P/V/R) / secondary_type_desc / is_primary_key (always false).
+
+21 new tests in `XmlTests.cs` cover: xml column round-trip (text payload through INSERT / SELECT); NULL handling; sys.columns reports xml type identity; CREATE XML SCHEMA COLLECTION happy + qualified schema + duplicate Msg 219; xml(name) binding + CONTENT/DOCUMENT discriminators + unknown-collection Msg 208; DROP collection; CREATE PRIMARY XML INDEX + three secondary forms (PATH/VALUE/PROPERTY) + using_xml_index_id linkage; duplicate-name Msg 2714; XML method NotSupportedException at execute (`.value` / `.query` / `.exist`); CREATE VIEW with XML method succeeds-then-fails-at-execute; xml_collection_id starts at 65536; CAST xml→nvarchar round-trip. Total: 4162 main (+21 new) / 227 internal / 328 EFCore / 58 analyzers — all green Debug + Release.
+
+**Deferred** (real feature work after the loader baseline ships): XPath/XQuery evaluation pipeline (`.value` / `.nodes` / `.query` / `.exist` / `.modify`), XSD validation against `xml(schema_collection)` bindings, `FOR XML` query-output clause, `ALTER XML SCHEMA COLLECTION ADD` for incremental schema additions, secondary index selectivity hints (the `SELECTIVE XML INDEX` variant from SQL Server 2014+).
 
 ### [ ] `geography` / `geometry` data types (large — likely skip-with-diagnostic)
 1 column in AW (`Person.Address.SpatialLocation`). Spatial types have their own large surface (WKT/WKB parsing, OGC methods, spatial indexes). Recommend **skip-with-diagnostic**; load as `varbinary(MAX)` or `nvarchar(MAX)` in degraded mode, application queries that call `.STDistance` etc. fail at parse.
@@ -418,7 +430,7 @@ Encoding-edge probes needed (carve out tiny custom BACPACs locally via `SqlPacka
 
 Rough sequence — work each bundle to completion, update this checklist, then revisit BACPAC scoping once the prerequisites land:
 
-1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ + ~~**DDL trigger + permission statements**~~ (all shipped 2026-05-14) + ~~**Full-text catalog + index (skip-with-diagnostic)**~~ (shipped 2026-05-15)
+1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ + ~~**DDL trigger + permission statements**~~ (all shipped 2026-05-14) + ~~**Full-text catalog + index (skip-with-diagnostic)**~~ + ~~**`xml` data type + schema collections + indexes (skip-with-diagnostic)**~~ (both shipped 2026-05-15)
 2. **Loader baseline implementation**, with `xml` / `geography` / full-text **loaded in degraded mode** (xml/geography → nvarchar(MAX), full-text indexes → parse-and-discard). Diagnostics report which features were degraded. **Re-probe the hierarchyid BCP wire format** at the start of this bundle and either confirm CAST-byte-identical or implement a separate BCP decoder; replace the current simulator-native CAST encoder/decoder with the documented variable-bit ordinal encoding at the same time.
 3. **Real xml + spatial + full-text** as separate post-baseline initiatives, each promoted from degraded-mode-via-diagnostic to first-class as bundles complete.
 

@@ -70,6 +70,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.NVarchar, 0, value, isNull: false);
     }
 
+    /// <summary>Non-NULL SQL <c>xml</c> value (encoded identically to <c>nvarchar(MAX)</c>; identity preserved through <see cref="SqlType.Xml"/>).</summary>
+    public static SqlValue FromXml(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(SqlType.Xml, 0, value, isNull: false);
+    }
+
     /// <summary>Non-NULL SQL <c>sysname</c> value (encoded identically to <c>nvarchar</c>; identity preserved across system catalogs).</summary>
     public static SqlValue FromSystemName(string value)
     {
@@ -420,6 +427,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : type == SqlType.SystemName ? FromSystemName(value)
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)
+        : type == SqlType.Xml ? FromXml(value)
         : type is CharSqlType ? FromChar(type, value)
         : type is NCharSqlType ? FromNChar(type, value)
         : throw new ArgumentException($"{type} is not a string type.", nameof(type));

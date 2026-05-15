@@ -264,6 +264,16 @@ internal sealed class HeapTable : SchemaObject
     public FullTextIndex? FullTextIndex;
 
     /// <summary>
+    /// XML indexes attached to this table. At most one PRIMARY XML INDEX
+    /// per column; zero or more secondary indexes per primary. Populated by
+    /// <c>CREATE [PRIMARY] XML INDEX</c>; drained by <c>DROP INDEX</c>;
+    /// surfaced by <c>sys.xml_indexes</c>. The simulator never indexes
+    /// xml values for query acceleration — entries are catalog-visible
+    /// metadata only.
+    /// </summary>
+    public readonly List<XmlIndex> XmlIndexes = [];
+
+    /// <summary>
     /// Lazily-interned per-row <see cref="LockResource"/>s keyed by
     /// <c>(pageIndex, slotIndex)</c> — the RID (row id) that
     /// <see cref="Heap.EnumerateRowsWithAddress"/> yields and that

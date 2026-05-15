@@ -909,6 +909,40 @@ internal static class BuiltInResources
         };
         var fulltextIndexColumnsView = new CatalogView("fulltext_index_columns", fulltextIndexColumnsColumns, EnumerateSysFullTextIndexColumns);
 
+        // sys.xml_schema_collections: probe-confirmed 6-col shipped subset
+        // against SQL Server 2025 (2026-05-15). Real SQL Server's
+        // principal_id column is nullable; the simulator's pre-seeded
+        // collections leave it NULL.
+        var xmlSchemaCollectionsColumns = new HeapColumn[]
+        {
+            new("xml_collection_id", SqlType.Int32, null, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("name", SqlType.SystemName, 128, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+        };
+        var xmlSchemaCollectionsView = new CatalogView("xml_schema_collections", xmlSchemaCollectionsColumns, EnumerateSysXmlSchemaCollections);
+
+        // sys.xml_indexes: probe-confirmed 9-col shipped subset (real SQL
+        // Server's row is 26 cols including a long is_disabled / is_padded
+        // / allow_row_locks tail of admin flags). The simulator surfaces
+        // the AW-load-bearing core: identity, primary/secondary
+        // discriminator, and the FOR-PATH/VALUE/PROPERTY classifier.
+        var xmlIndexesColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("using_xml_index_id", SqlType.Int32, null, true),
+            new("secondary_type", charOne, 1, true),
+            new("secondary_type_desc", SqlType.NVarchar, 60, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+        };
+        var xmlIndexesView = new CatalogView("xml_indexes", xmlIndexesColumns, EnumerateSysXmlIndexes);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -941,6 +975,8 @@ internal static class BuiltInResources
             ["sys.fulltext_catalogs"] = fulltextCatalogsView,
             ["sys.fulltext_indexes"] = fulltextIndexesView,
             ["sys.fulltext_index_columns"] = fulltextIndexColumnsView,
+            ["sys.xml_schema_collections"] = xmlSchemaCollectionsView,
+            ["sys.xml_indexes"] = xmlIndexesView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -1862,6 +1898,96 @@ internal static class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>sys.xml_schema_collections</c>. One row per
+    /// <see cref="XmlSchemaCollection"/> across every schema. The
+    /// principal_id surfaces as NULL — the simulator's CREATE XML SCHEMA
+    /// COLLECTION grammar doesn't support an AUTHORIZATION clause and
+    /// every collection's principal_id field is left null at construction.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysXmlSchemaCollections(Parser.BatchContext batch)
+    {
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var coll in schema.XmlSchemaCollections.Values.OrderBy(c => c.Id))
+            {
+                yield return [
+                    SqlValue.FromInt32(coll.Id),
+                    SqlValue.FromInt32(coll.SchemaId),
+                    coll.PrincipalId is int p ? SqlValue.FromInt32(p) : SqlValue.Null(SqlType.Int32),
+                    SqlValue.FromSystemName(coll.Name),
+                    SqlValue.FromDateTime(coll.CreateDate),
+                    SqlValue.FromDateTime(coll.ModifyDate),
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.xml_indexes</c>. One row per
+    /// <see cref="XmlIndex"/> across every table. type=3 / type_desc='XML'
+    /// for both primary and secondary forms (probe-confirmed). The
+    /// is_primary_key column surfaces always false — primary xml indexes
+    /// aren't xml-typed PKs.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysXmlIndexes(Parser.BatchContext batch)
+    {
+        var charOneType = CharSqlType.Get(1);
+        var typeCode = SqlValue.FromByte(3);
+        var typeDesc = SqlValue.FromNVarchar("XML");
+        var falseBit = SqlValue.FromBoolean(false);
+        var pathCode = SqlValue.FromChar(charOneType, "P");
+        var pathDesc = SqlValue.FromNVarchar("PATH");
+        var valueCode = SqlValue.FromChar(charOneType, "V");
+        var valueDesc = SqlValue.FromNVarchar("VALUE");
+        var propertyCode = SqlValue.FromChar(charOneType, "R");
+        var propertyDesc = SqlValue.FromNVarchar("PROPERTY");
+        var nullChar = SqlValue.Null(charOneType);
+        var nullDesc = SqlValue.Null(SqlType.NVarchar);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.XmlIndexes.Count == 0)
+                    continue;
+                // Build a quick name→objectId map so secondary indexes can
+                // resolve their using_xml_index_id from the recorded
+                // UsingPrimaryIndexName.
+                var primaryIds = new Dictionary<string, int>(Collation.Default);
+                foreach (var ix in table.XmlIndexes)
+                {
+                    if (ix.IsPrimary)
+                        primaryIds[ix.Name] = ix.ObjectId;
+                }
+                foreach (var ix in table.XmlIndexes)
+                {
+                    var usingId = ix.UsingPrimaryIndexName is { } u && primaryIds.TryGetValue(u, out var v)
+                        ? SqlValue.FromInt32(v)
+                        : nullInt;
+                    var (secCode, secDesc) = ix.SecondaryType switch
+                    {
+                        XmlSecondaryIndexType.Path => (pathCode, pathDesc),
+                        XmlSecondaryIndexType.Value => (valueCode, valueDesc),
+                        XmlSecondaryIndexType.Property => (propertyCode, propertyDesc),
+                        _ => (nullChar, nullDesc),
+                    };
+                    yield return [
+                        SqlValue.FromInt32(table.ObjectId),
+                        SqlValue.FromSystemName(ix.Name),
+                        SqlValue.FromInt32(ix.ObjectId),
+                        typeCode,
+                        typeDesc,
+                        usingId,
+                        secCode,
+                        secDesc,
+                        falseBit,
+                    ];
+                }
+            }
+        }
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
@@ -2463,6 +2589,9 @@ internal static class BuiltInResources
                 },
                 0, 0),
             VarbinarySqlType vb => (vb.length == 0 ? (short)(col.MaxLength ?? 1) : vb.length, 0, 0),
+            // xml: real SQL Server reports max_length = -1 (matching the
+            // nvarchar(MAX) storage shape) and no numeric precision/scale.
+            XmlSqlType => (-1, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }

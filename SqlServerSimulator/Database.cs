@@ -274,6 +274,17 @@ internal sealed class Database
     /// allocation returns 5.
     /// </summary>
     public int AllocateFullTextCatalogId() => Interlocked.Increment(ref this.nextFullTextCatalogId) + 4;
+
+    private int nextXmlCollectionId = 65535;
+
+    /// <summary>
+    /// Allocates the next XML schema collection id. Real SQL Server's
+    /// <c>sys.xml_schema_collections.xml_collection_id</c> uses a high-range
+    /// numbering with the first user collection at id 65536 (probe-confirmed
+    /// against SQL Server 2025). The counter is seeded at 65535 so the first
+    /// allocation returns 65536, matching that convention.
+    /// </summary>
+    public int AllocateXmlCollectionId() => Interlocked.Increment(ref this.nextXmlCollectionId);
 }
 
 /// <summary>

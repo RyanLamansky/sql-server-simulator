@@ -49,6 +49,8 @@ partial class Simulation
                 return TryParseDropRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseDropFullText(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
+                return Simulation.TryParseDropXml(context);
         }
 
         var targetKind = context.Token switch

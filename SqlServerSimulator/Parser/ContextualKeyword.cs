@@ -103,5 +103,6 @@ enum ContextualKeyword
     View_Metadata,
     Within,
     Work,
+    Xml,
     Zone,
 }

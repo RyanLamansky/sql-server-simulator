@@ -1,0 +1,365 @@
+using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator;
+
+partial class Simulation
+{
+    /// <summary>
+    /// Returns true when the token after the current <c>(</c> looks like an
+    /// XML schema-collection argument (a 1- or 2-part name optionally
+    /// preceded by the <c>CONTENT</c> or <c>DOCUMENT</c> contextual keyword)
+    /// rather than a length / precision spec. Probes without advancing the
+    /// cursor.
+    /// </summary>
+    internal static bool PeekIsXmlSchemaArgument(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            // A Name token after `(` is either a schema-collection ref or the
+            // CONTENT/DOCUMENT discriminator. Numeric / MAX is a length-spec
+            // path. UnquotedString is a Name subclass, so a single Name arm
+            // covers both forms.
+            return context.GetNextOptional() is Name;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+    }
+
+    /// <summary>
+    /// Parses the inner argument of <c>xml(...)</c> as a schema-collection
+    /// reference. Forms: <c>xml(name)</c>, <c>xml(CONTENT name)</c>,
+    /// <c>xml(DOCUMENT name)</c>; the CONTENT/DOCUMENT discriminator is
+    /// parsed-and-discarded (AW emits neither — every xml column is the
+    /// default CONTENT form). Cursor enters on the <c>(</c>, exits on the
+    /// matching <c>)</c>. The resolved <see cref="XmlSchemaCollection"/> is
+    /// returned for the caller to attach to the column.
+    /// </summary>
+    internal static XmlSchemaCollection ParseXmlSchemaCollectionArgument(ParserContext context)
+    {
+        // Cursor on `(`. Advance to the inner content.
+        context.MoveNextRequired();
+
+        // Optional CONTENT / DOCUMENT discriminator.
+        if (context.Token is UnquotedString { Value: var maybeKind }
+            && (Collation.Default.Equals(maybeKind, "CONTENT") || Collation.Default.Equals(maybeKind, "DOCUMENT")))
+        {
+            context.MoveNextRequired();
+        }
+
+        if (context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var collectionName = BatchContext.ParseObjectName(context);
+        context.MoveNextRequired();
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Resolve via the schema's XmlSchemaCollections dict, falling back
+        // to dbo for an unqualified name (matches the alias-type / table-type
+        // resolution shape).
+        var schemaName = collectionName.ImmediateQualifier ?? Database.DefaultSchemaName;
+        return context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema)
+            && schema.XmlSchemaCollections.TryGetValue(collectionName.Leaf, out var collection)
+            ? collection
+            : throw SimulatedSqlException.InvalidObjectName(collectionName);
+    }
+
+    /// <summary>
+    /// Parses <c>CREATE XML SCHEMA COLLECTION [schema.]name AS '&lt;xsd&gt;…'</c>.
+    /// Cursor enters on the <c>XML</c> contextual keyword; caller has matched
+    /// <c>CREATE</c>. The XSD text is stored verbatim; no XSD parsing or
+    /// validation is performed.
+    /// </summary>
+    internal static bool TryParseCreateXml(ParserContext context)
+    {
+        // Cursor on XML. Advance to determine the kind (SCHEMA COLLECTION or
+        // INDEX). PRIMARY XML INDEX has its own dispatch through the CREATE
+        // path; here we handle the schema-collection and bare-secondary-index
+        // forms only. SCHEMA is a reserved keyword in SQL Server's grammar
+        // (Keyword.Schema), so the match is on ReservedKeyword rather than
+        // the contextual-keyword path.
+        context.MoveNextRequired();
+        return context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Schema }
+                => ParseCreateXmlSchemaCollection(context),
+            ReservedKeyword { Keyword: Keyword.Index }
+                => ParseCreateXmlIndex(context, isPrimary: false),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+    }
+
+    /// <summary>
+    /// Parses <c>CREATE PRIMARY XML INDEX name ON table(col) [WITH (…)]</c>.
+    /// Cursor enters on the <c>PRIMARY</c> reserved keyword.
+    /// </summary>
+    internal static bool TryParseCreatePrimaryXml(ParserContext context)
+    {
+        // Cursor on PRIMARY. Advance to XML then INDEX.
+        context.MoveNextRequired();
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Xml })
+            return false;
+        context.MoveNextRequired();
+        return context.Token is ReservedKeyword { Keyword: Keyword.Index }
+            ? ParseCreateXmlIndex(context, isPrimary: true)
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Parses <c>DROP XML SCHEMA COLLECTION [schema.]name</c>. Cursor enters
+    /// on the <c>XML</c> contextual keyword; caller has matched <c>DROP</c>.
+    /// </summary>
+    internal static bool TryParseDropXml(ParserContext context)
+    {
+        context.MoveNextRequired();
+        return context.Token is ReservedKeyword { Keyword: Keyword.Schema }
+            ? ParseDropXmlSchemaCollection(context)
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    private static bool ParseCreateXmlSchemaCollection(ParserContext context)
+    {
+        // Cursor on SCHEMA reserved keyword; expect COLLECTION next. COLLECTION
+        // is a bare identifier (not in the reserved list).
+        context.MoveNextRequired();
+        if (context.Token is not Name { Value: var c } || !Collation.Default.Equals(c, "COLLECTION"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        if (context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var name = BatchContext.ParseObjectName(context);
+        context.MoveNextRequired();
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        // Schema expression — typically a literal string (single-quoted or
+        // N'…' prefixed). Real SQL Server also accepts an expression that
+        // produces a string; the simulator handles only the literal form
+        // since AW emits literals exclusively.
+        if (context.Token is not Literal { Value: { IsNull: false } literalValue })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var xsdText = literalValue.AsString;
+        context.MoveNextOptional();
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
+        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName);
+
+        // Type-namespace collision with existing alias type / table type /
+        // xml collection raises Msg 219 — same surface as the existing
+        // alias-vs-table-type rule.
+        if (ownerSchema.XmlSchemaCollections.ContainsKey(name.Leaf)
+            || ownerSchema.TableTypes.ContainsKey(name.Leaf)
+            || ownerSchema.AliasTypes.ContainsKey(name.Leaf))
+        {
+            throw SimulatedSqlException.TypeAlreadyExists($"{schemaName}.{name.Leaf}");
+        }
+
+        var id = context.CurrentDatabase.AllocateXmlCollectionId();
+        ownerSchema.XmlSchemaCollections[name.Leaf] = new XmlSchemaCollection(
+            id, name.Leaf, ownerSchema.SchemaId,
+            principalId: null,
+            xsdText: xsdText,
+            createDate: context.Batch.CurrentStatement.UtcNow);
+        return true;
+    }
+
+    private static bool ParseCreateXmlIndex(ParserContext context, bool isPrimary)
+    {
+        // Cursor on INDEX. Advance to the index name.
+        context.MoveNextRequired();
+        if (context.Token is not Name nameToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var indexName = nameToken.Value;
+        context.MoveNextRequired();
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        if (context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var tableName = BatchContext.ParseObjectName(context);
+        context.MoveNextRequired();
+
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not Name colToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var columnName = colToken.Value;
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+
+        string? usingPrimaryName = null;
+        XmlSecondaryIndexType? secondaryType = null;
+        if (!isPrimary)
+        {
+            // USING XML INDEX primary_name FOR {PATH | VALUE | PROPERTY}
+            if (context.Token is not UnquotedString { Value: var usingKw } || !Collation.Default.Equals(usingKw, "USING"))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Xml })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Index })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is not Name usingPrimaryToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            usingPrimaryName = usingPrimaryToken.Value;
+            context.MoveNextRequired();
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.For })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is not Name secondaryTypeToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            Span<char> upper = stackalloc char[secondaryTypeToken.Value.Length];
+            var len = secondaryTypeToken.Value.AsSpan().ToUpperInvariant(upper);
+            secondaryType = len switch
+            {
+                4 when upper[..4].SequenceEqual("PATH") => XmlSecondaryIndexType.Path,
+                5 when upper[..5].SequenceEqual("VALUE") => XmlSecondaryIndexType.Value,
+                8 when upper[..8].SequenceEqual("PROPERTY") => XmlSecondaryIndexType.Property,
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            context.MoveNextOptional();
+        }
+
+        // Optional WITH (...) trailer — parse-and-discard.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            SkipBalancedParens(context);
+        }
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table)
+            || table.IsTableVariable
+            || BatchContext.IsLocalTempName(table.Name))
+        {
+            throw SimulatedSqlException.InvalidObjectName(tableName);
+        }
+
+        var ordinal = -1;
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            {
+                ordinal = i;
+                break;
+            }
+        }
+        if (ordinal < 0)
+            throw SimulatedSqlException.InvalidColumnName(columnName);
+
+        // Duplicate index name on the same table raises Msg 1779 / 1913 in
+        // real SQL Server (probe-confirmed for xml indexes uses 1913 — the
+        // simulator surfaces the generic Msg 2714 since neither catalog
+        // error factory exists yet).
+        foreach (var existing in table.XmlIndexes)
+        {
+            if (Collation.Default.Equals(existing.Name, indexName))
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(indexName);
+        }
+
+        var index = new XmlIndex(
+            indexName,
+            ordinal,
+            isPrimary,
+            usingPrimaryName,
+            secondaryType,
+            context.CurrentDatabase.AllocateObjectId());
+        table.XmlIndexes.Add(index);
+        return true;
+    }
+
+    private static bool ParseDropXmlSchemaCollection(ParserContext context)
+    {
+        // Cursor on SCHEMA. Advance to COLLECTION (bare identifier).
+        context.MoveNextRequired();
+        if (context.Token is not Name { Value: var c } || !Collation.Default.Equals(c, "COLLECTION"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        if (context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var name = BatchContext.ParseObjectName(context);
+        context.MoveNextOptional();
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
+        return context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema)
+            && ownerSchema.XmlSchemaCollections.TryRemove(name.Leaf, out _)
+            ? true
+            : throw SimulatedSqlException.InvalidObjectName(name);
+    }
+}
+
+/// <summary>
+/// A registered XML index on a heap table. Created via
+/// <c>CREATE [PRIMARY] XML INDEX name ON table(col) [USING XML INDEX primary FOR {PATH|VALUE|PROPERTY}]</c>;
+/// stored on <see cref="HeapTable.XmlIndexes"/>. The simulator does not
+/// index xml values for query acceleration — entries exist for
+/// <c>sys.xml_indexes</c> round-trip only.
+/// </summary>
+internal sealed class XmlIndex(
+    string name,
+    int columnOrdinal,
+    bool isPrimary,
+    string? usingPrimaryIndexName,
+    XmlSecondaryIndexType? secondaryType,
+    int objectId)
+{
+    public readonly string Name = name;
+
+    /// <summary>0-based column ordinal that the index targets. Translated
+    /// to 1-based <c>column_id</c> on the catalog-view surface.</summary>
+    public readonly int ColumnOrdinal = columnOrdinal;
+
+    public readonly bool IsPrimary = isPrimary;
+
+    /// <summary>Name of the primary XML index this secondary index uses
+    /// for its rowset. Null for primary indexes.</summary>
+    public readonly string? UsingPrimaryIndexName = usingPrimaryIndexName;
+
+    /// <summary>For secondary indexes: PATH / VALUE / PROPERTY. Null for
+    /// primary indexes.</summary>
+    public readonly XmlSecondaryIndexType? SecondaryType = secondaryType;
+
+    /// <summary>Stable object id (allocated from the same counter as
+    /// tables / views / etc.). Used for any future <c>sys.objects</c>
+    /// surfacing; surfaces in <c>sys.xml_indexes.index_id</c> directly
+    /// in real SQL Server convention.</summary>
+    public readonly int ObjectId = objectId;
+}
+
+/// <summary>
+/// Secondary XML index kind (real SQL Server's three secondary forms).
+/// Maps to <c>sys.xml_indexes.secondary_type</c> char(1): P / V / R.
+/// </summary>
+internal enum XmlSecondaryIndexType : byte
+{
+    Path,
+    Value,
+    Property,
+}
