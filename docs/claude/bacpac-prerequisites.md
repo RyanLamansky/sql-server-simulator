@@ -277,10 +277,104 @@ AW emits 2 GRANTs (`GRANT VIEW ANY COLUMN ENCRYPTION KEY DEFINITION TO public` +
 
 15 new tests in `PermissionStatementTests.cs` cover GRANT / REVOKE / DENY happy paths, WITH GRANT OPTION, multi-permission comma lists, object-scope ON, unknown-principal Msg 15151, CREATE USER / CREATE ROLE happy + duplicate Msg 15023, ALTER ROLE ADD MEMBER landing in role_members, DROP USER / DROP ROLE happy + IF EXISTS + cascade-drop-membership, and fixed-principal pre-seed visibility.
 
-### [ ] Full-text catalog + index (large — likely skip-with-diagnostic)
-1 catalog (`[AW2025FullTextCatalog]`) + 3 indexes in AW. Full surface: `CREATE FULLTEXT CATALOG` / `CREATE FULLTEXT INDEX … ON tbl(col LANGUAGE 1033) KEY INDEX <pk> ON <catalog>`, `CONTAINS()` / `FREETEXT()` predicates, `CONTAINSTABLE` / `FREETEXTTABLE` rowset functions, `sys.fulltext_catalogs` / `sys.fulltext_indexes`.
+### [x] Full-text catalog + index (skip-with-diagnostic, shipped 2026-05-15)
+DDL + catalog views ship; query-time predicates are explicit
+`NotSupportedException`. AW model.xml's 1 `SqlFullTextCatalog`
+(`[AW2025FullTextCatalog]`) + 3 `SqlFullTextIndex` elements load
+end-to-end; the existing AW procedure `uspSearchCandidateResumes` (which
+exercises `CONTAINSTABLE`) parses through CREATE PROCEDURE (proc bodies
+are stored verbatim and only re-tokenized on EXEC) — calling the proc
+fails loudly with the documented NotSupportedException, which is exactly
+the skip-with-diagnostic stance the doc called for.
 
-The query-time predicates (`CONTAINS`, `FREETEXT`) are the hard part — they need a tokenizer/stemmer/inverted-index/relevance-rank pipeline. Recommend **skip-with-diagnostic** for the loader; AW data still loads, full-text-using queries fail at parse with `NotSupportedException("Full-text search is not modeled")`. Real feature deferred indefinitely unless an application needs it.
+**Storage**: new `FullTextCatalog` class (`SqlServerSimulator/FullTextCatalog.cs`)
+carries id + name + is_default + is_accent_sensitivity_on + principal_id +
+create_date; `Database.FullTextCatalogs` is the per-database
+`ConcurrentDictionary<string, FullTextCatalog>` (case-insensitive). New
+`FullTextIndex` class (`SqlServerSimulator/FullTextIndex.cs`) carries
+catalog_id + key_index_name + unique_index_id (resolved at CREATE) +
+List<FullTextIndexColumn>; the index lives directly on
+`HeapTable.FullTextIndex` as a single nullable slot (real SQL Server's
+invariant: at most one FT index per table). `FullTextIndexColumn` carries
+column_id (1-based storage ordinal) + language_id + nullable
+type_column_id. The catalog-id counter starts at 5 — matches Microsoft
+Learn's documented numbering convention for user catalogs (id 0..4 are
+reserved internal slots).
+
+**Parsers** in `Simulation/Simulation.FullText.cs`:
+- `CREATE FULLTEXT CATALOG name [AS DEFAULT] [AUTHORIZATION owner]
+  [WITH ACCENT_SENSITIVITY = {ON|OFF}] [ON FILEGROUP fg] [IN PATH '…']` —
+  the filesystem-placement trailers (ON FILEGROUP / IN PATH) parse-and-
+  discard. AS DEFAULT demotes any prior default before promoting this
+  catalog. AUTHORIZATION owner resolves against `Database.Principals`
+  (default `dbo`).
+- `CREATE FULLTEXT INDEX ON table (col [TYPE COLUMN typeCol] [LANGUAGE n]
+  [STATISTICAL_SEMANTICS] [, ...]) [KEY INDEX name] [ON catalog [, FILEGROUP fg] | ON (catalog [, FILEGROUP fg])]
+  [WITH (option [, ...])]` — multi-column lists, the TYPE COLUMN nested
+  reference (used for varbinary columns paired with a doc-extension
+  column — AW's `[Production].[Document]` shape), the LANGUAGE LCID
+  (integer literal — language-name literal parse-and-discards), the
+  STATISTICAL_SEMANTICS flag (parse-and-discard), both paren and bare ON
+  catalog forms, and the WITH (…) trailing options block (parse-and-
+  discard via the shared `SkipBalancedParens` helper).
+- `DROP FULLTEXT CATALOG name` and `DROP FULLTEXT INDEX ON table` —
+  routed through dedicated `TryParseDropFullText` ahead of the generic
+  DROP-target switch (DDL form sub-keywords have their own grammar).
+- Statement dispatch: `Fulltext` added to `ContextualKeyword` enum;
+  CREATE / DROP routes match `UnquotedString { ContextualKeyword:
+  ContextualKeyword.Fulltext }` and dispatch through
+  `Simulation.TryParseCreateFullText` / `Simulation.TryParseDropFullText`.
+
+**Predicate / rowset rejection**:
+- `WHERE CONTAINS(col, '…')` / `WHERE FREETEXT(col, '…')` —
+  `BooleanExpression.ParseAtom` intercepts the `ReservedKeyword`s
+  `Contains` and `FreeText` ahead of the comparison parse and raises
+  `NotSupportedException` with the message `"Full-text search
+  predicates (CONTAINS|FREETEXT) are not modeled."`.
+- `FROM CONTAINSTABLE(...) AS t` / `FROM FREETEXTTABLE(...)` / the two
+  SEMANTIC* variants — `Selection.ParseSingleFromSource` intercepts the
+  rowset-function keywords ahead of the syntax-error default and raises
+  `NotSupportedException` with `"Full-text rowset functions
+  (CONTAINSTABLE|...) are not modeled."`.
+
+**Catalog views** in `BuiltInResources.cs`:
+- `sys.fulltext_catalogs` (9-col): fulltext_catalog_id / name / path
+  (NULL — no on-disk storage) / is_default / is_accent_sensitivity_on /
+  data_space_id (NULL) / file_id (NULL) / principal_id / is_importing
+  (always false).
+- `sys.fulltext_indexes` (14-col): object_id / unique_index_id /
+  fulltext_catalog_id / is_enabled (true) / change_tracking_state ('A')
+  / change_tracking_state_desc ('AUTO') / has_crawl_completed (true) /
+  crawl_type ('F') / crawl_type_desc ('FULL') / crawl_start_date (NULL)
+  / crawl_end_date (NULL) / stoplist_id (NULL) / data_space_id (NULL) /
+  property_list_id (NULL).
+- `sys.fulltext_index_columns` (5-col, full row): object_id / column_id /
+  type_column_id / language_id / statistical_semantics (always false).
+
+Column subset matches Microsoft Learn's documented surface for SQL
+Server 2022+ (the reference instance doesn't have Full-Text installed —
+the catalog views aren't registered without the FT service — so probe-
+confirmation isn't available; column shapes are taken from
+learn.microsoft.com/sql/relational-databases/system-catalog-views/).
+
+21 new tests across `FullTextDdlTests.cs` (17) + `FullTextPredicateTests.cs`
+(4): catalog AS DEFAULT semantics + accent-sensitivity / duplicate-name
+Msg 2714 / drop happy + missing Msg 208 / default-promotion demotion; index
+single-col / multi-col with TYPE COLUMN / default-catalog resolution /
+missing table Msg 208 / duplicate-on-table Msg 2714 / unknown column
+Msg 207 / unknown key-index Msg 208 / row shape (is_enabled / crawl_type) /
+principal_id round-trip; predicate + rowset NotSupportedException
+verification. Total: 4141 main (+21 new) / 227 internal / 328 EFCore / 58
+analyzers, all green Debug + Release.
+
+**Deferred**: query-time text search (tokenizer/stemmer/inverted-index
+pipeline) — out of scope as documented. ALTER FULLTEXT CATALOG /
+INDEX (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column)
+— `NotSupportedException` at parse. Filesystem-placement semantics
+(`ON FILEGROUP` / `IN PATH`) parse-and-discard. The legacy
+`sys.fulltext_languages` / `sys.fulltext_document_types` /
+`sys.fulltext_stoplists` lookup catalogs aren't shipped — apps that
+introspect the language enum hit a missing-view error.
 
 ### [ ] `xml` data type + XML schema collections + XML methods + XML indexes (very large)
 9 column uses in AW (`Production.Document.DocumentSummary`, `Person.Person.AdditionalContactInfo`, `HumanResources.JobCandidate.Resume`, etc.), 6 `SqlXmlSchemaCollection` (with embedded XSD schemas in `SchemaExpression`), 8 `SqlXmlIndex` (`PrimaryXmlIndexUsage` 3, secondary index types). Surface:
@@ -324,7 +418,7 @@ Encoding-edge probes needed (carve out tiny custom BACPACs locally via `SqlPacka
 
 Rough sequence — work each bundle to completion, update this checklist, then revisit BACPAC scoping once the prerequisites land:
 
-1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ + ~~**DDL trigger + permission statements**~~ (all shipped 2026-05-14)
+1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ + ~~**DDL trigger + permission statements**~~ (all shipped 2026-05-14) + ~~**Full-text catalog + index (skip-with-diagnostic)**~~ (shipped 2026-05-15)
 2. **Loader baseline implementation**, with `xml` / `geography` / full-text **loaded in degraded mode** (xml/geography → nvarchar(MAX), full-text indexes → parse-and-discard). Diagnostics report which features were degraded. **Re-probe the hierarchyid BCP wire format** at the start of this bundle and either confirm CAST-byte-identical or implement a separate BCP decoder; replace the current simulator-native CAST encoder/decoder with the documented variable-bit ordinal encoding at the same time.
 3. **Real xml + spatial + full-text** as separate post-baseline initiatives, each promoted from degraded-mode-via-diagnostic to first-class as bundles complete.
 

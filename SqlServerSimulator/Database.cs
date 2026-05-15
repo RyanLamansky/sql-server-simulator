@@ -252,6 +252,28 @@ internal sealed class Database
     /// the fixed principals seeded in this database's constructor.
     /// </summary>
     public int AllocatePrincipalId() => Interlocked.Increment(ref this.nextPrincipalId);
+
+    /// <summary>
+    /// Per-database full-text catalogs. Populated by
+    /// <c>CREATE FULLTEXT CATALOG</c>; drained by
+    /// <c>DROP FULLTEXT CATALOG</c>; surfaced by
+    /// <c>sys.fulltext_catalogs</c>. The simulator has no full-text search
+    /// engine; this dict exists for AW model.xml round-trip + catalog-view
+    /// visibility — query-time CONTAINS / FREETEXT predicates raise
+    /// <see cref="NotSupportedException"/> rather than evaluate.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, FullTextCatalog> FullTextCatalogs = new(Collation.Default);
+
+    private int nextFullTextCatalogId;
+
+    /// <summary>
+    /// Allocates the next full-text catalog id. Real SQL Server's
+    /// <c>sys.fulltext_catalogs.fulltext_catalog_id</c> uses a separate
+    /// numbering space starting at 5 (the first user catalog probe-confirmed
+    /// at id 5); the simulator matches by seeding the counter so the first
+    /// allocation returns 5.
+    /// </summary>
+    public int AllocateFullTextCatalogId() => Interlocked.Increment(ref this.nextFullTextCatalogId) + 4;
 }
 
 /// <summary>

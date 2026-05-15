@@ -94,9 +94,17 @@ internal abstract class BooleanExpression
             context.MoveNextOptional(); // closing `)` is the predicate's last meaningful token; what follows may be end-of-input
             return inner;
         }
-        return context.Token is ReservedKeyword { Keyword: Keyword.Exists }
-            ? ParseExists(context)
-            : ParseComparison(Expression.Parse(context), context);
+        return context.Token switch
+        {
+            // Full-text predicates aren't modeled — raise NotSupportedException
+            // at parse time so apps see a loud failure rather than a silent
+            // miss. See [bacpac-prerequisites.md] for skip-with-diagnostic.
+            ReservedKeyword { Keyword: Keyword.Contains or Keyword.FreeText } predicate
+                => throw new NotSupportedException(
+                    $"Full-text search predicates ({predicate.Keyword.ToString().ToUpperInvariant()}) are not modeled."),
+            ReservedKeyword { Keyword: Keyword.Exists } => ParseExists(context),
+            _ => ParseComparison(Expression.Parse(context), context),
+        };
     }
 
     /// <summary>

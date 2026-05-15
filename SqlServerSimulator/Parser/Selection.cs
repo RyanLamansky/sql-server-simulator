@@ -1171,6 +1171,15 @@ internal sealed partial class Selection
                     rows: [],
                     lateralPlan: derivedSelection);
 
+            case ReservedKeyword
+            {
+                Keyword: Keyword.ContainsTable or Keyword.FreeTextTable
+                    or Keyword.SemanticKeyPhraseTable or Keyword.SemanticSimilarityTable
+                    or Keyword.SemanticSimilarityDetailsTable
+            } ftRowset:
+                throw new NotSupportedException(
+                    $"Full-text rowset functions ({ftRowset.Keyword.ToString().ToUpperInvariant()}) are not modeled.");
+
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }

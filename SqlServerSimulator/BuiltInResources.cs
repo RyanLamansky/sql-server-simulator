@@ -855,6 +855,60 @@ internal static class BuiltInResources
         };
         var databaseRoleMembersView = new CatalogView("database_role_members", databaseRoleMembersColumns, EnumerateSysDatabaseRoleMembers);
 
+        // sys.fulltext_catalogs: per-database full-text catalog metadata.
+        // Column subset matches Microsoft Learn's documented surface for
+        // SQL Server 2022+ (the reference instance doesn't have full-text
+        // installed, so probe-confirmation isn't available — column shapes
+        // are taken from learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-fulltext-catalogs-transact-sql).
+        var fulltextCatalogsColumns = new HeapColumn[]
+        {
+            new("fulltext_catalog_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("path", SqlType.NVarchar, 260, true),
+            new("is_default", SqlType.Bit, null, false),
+            new("is_accent_sensitivity_on", SqlType.Bit, null, false),
+            new("data_space_id", SqlType.Int32, null, true),
+            new("file_id", SqlType.Int32, null, true),
+            new("principal_id", SqlType.Int32, null, false),
+            new("is_importing", SqlType.Bit, null, false),
+        };
+        var fulltextCatalogsView = new CatalogView("fulltext_catalogs", fulltextCatalogsColumns, EnumerateSysFullTextCatalogs);
+
+        // sys.fulltext_indexes: per-database full-text indexes. One row per
+        // indexed table. Column subset from Microsoft Learn.
+        var fulltextIndexesColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("unique_index_id", SqlType.Int32, null, false),
+            new("fulltext_catalog_id", SqlType.Int32, null, false),
+            new("is_enabled", SqlType.Bit, null, false),
+            new("change_tracking_state", charOne, 1, false),
+            new("change_tracking_state_desc", SqlType.NVarchar, 60, true),
+            new("has_crawl_completed", SqlType.Bit, null, false),
+            new("crawl_type", charOne, 1, false),
+            new("crawl_type_desc", SqlType.NVarchar, 60, true),
+            new("crawl_start_date", SqlType.DateTime, null, true),
+            new("crawl_end_date", SqlType.DateTime, null, true),
+            new("stoplist_id", SqlType.Int32, null, true),
+            new("data_space_id", SqlType.Int32, null, true),
+            new("property_list_id", SqlType.Int32, null, true),
+        };
+        var fulltextIndexesView = new CatalogView("fulltext_indexes", fulltextIndexesColumns, EnumerateSysFullTextIndexes);
+
+        // sys.fulltext_index_columns: one row per indexed column inside each
+        // full-text index. column_id = 1-based storage ordinal of the
+        // indexed column; type_column_id = nullable ordinal of the paired
+        // doc-extension column for varbinary indexes.
+        var fulltextIndexColumnsColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("column_id", SqlType.Int32, null, false),
+            new("type_column_id", SqlType.Int32, null, true),
+            new("language_id", SqlType.Int32, null, false),
+            new("statistical_semantics", SqlType.Bit, null, false),
+        };
+        var fulltextIndexColumnsView = new CatalogView("fulltext_index_columns", fulltextIndexColumnsColumns, EnumerateSysFullTextIndexColumns);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -884,6 +938,9 @@ internal static class BuiltInResources
             ["sys.database_principals"] = databasePrincipalsView,
             ["sys.database_permissions"] = databasePermissionsView,
             ["sys.database_role_members"] = databaseRoleMembersView,
+            ["sys.fulltext_catalogs"] = fulltextCatalogsView,
+            ["sys.fulltext_indexes"] = fulltextIndexesView,
+            ["sys.fulltext_index_columns"] = fulltextIndexColumnsView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -1697,6 +1754,111 @@ internal static class BuiltInResources
                 SqlValue.FromInt32(roleId),
                 SqlValue.FromInt32(memberId),
             ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.fulltext_catalogs</c>. One row per
+    /// <see cref="FullTextCatalog"/> in <see cref="Database.FullTextCatalogs"/>.
+    /// Filesystem-placement columns (<c>path</c>, <c>data_space_id</c>,
+    /// <c>file_id</c>) surface as NULL — the simulator has no on-disk catalog
+    /// storage. <c>is_importing</c> is always false (no concurrent bacpac
+    /// import to observe).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysFullTextCatalogs(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullPath = SqlValue.Null(SqlType.NVarchar);
+        var nullDataSpaceId = SqlValue.Null(SqlType.Int32);
+        var nullFileId = SqlValue.Null(SqlType.Int32);
+        foreach (var cat in batch.CurrentDatabase.FullTextCatalogs.Values.OrderBy(c => c.Id))
+        {
+            yield return [
+                SqlValue.FromInt32(cat.Id),
+                SqlValue.FromSystemName(cat.Name),
+                nullPath,
+                cat.IsDefault ? trueBit : falseBit,
+                cat.IsAccentSensitive ? trueBit : falseBit,
+                nullDataSpaceId,
+                nullFileId,
+                SqlValue.FromInt32(cat.PrincipalId),
+                falseBit,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.fulltext_indexes</c>. One row per table that has a
+    /// <see cref="HeapTable.FullTextIndex"/> populated. <c>is_enabled</c> /
+    /// <c>has_crawl_completed</c> default to true (no crawl is performed
+    /// but the FT index is "ready" from the catalog's POV);
+    /// <c>change_tracking_state</c> = 'A' (AUTO) / 'AUTO';
+    /// <c>crawl_type</c> = 'F' (FULL) / 'FULL'.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch)
+    {
+        var charOneType = CharSqlType.Get(1);
+        var trueBit = SqlValue.FromBoolean(true);
+        var autoCode = SqlValue.FromChar(charOneType, "A");
+        var autoDesc = SqlValue.FromNVarchar("AUTO");
+        var fullCode = SqlValue.FromChar(charOneType, "F");
+        var fullDesc = SqlValue.FromNVarchar("FULL");
+        var nullDate = SqlValue.Null(SqlType.DateTime);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.FullTextIndex is not { } fti)
+                    continue;
+                yield return [
+                    SqlValue.FromInt32(table.ObjectId),
+                    SqlValue.FromInt32(fti.UniqueIndexId),
+                    SqlValue.FromInt32(fti.CatalogId),
+                    trueBit,
+                    autoCode,
+                    autoDesc,
+                    trueBit,
+                    fullCode,
+                    fullDesc,
+                    nullDate,
+                    nullDate,
+                    nullInt,
+                    nullInt,
+                    nullInt,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.fulltext_index_columns</c>. One row per
+    /// <see cref="FullTextIndexColumn"/> across every indexed table.
+    /// <c>statistical_semantics</c> always false (the simulator doesn't
+    /// expose the WITH STATISTICAL_SEMANTICS option at the column level
+    /// since the index parser parse-and-discards it).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexColumns(Parser.BatchContext batch)
+    {
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.FullTextIndex is not { } fti)
+                    continue;
+                foreach (var col in fti.Columns)
+                {
+                    yield return [
+                        SqlValue.FromInt32(table.ObjectId),
+                        SqlValue.FromInt32(col.ColumnId),
+                        col.TypeColumnId is int tcid ? SqlValue.FromInt32(tcid) : SqlValue.Null(SqlType.Int32),
+                        SqlValue.FromInt32(col.LanguageId),
+                        falseBit,
+                    ];
+                }
+            }
         }
     }
 

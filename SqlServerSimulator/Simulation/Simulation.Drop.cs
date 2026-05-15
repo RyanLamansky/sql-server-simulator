@@ -38,13 +38,18 @@ partial class Simulation
         if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Index })
             return TryParseDropIndex(context);
 
-        // DROP USER / DROP ROLE go through dedicated parsers — they have
-        // their own [IF EXISTS] + comma-list-free grammar and live in
-        // Database.Principals rather than a per-schema dict.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.User })
-            return TryParseDropUser(context);
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Role })
-            return TryParseDropRole(context);
+        // DROP USER / DROP ROLE / DROP FULLTEXT go through dedicated parsers
+        // — they have their own [IF EXISTS] / comma-list-free / sub-keyword
+        // grammars and live in per-database dicts rather than per-schema.
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.User }:
+                return TryParseDropUser(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
+                return TryParseDropRole(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
+                return Simulation.TryParseDropFullText(context);
+        }
 
         var targetKind = context.Token switch
         {

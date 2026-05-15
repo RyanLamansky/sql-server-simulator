@@ -40,6 +40,7 @@ enum ContextualKeyword
     Encryption,
     First,
     Following,
+    FullText,
     Generated,
     Grouping_Id,
     Grouping,

@@ -37,6 +37,8 @@ partial class Simulation
                 return TryParseCreateUser(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseCreateRole(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
+                return Simulation.TryParseCreateFullText(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })

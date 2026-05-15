@@ -253,6 +253,17 @@ internal sealed class HeapTable : SchemaObject
     public readonly List<ForeignKey> IncomingForeignKeys = [];
 
     /// <summary>
+    /// Optional full-text index attached to this table. At most one per
+    /// table (real SQL Server's invariant). Populated by
+    /// <c>CREATE FULLTEXT INDEX ON table</c>; cleared by
+    /// <c>DROP FULLTEXT INDEX ON table</c>; surfaced by
+    /// <c>sys.fulltext_indexes</c> / <c>sys.fulltext_index_columns</c>.
+    /// The simulator never indexes for text search — the field is
+    /// catalog-visible metadata only.
+    /// </summary>
+    public FullTextIndex? FullTextIndex;
+
+    /// <summary>
     /// Lazily-interned per-row <see cref="LockResource"/>s keyed by
     /// <c>(pageIndex, slotIndex)</c> — the RID (row id) that
     /// <see cref="Heap.EnumerateRowsWithAddress"/> yields and that
