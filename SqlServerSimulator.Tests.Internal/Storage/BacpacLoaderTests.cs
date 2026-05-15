@@ -83,13 +83,189 @@ public sealed class BacpacLoaderTests
     public void Load_AW_Unhandled_Elements_Recorded_In_Skipped()
     {
         _ = LoadAdventureWorks(out var diagnostics);
-        // Phase A + B handled element types (SqlSchema, SqlDatabaseOptions,
-        // SqlTable, SqlSimpleColumn) are off Skipped; everything else still
+        // Phases A-C handled types are off Skipped; everything else still
         // appears there awaiting future bundles.
         IsNotEmpty(diagnostics.Skipped);
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlTable").ToList());
+        IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPrimaryKeyConstraint").ToList());
+        IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlForeignKeyConstraint").ToList());
+        IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlCheckConstraint").ToList());
+        IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlDefaultConstraint").ToList());
         IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList());
         IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlComputedColumn").ToList());
+    }
+
+    [TestMethod]
+    public void Load_AW_Constraints_Land_On_Tables()
+    {
+        var simulation = LoadAdventureWorks(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+
+        // PK count — every AW table has a PK (71 SqlPrimaryKeyConstraint).
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM sys.key_constraints WHERE type = 'PK';";
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            AreEqual(71, reader.GetInt32(0));
+        }
+
+        // UQ count — AW has 1 SqlUniqueConstraint (Production.Document.rowguid).
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM sys.key_constraints WHERE type = 'UQ';";
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+        }
+
+        // FK count — 90 SqlForeignKeyConstraint in AW.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM sys.foreign_keys;";
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            AreEqual(90, reader.GetInt32(0));
+        }
+
+        // CHECK count — 89 SqlCheckConstraint in AW.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM sys.check_constraints;";
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            AreEqual(89, reader.GetInt32(0));
+        }
+
+        // DEFAULT count — 152 SqlDefaultConstraint in AW.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM sys.default_constraints;";
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            AreEqual(152, reader.GetInt32(0));
+        }
+    }
+
+    [TestMethod]
+    public void Load_AW_Production_ProductCategory_PK_Wired()
+    {
+        var simulation = LoadAdventureWorks(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        // Production.ProductCategory's PK is named [PK_ProductCategory_ProductCategoryID].
+        command.CommandText = """
+            SELECT kc.name
+              FROM sys.key_constraints kc
+              JOIN sys.tables t ON kc.parent_object_id = t.object_id
+              JOIN sys.schemas s ON t.schema_id = s.schema_id
+             WHERE s.name = 'Production' AND t.name = 'ProductCategory' AND kc.type = 'PK';
+            """;
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("PK_ProductCategory_ProductCategoryID", reader.GetString(0));
+    }
+
+    [TestMethod]
+    public void Load_AW_Indexes_Land()
+    {
+        var simulation = LoadAdventureWorks(out var diagnostics);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        // AW has 95 SqlIndex elements: 2 target views (deferred — indexed
+        // views need view + SCHEMABINDING machinery), N target computed
+        // columns that aren't loaded yet (deferred until functions land).
+        // Verify the bulk lands and the deferrals are recorded.
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.indexes WHERE name LIKE 'AK[_]%' OR name LIKE 'IX[_]%';";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        // 89 user indexes land = 95 SqlIndex - 2 view-targeted (deferred:
+        // indexed views need SCHEMABINDING) - 4 that reference computed
+        // columns the loader currently defers until functions land. The 6
+        // deferrals all surface as Skipped entries.
+        AreEqual(89, reader.GetInt32(0));
+        var skippedIndexEntries = diagnostics.Skipped.Where(s => s.ElementType == "SqlIndex").ToList();
+        HasCount(6, skippedIndexEntries);
+        // Both deferral reasons appear in Skipped.
+        IsNotEmpty(skippedIndexEntries.Where(s => s.Reason.Contains("on view '", StringComparison.OrdinalIgnoreCase)).ToList());
+        IsNotEmpty(skippedIndexEntries.Where(s => s.Reason.Contains("CREATE INDEX", StringComparison.OrdinalIgnoreCase) && s.Reason.Contains("failed", StringComparison.OrdinalIgnoreCase)).ToList());
+    }
+
+    [TestMethod]
+    public void Load_AW_Programmable_Counts()
+    {
+        var simulation = LoadAdventureWorks(out var diagnostics);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+
+        // AW counts: 20 views, 10 procs, 10 scalar functions, 1 multi-stmt
+        // TVF, 10 DML triggers, 1 DDL trigger (DDL trigger isn't programmable
+        // in the same sense — deferred). Best-effort load may miss some that
+        // reference computed cols / unsupported features; lower bounds keep
+        // the test green as the loader matures. The Skipped log on the
+        // BacpacLoadResult names the reason for each miss.
+        var views = QueryCount(connection, "SELECT COUNT(*) FROM sys.views;");
+        var procs = QueryCount(connection, "SELECT COUNT(*) FROM sys.procedures;");
+        var funcs = QueryCount(connection, "SELECT COUNT(*) FROM sys.objects WHERE type IN ('FN', 'TF', 'IF');");
+        var triggers = QueryCount(connection, "SELECT COUNT(*) FROM sys.triggers WHERE parent_class = 1;");
+
+        // Current landing rates against AW (probed 2026-05-15). Gaps:
+        //   views: 11/20 — 3 vJobCandidate-family views use CROSS APPLY in
+        //     a shape the simulator's view-body parser rejects; the rest
+        //     reference computed columns (deferred until functions land) or
+        //     other unsupported syntax.
+        //   procs: 8/10 — 2 reject the unbracketed UDDT `dbo.Flag` parameter
+        //     type (1-part alias resolution in proc param list).
+        //   funcs: 10/11 — 3 scalar UDFs hit RETURN-with-value-in-context
+        //     diagnostic; the multi-stmt TVF lands.
+        //   triggers: 10/10 — all DML triggers land after the NOT FOR
+        //     REPLICATION reserved-keyword fix. (1 DDL trigger lands
+        //     separately via SqlDatabaseDdlTrigger.)
+        AreEqual(11, views);
+        AreEqual(8, procs);
+        AreEqual(10, funcs);
+        AreEqual(10, triggers);
+
+        // Any Skipped programmable entries name their reason (helps the
+        // next-phase development checklist).
+        var skippedProgrammable = diagnostics.Skipped
+            .Where(s => s.ElementType is "SqlView" or "SqlScalarFunction"
+                or "SqlMultiStatementTableValuedFunction" or "SqlProcedure" or "SqlDmlTrigger")
+            .ToList();
+        // No assertion on count — may be 0 if all land. Just sanity-check
+        // that the dispatcher routed every element type (none on Skipped
+        // means everything succeeded; >0 means we have a Reason to inspect).
+        foreach (var entry in skippedProgrammable)
+            IsFalse(string.IsNullOrEmpty(entry.Reason), $"empty Reason on Skipped entry {entry}");
+    }
+
+    private static int QueryCount(SimulatedDbConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        return reader.GetInt32(0);
+    }
+
+    public TestContext TestContext { get; set; } = null!;
+
+    [TestMethod]
+    public void Load_AW_Cascade_FK_Has_Correct_Action()
+    {
+        var simulation = LoadAdventureWorks(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        // AW carries 2 FKs with OnDeleteAction=CASCADE on Sales.SalesOrderHeader's
+        // child tables. Verify delete_referential_action=1 (CASCADE) lands.
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.foreign_keys WHERE delete_referential_action = 1;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
     }
 
     [TestMethod]

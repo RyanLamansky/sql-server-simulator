@@ -332,8 +332,15 @@ partial class Simulation
                     context.MoveNextRequired();
                     break;
                 case ReservedKeyword { Keyword: Keyword.For }:
-                    if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Replication })
+                    // REPLICATION lives in the reserved Keyword enum, so the
+                    // tokenizer surfaces it as ReservedKeyword — not as the
+                    // ContextualKeyword.Replication UnquotedString form. Accept
+                    // either to survive both classification paths.
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Replication }
+                        and not UnquotedString { ContextualKeyword: ContextualKeyword.Replication })
+                    {
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
                     context.MoveNextRequired();
                     break;
                 default:

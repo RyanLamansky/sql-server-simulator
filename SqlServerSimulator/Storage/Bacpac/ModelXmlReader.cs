@@ -58,46 +58,83 @@ internal static class ModelXmlReader
         using var connection = simulation.CreateDbConnection();
         connection.Open();
 
-        // Phase 1: database options + schemas + UDDTs. These don't depend on
-        // any other DDL and must land before tables (column types may
-        // reference an alias type, FK definitions may reference a schema, etc.).
-        RunPhase(elements, connection, result, isPhase1: true);
-        // Phase 2: tables. Constraints / indexes / views / etc. arrive in
-        // later phases as they're added.
-        RunPhase(elements, connection, result, isPhase1: false);
+        // Pre-build a set of view qualified-names so the index emitter can
+        // skip indexes on views (those require views to exist first + indexed-
+        // view machinery the simulator doesn't model). Future phase that adds
+        // view support promotes the skipped-on-view indexes off Skipped.
+        var viewNames = elements
+            .Where(e => e.Attribute("Type")?.Value == "SqlView")
+            .Select(e => e.Attribute("Name")?.Value)
+            .OfType<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Ordered passes: phase 1 = schemas + UDDTs + db options (no deps);
+        // phase 2 = tables (depend on phase 1); phase 3 = PK/UQ/CHECK/DEFAULT
+        // constraints (depend on tables); phase 4 = FK constraints (depend on
+        // PK/UQ on referenced tables); phase 5 = indexes (depend on tables);
+        // phase 6 = views (depend on tables + other views); phase 7 = functions
+        // + procedures + DML triggers (depend on tables + views; bodies are
+        // deferred-parsed so cross-references inside the same phase work).
+        // Future phases will add permissions + extended properties (8).
+        // Skipped-element recording happens on the last phase so each
+        // unhandled type is reported once.
+        const int LastPhase = 7;
+        for (var phase = 1; phase <= LastPhase; phase++)
+            RunPhase(elements, connection, result, phase, viewNames, isLastPhase: phase == LastPhase);
     }
 
-    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacLoadResult result, bool isPhase1)
+    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacLoadResult result, int phase, HashSet<string> viewNames, bool isLastPhase)
     {
         foreach (var element in elements)
         {
             var type = element.Attribute("Type")?.Value!;
             var name = element.Attribute("Name")?.Value;
-            switch ((type, isPhase1))
+            var handled = (type, phase) switch
             {
-                case ("SqlDatabaseOptions", true):
-                    EmitDatabaseOptions(element, connection, result);
-                    break;
-                case ("SqlSchema", true):
-                    EmitSchema(name, connection);
-                    break;
-                case ("SqlUserDefinedDataType", true):
-                    EmitUserDefinedDataType(element, name, connection);
-                    break;
-                case ("SqlTable", false):
-                    EmitTable(element, name, connection, result);
-                    break;
-                case (_, true):
-                    // Skipped recording happens in phase 2's default arm so
-                    // an element doesn't get reported twice.
-                    break;
-                default:
-                    if (type is not "SqlDatabaseOptions" and not "SqlSchema" and not "SqlUserDefinedDataType" and not "SqlTable")
-                        result.Skipped.Add(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
-                    break;
-            }
+                ("SqlDatabaseOptions", 1) => Run(() => EmitDatabaseOptions(element, connection, result)),
+                ("SqlSchema", 1) => Run(() => EmitSchema(name, connection)),
+                ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
+                ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result)),
+                ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
+                ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
+                ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
+                ("SqlDefaultConstraint", 3) => Run(() => EmitDefaultConstraint(element, name, connection)),
+                ("SqlForeignKeyConstraint", 4) => Run(() => EmitForeignKeyConstraint(element, name, connection)),
+                ("SqlIndex", 5) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
+                ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
+                ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
+                ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
+                ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
+                ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
+                ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
+                _ => IsHandledByAnotherPhase(type),
+            };
+            if (!handled && isLastPhase)
+                result.Skipped.Add(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
         }
     }
+
+    private static bool Run(Action action)
+    {
+        action();
+        return true;
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="type"/> is handled in some other
+    /// phase — used by the dispatcher to avoid recording the same element
+    /// type on Skipped multiple times (once per pass).
+    /// </summary>
+    private static bool IsHandledByAnotherPhase(string type) => type
+        is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
+        or "SqlTable"
+        or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
+        or "SqlCheckConstraint" or "SqlDefaultConstraint"
+        or "SqlForeignKeyConstraint"
+        or "SqlIndex"
+        or "SqlView"
+        or "SqlScalarFunction" or "SqlMultiStatementTableValuedFunction"
+        or "SqlProcedure" or "SqlDmlTrigger" or "SqlDatabaseDdlTrigger";
 
     /// <summary>
     /// Emits <c>CREATE SCHEMA [name]</c>. The default <c>dbo</c> schema is
@@ -282,12 +319,17 @@ internal static class ModelXmlReader
                     columnDdls.Add(TranslateSimpleColumn(columnElement, columnName, result));
                     break;
                 case "SqlComputedColumn":
-                    // Deferred to a follow-up phase. Recording on Skipped so
-                    // the caller has a per-column inventory of what's missing.
+                    // Deferred to a follow-up phase after functions land —
+                    // some computed expressions invoke UDFs (e.g.
+                    // dbo.ufnLeadingZeros) that don't exist until function
+                    // emission, and the simulator's CREATE TABLE column-list
+                    // parser can't tolerate a forward reference. ALTER TABLE
+                    // ADD <col> AS (expr) after the function pass will
+                    // promote these off Skipped.
                     result.Skipped.Add(new BacpacSkipped(
                         "SqlComputedColumn",
                         columnName,
-                        $"Computed column on '{qualifiedName}' deferred to a follow-up phase."));
+                        $"Computed column on '{qualifiedName}' deferred until functions land."));
                     break;
                 default:
                     result.Skipped.Add(new BacpacSkipped(
@@ -431,4 +473,302 @@ internal static class ModelXmlReader
         element.Elements(Ns + "Property")
             .FirstOrDefault(p => p.Attribute("Name")?.Value == name)
             ?.Attribute("Value")?.Value;
+
+    /// <summary>
+    /// Reads the body of <c>&lt;Property Name=X&gt;&lt;Value&gt;[CDATA[…]]&lt;/Value&gt;&lt;/Property&gt;</c>
+    /// — used for CDATA-wrapped raw T-SQL bodies (CHECK / DEFAULT expression
+    /// scripts, view / procedure / function bodies).
+    /// </summary>
+    private static string? ReadScriptProperty(XElement element, string name) =>
+        element.Elements(Ns + "Property")
+            .FirstOrDefault(p => p.Attribute("Name")?.Value == name)
+            ?.Element(Ns + "Value")?.Value;
+
+    /// <summary>
+    /// Resolves a <c>&lt;Relationship Name=X&gt;&lt;Entry&gt;&lt;References Name="…" /&gt;&lt;/Entry&gt;&lt;/Relationship&gt;</c>
+    /// chain to the single target Name attribute. Returns null when the
+    /// relationship is absent.
+    /// </summary>
+    private static string? ReadSingleReference(XElement element, string relationshipName) =>
+        element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == relationshipName)
+            ?.Elements(Ns + "Entry").Elements(Ns + "References").FirstOrDefault()
+            ?.Attribute("Name")?.Value;
+
+    /// <summary>
+    /// Resolves a relationship containing 1 or more
+    /// <c>&lt;Entry&gt;&lt;References Name="…" /&gt;&lt;/Entry&gt;</c> children
+    /// to their Name attributes in document order. Empty list when absent.
+    /// </summary>
+    private static List<string> ReadMultipleReferences(XElement element, string relationshipName) =>
+        [.. element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == relationshipName)
+            ?.Elements(Ns + "Entry").Elements(Ns + "References")
+            .Select(r => r.Attribute("Name")?.Value)
+            .OfType<string>()
+            ?? []];
+
+    /// <summary>
+    /// Extracts the bracketed leaf of a 1/2/3-part qualified name.
+    /// <c>[s].[t].[c]</c> → <c>[c]</c>, <c>[s].[t]</c> → <c>[t]</c>,
+    /// <c>[t]</c> → <c>[t]</c>.
+    /// </summary>
+    private static string Leaf(string qualifiedName)
+    {
+        var lastDot = qualifiedName.LastIndexOf('.');
+        return lastDot < 0 ? qualifiedName : qualifiedName[(lastDot + 1)..];
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER TABLE table ADD CONSTRAINT name PRIMARY KEY | UNIQUE [CLUSTERED|NONCLUSTERED] (cols)</c>.
+    /// <c>SqlUniqueConstraint</c> may carry no Name attribute (the
+    /// auto-generated name shows up in a <c>SqlInlineConstraintAnnotation</c>
+    /// sibling) — in that case the loader drops the <c>CONSTRAINT name</c>
+    /// segment and lets the simulator allocate one. PK defaults to CLUSTERED
+    /// unless <c>IsClustered=False</c>; UQ defaults to NONCLUSTERED.
+    /// </summary>
+    private static void EmitKeyConstraint(XElement element, string? constraintName, DbConnection connection, bool isPrimary)
+    {
+        var definingTable = ReadSingleReference(element, "DefiningTable")
+            ?? throw new InvalidDataException($"bacpac: {(isPrimary ? "SqlPrimaryKeyConstraint" : "SqlUniqueConstraint")} missing DefiningTable.");
+        var columnRefs = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .Select(spec => ReadSingleReference(spec, "Column"))
+            .OfType<string>()
+            .ToList()
+            ?? throw new InvalidDataException($"bacpac: {(isPrimary ? "PK" : "UQ")} on '{definingTable}' missing ColumnSpecifications.");
+        var columnLeaves = string.Join(", ", columnRefs.Select(Leaf));
+
+        // UQ defaults to NONCLUSTERED, PK to CLUSTERED. IsClustered=False
+        // flips PK to NONCLUSTERED; True flips UQ to CLUSTERED (rare).
+        var isClustered = ReadBoolProperty(element, "IsClustered", defaultValue: isPrimary);
+        var clusteringClause = isClustered ? " CLUSTERED" : " NONCLUSTERED";
+        var kind = isPrimary ? "PRIMARY KEY" : "UNIQUE";
+        // Constraint names arrive 2-part qualified ([schema].[name]); ALTER
+        // TABLE ADD CONSTRAINT expects the unqualified leaf — the constraint
+        // lives in its DefiningTable's schema by default.
+        var constraintPrefix = string.IsNullOrEmpty(constraintName) ? "" : $"CONSTRAINT {Leaf(constraintName)} ";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER TABLE {definingTable} ADD {constraintPrefix}{kind}{clusteringClause} ({columnLeaves});";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER TABLE child ADD CONSTRAINT name FOREIGN KEY (cols) REFERENCES parent (cols) [ON DELETE …] [ON UPDATE …]</c>.
+    /// OnDeleteAction / OnUpdateAction property values use the DACFx enum:
+    /// 0 = NO ACTION (default — clause omitted), 1 = CASCADE, 2 = SET NULL,
+    /// 3 = SET DEFAULT. The simulator's CREATE TABLE / ALTER TABLE FK parser
+    /// already ships all four referential actions per
+    /// <c>docs/claude/foreign-keys.md</c>.
+    /// </summary>
+    private static void EmitForeignKeyConstraint(XElement element, string? constraintName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(constraintName))
+            throw new InvalidDataException("bacpac: SqlForeignKeyConstraint missing Name attribute.");
+
+        var definingTable = ReadSingleReference(element, "DefiningTable")
+            ?? throw new InvalidDataException($"bacpac: FK '{constraintName}' missing DefiningTable.");
+        var foreignTable = ReadSingleReference(element, "ForeignTable")
+            ?? throw new InvalidDataException($"bacpac: FK '{constraintName}' missing ForeignTable.");
+        var childCols = ReadMultipleReferences(element, "Columns");
+        var parentCols = ReadMultipleReferences(element, "ForeignColumns");
+        if (childCols.Count == 0 || parentCols.Count == 0 || childCols.Count != parentCols.Count)
+            throw new InvalidDataException($"bacpac: FK '{constraintName}' has mismatched / missing column relationships.");
+
+        var childList = string.Join(", ", childCols.Select(Leaf));
+        var parentList = string.Join(", ", parentCols.Select(Leaf));
+        var deleteAction = TranslateReferentialAction(ReadStringProperty(element, "OnDeleteAction"));
+        var updateAction = TranslateReferentialAction(ReadStringProperty(element, "OnUpdateAction"));
+        var deleteClause = deleteAction is null ? "" : $" ON DELETE {deleteAction}";
+        var updateClause = updateAction is null ? "" : $" ON UPDATE {updateAction}";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} FOREIGN KEY ({childList}) REFERENCES {foreignTable} ({parentList}){deleteClause}{updateClause};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Maps DACFx's <c>OnDeleteAction</c> / <c>OnUpdateAction</c> integer enum
+    /// to the T-SQL surface form. Returns null for NO ACTION (the default —
+    /// no <c>ON DELETE</c> / <c>ON UPDATE</c> clause emitted).
+    /// </summary>
+    private static string? TranslateReferentialAction(string? value) => value switch
+    {
+        null or "0" => null,
+        "1" => "CASCADE",
+        "2" => "SET NULL",
+        "3" => "SET DEFAULT",
+        _ => null,
+    };
+
+    /// <summary>
+    /// Emits <c>ALTER TABLE table ADD CONSTRAINT name CHECK (raw_expression)</c>.
+    /// The CheckExpressionScript property body is raw T-SQL — feeds directly
+    /// to the simulator's CHECK parser.
+    /// </summary>
+    private static void EmitCheckConstraint(XElement element, string? constraintName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(constraintName))
+            throw new InvalidDataException("bacpac: SqlCheckConstraint missing Name attribute.");
+        var definingTable = ReadSingleReference(element, "DefiningTable")
+            ?? throw new InvalidDataException($"bacpac: CHECK '{constraintName}' missing DefiningTable.");
+        var script = ReadScriptProperty(element, "CheckExpressionScript")
+            ?? throw new InvalidDataException($"bacpac: CHECK '{constraintName}' missing CheckExpressionScript.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} CHECK ({script});";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Universal emitter for views / scalar functions / multi-statement TVFs
+    /// / procedures / DML triggers. DACFx captures the canonical
+    /// <c>CREATE …</c> statement header in a <c>SysCommentsObjectAnnotation</c>
+    /// alongside the body — for SqlView / SqlProcedure / SqlDmlTrigger the
+    /// annotation sits directly on the element; for SqlScalarFunction and
+    /// SqlMultiStatementTableValuedFunction it lives one level deeper on the
+    /// nested <c>SqlScriptFunctionImplementation</c> reached through the
+    /// FunctionBody relationship. The emitter concatenates HeaderContents +
+    /// body verbatim and runs the result through the simulator's parser.
+    /// </summary>
+    private static void EmitProgrammableObject(XElement element, string? name, DbConnection connection, BacpacLoadResult result, string objectType, string bodyPropertyName)
+    {
+        if (string.IsNullOrEmpty(name))
+            throw new InvalidDataException($"bacpac: {objectType} missing Name attribute.");
+
+        // FunctionBody → SqlScriptFunctionImplementation indirection. Other
+        // element types' annotation + body live directly on the element.
+        var bodyHost = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "FunctionBody")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .FirstOrDefault(e => e.Attribute("Type")?.Value == "SqlScriptFunctionImplementation")
+            ?? element;
+
+        var headerContents = bodyHost.Elements(Ns + "Annotation")
+            .Where(a => a.Attribute("Type")?.Value == "SysCommentsObjectAnnotation")
+            .SelectMany(a => a.Elements(Ns + "Property"))
+            .FirstOrDefault(p => p.Attribute("Name")?.Value == "HeaderContents")
+            ?.Attribute("Value")?.Value;
+
+        var body = ReadScriptProperty(bodyHost, bodyPropertyName);
+
+        if (string.IsNullOrEmpty(headerContents) || string.IsNullOrEmpty(body))
+        {
+            result.Skipped.Add(new BacpacSkipped(objectType, name,
+                $"Missing HeaderContents or {bodyPropertyName} — can't reconstruct CREATE statement."));
+            return;
+        }
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = headerContents + "\n" + body;
+#pragma warning restore CA2100
+        try
+        {
+            _ = command.ExecuteNonQuery();
+        }
+        catch (SimulatedSqlException ex)
+        {
+            result.Skipped.Add(new BacpacSkipped(objectType, name,
+                $"CREATE {objectType} failed: {ex.Message}"));
+        }
+        catch (NotSupportedException ex)
+        {
+            result.Skipped.Add(new BacpacSkipped(objectType, name,
+                $"CREATE {objectType} hit unsupported feature: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX name ON table (cols) [INCLUDE (cols)]</c>.
+    /// Index Name attribute is 3-part <c>[schema].[table].[index_name]</c>;
+    /// the leaf becomes the index name. IsUnique / IsClustered default False
+    /// (= non-unique nonclustered). IncludedColumns relationship carries the
+    /// INCLUDE list. Indexes whose <c>IndexedObject</c> is a view land on
+    /// Skipped — indexed views need view support + SCHEMABINDING machinery
+    /// the simulator doesn't model.
+    /// </summary>
+    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, HashSet<string> viewNames, BacpacLoadResult result)
+    {
+        if (string.IsNullOrEmpty(indexName))
+            throw new InvalidDataException("bacpac: SqlIndex missing Name attribute.");
+
+        var indexedObject = ReadSingleReference(element, "IndexedObject")
+            ?? throw new InvalidDataException($"bacpac: SqlIndex '{indexName}' missing IndexedObject.");
+        if (viewNames.Contains(indexedObject))
+        {
+            result.Skipped.Add(new BacpacSkipped(
+                "SqlIndex",
+                indexName,
+                $"Index on view '{indexedObject}' deferred — indexed views need view support + SCHEMABINDING machinery the simulator doesn't model."));
+            return;
+        }
+
+        var columnRefs = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .Select(spec => ReadSingleReference(spec, "Column"))
+            .OfType<string>()
+            .ToList()
+            ?? throw new InvalidDataException($"bacpac: SqlIndex '{indexName}' missing ColumnSpecifications.");
+
+        var includeRefs = ReadMultipleReferences(element, "IncludedColumns");
+        var isUnique = ReadBoolProperty(element, "IsUnique", defaultValue: false);
+        var isClustered = ReadBoolProperty(element, "IsClustered", defaultValue: false);
+
+        var uniqueClause = isUnique ? "UNIQUE " : "";
+        var clusteringClause = isClustered ? "CLUSTERED " : "NONCLUSTERED ";
+        var keyList = string.Join(", ", columnRefs.Select(Leaf));
+        var includeClause = includeRefs.Count == 0
+            ? ""
+            : $" INCLUDE ({string.Join(", ", includeRefs.Select(Leaf))})";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause};";
+#pragma warning restore CA2100
+        try
+        {
+            _ = command.ExecuteNonQuery();
+        }
+        catch (SimulatedSqlException ex)
+        {
+            // Best-effort load: some AW indexes reference computed columns
+            // that won't exist until functions land (Phase F deferred). Each
+            // failure lands on Skipped with the simulator's diagnostic so the
+            // caller has a precise inventory of what didn't make it; future
+            // phase work shrinks this set.
+            result.Skipped.Add(new BacpacSkipped("SqlIndex", indexName,
+                $"CREATE INDEX on '{indexedObject}' failed: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER TABLE table ADD CONSTRAINT name DEFAULT (raw_expression) FOR column</c>.
+    /// </summary>
+    private static void EmitDefaultConstraint(XElement element, string? constraintName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(constraintName))
+            throw new InvalidDataException("bacpac: SqlDefaultConstraint missing Name attribute.");
+        var definingTable = ReadSingleReference(element, "DefiningTable")
+            ?? throw new InvalidDataException($"bacpac: DEFAULT '{constraintName}' missing DefiningTable.");
+        var forColumn = ReadSingleReference(element, "ForColumn")
+            ?? throw new InvalidDataException($"bacpac: DEFAULT '{constraintName}' missing ForColumn.");
+        var script = ReadScriptProperty(element, "DefaultExpressionScript")
+            ?? throw new InvalidDataException($"bacpac: DEFAULT '{constraintName}' missing DefaultExpressionScript.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} DEFAULT ({script}) FOR {Leaf(forColumn)};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
 }
