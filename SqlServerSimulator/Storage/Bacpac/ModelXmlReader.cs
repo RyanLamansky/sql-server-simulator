@@ -89,27 +89,43 @@ internal static class ModelXmlReader
         {
             var type = element.Attribute("Type")?.Value!;
             var name = element.Attribute("Name")?.Value;
-            var handled = (type, phase) switch
+            bool handled;
+            try
             {
-                ("SqlDatabaseOptions", 1) => Run(() => EmitDatabaseOptions(element, connection, result)),
-                ("SqlSchema", 1) => Run(() => EmitSchema(name, connection)),
-                ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
-                ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result)),
-                ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
-                ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
-                ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
-                ("SqlDefaultConstraint", 3) => Run(() => EmitDefaultConstraint(element, name, connection)),
-                ("SqlForeignKeyConstraint", 4) => Run(() => EmitForeignKeyConstraint(element, name, connection)),
-                ("SqlIndex", 5) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
-                ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
-                ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
-                ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
-                ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
-                ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
-                ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
-                ("SqlExtendedProperty", 8) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
-                _ => IsHandledByAnotherPhase(type),
-            };
+                handled = (type, phase) switch
+                {
+                    ("SqlDatabaseOptions", 1) => Run(() => EmitDatabaseOptions(element, connection, result)),
+                    ("SqlSchema", 1) => Run(() => EmitSchema(name, connection)),
+                    ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
+                    ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
+                    ("SqlRole", 1) => Run(() => EmitRole(element, name, connection)),
+                    ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result)),
+                    ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
+                    ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
+                    ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
+                    ("SqlDefaultConstraint", 3) => Run(() => EmitDefaultConstraint(element, name, connection)),
+                    ("SqlForeignKeyConstraint", 4) => Run(() => EmitForeignKeyConstraint(element, name, connection)),
+                    ("SqlIndex", 5) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
+                    ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
+                    ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
+                    ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
+                    ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
+                    ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
+                    ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
+                    ("SqlExtendedProperty", 8) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
+                    _ => IsHandledByAnotherPhase(type),
+                };
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+            {
+                // Per-element failures must not abort the whole load — record
+                // the failure on Skipped so the caller sees what couldn't be
+                // translated, and continue with the rest of the model. Cascade
+                // failures (a later element depending on the failed one) land
+                // on Skipped with their own messages.
+                result.Skipped.Add(new BacpacSkipped(type, name, $"Load failed: {ex.GetType().Name}: {ex.Message}"));
+                continue;
+            }
             if (!handled && isLastPhase)
                 result.Skipped.Add(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
         }
@@ -128,6 +144,7 @@ internal static class ModelXmlReader
     /// </summary>
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
+        or "SqlSequence" or "SqlRole"
         or "SqlTable"
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
         or "SqlCheckConstraint" or "SqlDefaultConstraint"
@@ -287,6 +304,61 @@ internal static class ModelXmlReader
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         command.CommandText = $"CREATE TYPE {qualifiedName} FROM {typeDdl}{nullability};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE SEQUENCE [schema].[name] AS &lt;type&gt; START WITH N INCREMENT BY M</c>
+    /// for a <c>SqlSequence</c> element. Properties carried by the bacpac:
+    /// <c>StartValue</c>, <c>Increment</c>, plus a <c>TypeSpecifier</c>
+    /// relationship pointing at the underlying integer type (<c>int</c>,
+    /// <c>bigint</c>, <c>smallint</c>, <c>tinyint</c>, or
+    /// <c>decimal(p, 0)</c>). MinValue / MaxValue / CycleOption / cache size
+    /// aren't carried by WWI's bacpac, so the loader emits the bare form;
+    /// SQL Server applies the data-type's natural bounds.
+    /// </summary>
+    private static void EmitSequence(XElement element, string? qualifiedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(qualifiedName))
+            throw new InvalidDataException("bacpac: SqlSequence element missing Name attribute.");
+
+        var typeSpec = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "TypeSpecifier")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .FirstOrDefault(e => e.Attribute("Type")?.Value == "SqlTypeSpecifier")
+            ?? throw new InvalidDataException($"bacpac: SqlSequence '{qualifiedName}' missing TypeSpecifier.");
+
+        var typeDdl = TranslateTypeSpecifier(typeSpec);
+        var startValue = ReadStringProperty(element, "StartValue") ?? "1";
+        var increment = ReadStringProperty(element, "Increment") ?? "1";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE SEQUENCE {qualifiedName} AS {typeDdl} START WITH {startValue} INCREMENT BY {increment};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE ROLE [name] [AUTHORIZATION owner]</c> for a
+    /// <c>SqlRole</c> element. The <c>Authorizer</c> relationship points at
+    /// the role's owner (defaults to <c>dbo</c> when absent).
+    /// </summary>
+    private static void EmitRole(XElement element, string? bracketedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(bracketedName))
+            throw new InvalidDataException("bacpac: SqlRole element missing Name attribute.");
+
+        var authorizer = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Authorizer")
+            ?.Elements(Ns + "Entry").Elements(Ns + "References")
+            .FirstOrDefault()?.Attribute("Name")?.Value;
+        var authClause = string.IsNullOrEmpty(authorizer) ? "" : $" AUTHORIZATION {authorizer}";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE ROLE {bracketedName}{authClause};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }

@@ -5,11 +5,57 @@ namespace SqlServerSimulator.Storage.Bacpac;
 /// simulator's segment-array internal representation (<see cref="HierarchyIdSqlType"/>).
 /// </summary>
 /// <remarks>
-/// <para>SQL Server's OrdPath binary encoding is a variable-bit Huffman-style
-/// prefix code: each ordinal in the path is encoded as a self-contained bit
-/// sequence (prefix bits + value bits + terminator bit), ordinals concatenate
-/// left-to-right, and the byte stream is padded with zero bits to a byte
-/// boundary. The path ends when remaining bits are all zero.</para>
+/// <para>SQL Server's OrdPath binary encoding is an order-preserving
+/// variable-length prefix code: each ordinal in the path is encoded as a
+/// self-contained bit sequence (prefix bits + value bits + terminator bit),
+/// ordinals concatenate left-to-right, and the byte stream is padded with
+/// zero bits to a byte boundary. The path ends when remaining bits are all
+/// zero.</para>
+///
+/// <para><b>Index-relevant design properties</b> (the simulator stores the
+/// decoded segment-array form and does linear scans, so none of these are
+/// exercised today — but any future B-tree index work depends on them, and
+/// "cleaning up" the encoding without understanding what each property
+/// buys would break index behavior cross-engine):</para>
+///
+/// <list type="bullet">
+/// <item><b>Byte-wise <c>memcmp</c> ordering equals depth-first pre-order
+/// traversal of the tree.</b> A B-tree on a hierarchyid column naturally
+/// clusters siblings together and places ancestors immediately before their
+/// descendants. SQL Server's two recommended index shapes — depth-first
+/// (<c>CREATE INDEX … ON t(node)</c>) and breadth-first
+/// (<c>… ON t(node.GetLevel(), node)</c>) — both fall out of this property.
+/// Verified observationally from the decoder tests: <c>/3/</c> = <c>0x78</c>,
+/// <c>/3/0/</c> = <c>0x7A40</c>; the zero-padding tail of an ancestor is
+/// always less than the next-ordinal continuation of a descendant.</item>
+/// <item><b>Ancestor encoding is a bit-prefix (not byte-prefix) of every
+/// descendant's encoding</b>, modulo the trailing zero pad. <c>IsDescendantOf</c>
+/// reduces to a bit-prefix check, which an optimizer can rewrite to an
+/// index range seek.</item>
+/// <item><b>The prefix codes are sort-ordered, not frequency-optimal.</b>
+/// <c>01</c> &lt; <c>100</c> &lt; <c>101</c> &lt; <c>110</c> &lt; <c>1110</c>
+/// bit-wise, mapping to ordinal ranges [0..3] &lt; [4..7] &lt; [8..15] &lt;
+/// [16..79] &lt; [80..]. This is <i>not</i> a Huffman code — Huffman
+/// optimizes for compression, which would re-pick codes by ordinal frequency
+/// and break the sort. Re-deriving "optimal" codes would break
+/// <c>memcmp = DFS</c>.</item>
+/// <item><b>The static bits in the <c>110</c> encoding</b> (position 6 = static
+/// <c>0</c>, position 8 = static <c>1</c>) are load-bearing for round-trip.
+/// Their precise role in the original design isn't pinned down by the
+/// probe, but they almost certainly serve sort preservation across length
+/// boundaries, self-delimiting ordinal boundaries during decoding, or
+/// both. Treat them as inviolate: re-encoding without them would compress
+/// better but risks breaking <c>memcmp = DFS</c> or the bit-prefix property.</item>
+/// </list>
+///
+/// <para><b>Pointer for B-tree index work in the simulator</b>: implementing
+/// a hierarchical index does <i>not</i> require this wire format — a
+/// DFS-pre-order comparer on <see cref="HierarchyIdSqlType"/>'s
+/// <c>int[][]</c> form (lexicographic compare with shorter-less) suffices,
+/// since the simulator stores the decoded segment-array. This wire format
+/// matters only for the separate, currently-deferred symmetric
+/// <i>encoder</i> that would make <c>CAST(node AS varbinary)</c>
+/// byte-identical with SQL Server. Keep the two pieces of work separate.</para>
 ///
 /// <para>Encoding table for positive ordinals (derived empirically from the
 /// SQL Server 2025 reference on 2026-05-15, ground-truth via
@@ -20,15 +66,13 @@ namespace SqlServerSimulator.Storage.Bacpac;
 /// <item>Prefix <c>01</c> (2 bits) → 2 value bits + 1 terminator → range [0..3], 5 bits total</item>
 /// <item>Prefix <c>100</c> (3 bits) → 2 value bits + 1 terminator → range [4..7], 6 bits</item>
 /// <item>Prefix <c>101</c> (3 bits) → 3 value bits + 1 terminator → range [8..15], 7 bits</item>
-/// <item>Prefix <c>110</c> (3 bits) → 6 value bits with structural-bit insertion → range [16..79], 12 bits</item>
+/// <item>Prefix <c>110</c> (3 bits) → 6 value bits with 2 static bits → range [16..79], 12 bits</item>
 /// </list>
 ///
-/// <para>The <c>110</c>-prefix encoding has a peculiar layout: after the 3-bit
-/// prefix, 2 high-value bits are followed by a static <c>0</c>, then 1 more
-/// high-value bit, then a static <c>1</c> (mid-byte separator), then 3
-/// low-value bits, then the terminator <c>1</c>. The static bits are likely
-/// artifacts of the original byte-aligned design — they're load-bearing
-/// for round-trip but carry no value information.</para>
+/// <para><c>110</c>-prefix bit layout (12 bits): <c>110</c> + 2 high-value
+/// bits + static <c>0</c> + 1 mid-value bit + static <c>1</c> + 3 low-value
+/// bits + terminator <c>1</c>. See the index-relevant section above for
+/// why those static bits matter.</para>
 ///
 /// <para>Coverage notes for AdventureWorks2025: probe shows AW uses 27
 /// distinct ordinals (0..22 inclusive — all comfortably within the

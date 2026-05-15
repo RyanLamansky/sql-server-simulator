@@ -6,7 +6,7 @@ namespace SqlServerSimulator.Storage;
 /// <summary>
 /// Decoder fidelity tests for <see cref="HierarchyIdWireDecoder"/>. Ground
 /// truth via a synthetic + AdventureWorks2025-derived probe sweep against
-/// SQL Server 2025 on 2026-05-15 (Kardax7 reference).
+/// SQL Server 2025 on 2026-05-15.
 /// </summary>
 [TestClass]
 public sealed class HierarchyIdWireDecoderTests
