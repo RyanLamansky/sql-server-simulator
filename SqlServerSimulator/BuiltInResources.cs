@@ -943,6 +943,83 @@ internal static class BuiltInResources
         };
         var xmlIndexesView = new CatalogView("xml_indexes", xmlIndexesColumns, EnumerateSysXmlIndexes);
 
+        // sys.spatial_indexes: probe-confirmed 23-col shape against SQL Server
+        // 2025 (2026-05-15). Same shape as sys.indexes except (type, type_desc)
+        // are fixed to (4, 'SPATIAL') and the four trailing spatial-specific
+        // columns describe the tessellation. The simulator surfaces the
+        // load-bearing identity + spatial classification subset; the
+        // is_disabled / is_padded / allow_row_locks tail mirrors real values
+        // (false / false / true / true) but isn't read by any application
+        // path the loader cares about.
+        var spatialIndexesColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", SqlType.NVarchar, 60, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("spatial_index_type", SqlType.Int32, null, false),
+            new("spatial_index_type_desc", SqlType.NVarchar, 60, true),
+            new("tessellation_scheme", SqlType.NVarchar, 60, true),
+            new("has_filter", SqlType.Bit, null, false),
+            new("filter_definition", NVarcharSqlType.MaxForm, null, true),
+            new("auto_created", SqlType.Bit, null, true),
+        };
+        var spatialIndexesView = new CatalogView("spatial_indexes", spatialIndexesColumns, EnumerateSysSpatialIndexes);
+
+        // sys.spatial_index_tessellations: probe-confirmed 16-col shape
+        // against SQL Server 2025 (2026-05-15). One row per spatial index
+        // carrying the per-index bounding-box + 4-level grid detail.
+        var spatialIndexTessellationsColumns = new HeapColumn[]
+        {
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("tessellation_scheme", SqlType.NVarchar, 60, true),
+            new("bounding_box_xmin", SqlType.Float, null, true),
+            new("bounding_box_ymin", SqlType.Float, null, true),
+            new("bounding_box_xmax", SqlType.Float, null, true),
+            new("bounding_box_ymax", SqlType.Float, null, true),
+            new("level_1_grid", SqlType.SmallInt, null, true),
+            new("level_1_grid_desc", SqlType.NVarchar, 60, true),
+            new("level_2_grid", SqlType.SmallInt, null, true),
+            new("level_2_grid_desc", SqlType.NVarchar, 60, true),
+            new("level_3_grid", SqlType.SmallInt, null, true),
+            new("level_3_grid_desc", SqlType.NVarchar, 60, true),
+            new("level_4_grid", SqlType.SmallInt, null, true),
+            new("level_4_grid_desc", SqlType.NVarchar, 60, true),
+            new("cells_per_object", SqlType.Int32, null, true),
+        };
+        var spatialIndexTessellationsView = new CatalogView("spatial_index_tessellations", spatialIndexTessellationsColumns, EnumerateSysSpatialIndexTessellations);
+
+        // sys.spatial_reference_systems: real SQL Server seeds this view with
+        // ~390 rows of authoritative SRID definitions (EPSG / ESRI). The
+        // simulator surfaces an empty view — the column shape matches probe
+        // and the catalog is reachable, but no SRID rows pre-populate. This
+        // keeps applications that reference the view's schema from breaking
+        // without the byte-tonnage of the WKT-laden seed data.
+        var spatialReferenceSystemsColumns = new HeapColumn[]
+        {
+            new("spatial_reference_id", SqlType.Int32, null, true),
+            new("authority_name", SqlType.NVarchar, 256, true),
+            new("authorized_spatial_reference_id", SqlType.Int32, null, true),
+            new("well_known_text", SqlType.NVarchar, 8000, true),
+            new("unit_of_measure", SqlType.NVarchar, 256, true),
+            new("unit_conversion_factor", SqlType.Float, null, true),
+        };
+        var spatialReferenceSystemsView = new CatalogView("spatial_reference_systems", spatialReferenceSystemsColumns, EnumerateSysSpatialReferenceSystems);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.schemas"] = schemasView,
@@ -977,6 +1054,9 @@ internal static class BuiltInResources
             ["sys.fulltext_index_columns"] = fulltextIndexColumnsView,
             ["sys.xml_schema_collections"] = xmlSchemaCollectionsView,
             ["sys.xml_indexes"] = xmlIndexesView,
+            ["sys.spatial_indexes"] = spatialIndexesView,
+            ["sys.spatial_index_tessellations"] = spatialIndexTessellationsView,
+            ["sys.spatial_reference_systems"] = spatialReferenceSystemsView,
             ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
             ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
             ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
@@ -1988,6 +2068,130 @@ internal static class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>sys.spatial_indexes</c>. One row per
+    /// <see cref="SpatialIndex"/> across every table. Fixed values:
+    /// type=4 / type_desc='SPATIAL', is_unique=false, data_space_id=1
+    /// (the simulator's only filegroup), spatial_index_type=3 / 'GEOMETRY' or
+    /// 4 / 'GEOGRAPHY' driven by <see cref="SpatialIndexKind"/>. The trailing
+    /// admin flags (is_padded / allow_row_locks / etc.) mirror real-server
+    /// defaults so applications reading the column shape don't see NULL where
+    /// they expect a bool.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysSpatialIndexes(Parser.BatchContext batch)
+    {
+        var typeCode = SqlValue.FromByte(4);
+        var typeDesc = SqlValue.FromNVarchar("SPATIAL");
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var zeroByte = SqlValue.FromByte(0);
+        var oneInt = SqlValue.FromInt32(1);
+        var nullDesc = SqlValue.Null(NVarcharSqlType.MaxForm);
+        var geometryTypeDesc = SqlValue.FromNVarchar("GEOMETRY");
+        var geographyTypeDesc = SqlValue.FromNVarchar("GEOGRAPHY");
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.SpatialIndexes.Count == 0)
+                    continue;
+                foreach (var ix in table.SpatialIndexes)
+                {
+                    yield return [
+                        SqlValue.FromInt32(table.ObjectId),
+                        SqlValue.FromSystemName(ix.Name),
+                        SqlValue.FromInt32(ix.IndexId),
+                        typeCode,
+                        typeDesc,
+                        falseBit,
+                        oneInt,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        zeroByte,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        trueBit,
+                        trueBit,
+                        SqlValue.FromInt32((int)ix.Kind),
+                        ix.Kind == SpatialIndexKind.Geography ? geographyTypeDesc : geometryTypeDesc,
+                        SqlValue.FromNVarchar(ix.TessellationScheme),
+                        falseBit,
+                        nullDesc,
+                        falseBit,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.spatial_index_tessellations</c>. One row per
+    /// spatial index across every table, carrying the bounding box +
+    /// 4-level grid detail captured at CREATE time. Levels not specified
+    /// in the DDL surface as NULL. The level_*_grid_desc columns mirror
+    /// SQL Server's enumeration ('LOW' / 'MEDIUM' / 'HIGH' for codes 1/2/3).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysSpatialIndexTessellations(Parser.BatchContext batch)
+    {
+        var nullDouble = SqlValue.Null(SqlType.Float);
+        var nullShort = SqlValue.Null(SqlType.SmallInt);
+        var nullDesc = SqlValue.Null(SqlType.NVarchar);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.SpatialIndexes.Count == 0)
+                    continue;
+                foreach (var ix in table.SpatialIndexes)
+                {
+                    yield return [
+                        SqlValue.FromInt32(table.ObjectId),
+                        SqlValue.FromInt32(ix.IndexId),
+                        SqlValue.FromNVarchar(ix.TessellationScheme),
+                        ix.BoundingBoxXmin.HasValue ? SqlValue.FromDouble(ix.BoundingBoxXmin.Value) : nullDouble,
+                        ix.BoundingBoxYmin.HasValue ? SqlValue.FromDouble(ix.BoundingBoxYmin.Value) : nullDouble,
+                        ix.BoundingBoxXmax.HasValue ? SqlValue.FromDouble(ix.BoundingBoxXmax.Value) : nullDouble,
+                        ix.BoundingBoxYmax.HasValue ? SqlValue.FromDouble(ix.BoundingBoxYmax.Value) : nullDouble,
+                        ix.Level1Grid.HasValue ? SqlValue.FromInt16(ix.Level1Grid.Value) : nullShort,
+                        GridLevelDesc(ix.Level1Grid, nullDesc),
+                        ix.Level2Grid.HasValue ? SqlValue.FromInt16(ix.Level2Grid.Value) : nullShort,
+                        GridLevelDesc(ix.Level2Grid, nullDesc),
+                        ix.Level3Grid.HasValue ? SqlValue.FromInt16(ix.Level3Grid.Value) : nullShort,
+                        GridLevelDesc(ix.Level3Grid, nullDesc),
+                        ix.Level4Grid.HasValue ? SqlValue.FromInt16(ix.Level4Grid.Value) : nullShort,
+                        GridLevelDesc(ix.Level4Grid, nullDesc),
+                        ix.CellsPerObject.HasValue ? SqlValue.FromInt32(ix.CellsPerObject.Value) : nullInt,
+                    ];
+                }
+            }
+        }
+    }
+
+    private static SqlValue GridLevelDesc(short? code, SqlValue nullDesc) =>
+        code switch
+        {
+            1 => SqlValue.FromNVarchar("LOW"),
+            2 => SqlValue.FromNVarchar("MEDIUM"),
+            3 => SqlValue.FromNVarchar("HIGH"),
+            _ => nullDesc,
+        };
+
+    /// <summary>
+    /// Rows for <c>sys.spatial_reference_systems</c>. Real SQL Server
+    /// pre-seeds this with ~390 authoritative SRID rows; the simulator
+    /// surfaces an empty view (no rows yielded) so the column shape is
+    /// reachable but the WKT-laden seed payload doesn't ship.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysSpatialReferenceSystems(Parser.BatchContext batch)
+    {
+        _ = batch;
+        yield break;
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
@@ -2592,6 +2796,9 @@ internal static class BuiltInResources
             // xml: real SQL Server reports max_length = -1 (matching the
             // nvarchar(MAX) storage shape) and no numeric precision/scale.
             XmlSqlType => (-1, 0, 0),
+            // geography / geometry: same max_length = -1 reporting as xml,
+            // matching the probed sys.columns shape for spatial-typed columns.
+            SpatialSqlType => (-1, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }

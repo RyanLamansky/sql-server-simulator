@@ -83,6 +83,7 @@ enum ContextualKeyword
     Scoped,
     Sequence,
     Sets,
+    Spatial,
     Target,
     SetError,
     Source,

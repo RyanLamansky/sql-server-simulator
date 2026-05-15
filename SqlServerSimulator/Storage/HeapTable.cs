@@ -274,6 +274,16 @@ internal sealed class HeapTable : SchemaObject
     public readonly List<XmlIndex> XmlIndexes = [];
 
     /// <summary>
+    /// Spatial indexes attached to this table. Populated by
+    /// <c>CREATE SPATIAL INDEX</c>; surfaced by <c>sys.spatial_indexes</c>
+    /// (per-index) and <c>sys.spatial_index_tessellations</c> (per-index
+    /// bounding-box + grid-level detail). The simulator never indexes
+    /// spatial values for query acceleration — entries are catalog-visible
+    /// metadata only.
+    /// </summary>
+    public readonly List<SpatialIndex> SpatialIndexes = [];
+
+    /// <summary>
     /// Lazily-interned per-row <see cref="LockResource"/>s keyed by
     /// <c>(pageIndex, slotIndex)</c> — the RID (row id) that
     /// <see cref="Heap.EnumerateRowsWithAddress"/> yields and that

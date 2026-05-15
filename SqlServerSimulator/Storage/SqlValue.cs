@@ -77,6 +77,30 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.Xml, 0, value, isNull: false);
     }
 
+    /// <summary>
+    /// Non-NULL SQL <c>geography</c> value. Stored as raw-WKT (UTF-16 LE on
+    /// disk, .NET string in memory) — degraded-mode encoding for the
+    /// skip-with-diagnostic bacpac stance. Identity preserved through
+    /// <see cref="SqlType.Geography"/>.
+    /// </summary>
+    public static SqlValue FromGeography(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(SqlType.Geography, 0, value, isNull: false);
+    }
+
+    /// <summary>
+    /// Non-NULL SQL <c>geometry</c> value. Stored as raw-WKT (UTF-16 LE on
+    /// disk, .NET string in memory) — degraded-mode encoding for the
+    /// skip-with-diagnostic bacpac stance. Identity preserved through
+    /// <see cref="SqlType.Geometry"/>.
+    /// </summary>
+    public static SqlValue FromGeometry(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(SqlType.Geometry, 0, value, isNull: false);
+    }
+
     /// <summary>Non-NULL SQL <c>sysname</c> value (encoded identically to <c>nvarchar</c>; identity preserved across system catalogs).</summary>
     public static SqlValue FromSystemName(string value)
     {
@@ -428,6 +452,8 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)
         : type == SqlType.Xml ? FromXml(value)
+        : type == SqlType.Geography ? FromGeography(value)
+        : type == SqlType.Geometry ? FromGeometry(value)
         : type is CharSqlType ? FromChar(type, value)
         : type is NCharSqlType ? FromNChar(type, value)
         : throw new ArgumentException($"{type} is not a string type.", nameof(type));

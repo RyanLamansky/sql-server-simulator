@@ -134,6 +134,7 @@ internal abstract partial class SqlType
     {
         _ when this == HierarchyId => 17,
         XmlSqlType => 17,
+        SpatialSqlType => 17,
         _ when this == UniqueIdentifier => 16,
         _ when this == SystemName => 15,
         _ when this == NText => 14,
@@ -195,6 +196,7 @@ internal abstract partial class SqlType
         _ when this == SystemName => 231,
         NCharSqlType => 239,
         _ when this == HierarchyId => 240,
+        SpatialSqlType => 240,
         XmlSqlType => 241,
         _ => throw new NotSupportedException($"No SystemTypeId defined for {this}."),
     };
@@ -206,7 +208,11 @@ internal abstract partial class SqlType
     /// (well-known CLR-UDT alias id <c>128</c>, probe-confirmed against
     /// SQL Server 2025 <c>sys.types</c>).
     /// </summary>
-    public int UserTypeId => this == SystemName ? 256 : this == HierarchyId ? 128 : this.SystemTypeId;
+    public int UserTypeId => this == SystemName ? 256
+        : this == HierarchyId ? 128
+        : this == Geometry ? 129
+        : this == Geography ? 130
+        : this.SystemTypeId;
 
     /// <summary>True for SQL integer-family types (bit, tinyint, smallint, int, bigint).</summary>
     public static bool IsIntegerCategory(SqlType type) => type.Category == SqlTypeCategory.Integer;
@@ -446,6 +452,23 @@ internal abstract partial class SqlType
     /// rationale.
     /// </remarks>
     public static readonly XmlSqlType Xml = new();
+
+    /// <remarks>
+    /// SQL Server's <c>geography</c> CLR UDT — round-earth spatial values
+    /// bound to a Spatial Reference Identifier. Stored in the simulator as
+    /// raw-WKT UTF-16 (degraded-mode encoding); OGC + Microsoft-extension
+    /// methods parse cleanly and throw <see cref="NotSupportedException"/> at
+    /// execute except <c>.ToString()</c>, which returns the stored WKT. See
+    /// <see cref="GeographySqlType"/> for the skip-with-diagnostic rationale.
+    /// </remarks>
+    public static readonly GeographySqlType Geography = new();
+
+    /// <remarks>
+    /// SQL Server's <c>geometry</c> CLR UDT — flat-Earth spatial values.
+    /// Same implementation strategy as <see cref="Geography"/>; see
+    /// <see cref="GeometrySqlType"/> for details.
+    /// </remarks>
+    public static readonly GeometrySqlType Geometry = new();
 
     /// <remarks>
     /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
@@ -826,12 +849,14 @@ internal abstract partial class SqlType
             "SMALLINT" => SmallInt,
             "NVARCHAR" => NVarchar,
             "DATETIME" => DateTime,
+            "GEOMETRY" => Geometry,
             _ => null,
         },
         9 => upper switch
         {
             "TIMESTAMP" => RowVersion,
             "VARBINARY" => Varbinary,
+            "GEOGRAPHY" => Geography,
             _ => null,
         },
         10 => upper switch

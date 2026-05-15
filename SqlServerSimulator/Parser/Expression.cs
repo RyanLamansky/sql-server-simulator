@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
 
@@ -174,6 +175,25 @@ internal abstract class Expression
                                 }
                                 context.RestoreCheckpoint(checkpoint);
                             }
+                            // Spatial instance-method shape: <expr>.STDistance(args) /
+                            // .STAsText() / .ToString() / ... — broad accept-list
+                            // covering OGC + Microsoft-extension methods on
+                            // geography / geometry values. Parses cleanly so
+                            // CREATE VIEW / CREATE PROCEDURE bodies that reference
+                            // spatial methods store verbatim; runtime evaluation
+                            // throws NotSupportedException except for .ToString()
+                            // which returns the stored WKT (see SpatialMethodCall).
+                            if (SpatialMethodCall.IsKnownMethodName(name.Value))
+                            {
+                                var checkpoint = context.SaveCheckpoint();
+                                var probe = context.GetNextOptional();
+                                if (probe is Operator { Character: '(' })
+                                {
+                                    expression = SpatialMethodCall.Parse(expression, name.Value, context);
+                                    continue;
+                                }
+                                context.RestoreCheckpoint(checkpoint);
+                            }
                             if (expression is not Reference reference)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
                             reference.AddMultiPartComponent(name);
@@ -186,21 +206,26 @@ internal abstract class Expression
                     continue;
                 case Operator { Character: ':' }:
                     {
-                        // Type-scope `::` operator. The only modeled
-                        // type-scope is `hierarchyid::` (Parse / GetRoot).
-                        // First ':' already consumed by GetNextOptional;
-                        // require a second to confirm the `::` shape.
-                        if (expression is not Reference colonRef
-                            || colonRef.ReferencedName.Count != 1
-                            || !Collation.Default.Equals(colonRef.ReferencedName.Leaf, "hierarchyid"))
-                        {
+                        // Type-scope `::` operator. Modeled type-scopes:
+                        // `hierarchyid::` (Parse / GetRoot), `geography::` /
+                        // `geometry::` (Parse / STGeomFromText / Point / ...,
+                        // see SpatialStaticCall). First ':' already consumed
+                        // by GetNextOptional; require a second to confirm the
+                        // `::` shape.
+                        if (expression is not Reference colonRef || colonRef.ReferencedName.Count != 1)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
-                        }
+                        var typeName = colonRef.ReferencedName.Leaf;
                         var secondColon = context.GetNextRequired();
                         if (secondColon is not Operator { Character: ':' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         context.MoveNextRequired();
-                        expression = HierarchyIdStaticCall.Parse(context);
+                        expression = Collation.Default.Equals(typeName, "hierarchyid")
+                            ? HierarchyIdStaticCall.Parse(context)
+                            : Collation.Default.Equals(typeName, "geography")
+                                ? SpatialStaticCall.Parse(SqlType.Geography, context)
+                                : Collation.Default.Equals(typeName, "geometry")
+                                    ? SpatialStaticCall.Parse(SqlType.Geometry, context)
+                                    : throw SimulatedSqlException.SyntaxErrorNear(context);
                         continue;
                     }
                 case Operator { Character: ')' }:
@@ -350,16 +375,16 @@ internal abstract class Expression
     /// values (<see cref="RuntimeContext.ResolveColumn"/>) and per-batch /
     /// per-session / per-database state (<see cref="RuntimeContext.Batch"/>).
     /// </summary>
-    public abstract Storage.SqlValue Run(RuntimeContext runtime);
+    public abstract SqlValue Run(RuntimeContext runtime);
 
     /// <summary>
     /// Static type-of resolver for projection planning: returns the
-    /// <see cref="Storage.SqlType"/> this expression will produce, given a
+    /// <see cref="SqlType"/> this expression will produce, given a
     /// resolver that maps column-name parts to their declared types. Lets a
     /// SELECT plan its output schema before any rows are read.
     /// </summary>
     /// <param name="resolveColumnType">Callback that, given a multi-part column name, returns its declared type or throws if unresolvable.</param>
-    public abstract Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType);
+    public abstract SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType);
 
     /// <summary>
     /// Diagnostic-only string rendering, surfaced to debuggers via

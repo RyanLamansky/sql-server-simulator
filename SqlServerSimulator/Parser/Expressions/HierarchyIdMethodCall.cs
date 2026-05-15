@@ -78,6 +78,15 @@ internal sealed class HierarchyIdMethodCall : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var receiver = this.target.Run(runtime);
+        // .ToString() is a method on hierarchyid AND on geography / geometry;
+        // the parser dispatches both shapes through this class because the
+        // name overlaps. When the receiver turns out to be spatial at runtime,
+        // return the stored WKT directly (matching the skip-with-diagnostic
+        // spatial stance in SpatialMethodCall).
+        if (this.method == HierarchyIdMethod.ToStringMethod && receiver.Type is SpatialSqlType)
+        {
+            return receiver.IsNull ? SqlValue.Null(NVarcharSqlType.MaxForm) : SqlValue.FromNVarchar(receiver.AsString);
+        }
         if (receiver.IsNull)
             return SqlValue.Null(this.ResultType());
         if (receiver.Type != SqlType.HierarchyId)

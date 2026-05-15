@@ -43,6 +43,8 @@ partial class Simulation
                 return Simulation.TryParseCreateXml(context);
             case ReservedKeyword { Keyword: Keyword.Primary }:
                 return Simulation.TryParseCreatePrimaryXml(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Spatial }:
+                return Simulation.TryParseCreateSpatial(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })
