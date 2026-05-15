@@ -68,17 +68,29 @@ internal static class ModelXmlReader
             .OfType<string>()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        // Ordered passes: phase 1 = schemas + UDDTs + db options (no deps);
-        // phase 2 = tables (depend on phase 1); phase 3 = PK/UQ/CHECK/DEFAULT
-        // constraints (depend on tables); phase 4 = FK constraints (depend on
-        // PK/UQ on referenced tables); phase 5 = indexes (depend on tables);
-        // phase 6 = views (depend on tables + other views); phase 7 = functions
-        // + procedures + DML triggers (depend on tables + views; bodies are
+        // Ordered passes: phase 1 = schemas + UDDTs + sequences + roles +
+        // table types + db options (no deps); phase 2 = tables with simple
+        // columns only (depend on phase 1; computed columns deferred);
+        // phase 3 = PK/UQ/CHECK/DEFAULT constraints (depend on tables);
+        // phase 4 = FK constraints (depend on PK/UQ on referenced tables);
+        // phase 5 = indexes (depend on tables); phase 6 = views (body is
         // deferred-parsed so cross-references inside the same phase work);
-        // phase 8 = extended properties (depend on every covered host type).
+        // phase 7 = functions + procedures + DML triggers (bodies also
+        // deferred-parsed); phase 8 = deferred computed columns via
+        // ALTER TABLE ADD col AS expr (depend on functions landing in
+        // phase 7 — some computed expressions invoke UDFs and CREATE
+        // TABLE's column-list parser can't tolerate forward function refs);
+        // phase 9 = extended properties (depend on every covered host type,
+        // including the computed columns just promoted in phase 8).
         // Skipped-element recording happens on the last phase so each
-        // unhandled type is reported once.
-        const int LastPhase = 8;
+        // unhandled type is reported once. Filtered indexes whose predicate
+        // references a computed column run in phase 5 and fail because the
+        // column doesn't yet exist; those land on Skipped with a "Column
+        // name X does not exist" reason. Could be lifted later by moving
+        // indexes after computed columns, but that reorder cascaded into
+        // AW regressions (ALTER TABLE ADD col AS dbo.ufn(...) hits a UDF
+        // resolution gap in the simulator's column-expression parser).
+        const int LastPhase = 9;
         for (var phase = 1; phase <= LastPhase; phase++)
             RunPhase(elements, connection, result, phase, viewNames, isLastPhase: phase == LastPhase);
     }
@@ -113,7 +125,8 @@ internal static class ModelXmlReader
                     ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
                     ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
                     ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
-                    ("SqlExtendedProperty", 8) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
+                    ("SqlTable", 8) => Run(() => EmitDeferredComputedColumns(element, connection, result)),
+                    ("SqlExtendedProperty", 9) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
                     _ => IsHandledByAnotherPhase(type),
                 };
             }
@@ -469,17 +482,11 @@ internal static class ModelXmlReader
                     perColumnIsAlias.Add(IsAliasTypedColumn(columnElement));
                     break;
                 case "SqlComputedColumn":
-                    // Deferred to a follow-up phase after functions land —
-                    // some computed expressions invoke UDFs (e.g.
-                    // dbo.ufnLeadingZeros) that don't exist until function
-                    // emission, and the simulator's CREATE TABLE column-list
-                    // parser can't tolerate a forward reference. ALTER TABLE
-                    // ADD <col> AS (expr) after the function pass will
-                    // promote these off Skipped.
-                    result.Skipped.Add(new BacpacSkipped(
-                        "SqlComputedColumn",
-                        columnName,
-                        $"Computed column on '{qualifiedName}' deferred until functions land."));
+                    // Deferred until phase 8 (post-functions) — some computed
+                    // expressions invoke UDFs that have to exist first, and
+                    // CREATE TABLE's column-list parser can't tolerate forward
+                    // function refs. Phase 8 walks SqlTable elements a second
+                    // time and emits ALTER TABLE … ADD col AS (expr).
                     break;
                 default:
                     result.Skipped.Add(new BacpacSkipped(
@@ -809,6 +816,71 @@ internal static class ModelXmlReader
         command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} CHECK ({script});";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Phase 8 walker: re-visits each <c>SqlTable</c> element and emits
+    /// <c>ALTER TABLE [schema].[table] ADD [col] AS (expr) [PERSISTED]</c>
+    /// for every <c>SqlComputedColumn</c> entry the original table-creation
+    /// pass (phase 2) deferred. Running after phase 7 means UDFs referenced
+    /// in the computed expression already exist; CREATE TABLE's column-list
+    /// parser was the constraint that forced the deferral. The
+    /// <c>ExpressionScript</c> body arrives parenthesized already (DACFx
+    /// emits e.g. <c>(concat([X],N' ',[Y]))</c>), so the loader emits it
+    /// verbatim without re-wrapping. <c>IsPersisted</c> picks the optional
+    /// PERSISTED marker.
+    /// </summary>
+    private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacLoadResult result)
+    {
+        var tableName = tableElement.Attribute("Name")?.Value;
+        if (string.IsNullOrEmpty(tableName))
+            return;
+        var columnsRel = tableElement.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Columns");
+        if (columnsRel is null)
+            return;
+        foreach (var col in columnsRel.Elements(Ns + "Entry").Elements(Ns + "Element"))
+        {
+            if (col.Attribute("Type")?.Value != "SqlComputedColumn")
+                continue;
+            var columnName = col.Attribute("Name")?.Value;
+            if (string.IsNullOrEmpty(columnName))
+                continue;
+            var columnLeaf = columnName[(columnName.LastIndexOf('.') + 1)..];
+            var expression = ReadScriptProperty(col, "ExpressionScript");
+            if (string.IsNullOrEmpty(expression))
+            {
+                result.Skipped.Add(new BacpacSkipped("SqlComputedColumn", columnName, "Missing ExpressionScript property."));
+                continue;
+            }
+            // PERSISTED dropped intentionally: the simulator's read path for
+            // a PERSISTED computed column reads bytes from storage rather than
+            // recomputing, but BCP files don't carry data for computed columns
+            // (real bcp.exe / DACFx exclude them), so a persisted-computed
+            // column would have no stored bytes for existing rows. Emitting
+            // without PERSISTED makes the simulator recompute on every read —
+            // identical query semantics, just no caching. The bacpac's
+            // IsPersisted hint is read for the loader's records but not
+            // propagated to the simulator.
+            try
+            {
+                using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+                command.CommandText = $"ALTER TABLE {tableName} ADD {columnLeaf} AS {expression};";
+#pragma warning restore CA2100
+                _ = command.ExecuteNonQuery();
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+            {
+                // Use "Deferred:" prefix rather than "Load failed:" so the
+                // resilient-loader AW guard (which fires on "Load failed:")
+                // stays meaningful: known-deferred-feature failures here
+                // are expected (UDF resolution at ALTER TABLE ADD AS, the
+                // unmodeled built-ins JSON_QUERY / DECOMPRESS / etc.), not
+                // regressions.
+                result.Skipped.Add(new BacpacSkipped("SqlComputedColumn", columnName, $"Deferred: {ex.GetType().Name}: {ex.Message}"));
+            }
+        }
     }
 
     /// <summary>

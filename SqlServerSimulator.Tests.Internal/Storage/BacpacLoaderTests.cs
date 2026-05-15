@@ -599,16 +599,53 @@ public sealed class BacpacLoaderTests
         var grouped = diagnostics.Skipped.GroupBy(s => s.ElementType)
             .ToDictionary(g => g.Key, g => g.Count());
         IsFalse(grouped.ContainsKey("SqlTableType"), "SqlTableType is dispatched; should not appear in Skipped.");
-        AreEqual(89, grouped["SqlExtendedProperty"], "Extended properties (mostly on computed columns) deferred.");
-        AreEqual(8, grouped["SqlComputedColumn"], "Computed columns deferred (same as AW).");
-        AreEqual(3, grouped["SqlProcedure"], "3 WWI procedures parse-fail; need investigation.");
-        AreEqual(3, grouped["SqlIndex"], "3 WWI indexes fail (likely filtered indexes on bit columns).");
+        AreEqual(83, grouped["SqlExtendedProperty"], "Extended properties on the 2 still-deferred computed columns + on table-type columns + on filegroup.");
+        AreEqual(2, grouped["SqlComputedColumn"], "2 WWI computed columns invoke json_query (not modeled); both routed via 'Deferred:' prefix so the AW guard stays meaningful.");
+        AreEqual(3, grouped["SqlProcedure"], "3 WWI procedures parse-fail (sysname system-type modeling deferred).");
+        AreEqual(3, grouped["SqlIndex"], "3 filtered indexes reference computed columns that don't yet exist at phase 5 (computed columns land in phase 8). Reordering indexes to a later phase tripped an unrelated UDF-resolution gap in ALTER TABLE ADD AS for AW; deferred.");
         AreEqual(2, grouped["SqlCheckConstraint"], "2 JSON check constraints deferred.");
         AreEqual(2, grouped["SqlPermissionStatement"], "GRANT/REVOKE wire-up deferred (same as AW).");
         AreEqual(1, grouped["SqlDatabaseOptions"], "Non-default collation deferred.");
-        AreEqual(1, grouped["SqlView"], "1 WWI view parse-fails (computed-column referent).");
-        AreEqual(1, grouped["SqlScalarFunction"], "1 WWI scalar function parse-fails.");
+        AreEqual(1, grouped["SqlView"], "1 WWI view (Website.VehicleTemperatures) uses DECOMPRESS (not modeled).");
+        AreEqual(1, grouped["SqlScalarFunction"], "1 WWI scalar function uses SCHEMABINDING / WITH EXEC AS clauses beyond RETURNS NULL ON NULL INPUT.");
         AreEqual(1, grouped["SqlFilegroup"], "Filegroup not in dispatcher.");
+    }
+
+    [TestMethod]
+    public void Load_WWI_Computed_Columns_Land_With_is_computed_Set()
+    {
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        // 6 of WWI's 8 computed columns succeed (the 2 referencing json_query
+        // remain deferred). Verify the 6 surface in sys.columns with
+        // is_computed = 1.
+        command.CommandText = "SELECT COUNT(*) FROM sys.columns WHERE is_computed = 1;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(6, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWI_Persisted_Computed_Column_Evaluates_On_Read()
+    {
+        // Application.People.SearchName is a PERSISTED computed column
+        // defined as concat(PreferredName, N' ', FullName). Verify the
+        // ALTER TABLE ADD AS landed AND that the existing BCP-loaded rows
+        // can read it (the simulator recomputes on read, since PERSISTED
+        // is a no-op in the simulator).
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT TOP 1 PreferredName, FullName, SearchName FROM Application.People WHERE PreferredName IS NOT NULL AND FullName IS NOT NULL ORDER BY PersonID;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        var preferred = reader.GetString(0);
+        var full = reader.GetString(1);
+        var search = reader.GetString(2);
+        AreEqual($"{preferred} {full}", search);
     }
 
     [TestMethod]

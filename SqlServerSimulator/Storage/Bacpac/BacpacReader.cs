@@ -101,13 +101,32 @@ internal static class BacpacReader
             ? flags
             : new bool[table.Columns.Length];
 
+        // BCP files don't carry data for computed columns — neither real bcp.exe
+        // nor DACFx export them. Filter computed columns out of the per-row
+        // wire layout (read N stored values, encode an N-column row); the
+        // simulator's row-storage and read paths already treat computed
+        // columns as metadata-only (recomputed on read), so an encoded row
+        // missing the computed-column slot is the same shape any INSERT
+        // through normal DML would produce.
+        var storedColumns = new List<HeapColumn>(table.Columns.Length);
+        var storedIsAlias = new List<bool>(table.Columns.Length);
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (table.Columns[i].Computed is not null)
+                continue;
+            storedColumns.Add(table.Columns[i]);
+            storedIsAlias.Add(i < columnIsAlias.Length && columnIsAlias[i]);
+        }
+        var storedCols = storedColumns.ToArray();
+        var storedAlias = storedIsAlias.ToArray();
+
         var rowCount = 0;
         while (true)
         {
-            var values = BcpRowReader.TryReadRow(bcpStream, table.Columns, columnIsAlias);
+            var values = BcpRowReader.TryReadRow(bcpStream, storedCols, storedAlias);
             if (values is null)
                 break;
-            var rowBytes = RowEncoder.EncodeRow(table.Columns, values, table.Heap);
+            var rowBytes = RowEncoder.EncodeRow(storedCols, values, table.Heap);
             _ = table.Heap.Insert(rowBytes);
             rowCount++;
         }
