@@ -426,34 +426,37 @@ The `sys.types` row data was pre-existing (rows 33-34 in `BuiltInResources.cs:Sy
 
 ## BCP wire format
 
-The `Data/<schema>.<table>/TableData-NNN-NNNNN.BCP` files are the per-table data payload. Probed against `Production.ProductCategory` (4 rows, 192 bytes, schema `int IDENTITY NOT NULL, nvarchar(50) NOT NULL, uniqueidentifier NOT NULL, datetime NOT NULL` — verified row 1 = `(1, 'Bikes', <guid>, 2019-04-30 00:00:00)`):
+The `Data/<schema>.<table>/TableData-NNN-NNNNN.BCP` files are the per-table data payload. The full type matrix below is probe-confirmed against AdventureWorks2025 hex-dumps on 2026-05-15.
 
-| Type family | Wire layout | Notes |
+| Type family | Wire layout | NULL sentinel |
 |---|---|---|
-| Fixed-width numeric (`int`, `bigint`, `smallint`, `tinyint`, `bit`) | raw bytes, little-endian, no prefix | `int` = 4 bytes LE |
-| Fixed-width temporal (`datetime`, `smalldatetime`, `date`) | raw bytes, no prefix | `datetime` = 4-byte int32 days + 4-byte uint32 ticks-of-day (1/300 sec) |
-| Variable-length text/binary (`nvarchar`, `varchar`, `varbinary`) | 2-byte LE byte-length prefix + bytes | nvarchar = UTF-16 LE; `0xFFFF` likely = NULL (needs probe confirm) |
-| Length-prefixed fixed (`uniqueidentifier`, `decimal`/`numeric`, `money`, `smallmoney`, `datetime2`, `datetimeoffset`, `time`) | 1-byte length-prefix (= type width) + bytes | guid = `0x10` + 16 bytes; `0x00` likely = NULL |
-| MAX types (`varchar(MAX)`, `nvarchar(MAX)`, `varbinary(MAX)`, `text`, `ntext`, `image`) | length prefix likely 8-byte for full size + bytes (or chunked) | needs probe — not in ProductCategory |
-| `hierarchyid` | variable-length binary, length-prefixed | covered by hierarchyid feature work |
-| `xml` | variable-length text/binary, length-prefixed | covered by xml feature work; if xml is loaded as nvarchar(MAX) in degraded mode, falls through to the MAX-types row |
-| `sql_variant` | special envelope (type byte + value) | not yet investigated, AW may or may not use |
+| Fixed-width numeric (`int`, `bigint`, `smallint`, `tinyint`), temporal (`datetime`, `smalldatetime`, `date`) NOT NULL | raw bytes LE, no prefix | n/a |
+| Same types NULLABLE | 1-byte length prefix (= type width) + raw bytes | `0xFF` |
+| `bit` (NOT NULL or NULL, with-or-without UDDT alias) | 1-byte length prefix (= 1) + 1 raw byte | `0xFF` |
+| Length-prefixed fixed (`uniqueidentifier`, `decimal`/`numeric`, `money`, `smallmoney`, `datetime2(N)`, `time(N)`, `datetimeoffset(N)`) — always 1-byte-prefix even NOT NULL | 1-byte length prefix (= width) + raw bytes | `0xFF` |
+| UDDT-aliased columns of any base type (e.g. `dbo.Flag` over bit, `dbo.OrderNumber` over nvarchar) | shaped as if nullable (1-byte / 2-byte / 8-byte prefix per base family) regardless of declared nullability | per base-family NULL sentinel |
+| Variable-length bounded (`nvarchar(N)`, `varchar(N)`, `nchar(N)`, `char(N)`, `varbinary(N)`, `binary(N)`) | 2-byte LE byte-length prefix + bytes | `0xFFFF` |
+| MAX types (`varchar(MAX)`, `nvarchar(MAX)`, `varbinary(MAX)`), `xml`, CLR-UDT family (`hierarchyid`, `geography`, `geometry`) | 8-byte LE length prefix + N bytes inline (NOT the TDS-PLP chunked encoding) | `0xFFFFFFFFFFFFFFFF` (-1 signed) |
 
-Encoding-edge probes needed (carve out tiny custom BACPACs locally via `SqlPackage`):
-- NULL sentinel for each prefix class (1-byte / 2-byte / fixed-no-prefix)
-- `decimal(p, s)` precision/scale layout (probably sign byte + LE mantissa)
-- `datetime2(N)` and `datetimeoffset(N)` precision dependence
-- MAX-type encoding when row >> 8KB
-- `varbinary(N)` for `rowversion` columns (auto-generated server-side — does BACPAC export them or skip?)
-- `IDENTITY` reseed: confirm `LastValue` annotation matches the actual max-allocated rather than max-inserted
+Probe-confirmed corrections from the original first-cut matrix:
+- `money` / `smallmoney` / `time(N)` / `datetime2(N)` / `datetimeoffset(N)` were originally cataloged as "1-byte length prefix" but are actually fixed-raw with no prefix when NOT NULL (only nullable variants prefix). Reclassified during Phase G.
+- `bit` was originally cataloged as 1-byte raw (matching other fixed-width numerics). Probe against AW's plain-bit `Production.Document.FolderFlag` (the only non-UDDT bit column in AW) revealed it's actually 1-byte-length-prefixed regardless of nullability — matches the UDDT-aliased bit shape.
+- MAX types + xml + CLR-UDT (hierarchyid / geography / geometry) all share the **simple inline** 8-byte-prefix shape (NOT the chunked PLP form used in TDS network traffic). Probe-confirmed by ProductPhoto's 1077-byte ThumbNailPhoto flowing inline with no chunk markers / terminator, and by HumanResources.JobCandidate's 9086-byte Resume xml column likewise inline.
+
+Encoding-edge items still without probe coverage (none seen in AW):
+- `text` / `ntext` / `image` legacy LOB family — AW doesn't use any. Likely same 8-byte-prefix shape as the MAX family, but not confirmed.
+- `sql_variant` envelope — AW doesn't use it. Probably type-tag byte + per-type encoding.
+- TDS-PLP chunked form (8-byte length = `0xFFFFFFFFFFFFFFFE` "unknown total", chunks with 4-byte length markers terminating on 4-byte zero) — not seen in any bacpac shard; reserved for live TDS traffic only.
 
 ## Order of operations toward AW baseline
 
 Rough sequence — work each bundle to completion, update this checklist, then revisit BACPAC scoping once the prerequisites land:
 
 1. ~~**Database options expansion**~~ + ~~**UDDTs / alias types**~~ + ~~**Extended properties**~~ + ~~**`hierarchyid` (AW-minimum-viable)**~~ + ~~**DDL trigger + permission statements**~~ (all shipped 2026-05-14) + ~~**Full-text catalog + index (skip-with-diagnostic)**~~ + ~~**`xml` data type + schema collections + indexes (skip-with-diagnostic)**~~ + ~~**`geography` / `geometry` data types (skip-with-diagnostic)**~~ (latter three shipped 2026-05-15). **All prerequisites complete.**
-2. **Loader baseline implementation** — every spatial / xml / full-text DDL surface now ships first-class, so the loader can land xml + geography model.xml elements through their regular CREATE paths rather than degrading to `varbinary(MAX)`. Full-text catalog DDL likewise ships at the DDL level (search-time semantics remain `NotSupportedException`). **Re-probe the hierarchyid BCP wire format** at the start of this bundle and either confirm CAST-byte-identical or implement a separate BCP decoder; replace the current simulator-native CAST encoder/decoder with the documented variable-bit ordinal encoding at the same time. Same byte-format deferral applies to spatial types — the BCP decoder will need a parallel decode-from-wire path since the simulator currently stores WKT instead of the documented binary form.
-3. **Real XPath/XQuery + OGC method evaluation + full-text search** as separate post-baseline initiatives, each promoted from "parses cleanly, throws at execute" to first-class as bundles complete.
+2. ~~**Loader baseline implementation**~~ — shipped through Phase H (2026-05-15). `Simulation.FromBacpac(string, out BacpacLoadResult)` + Stream overload, internal until AdventureWorks2025 loads end-to-end. All 8 phases (schema + UDDTs + DB options → tables → constraints → FKs → indexes → views → programmable objects → extended properties → BCP data) ship in `SqlServerSimulator/Storage/Bacpac/`. AW coverage as of 2026-05-15: 5/5 schemas, 71/71 tables, 90/90 FKs, 89/89 CHECKs, 152/152 DEFAULTs, 89/95 indexes, 11/20 views, 8/10 procs, 10/11 functions, 10/10 DML triggers, 1/1 DDL trigger, 527/538 extended properties, **759,833/760,167 rows (99.96%)**. Only remaining row gap: 4 BCP shards (HR.Employee + Production.Document × 2 + Production.ProductDocument, ~334 rows total) block on hierarchyid binary decoding.
+3. **`hierarchyid` BCP wire-format decoder** — separate next bundle, closes the 4 remaining BCP shards. The Huffman-style variable-bit ordinal encoding (probe-derived prefix table in this doc's "hierarchyid byte-identical CAST" section above) needs a bit-stream parser that produces `int[][]` segments. Once landed, replace `HierarchyIdSqlType.Encode` / `Decode` with the documented format so cross-engine CAST byte equality also holds.
+4. **Geography WKB → WKT decoder** — Person.Address rows load with `SpatialLocation = NULL` after this bundle (the 8-byte-prefix bytes are drained but not decoded). A future bundle could implement the simple-point case (4-byte SRID + 1-byte version + 1-byte properties + 16-byte X/Y doubles) which is all AW uses; full WKB shape support (LineString / Polygon / MultiPolygon / etc.) is a larger project.
+5. **Real XPath/XQuery + OGC method evaluation + full-text search** as separate post-baseline initiatives, each promoted from "parses cleanly, throws at execute" to first-class as bundles complete.
 
 Loader code layout (target, when baseline lands):
 - `SqlServerSimulator/Storage/Bacpac/BacpacReader.cs` — OPC zip walker, dispatches to model + data readers
@@ -464,4 +467,4 @@ Loader code layout (target, when baseline lands):
 
 ## Status
 
-Pre-implementation. All eight prerequisite bundles shipped (2026-05-14 through 2026-05-15). Loader baseline is the next bundle: reopen the session named `bacpac` to start the `Simulation.FromBacpac` implementation work.
+Loader baseline shipped (2026-05-15). `Simulation.FromBacpac` loads AdventureWorks2025 end-to-end with **99.96% row coverage** (759,833 / 760,167 rows). Remaining gap: hierarchyid binary decoding for 4 BCP shards (~334 rows).

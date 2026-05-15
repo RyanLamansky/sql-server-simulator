@@ -15,19 +15,27 @@ namespace SqlServerSimulator.Storage.Bacpac;
 /// <para>BCP wire format conventions (verified by hex-dump probing
 /// AdventureWorks2025 on 2026-05-15):</para>
 /// <list type="bullet">
-/// <item>Fixed-width raw types (int/bigint/smallint/tinyint/bit/datetime/
+/// <item>Fixed-width raw types (int/bigint/smallint/tinyint/datetime/
 /// smalldatetime/date) NOT NULL → raw bytes, no prefix.</item>
 /// <item>Same types NULLABLE → 1-byte length prefix; 0xFF = NULL, otherwise
 /// the type's width followed by raw bytes.</item>
+/// <item><c>bit</c> always uses a 1-byte length prefix (== 1) followed by
+/// 1 raw byte, regardless of nullability. Probe-confirmed against AW's
+/// Production.Document.FolderFlag (plain bit NOT NULL) on 2026-05-15: the
+/// wire bytes are <c>01 01</c> for value 1, matching the UDDT-alias bit
+/// shape rather than the fixed-raw shape of other 1-byte types.</item>
 /// <item>Length-prefixed fixed (uniqueidentifier/money/smallmoney/decimal/
 /// datetime2/time/datetimeoffset) → always 1-byte length prefix regardless
 /// of nullability; 0xFF = NULL otherwise type-width + raw bytes.</item>
 /// <item>Variable-length (nvarchar/varchar/nchar/char/varbinary/binary) →
 /// 2-byte LE length prefix; 0xFFFF = NULL otherwise N bytes follow.</item>
+/// <item>MAX types (varchar(MAX) / nvarchar(MAX) / varbinary(MAX)), xml,
+/// and the CLR-UDT family (hierarchyid / geography / geometry) all use an
+/// 8-byte LE length prefix followed by N bytes inline. 0xFFFFFFFFFFFFFFFF
+/// (-1) = NULL. The bacpac BCP wire form is NOT the TDS PLP chunked
+/// encoding — probe-confirmed by ProductPhoto's 1077-byte ThumbNailPhoto
+/// flowing inline with no 4-byte chunk markers / terminator.</item>
 /// </list>
-/// <para>MAX types and the LOB-eligible legacy text/ntext/image family use an
-/// 8-byte length prefix with chunked sub-blocks; deferred until the loader
-/// hits an AW table that exercises them.</para>
 /// </remarks>
 internal static class BcpRowReader
 {
@@ -71,7 +79,10 @@ internal static class BcpRowReader
         if (type == SqlType.BigInt) return ReadFixedRaw(stream, nullable, 8, type, b => SqlValue.FromInt64(BinaryPrimitives.ReadInt64LittleEndian(b)));
         if (type == SqlType.SmallInt) return ReadFixedRaw(stream, nullable, 2, type, b => SqlValue.FromInt16(BinaryPrimitives.ReadInt16LittleEndian(b)));
         if (type == SqlType.TinyInt) return ReadFixedRaw(stream, nullable, 1, type, b => SqlValue.FromByte(b[0]));
-        if (type == SqlType.Bit) return ReadFixedRaw(stream, nullable, 1, type, b => SqlValue.FromBoolean(b[0] != 0));
+        // bit is always 1-byte length-prefixed (1 byte prefix == 1, then 1
+        // raw byte for the value). Probe-confirmed via AW's plain-bit
+        // Production.Document.FolderFlag on 2026-05-15.
+        if (type == SqlType.Bit) return ReadLengthPrefixed1(stream, 1, type, b => SqlValue.FromBoolean(b[0] != 0));
         if (type == SqlType.DateTime) return ReadFixedRaw(stream, nullable, 8, type, DecodeDateTime);
         if (type == SqlType.SmallDateTime) return ReadFixedRaw(stream, nullable, 4, type, DecodeSmallDateTime);
         if (type == SqlType.Date) return ReadFixedRaw(stream, nullable, 3, type, DecodeDate);
@@ -96,7 +107,16 @@ internal static class BcpRowReader
         if (type is DateTime2SqlType dt2t) return ReadFixedRaw(stream, nullable, dt2t.timeBytes + 3, type, b => DecodeDateTime2(b, type));
         if (type is DateTimeOffsetSqlType dtot) return ReadFixedRaw(stream, nullable, dtot.timeBytes + 5, type, b => DecodeDateTimeOffset(b, type));
 
-        // Variable-length (text/binary) — 2-byte LE prefix, 0xFFFF = NULL.
+        // 8-byte LE length-prefix types (MAX text/binary, xml, CLR-UDT family).
+        // 0xFFFFFFFFFFFFFFFF = NULL; otherwise N bytes inline (no TDS-PLP
+        // chunk markers — probe-confirmed against AW on 2026-05-15).
+        if (type is XmlSqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.Xml);
+        if (type is GeographySqlType or GeometrySqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.SpatialDeferToNull);
+        if (type is VarcharSqlType vc && vc.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.VarcharMax);
+        if (type is NVarcharSqlType nv && nv.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.NVarcharMax);
+        if (type is VarbinarySqlType vb && vb.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.VarbinaryMax);
+
+        // Variable-length bounded (text/binary) — 2-byte LE prefix, 0xFFFF = NULL.
         return type switch
         {
             VarcharSqlType => ReadVarchar2(stream, type, ansi: true),
@@ -106,6 +126,57 @@ internal static class BcpRowReader
             VarbinarySqlType => ReadVarbinary2(stream, type),
             BinarySqlType => ReadVarbinary2(stream, type),
             _ => throw new NotSupportedException($"BCP decoder doesn't yet handle type {type}."),
+        };
+    }
+
+    /// <summary>
+    /// Distinguishes how an 8-byte-prefixed payload is materialized into a
+    /// <see cref="SqlValue"/> — the byte handling and length read are
+    /// identical across the 8-byte-prefix family but the final coercion to
+    /// a value differs by SqlType.
+    /// </summary>
+    private enum EightBytePayload
+    {
+        VarcharMax,
+        NVarcharMax,
+        VarbinaryMax,
+        Xml,
+        /// <summary>
+        /// Geography / geometry: read the length, drain the bytes, return
+        /// <c>SqlValue.Null</c>. Spatial WKB decoding deferred to a later
+        /// bundle; this lets the row load without breaking column count.
+        /// </summary>
+        SpatialDeferToNull,
+    }
+
+    /// <summary>
+    /// Reads the 8-byte LE length prefix and dispatches by
+    /// <see cref="EightBytePayload"/>. <c>0xFFFFFFFFFFFFFFFF</c> (-1 signed)
+    /// is the NULL sentinel; positive lengths up to <see cref="int.MaxValue"/>
+    /// are read inline as a single buffer. The chunked TDS-PLP form (other
+    /// negative sentinels with 4-byte chunk markers) is not seen in bacpac
+    /// files and is rejected as <see cref="NotSupportedException"/> so a bad
+    /// payload surfaces clearly rather than corrupting the row stream.
+    /// </summary>
+    private static SqlValue ReadEightBytePrefixed(PushbackStream stream, SqlType type, EightBytePayload kind)
+    {
+        Span<byte> lengthBuf = stackalloc byte[8];
+        stream.ReadExact(lengthBuf);
+        var length = BinaryPrimitives.ReadInt64LittleEndian(lengthBuf);
+        if (length == -1L)
+            return SqlValue.Null(type);
+        if (length is < 0 or > int.MaxValue)
+            throw new NotSupportedException($"BCP: unsupported 8-byte-prefix length 0x{length:X16} for {type} (TDS-PLP chunked form not seen in bacpac BCP).");
+        var data = new byte[length];
+        stream.ReadExact(data);
+        return kind switch
+        {
+            EightBytePayload.VarcharMax => SqlValue.FromVarchar(Encoding.GetEncoding(1252).GetString(data)),
+            EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
+            EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
+            EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
+            EightBytePayload.SpatialDeferToNull => SqlValue.Null(type),
+            _ => throw new InvalidOperationException($"unknown EightBytePayload {kind}"),
         };
     }
 
@@ -235,7 +306,6 @@ internal static class BcpRowReader
 
     private static SqlValue ReadVarchar2(PushbackStream stream, SqlType type, bool ansi)
     {
-        RejectMaxType(type);
         var prefixBytes = new byte[2];
         stream.ReadExact(prefixBytes);
         var byteLength = BinaryPrimitives.ReadUInt16LittleEndian(prefixBytes);
@@ -256,7 +326,6 @@ internal static class BcpRowReader
 
     private static SqlValue ReadVarbinary2(PushbackStream stream, SqlType type)
     {
-        RejectMaxType(type);
         var prefixBytes = new byte[2];
         stream.ReadExact(prefixBytes);
         var byteLength = BinaryPrimitives.ReadUInt16LittleEndian(prefixBytes);
@@ -265,25 +334,6 @@ internal static class BcpRowReader
         var data = new byte[byteLength];
         stream.ReadExact(data);
         return type is BinarySqlType ? SqlValue.FromBinary(type, data) : SqlValue.FromVarbinary(data);
-    }
-
-    /// <summary>
-    /// MAX types (varchar(MAX) / nvarchar(MAX) / varbinary(MAX)) use a
-    /// different wire format than the 2-byte-prefix bounded variants —
-    /// 8-byte total-length prefix with chunked sub-blocks. Decoding deferred
-    /// to a follow-up bundle; raising upfront here avoids the 2-byte read
-    /// consuming garbage data and corrupting downstream column boundaries.
-    /// </summary>
-    private static void RejectMaxType(SqlType type)
-    {
-        // MAX variants use length=-1 sentinel; bounded forms carry their
-        // declared length (1..8000 for varchar/varbinary, 1..4000 for nvarchar).
-        if (type is VarcharSqlType vc && vc.length == -1)
-            throw new NotSupportedException("BCP decoder doesn't yet handle varchar(MAX).");
-        if (type is NVarcharSqlType nv && nv.length == -1)
-            throw new NotSupportedException("BCP decoder doesn't yet handle nvarchar(MAX).");
-        if (type is VarbinarySqlType vb && vb.length == -1)
-            throw new NotSupportedException("BCP decoder doesn't yet handle varbinary(MAX).");
     }
 
     /// <summary>
