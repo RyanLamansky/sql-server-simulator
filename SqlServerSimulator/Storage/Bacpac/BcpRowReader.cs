@@ -122,6 +122,7 @@ internal static class BcpRowReader
         {
             VarcharSqlType => ReadVarchar2(stream, type, ansi: true),
             NVarcharSqlType => ReadVarchar2(stream, type, ansi: false),
+            SystemNameSqlType => ReadVarchar2(stream, type, ansi: false),
             NCharSqlType => ReadVarchar2(stream, type, ansi: false),
             CharSqlType => ReadVarchar2(stream, type, ansi: true),
             VarbinarySqlType => ReadVarbinary2(stream, type),
@@ -330,6 +331,7 @@ internal static class BcpRowReader
         {
             VarcharSqlType => SqlValue.FromVarchar(text),
             NVarcharSqlType => SqlValue.FromNVarchar(text),
+            SystemNameSqlType => SqlValue.FromSystemName(text),
             NCharSqlType => SqlValue.FromNChar(type, text),
             CharSqlType => SqlValue.FromChar(type, text),
             _ => throw new InvalidOperationException(),

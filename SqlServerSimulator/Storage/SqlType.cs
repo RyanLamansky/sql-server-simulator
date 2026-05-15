@@ -842,6 +842,7 @@ internal abstract partial class SqlType
         {
             "TINYINT" => TinyInt,
             "VARCHAR" => Varchar,
+            "SYSNAME" => SystemName,
             _ => null,
         },
         8 => upper switch

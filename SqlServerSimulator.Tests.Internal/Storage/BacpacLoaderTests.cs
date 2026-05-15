@@ -599,9 +599,9 @@ public sealed class BacpacLoaderTests
         var grouped = diagnostics.Skipped.GroupBy(s => s.ElementType)
             .ToDictionary(g => g.Key, g => g.Count());
         IsFalse(grouped.ContainsKey("SqlTableType"), "SqlTableType is dispatched; should not appear in Skipped.");
+        IsFalse(grouped.ContainsKey("SqlProcedure"), "All 3 previously-failing sysname-using procs now load (sysname keyword wired into SqlType.ResolveSimpleKeyword).");
         AreEqual(83, grouped["SqlExtendedProperty"], "Extended properties on the 2 still-deferred computed columns + on table-type columns + on filegroup.");
         AreEqual(2, grouped["SqlComputedColumn"], "2 WWI computed columns invoke json_query (not modeled); both routed via 'Deferred:' prefix so the AW guard stays meaningful.");
-        AreEqual(3, grouped["SqlProcedure"], "3 WWI procedures parse-fail (sysname system-type modeling deferred).");
         AreEqual(3, grouped["SqlIndex"], "3 filtered indexes reference computed columns that don't yet exist at phase 5 (computed columns land in phase 8). Reordering indexes to a later phase tripped an unrelated UDF-resolution gap in ALTER TABLE ADD AS for AW; deferred.");
         AreEqual(2, grouped["SqlCheckConstraint"], "2 JSON check constraints deferred.");
         AreEqual(2, grouped["SqlPermissionStatement"], "GRANT/REVOKE wire-up deferred (same as AW).");
@@ -646,6 +646,33 @@ public sealed class BacpacLoaderTests
         var full = reader.GetString(1);
         var search = reader.GetString(2);
         AreEqual($"{preferred} {full}", search);
+    }
+
+    [TestMethod]
+    public void Load_WWI_Sysname_Procs_Land_In_sys_procedures()
+    {
+        // The three WWI procs taking sysname parameters
+        // ([Application].[AddRoleMemberIfNonexistent],
+        // [Application].[CreateRoleIfNonexistent],
+        // [Sequences].[ReseedSequenceBeyondTableValues]) now load — sysname
+        // is recognized as a keyword. Verify they're in sys.procedures.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT name FROM sys.procedures
+            WHERE name IN ('AddRoleMemberIfNonexistent', 'CreateRoleIfNonexistent', 'ReseedSequenceBeyondTableValues')
+            ORDER BY name;
+            """;
+        using var reader = command.ExecuteReader();
+        var names = new List<string>();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        HasCount(3, names);
+        AreEqual("AddRoleMemberIfNonexistent", names[0]);
+        AreEqual("CreateRoleIfNonexistent", names[1]);
+        AreEqual("ReseedSequenceBeyondTableValues", names[2]);
     }
 
     [TestMethod]

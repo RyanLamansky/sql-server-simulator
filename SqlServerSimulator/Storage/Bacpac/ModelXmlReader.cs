@@ -640,20 +640,15 @@ internal static class ModelXmlReader
     /// <summary>
     /// Strips the brackets and any <c>[sys].</c> qualifier from a built-in
     /// type reference. <c>[int]</c> → <c>int</c>, <c>[sys].[hierarchyid]</c>
-    /// → <c>hierarchyid</c>. The simulator's <see cref="SqlType.GetByName"/>
-    /// keyword table doesn't include <c>sysname</c> (it's a sys-schema alias
-    /// over nvarchar(128) rather than a parser keyword); the loader expands
-    /// the alias inline so DACFx's <c>[sys].[sysname]</c> reaches the parser
-    /// as <c>nvarchar(128)</c>. Surface fidelity loss: <c>sys.columns</c>
-    /// reports nvarchar(128) instead of sysname for the affected columns —
-    /// acceptable for the loader baseline (storage shape is identical).
+    /// → <c>hierarchyid</c>, <c>[sys].[sysname]</c> → <c>sysname</c>. The
+    /// returned bare name is what the simulator's parser sees in a column /
+    /// parameter type position.
     /// </summary>
     private static string NormalizeBuiltinName(string bracketedName)
     {
         var lastDot = bracketedName.LastIndexOf('.');
         var lastSegment = lastDot < 0 ? bracketedName : bracketedName[(lastDot + 1)..];
-        var bare = lastSegment.Trim('[', ']');
-        return string.Equals(bare, "sysname", StringComparison.OrdinalIgnoreCase) ? "nvarchar(128)" : bare;
+        return lastSegment.Trim('[', ']');
     }
 
     private static bool ReadBoolProperty(XElement element, string name, bool defaultValue) =>
