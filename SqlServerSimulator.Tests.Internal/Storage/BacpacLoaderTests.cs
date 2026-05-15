@@ -598,10 +598,10 @@ public sealed class BacpacLoaderTests
         _ = LoadWideWorldImporters(out var diagnostics);
         var grouped = diagnostics.Skipped.GroupBy(s => s.ElementType)
             .ToDictionary(g => g.Key, g => g.Count());
-        AreEqual(89, grouped["SqlExtendedProperty"], "Extended properties (mostly on computed columns / table types) deferred.");
+        IsFalse(grouped.ContainsKey("SqlTableType"), "SqlTableType is dispatched; should not appear in Skipped.");
+        AreEqual(89, grouped["SqlExtendedProperty"], "Extended properties (mostly on computed columns) deferred.");
         AreEqual(8, grouped["SqlComputedColumn"], "Computed columns deferred (same as AW).");
-        AreEqual(6, grouped["SqlProcedure"], "6 WWI procedures parse-fail; need investigation.");
-        AreEqual(4, grouped["SqlTableType"], "SqlTableType not yet in dispatcher.");
+        AreEqual(3, grouped["SqlProcedure"], "3 WWI procedures parse-fail; need investigation.");
         AreEqual(3, grouped["SqlIndex"], "3 WWI indexes fail (likely filtered indexes on bit columns).");
         AreEqual(2, grouped["SqlCheckConstraint"], "2 JSON check constraints deferred.");
         AreEqual(2, grouped["SqlPermissionStatement"], "GRANT/REVOKE wire-up deferred (same as AW).");
@@ -609,6 +609,27 @@ public sealed class BacpacLoaderTests
         AreEqual(1, grouped["SqlView"], "1 WWI view parse-fails (computed-column referent).");
         AreEqual(1, grouped["SqlScalarFunction"], "1 WWI scalar function parse-fails.");
         AreEqual(1, grouped["SqlFilegroup"], "Filegroup not in dispatcher.");
+    }
+
+    [TestMethod]
+    public void Load_WWI_Table_Types_Land_In_sys_table_types()
+    {
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT name FROM sys.table_types ORDER BY name;";
+        using var reader = command.ExecuteReader();
+        var names = new List<string>();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        // WWI emits 4 SqlTableType elements, all under the Website schema:
+        // OrderIDList, OrderLineList, OrderList, SensorDataList.
+        HasCount(4, names);
+        AreEqual("OrderIDList", names[0]);
+        AreEqual("OrderLineList", names[1]);
+        AreEqual("OrderList", names[2]);
+        AreEqual("SensorDataList", names[3]);
     }
 
     [TestMethod]

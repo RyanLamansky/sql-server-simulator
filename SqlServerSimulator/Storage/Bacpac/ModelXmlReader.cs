@@ -99,6 +99,7 @@ internal static class ModelXmlReader
                     ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
                     ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
                     ("SqlRole", 1) => Run(() => EmitRole(element, name, connection)),
+                    ("SqlTableType", 1) => Run(() => EmitTableType(element, name, connection, result)),
                     ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result)),
                     ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
                     ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
@@ -144,7 +145,7 @@ internal static class ModelXmlReader
     /// </summary>
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
-        or "SqlSequence" or "SqlRole"
+        or "SqlSequence" or "SqlRole" or "SqlTableType"
         or "SqlTable"
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
         or "SqlCheckConstraint" or "SqlDefaultConstraint"
@@ -336,6 +337,79 @@ internal static class ModelXmlReader
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         command.CommandText = $"CREATE SEQUENCE {qualifiedName} AS {typeDdl} START WITH {startValue} INCREMENT BY {increment};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE TYPE [schema].[name] AS TABLE (col_list [, PRIMARY KEY (cols)])</c>
+    /// for a <c>SqlTableType</c> element. Columns are <c>SqlTableTypeSimpleColumn</c>
+    /// entries with the same TypeSpecifier shape as regular columns — so
+    /// <see cref="TranslateSimpleColumn"/> reuses cleanly. The optional
+    /// <c>SqlTableTypePrimaryKeyConstraint</c> arrives under a
+    /// <c>Constraints</c> relationship; the PK is anonymous (named constraints
+    /// are grammar-rejected inside table types, see Msg 156 in
+    /// <c>docs/claude/table-valued-parameters.md</c>) and the
+    /// <c>IsClustered</c> annotation is dropped (table-variable storage is
+    /// linear-scan regardless). UNIQUE / CHECK / FK on table types aren't
+    /// exercised by WWI and aren't translated here.
+    /// </summary>
+    private static void EmitTableType(XElement element, string? qualifiedName, DbConnection connection, BacpacLoadResult result)
+    {
+        if (string.IsNullOrEmpty(qualifiedName))
+            throw new InvalidDataException("bacpac: SqlTableType element missing Name attribute.");
+
+        var columnsRel = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Columns")
+            ?? throw new InvalidDataException($"bacpac: SqlTableType '{qualifiedName}' has no Columns relationship.");
+
+        var columnDdls = new List<string>();
+        foreach (var col in columnsRel.Elements(Ns + "Entry").Elements(Ns + "Element"))
+        {
+            var colType = col.Attribute("Type")?.Value;
+            var colName = col.Attribute("Name")?.Value;
+            if (colType == "SqlTableTypeSimpleColumn")
+            {
+                columnDdls.Add(TranslateSimpleColumn(col, colName, result));
+            }
+            else
+            {
+                result.Skipped.Add(new BacpacSkipped(colType ?? "<unknown>", colName, $"Table-type column kind not handled inside '{qualifiedName}'."));
+            }
+        }
+
+        var pkClauses = new List<string>();
+        var constraintsRel = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Constraints");
+        if (constraintsRel is not null)
+        {
+            foreach (var constraint in constraintsRel.Elements(Ns + "Entry").Elements(Ns + "Element"))
+            {
+                if (constraint.Attribute("Type")?.Value != "SqlTableTypePrimaryKeyConstraint")
+                    continue;
+                var cols = new List<string>();
+                var specs = constraint.Elements(Ns + "Relationship")
+                    .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
+                    ?.Elements(Ns + "Entry").Elements(Ns + "Element");
+                foreach (var spec in specs ?? [])
+                {
+                    var colRef = spec.Elements(Ns + "Relationship")
+                        .FirstOrDefault(r => r.Attribute("Name")?.Value == "Column")
+                        ?.Elements(Ns + "Entry").Elements(Ns + "References")
+                        .FirstOrDefault()?.Attribute("Name")?.Value;
+                    if (string.IsNullOrEmpty(colRef))
+                        continue;
+                    cols.Add(colRef[(colRef.LastIndexOf('.') + 1)..]);
+                }
+                if (cols.Count > 0)
+                    pkClauses.Add($"PRIMARY KEY ({string.Join(", ", cols)})");
+            }
+        }
+
+        var body = string.Join(", ", columnDdls.Concat(pkClauses));
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE TYPE {qualifiedName} AS TABLE ({body});";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
