@@ -600,8 +600,8 @@ public sealed class BacpacLoaderTests
             .ToDictionary(g => g.Key, g => g.Count());
         IsFalse(grouped.ContainsKey("SqlTableType"), "SqlTableType is dispatched; should not appear in Skipped.");
         IsFalse(grouped.ContainsKey("SqlProcedure"), "All 3 previously-failing sysname-using procs now load (sysname keyword wired into SqlType.ResolveSimpleKeyword).");
-        AreEqual(83, grouped["SqlExtendedProperty"], "Extended properties on the 2 still-deferred computed columns + on table-type columns + on filegroup.");
-        AreEqual(2, grouped["SqlComputedColumn"], "2 WWI computed columns invoke json_query (not modeled); both routed via 'Deferred:' prefix so the AW guard stays meaningful.");
+        IsFalse(grouped.ContainsKey("SqlComputedColumn"), "JSON_QUERY now supported; all 8 WWI computed columns load.");
+        AreEqual(81, grouped["SqlExtendedProperty"], "Extended properties on table-type columns + filegroup + a handful of computed-col-adjacent columns the loader doesn't yet host-route.");
         AreEqual(3, grouped["SqlIndex"], "3 filtered indexes reference computed columns that don't yet exist at phase 5 (computed columns land in phase 8). Reordering indexes to a later phase tripped an unrelated UDF-resolution gap in ALTER TABLE ADD AS for AW; deferred.");
         AreEqual(2, grouped["SqlCheckConstraint"], "2 JSON check constraints deferred.");
         AreEqual(2, grouped["SqlPermissionStatement"], "GRANT/REVOKE wire-up deferred (same as AW).");
@@ -618,13 +618,13 @@ public sealed class BacpacLoaderTests
         using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        // 6 of WWI's 8 computed columns succeed (the 2 referencing json_query
-        // remain deferred). Verify the 6 surface in sys.columns with
-        // is_computed = 1.
+        // All 8 of WWI's computed columns succeed after the 2026-05-15
+        // JSON_QUERY bundle (was 6/8 before). Verify all 8 surface in
+        // sys.columns with is_computed = 1.
         command.CommandText = "SELECT COUNT(*) FROM sys.columns WHERE is_computed = 1;";
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
-        AreEqual(6, reader.GetInt32(0));
+        AreEqual(8, reader.GetInt32(0));
     }
 
     [TestMethod]

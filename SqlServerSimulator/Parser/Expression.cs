@@ -614,6 +614,7 @@ internal abstract class Expression
                 "DENSE_RANK" => WindowExpression.ParseDenseRank(context),
                 "ERROR_LINE" => new ErrorLineFunction(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
+                "JSON_QUERY" => new JsonQuery(context),
                 "JSON_VALUE" => new JsonValue(context),
                 "LAST_VALUE" => WindowExpression.ParseLastValue(context),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),

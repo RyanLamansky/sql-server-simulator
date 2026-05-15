@@ -138,4 +138,35 @@ public sealed class JsonScalarTests
             "{\"City\":\"Shelbyville\",\"Street\":\"1 Main\"}",
             simulation.ExecuteScalar("select json_modify('{\"City\":\"Springfield\",\"Street\":\"1 Main\"}', 'strict $.City', json_value('{\"\":\"Shelbyville\"}', '$.\"\"'))"));
     }
+
+    [TestMethod]
+    public void JsonQuery_ObjectMatch_ReturnsRawJson()
+        => AreEqual("{\"a\":1,\"b\":2}", new Simulation().ExecuteScalar("select json_query('{\"obj\":{\"a\":1,\"b\":2}}', '$.obj')"));
+
+    [TestMethod]
+    public void JsonQuery_ArrayMatch_ReturnsRawJson()
+        => AreEqual("[1,2,3]", new Simulation().ExecuteScalar("select json_query('{\"arr\":[1,2,3]}', '$.arr')"));
+
+    /// <summary>Complement of <see cref="JsonValue_ObjectMatch_ReturnsNullLax"/>: JSON_QUERY returns NULL on scalar matches in lax mode.</summary>
+    [TestMethod]
+    public void JsonQuery_ScalarMatch_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('{\"n\":42}', '$.n')"));
+
+    [TestMethod]
+    public void JsonQuery_MissingPath_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('{\"x\":[1]}', '$.missing')"));
+
+    [TestMethod]
+    public void JsonQuery_NullJson_ReturnsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query(null, '$.x')"));
+
+    [TestMethod]
+    public void JsonQuery_NullPath_ReturnsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('{\"x\":[1]}', null)"));
+
+    [TestMethod]
+    public void JsonQuery_RoundTripThroughOpenJson()
+        => AreEqual(
+            "Spanish",
+            new Simulation().ExecuteScalar("select [value] from openjson(json_query('{\"OtherLanguages\":[\"Spanish\"]}', '$.OtherLanguages'))"));
 }
