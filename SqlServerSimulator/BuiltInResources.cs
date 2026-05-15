@@ -2799,6 +2799,9 @@ internal static class BuiltInResources
             // geography / geometry: same max_length = -1 reporting as xml,
             // matching the probed sys.columns shape for spatial-typed columns.
             SpatialSqlType => (-1, 0, 0),
+            // hierarchyid: 892-byte max representation per the probed
+            // sys.types row shape; no numeric precision/scale.
+            HierarchyIdSqlType => (892, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }

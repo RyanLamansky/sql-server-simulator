@@ -83,10 +83,68 @@ public sealed class BacpacLoaderTests
     public void Load_AW_Unhandled_Elements_Recorded_In_Skipped()
     {
         _ = LoadAdventureWorks(out var diagnostics);
-        // Every non-Schema, non-DatabaseOptions element should currently be
-        // on Skipped — they'll move off as each emitter lands.
+        // Phase A + B handled element types (SqlSchema, SqlDatabaseOptions,
+        // SqlTable, SqlSimpleColumn) are off Skipped; everything else still
+        // appears there awaiting future bundles.
         IsNotEmpty(diagnostics.Skipped);
-        IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlTable").ToList());
+        IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlTable").ToList());
         IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList());
+        IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlComputedColumn").ToList());
+    }
+
+    [TestMethod]
+    public void Load_AW_Tables_Land_With_Correct_Column_Counts()
+    {
+        var simulation = LoadAdventureWorks(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        // 71 user tables. Pre-existing system tables (sys.*) are filtered by
+        // the schema_id range (user schemas use ids >= 5; built-in sys = 4).
+        command.CommandText = "SELECT COUNT(*) FROM sys.tables;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(71, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_AW_Production_ProductCategory_Has_Expected_Columns()
+    {
+        var simulation = LoadAdventureWorks(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        // ProductCategory has 4 cols: ProductCategoryID int IDENTITY PK,
+        // Name [dbo].[Name] NOT NULL, rowguid uniqueidentifier NOT NULL
+        // ROWGUIDCOL, ModifiedDate datetime NOT NULL.
+        command.CommandText = """
+            SELECT c.name, t.name AS type_name, c.is_nullable, c.is_identity
+              FROM sys.columns c
+              JOIN sys.tables tab ON c.object_id = tab.object_id
+              JOIN sys.types t ON c.user_type_id = t.user_type_id
+              JOIN sys.schemas s ON tab.schema_id = s.schema_id
+             WHERE s.name = 'Production' AND tab.name = 'ProductCategory'
+             ORDER BY c.column_id;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<(string Name, string TypeName, bool Nullable, bool Identity)>();
+        while (reader.Read())
+        {
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetBoolean(2), reader.GetBoolean(3)));
+        }
+        HasCount(4, rows);
+        AreEqual("ProductCategoryID", rows[0].Name);
+        AreEqual("int", rows[0].TypeName);
+        IsFalse(rows[0].Nullable);
+        IsTrue(rows[0].Identity);
+        AreEqual("Name", rows[1].Name);
+        // [dbo].[Name] is an alias over nvarchar(50); user_type_id surfaces the
+        // alias's allocated id (>=256) and joining to sys.types resolves the
+        // alias name. NOT NULL is preserved through the column declaration.
+        IsFalse(rows[1].Nullable);
+        AreEqual("rowguid", rows[2].Name);
+        AreEqual("uniqueidentifier", rows[2].TypeName);
+        AreEqual("ModifiedDate", rows[3].Name);
+        AreEqual("datetime", rows[3].TypeName);
     }
 }

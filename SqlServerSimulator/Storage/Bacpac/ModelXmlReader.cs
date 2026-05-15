@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Globalization;
 using System.Xml;
 using System.Xml.Linq;
 
@@ -41,28 +42,58 @@ internal static class ModelXmlReader
         var model = doc.Root?.Element(Ns + "Model")
             ?? throw new InvalidDataException("bacpac: <DataSchemaModel><Model> root not found.");
 
-        using var connection = simulation.CreateDbConnection();
-        connection.Open();
-
-        foreach (var element in model.Elements(Ns + "Element"))
+        // Materialize once so dependency-ordered passes can iterate the same
+        // element list multiple times. The cost is one O(N) walk + per-element
+        // XElement reference retention — 1000s of elements at most, negligible
+        // memory-wise even for huge bacpacs.
+        var elements = model.Elements(Ns + "Element").ToList();
+        foreach (var element in elements)
         {
             var type = element.Attribute("Type")?.Value
                 ?? throw new InvalidDataException("bacpac: <Element> missing Type attribute.");
-            var name = element.Attribute("Name")?.Value;
-
             _ = result.ElementCounts.TryGetValue(type, out var current);
             result.ElementCounts[type] = current + 1;
+        }
 
-            switch (type)
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+
+        // Phase 1: database options + schemas + UDDTs. These don't depend on
+        // any other DDL and must land before tables (column types may
+        // reference an alias type, FK definitions may reference a schema, etc.).
+        RunPhase(elements, connection, result, isPhase1: true);
+        // Phase 2: tables. Constraints / indexes / views / etc. arrive in
+        // later phases as they're added.
+        RunPhase(elements, connection, result, isPhase1: false);
+    }
+
+    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacLoadResult result, bool isPhase1)
+    {
+        foreach (var element in elements)
+        {
+            var type = element.Attribute("Type")?.Value!;
+            var name = element.Attribute("Name")?.Value;
+            switch ((type, isPhase1))
             {
-                case "SqlDatabaseOptions":
+                case ("SqlDatabaseOptions", true):
                     EmitDatabaseOptions(element, connection, result);
                     break;
-                case "SqlSchema":
+                case ("SqlSchema", true):
                     EmitSchema(name, connection);
                     break;
+                case ("SqlUserDefinedDataType", true):
+                    EmitUserDefinedDataType(element, name, connection);
+                    break;
+                case ("SqlTable", false):
+                    EmitTable(element, name, connection, result);
+                    break;
+                case (_, true):
+                    // Skipped recording happens in phase 2's default arm so
+                    // an element doesn't get reported twice.
+                    break;
                 default:
-                    result.Skipped.Add(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
+                    if (type is not "SqlDatabaseOptions" and not "SqlSchema" and not "SqlUserDefinedDataType" and not "SqlTable")
+                        result.Skipped.Add(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
                     break;
             }
         }
@@ -197,4 +228,207 @@ internal static class ModelXmlReader
         "3" => "SIMPLE",
         _ => "FULL",
     };
+
+    /// <summary>
+    /// Emits <c>CREATE TYPE [schema].[name] FROM &lt;builtin&gt;[(args)] [NULL | NOT NULL]</c>
+    /// for a <c>SqlUserDefinedDataType</c> element. The element's Type relationship
+    /// + Length / Precision / Scale properties match the SqlTypeSpecifier shape exactly,
+    /// so <see cref="TranslateTypeSpecifier"/> reuses cleanly. Default nullability when
+    /// IsNullable is absent is True (matches SQL Server's CREATE TYPE default).
+    /// </summary>
+    private static void EmitUserDefinedDataType(XElement element, string? qualifiedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(qualifiedName))
+            throw new InvalidDataException("bacpac: SqlUserDefinedDataType element missing Name attribute.");
+
+        var typeDdl = TranslateTypeSpecifier(element);
+        var isNullable = ReadBoolProperty(element, "IsNullable", defaultValue: true);
+        var nullability = isNullable ? " NULL" : " NOT NULL";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE TYPE {qualifiedName} FROM {typeDdl}{nullability};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE TABLE [schema].[name] (col1 TYPE [IDENTITY] [ROWGUIDCOL] [NULL|NOT NULL], …)</c>
+    /// for a <c>SqlTable</c> element. Only <c>SqlSimpleColumn</c> entries are
+    /// translated in this phase; <c>SqlComputedColumn</c> entries land on
+    /// <see cref="BacpacLoadResult.Skipped"/> (a follow-up phase ties them
+    /// into the same CREATE TABLE via the simulator's <c>AS &lt;expr&gt; [PERSISTED]</c>
+    /// computed-column grammar). Constraints (PK / UQ / FK / CHECK / DEFAULT)
+    /// arrive as separate top-level Elements; they layer onto the table later
+    /// via <c>ALTER TABLE … ADD CONSTRAINT</c>.
+    /// </summary>
+    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacLoadResult result)
+    {
+        if (string.IsNullOrEmpty(qualifiedName))
+            throw new InvalidDataException("bacpac: SqlTable element missing Name attribute.");
+
+        var columnsRelationship = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Columns")
+            ?? throw new InvalidDataException($"bacpac: SqlTable '{qualifiedName}' has no Columns relationship.");
+
+        var columnDdls = new List<string>();
+        foreach (var columnElement in columnsRelationship.Elements(Ns + "Entry").Elements(Ns + "Element"))
+        {
+            var columnType = columnElement.Attribute("Type")?.Value;
+            var columnName = columnElement.Attribute("Name")?.Value;
+            switch (columnType)
+            {
+                case "SqlSimpleColumn":
+                    columnDdls.Add(TranslateSimpleColumn(columnElement, columnName, result));
+                    break;
+                case "SqlComputedColumn":
+                    // Deferred to a follow-up phase. Recording on Skipped so
+                    // the caller has a per-column inventory of what's missing.
+                    result.Skipped.Add(new BacpacSkipped(
+                        "SqlComputedColumn",
+                        columnName,
+                        $"Computed column on '{qualifiedName}' deferred to a follow-up phase."));
+                    break;
+                default:
+                    result.Skipped.Add(new BacpacSkipped(
+                        columnType ?? "<unknown>",
+                        columnName,
+                        $"Unrecognized column element on '{qualifiedName}'."));
+                    break;
+            }
+        }
+
+        if (columnDdls.Count == 0)
+            throw new InvalidDataException($"bacpac: SqlTable '{qualifiedName}' has no recognized columns.");
+
+        var sql = $"CREATE TABLE {qualifiedName} ({string.Join(", ", columnDdls)});";
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = sql;
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Builds the per-column DDL fragment for a single <c>SqlSimpleColumn</c>
+    /// element. Output shape:
+    /// <c>[col] type[(args)] [IDENTITY(seed, increment)] [ROWGUIDCOL] [NULL|NOT NULL]</c>.
+    /// IDENTITY defaults to (1,1); ROWGUIDCOL only emits when
+    /// <c>IsRowGuidColumn=True</c>; the explicit NULL/NOT NULL marker comes
+    /// from <c>IsNullable</c> (default True per probe).
+    /// </summary>
+    private static string TranslateSimpleColumn(XElement columnElement, string? qualifiedColumnName, BacpacLoadResult result)
+    {
+        if (string.IsNullOrEmpty(qualifiedColumnName))
+            throw new InvalidDataException("bacpac: SqlSimpleColumn missing Name attribute.");
+
+        // Name shape: [schema].[table].[column] — take the trailing bracketed
+        // segment as the column leaf.
+        var lastDot = qualifiedColumnName.LastIndexOf('.');
+        var columnLeaf = lastDot < 0 ? qualifiedColumnName : qualifiedColumnName[(lastDot + 1)..];
+
+        var isNullable = ReadBoolProperty(columnElement, "IsNullable", defaultValue: true);
+        var isIdentity = ReadBoolProperty(columnElement, "IsIdentity", defaultValue: false);
+        var isRowGuid = ReadBoolProperty(columnElement, "IsRowGuidColumn", defaultValue: false);
+        var identitySeed = ReadStringProperty(columnElement, "IdentitySeed");
+        var identityIncrement = ReadStringProperty(columnElement, "IdentityIncrement");
+
+        var typeSpec = columnElement.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "TypeSpecifier")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .FirstOrDefault(e => e.Attribute("Type")?.Value is "SqlTypeSpecifier" or "SqlXmlTypeSpecifier")
+            ?? throw new InvalidDataException($"bacpac: column '{qualifiedColumnName}' missing TypeSpecifier.");
+
+        var typeDdl = TranslateTypeSpecifier(typeSpec);
+
+        var identityClause = isIdentity
+            ? $" IDENTITY({identitySeed ?? "1"}, {identityIncrement ?? "1"})"
+            : "";
+        if (isRowGuid)
+        {
+            // ROWGUIDCOL is metadata-only — it tells SQL Server which
+            // uniqueidentifier column NEWID()/NEWSEQUENTIALID() defaults to
+            // for $rowguid pseudo-column references. The simulator's CREATE
+            // TABLE parser doesn't accept the clause; storage shape and DML
+            // are unaffected by its absence (DEFAULT NEWID() arrives as a
+            // separate SqlDefaultConstraint element). Record a Warning once
+            // so the diagnostics report names the deferred surface.
+            result.Warnings.Add($"ROWGUIDCOL clause on column '{qualifiedColumnName}' dropped — the simulator doesn't model this metadata annotation; storage behavior is unaffected.");
+        }
+        var nullability = isNullable ? " NULL" : " NOT NULL";
+        return $"{columnLeaf} {typeDdl}{identityClause}{nullability}";
+    }
+
+    /// <summary>
+    /// Translates a <c>SqlTypeSpecifier</c> element to its T-SQL surface form.
+    /// Handles bracketed built-ins (<c>[int]</c> / <c>[sys].[sysname]</c> /
+    /// <c>[sys].[hierarchyid]</c>), user-defined alias types
+    /// (<c>[dbo].[Name]</c>), and the four argument shapes: <c>Length</c>,
+    /// <c>IsMax</c>, <c>Precision</c> alone, <c>Precision+Scale</c>, and
+    /// <c>Scale</c> alone (datetime2 / time / datetimeoffset).
+    /// </summary>
+    private static string TranslateTypeSpecifier(XElement typeSpec)
+    {
+        var typeRef = typeSpec.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Type")
+            ?.Elements(Ns + "Entry").Elements(Ns + "References").FirstOrDefault()
+            ?? throw new InvalidDataException("bacpac: TypeSpecifier missing Type reference.");
+
+        var typeName = typeRef.Attribute("Name")?.Value
+            ?? throw new InvalidDataException("bacpac: Type reference missing Name attribute.");
+        var isBuiltin = typeRef.Attribute("ExternalSource")?.Value == "BuiltIns";
+
+        // Normalize the name into the form a CREATE TABLE column-type position
+        // can use. Built-ins drop their brackets and any [sys]. prefix so
+        // hierarchyid / sysname / etc. reach the parser as bare identifiers;
+        // user-defined alias types keep their bracketed 2-part shape so the
+        // simulator's Schema.AliasTypes lookup runs through the qualified path.
+        var renderedTypeName = isBuiltin ? NormalizeBuiltinName(typeName) : typeName;
+
+        var isMax = ReadBoolProperty(typeSpec, "IsMax", defaultValue: false);
+        var length = ReadStringProperty(typeSpec, "Length");
+        var precision = ReadStringProperty(typeSpec, "Precision");
+        var scale = ReadStringProperty(typeSpec, "Scale");
+
+        // Argument-shape cascade: IsMax wins, then Length, then
+        // Precision[+Scale], then Scale (datetime2 / time / datetimeoffset),
+        // then bare type. The simulator's parser accepts the trailing-paren
+        // shape verbatim.
+        return (isMax, length, precision, scale) switch
+        {
+            (true, _, _, _) => $"{renderedTypeName}(MAX)",
+            (_, not null, _, _) => $"{renderedTypeName}({length})",
+            (_, _, not null, not null) => string.Create(CultureInfo.InvariantCulture, $"{renderedTypeName}({precision}, {scale})"),
+            (_, _, not null, _) => $"{renderedTypeName}({precision})",
+            (_, _, _, not null) => $"{renderedTypeName}({scale})",
+            _ => renderedTypeName,
+        };
+    }
+
+    /// <summary>
+    /// Strips the brackets and any <c>[sys].</c> qualifier from a built-in
+    /// type reference. <c>[int]</c> → <c>int</c>, <c>[sys].[hierarchyid]</c>
+    /// → <c>hierarchyid</c>. The simulator's <see cref="SqlType.GetByName"/>
+    /// keyword table doesn't include <c>sysname</c> (it's a sys-schema alias
+    /// over nvarchar(128) rather than a parser keyword); the loader expands
+    /// the alias inline so DACFx's <c>[sys].[sysname]</c> reaches the parser
+    /// as <c>nvarchar(128)</c>. Surface fidelity loss: <c>sys.columns</c>
+    /// reports nvarchar(128) instead of sysname for the affected columns —
+    /// acceptable for the loader baseline (storage shape is identical).
+    /// </summary>
+    private static string NormalizeBuiltinName(string bracketedName)
+    {
+        var lastDot = bracketedName.LastIndexOf('.');
+        var lastSegment = lastDot < 0 ? bracketedName : bracketedName[(lastDot + 1)..];
+        var bare = lastSegment.Trim('[', ']');
+        return string.Equals(bare, "sysname", StringComparison.OrdinalIgnoreCase) ? "nvarchar(128)" : bare;
+    }
+
+    private static bool ReadBoolProperty(XElement element, string name, bool defaultValue) =>
+        ReadStringProperty(element, name) is { } value ? IsTrue(value) : defaultValue;
+
+    private static string? ReadStringProperty(XElement element, string name) =>
+        element.Elements(Ns + "Property")
+            .FirstOrDefault(p => p.Attribute("Name")?.Value == name)
+            ?.Attribute("Value")?.Value;
 }
