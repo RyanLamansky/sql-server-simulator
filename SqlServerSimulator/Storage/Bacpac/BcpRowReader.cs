@@ -112,6 +112,7 @@ internal static class BcpRowReader
         // chunk markers — probe-confirmed against AW on 2026-05-15).
         if (type is XmlSqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.Xml);
         if (type is GeographySqlType or GeometrySqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.SpatialDeferToNull);
+        if (type is HierarchyIdSqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.HierarchyId);
         if (type is VarcharSqlType vc && vc.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.VarcharMax);
         if (type is NVarcharSqlType nv && nv.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.NVarcharMax);
         if (type is VarbinarySqlType vb && vb.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.VarbinaryMax);
@@ -147,6 +148,16 @@ internal static class BcpRowReader
         /// bundle; this lets the row load without breaking column count.
         /// </summary>
         SpatialDeferToNull,
+        /// <summary>
+        /// Hierarchyid: read the length + N bytes, decode the OrdPath
+        /// binary form via <see cref="HierarchyIdWireDecoder.Decode"/>, and
+        /// return a hierarchyid <see cref="SqlValue"/>. The decoder covers
+        /// the [0..79] ordinal range and raises
+        /// <see cref="NotSupportedException"/> for the negative range +
+        /// ordinals &gt;= 80; both bubble up to the per-file try/catch in
+        /// <see cref="BacpacReader"/> so the whole file lands on Skipped.
+        /// </summary>
+        HierarchyId,
     }
 
     /// <summary>
@@ -176,6 +187,7 @@ internal static class BcpRowReader
             EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
             EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
             EightBytePayload.SpatialDeferToNull => SqlValue.Null(type),
+            EightBytePayload.HierarchyId => SqlValue.FromHierarchyId(HierarchyIdWireDecoder.Decode(data)),
             _ => throw new InvalidOperationException($"unknown EightBytePayload {kind}"),
         };
     }

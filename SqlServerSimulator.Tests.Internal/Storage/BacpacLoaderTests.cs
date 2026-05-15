@@ -259,34 +259,56 @@ public sealed class BacpacLoaderTests
     public void Load_AW_Bcp_Data_Loads()
     {
         var simulation = LoadAdventureWorks(out var diagnostics);
-        // AW carries 760,167 rows across 1103 BCP shards. The wire-format
-        // decoder lands 759,833 (99.96%); the remaining ~334 live in four
-        // BCP shards that exercise hierarchyid columns (HR.Employee +
-        // Prod.Document × 2 + Prod.ProductDocument). hierarchyid's
-        // variable-bit Huffman-style binary encoding is deferred to a
-        // dedicated follow-up bundle.
+        // AW carries 760,167 rows across 1103 BCP shards. With the
+        // hierarchyid wire decoder landing alongside the MAX / xml /
+        // geography paths, every shard loads cleanly: 100% row coverage,
+        // 0 BCP-file failures.
         var rowsLoaded = diagnostics.ElementCounts.GetValueOrDefault("_DataRows", 0);
-        IsGreaterThanOrEqualTo(759_500, rowsLoaded, $"expected >= 759.5K rows, got {rowsLoaded}");
+        AreEqual(760_167, rowsLoaded);
 
-        // Production.ProductCategory's 4 rows must land (no exotic types).
         using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
         connection.Open();
-        AreEqual(4, QueryCount(connection, "SELECT COUNT(*) FROM Production.ProductCategory;"));
 
+        // Production.ProductCategory's 4 rows must land (no exotic types).
+        AreEqual(4, QueryCount(connection, "SELECT COUNT(*) FROM Production.ProductCategory;"));
         // Sales.SpecialOffer's 16 rows must land (exercises smallmoney +
         // nullable int + uniqueidentifier + alias-typed dbo.Flag).
         AreEqual(16, QueryCount(connection, "SELECT COUNT(*) FROM Sales.SpecialOffer;"));
 
-        // All remaining BCP failures are hierarchyid-blocked. Lock the
-        // expected set to surface any regression in MAX/xml/geography paths
-        // (those types loaded fine for AW after this bundle).
+        // Lock the zero-failures state — any regression in MAX / xml /
+        // geography / hierarchyid decoding surfaces here.
         var dataFileFailures = diagnostics.Skipped.Where(s => s.ElementType == "_DataFile").ToList();
-        HasCount(4, dataFileFailures);
-        foreach (var entry in dataFileFailures)
-        {
-            IsTrue(entry.Reason.Contains("hierarchyid", StringComparison.OrdinalIgnoreCase),
-                $"unexpected BCP failure (only hierarchyid remains): {entry.ElementName}: {entry.Reason}");
-        }
+        IsEmpty(dataFileFailures);
+    }
+
+    [TestMethod]
+    public void Load_AW_Hierarchyid_Column_Carries_Path()
+    {
+        var simulation = LoadAdventureWorks(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+
+        // HR.Employee carries 290 rows; OrganizationNode is hierarchyid
+        // NULL for the CEO (BusinessEntityID=1) and a path for everyone
+        // else. Verify the full count + a representative path.
+        AreEqual(290, QueryCount(connection, "SELECT COUNT(*) FROM HumanResources.Employee;"));
+        AreEqual(1, QueryCount(connection, "SELECT COUNT(*) FROM HumanResources.Employee WHERE OrganizationNode IS NULL;"));
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT OrganizationNode.ToString() FROM HumanResources.Employee WHERE BusinessEntityID = 2;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("/1/", reader.GetString(0));
+
+        // Production.Document.DocumentNode loads (12 rows in this bacpac;
+        // probe-confirmed). The root row (DocumentNode = '/') has an empty
+        // 8-byte payload.
+        AreEqual(12, QueryCount(connection, "SELECT COUNT(*) FROM Production.Document;"));
+        using var rootCmd = connection.CreateCommand();
+        rootCmd.CommandText = "SELECT DocumentNode.ToString() FROM Production.Document WHERE Title = 'Documents';";
+        using var rootReader = rootCmd.ExecuteReader();
+        IsTrue(rootReader.Read());
+        AreEqual("/", rootReader.GetString(0));
     }
 
     [TestMethod]
