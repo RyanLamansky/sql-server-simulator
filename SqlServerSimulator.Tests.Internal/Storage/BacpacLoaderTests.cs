@@ -83,16 +83,18 @@ public sealed class BacpacLoaderTests
     public void Load_AW_Unhandled_Elements_Recorded_In_Skipped()
     {
         _ = LoadAdventureWorks(out var diagnostics);
-        // Phases A-C handled types are off Skipped; everything else still
-        // appears there awaiting future bundles.
+        // Phases A-F handled types are off Skipped; the few remaining bucket
+        // types (SqlComputedColumn, SqlPermissionStatement, full-text, XML
+        // schema collections / indexes, filegroup-hosted extended properties)
+        // appear awaiting their own bundles.
         IsNotEmpty(diagnostics.Skipped);
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlTable").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPrimaryKeyConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlForeignKeyConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlCheckConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlDefaultConstraint").ToList());
-        IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList());
         IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlComputedColumn").ToList());
+        IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPermissionStatement").ToList());
     }
 
     [TestMethod]
@@ -252,6 +254,68 @@ public sealed class BacpacLoaderTests
     }
 
     public TestContext TestContext { get; set; } = null!;
+
+    [TestMethod]
+    public void Load_AW_Bcp_Data_Loads()
+    {
+        var simulation = LoadAdventureWorks(out var diagnostics);
+        // AW carries 760,167 rows across 1103 BCP shards. Phase G's
+        // first-cut decoder lands ~718K (94%); the remaining ~42K live in
+        // tables with xml / hierarchyid / geography / varbinary(MAX)
+        // columns whose wire-format decoders are deferred to a follow-up
+        // bundle. Each unloaded shard surfaces on Skipped with the type
+        // that's blocking it.
+        var rowsLoaded = diagnostics.ElementCounts.GetValueOrDefault("_DataRows", 0);
+        IsGreaterThanOrEqualTo(700_000, rowsLoaded, $"expected >= 700K rows, got {rowsLoaded}");
+
+        // Production.ProductCategory's 4 rows must land (no exotic types).
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        AreEqual(4, QueryCount(connection, "SELECT COUNT(*) FROM Production.ProductCategory;"));
+
+        // Sales.SpecialOffer's 16 rows must land (exercises smallmoney +
+        // nullable int + uniqueidentifier + alias-typed dbo.Flag).
+        AreEqual(16, QueryCount(connection, "SELECT COUNT(*) FROM Sales.SpecialOffer;"));
+
+        // The Skipped data files all name their blocking type or feature.
+        var dataFileFailures = diagnostics.Skipped.Where(s => s.ElementType == "_DataFile").ToList();
+        foreach (var entry in dataFileFailures)
+        {
+            IsTrue(entry.Reason.Contains("hierarchyid", StringComparison.OrdinalIgnoreCase)
+                || entry.Reason.Contains("geography", StringComparison.OrdinalIgnoreCase)
+                || entry.Reason.Contains("xml", StringComparison.OrdinalIgnoreCase)
+                || entry.Reason.Contains("MAX", StringComparison.OrdinalIgnoreCase),
+                $"unexpected BCP failure: {entry.ElementName}: {entry.Reason}");
+        }
+    }
+
+    [TestMethod]
+    public void Load_AW_Extended_Properties_Land()
+    {
+        var simulation = LoadAdventureWorks(out var diagnostics);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        // AW has 538 SqlExtendedProperty elements: 461 column-level + 69
+        // table-level + 5 schema + 1 DB + 1 filegroup + 1 DDL-trigger. The
+        // loader handles SqlColumn / SqlTableBase / SqlSchema /
+        // SqlDatabaseOptions hosts; SqlFilegroup + SqlDatabaseDdlTrigger
+        // hosts are out of scope, and 9 column/table-level properties miss
+        // because their host columns / tables didn't load (computed-col
+        // tables, vJobCandidate-family views, etc.). 527 land in practice.
+        var landed = QueryCount(connection, "SELECT COUNT(*) FROM sys.extended_properties;");
+        IsGreaterThanOrEqualTo(525, landed);
+
+        // The 1 DB-level MS_Description should be present.
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT CAST(value AS nvarchar(MAX)) FROM sys.extended_properties WHERE class = 0 AND name = 'MS_Description';";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("AdventureWorks 2025 Sample OLTP Database", reader.GetString(0));
+
+        // Filegroup + DDL-trigger hosts land on Skipped with the expected reason.
+        var skipped = diagnostics.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList();
+        IsNotEmpty(skipped.Where(s => s.Reason.Contains("SqlFilegroup", StringComparison.Ordinal)).ToList());
+    }
 
     [TestMethod]
     public void Load_AW_Cascade_FK_Has_Correct_Action()

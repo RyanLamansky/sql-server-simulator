@@ -29,6 +29,16 @@ internal sealed class BacpacLoadResult
 
     /// <summary>Element counts seen during the walk, keyed by element type.</summary>
     internal readonly Dictionary<string, int> ElementCounts = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Per-table per-column "declared via UDDT alias" flags, keyed by
+    /// <c>[schema].[table]</c>. UDDT-typed columns get a 1-byte length prefix
+    /// in BCP wire format even when NOT NULL, regardless of the underlying
+    /// type's natural encoding — the BCP decoder needs this distinction to
+    /// align column boundaries correctly. Populated during model.xml
+    /// emission, consumed during the data-load pass.
+    /// </summary>
+    internal readonly Dictionary<string, bool[]> TableColumnIsAlias = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>

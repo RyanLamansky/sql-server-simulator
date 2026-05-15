@@ -74,11 +74,11 @@ internal static class ModelXmlReader
         // PK/UQ on referenced tables); phase 5 = indexes (depend on tables);
         // phase 6 = views (depend on tables + other views); phase 7 = functions
         // + procedures + DML triggers (depend on tables + views; bodies are
-        // deferred-parsed so cross-references inside the same phase work).
-        // Future phases will add permissions + extended properties (8).
+        // deferred-parsed so cross-references inside the same phase work);
+        // phase 8 = extended properties (depend on every covered host type).
         // Skipped-element recording happens on the last phase so each
         // unhandled type is reported once.
-        const int LastPhase = 7;
+        const int LastPhase = 8;
         for (var phase = 1; phase <= LastPhase; phase++)
             RunPhase(elements, connection, result, phase, viewNames, isLastPhase: phase == LastPhase);
     }
@@ -107,6 +107,7 @@ internal static class ModelXmlReader
                 ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
                 ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
                 ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
+                ("SqlExtendedProperty", 8) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
                 _ => IsHandledByAnotherPhase(type),
             };
             if (!handled && isLastPhase)
@@ -134,7 +135,8 @@ internal static class ModelXmlReader
         or "SqlIndex"
         or "SqlView"
         or "SqlScalarFunction" or "SqlMultiStatementTableValuedFunction"
-        or "SqlProcedure" or "SqlDmlTrigger" or "SqlDatabaseDdlTrigger";
+        or "SqlProcedure" or "SqlDmlTrigger" or "SqlDatabaseDdlTrigger"
+        or "SqlExtendedProperty";
 
     /// <summary>
     /// Emits <c>CREATE SCHEMA [name]</c>. The default <c>dbo</c> schema is
@@ -309,6 +311,7 @@ internal static class ModelXmlReader
             ?? throw new InvalidDataException($"bacpac: SqlTable '{qualifiedName}' has no Columns relationship.");
 
         var columnDdls = new List<string>();
+        var perColumnIsAlias = new List<bool>();
         foreach (var columnElement in columnsRelationship.Elements(Ns + "Entry").Elements(Ns + "Element"))
         {
             var columnType = columnElement.Attribute("Type")?.Value;
@@ -317,6 +320,7 @@ internal static class ModelXmlReader
             {
                 case "SqlSimpleColumn":
                     columnDdls.Add(TranslateSimpleColumn(columnElement, columnName, result));
+                    perColumnIsAlias.Add(IsAliasTypedColumn(columnElement));
                     break;
                 case "SqlComputedColumn":
                     // Deferred to a follow-up phase after functions land —
@@ -349,6 +353,30 @@ internal static class ModelXmlReader
         command.CommandText = sql;
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
+
+        // Side map: which columns (in HeapTable.Columns order, after computed
+        // columns are filtered out) are UDDT-aliased. The BCP decoder needs
+        // this to apply the alias-specific 1-byte-prefix wire format.
+        result.TableColumnIsAlias[qualifiedName] = [.. perColumnIsAlias];
+    }
+
+    /// <summary>
+    /// Returns true when the column's type-reference is a UDDT alias (e.g.
+    /// <c>[dbo].[Flag]</c>) rather than a built-in (<c>[int]</c> with
+    /// <c>ExternalSource="BuiltIns"</c>). UDDT-aliased columns use a
+    /// 1-byte-prefix wire format in BCP regardless of nullability — see
+    /// <see cref="BacpacLoadResult.TableColumnIsAlias"/>.
+    /// </summary>
+    private static bool IsAliasTypedColumn(XElement columnElement)
+    {
+        var typeRef = columnElement.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "TypeSpecifier")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .FirstOrDefault(e => e.Attribute("Type")?.Value is "SqlTypeSpecifier")
+            ?.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Type")
+            ?.Elements(Ns + "Entry").Elements(Ns + "References").FirstOrDefault();
+        return typeRef is not null && typeRef.Attribute("ExternalSource")?.Value != "BuiltIns";
     }
 
     /// <summary>
@@ -369,6 +397,15 @@ internal static class ModelXmlReader
         var lastDot = qualifiedColumnName.LastIndexOf('.');
         var columnLeaf = lastDot < 0 ? qualifiedColumnName : qualifiedColumnName[(lastDot + 1)..];
 
+        // Capture explicit-or-absent for IsNullable: absent means "inherit
+        // the column-type's default". For builtins that's NULL (ANSI default);
+        // for alias types it's the alias's stored IsNullable. Omitting the
+        // marker entirely lets the simulator's resolver pick the right
+        // default through both paths. This matters for columns like
+        // SalesOrderHeader.OnlineOrderFlag which uses the dbo.Flag alias
+        // (NOT NULL default) — emitting "NULL" explicitly would override
+        // the alias and cause BCP NULL-marker misalignment downstream.
+        var isNullableExplicit = ReadStringProperty(columnElement, "IsNullable") is not null;
         var isNullable = ReadBoolProperty(columnElement, "IsNullable", defaultValue: true);
         var isIdentity = ReadBoolProperty(columnElement, "IsIdentity", defaultValue: false);
         var isRowGuid = ReadBoolProperty(columnElement, "IsRowGuidColumn", defaultValue: false);
@@ -397,7 +434,7 @@ internal static class ModelXmlReader
             // so the diagnostics report names the deferred surface.
             result.Warnings.Add($"ROWGUIDCOL clause on column '{qualifiedColumnName}' dropped — the simulator doesn't model this metadata annotation; storage behavior is unaffected.");
         }
-        var nullability = isNullable ? " NULL" : " NOT NULL";
+        var nullability = isNullableExplicit ? (isNullable ? " NULL" : " NOT NULL") : "";
         return $"{columnLeaf} {typeDdl}{identityClause}{nullability}";
     }
 
@@ -626,6 +663,172 @@ internal static class ModelXmlReader
         command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} CHECK ({script});";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>EXEC sp_addextendedproperty …</c> for a <c>SqlExtendedProperty</c>
+    /// element. DACFx encodes the host kind in the element Name's leading
+    /// bracketed segment (<c>[SqlColumn]</c> / <c>[SqlTableBase]</c> /
+    /// <c>[SqlSchema]</c> / <c>[SqlDatabaseOptions]</c> / <c>[SqlDatabaseDdlTrigger]</c> /
+    /// <c>[SqlFilegroup]</c>); the Host relationship carries the dotted
+    /// qualified-name path. The property name is the trailing bracketed
+    /// segment. SqlTableBase resolves to TABLE or VIEW depending on whether
+    /// the host name appears in <paramref name="viewNames"/>.
+    /// </summary>
+    private static void EmitExtendedProperty(XElement element, string? elementName, DbConnection connection, HashSet<string> viewNames, BacpacLoadResult result)
+    {
+        if (string.IsNullOrEmpty(elementName))
+            throw new InvalidDataException("bacpac: SqlExtendedProperty missing Name attribute.");
+
+        // Element name shape: [<HostKind>].[<host_segments...>].[<prop_name>]
+        // Tokenize on the unquoted dots; bracketed segments can contain spaces.
+        var segments = SplitBracketedSegments(elementName);
+        if (segments.Count < 2)
+        {
+            result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, "Couldn't split Name into host-kind + property-name segments."));
+            return;
+        }
+        var hostKind = segments[0];
+        var propertyName = segments[^1];
+
+        var value = ReadScriptProperty(element, "Value");
+        if (value is null)
+        {
+            result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, "Missing Value property."));
+            return;
+        }
+
+        // Host reference for column/table/schema hosts; SqlDatabaseOptions's
+        // Host is the disambiguator-only DB ref so we skip the lookup there.
+        var hostRef = ReadSingleReference(element, "Host");
+
+        // Resolve to sp_addextendedproperty's @levelNtype / @levelNname pairs.
+        string? l0type = null, l0name = null, l1type = null, l1name = null, l2type = null, l2name = null;
+        switch (hostKind)
+        {
+            case "SqlDatabaseOptions":
+                // No level args — applies to the current database.
+                break;
+            case "SqlSchema":
+                if (hostRef is null)
+                {
+                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, "SqlSchema host missing reference."));
+                    return;
+                }
+                l0type = "SCHEMA";
+                l0name = Unbracket(hostRef);
+                break;
+            case "SqlTableBase":
+                if (hostRef is null || !TrySplit2Part(hostRef, out var tabSchema, out var tabName))
+                {
+                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlTableBase host '{hostRef}' isn't 2-part qualified."));
+                    return;
+                }
+                l0type = "SCHEMA";
+                l0name = tabSchema;
+                l1type = viewNames.Contains(hostRef) ? "VIEW" : "TABLE";
+                l1name = tabName;
+                break;
+            case "SqlColumn":
+                if (hostRef is null || !TrySplit3Part(hostRef, out var colSchema, out var colTable, out var colName))
+                {
+                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlColumn host '{hostRef}' isn't 3-part qualified."));
+                    return;
+                }
+                l0type = "SCHEMA";
+                l0name = colSchema;
+                l1type = viewNames.Contains($"[{colSchema}].[{colTable}]") ? "VIEW" : "TABLE";
+                l1name = colTable;
+                l2type = "COLUMN";
+                l2name = colName;
+                break;
+            case "SqlDatabaseDdlTrigger":
+            case "SqlFilegroup":
+            default:
+                result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"Host kind '{hostKind}' not modeled for sp_addextendedproperty."));
+                return;
+        }
+
+        // Assemble the EXEC. Value is already wrapped (N'…' or numeric); other
+        // args are bare identifiers quoted as N-strings here.
+        var args = new List<string>
+        {
+            $"@name = N'{propertyName.Replace("'", "''", StringComparison.Ordinal)}'",
+            $"@value = {value}",
+        };
+        if (l0type is not null)
+        {
+            args.Add($"@level0type = N'{l0type}'");
+            args.Add($"@level0name = N'{l0name!.Replace("'", "''", StringComparison.Ordinal)}'");
+        }
+        if (l1type is not null)
+        {
+            args.Add($"@level1type = N'{l1type}'");
+            args.Add($"@level1name = N'{l1name!.Replace("'", "''", StringComparison.Ordinal)}'");
+        }
+        if (l2type is not null)
+        {
+            args.Add($"@level2type = N'{l2type}'");
+            args.Add($"@level2name = N'{l2name!.Replace("'", "''", StringComparison.Ordinal)}'");
+        }
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"EXEC sp_addextendedproperty {string.Join(", ", args)};";
+#pragma warning restore CA2100
+        try
+        {
+            _ = command.ExecuteNonQuery();
+        }
+        catch (SimulatedSqlException ex)
+        {
+            result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName,
+                $"sp_addextendedproperty failed: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Splits a DACFx-bracketed dotted name (e.g. <c>[SqlColumn].[dbo].[t].[c].[MS_Description]</c>)
+    /// into its bare segments. Bracketed segments can contain dots and spaces
+    /// — the split tokenizes on <c>].[</c> after stripping the leading <c>[</c>
+    /// and trailing <c>]</c>.
+    /// </summary>
+    private static List<string> SplitBracketedSegments(string bracketedName)
+    {
+        if (bracketedName.Length < 2 || bracketedName[0] != '[' || bracketedName[^1] != ']')
+            return [bracketedName];
+        var inner = bracketedName[1..^1];
+        return [.. inner.Split("].[", StringSplitOptions.None)];
+    }
+
+    private static string Unbracket(string s) =>
+        s.Length >= 2 && s[0] == '[' && s[^1] == ']' ? s[1..^1] : s;
+
+    private static bool TrySplit2Part(string qualifiedName, out string schema, out string name)
+    {
+        var segments = SplitBracketedSegments(qualifiedName);
+        if (segments.Count != 2)
+        {
+            schema = name = "";
+            return false;
+        }
+        schema = segments[0];
+        name = segments[1];
+        return true;
+    }
+
+    private static bool TrySplit3Part(string qualifiedName, out string schema, out string table, out string column)
+    {
+        var segments = SplitBracketedSegments(qualifiedName);
+        if (segments.Count != 3)
+        {
+            schema = table = column = "";
+            return false;
+        }
+        schema = segments[0];
+        table = segments[1];
+        column = segments[2];
+        return true;
     }
 
     /// <summary>
