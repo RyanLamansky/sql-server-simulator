@@ -251,4 +251,49 @@ public sealed class CheckConstraintTests
         var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (5, 3)"));
         Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
     }
+
+    /// <summary>
+    /// Paren-wrapped value LHS in CHECK: DACFx emits the
+    /// <c>((value_expr) = (literal))</c> shape (WWI's
+    /// <c>CK_Sales_SpecialDeals_Exactly_One_NOT_NULL_Pricing_Option_Is_Required</c>
+    /// is the canonical instance). The boolean parser disambiguates the
+    /// leading <c>(</c> via a token-lookahead at the matching <c>)</c>.
+    /// </summary>
+    [TestMethod]
+    public void TableLevelCheck_ParenWrappedValueLhs_AcceptsConforming()
+        => Assert.AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (a int, b int, c int,
+                check (((case when a is null then 0 else 1 end
+                        + case when b is null then 0 else 1 end)
+                       + case when c is null then 0 else 1 end) = (1)));
+            insert t values (1, null, null);
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void TableLevelCheck_ParenWrappedValueLhs_RejectsTwoSet()
+    {
+        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+            create table t (a int, b int, c int,
+                constraint ck_one_only check (((case when a is null then 0 else 1 end
+                        + case when b is null then 0 else 1 end)
+                       + case when c is null then 0 else 1 end) = (1)));
+            insert t values (1, 2, null)
+            """));
+        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("ck_one_only", ex.Message);
+    }
+
+    [TestMethod]
+    public void TableLevelCheck_ParenWrappedValueLhs_RejectsAllNull()
+    {
+        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+            create table t (a int, b int, c int,
+                check (((case when a is null then 0 else 1 end
+                        + case when b is null then 0 else 1 end)
+                       + case when c is null then 0 else 1 end) = (1)));
+            insert t values (null, null, null)
+            """));
+        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+    }
 }

@@ -99,15 +99,15 @@ public sealed class BacpacLoaderTests
         // parser fix unblocked `dbo.ufnLeadingZeros`, which in turn
         // unblocked every AW computed column referencing it (and the
         // filtered indexes whose predicates depend on those columns).
-        // SqlPermissionStatement remains — encryption-feature permissions
-        // not yet wired to the simulator's GRANT surface.
-        IsNotEmpty(diagnostics.Skipped);
+        // The 2026-05-16 SqlPermissionStatement loader bundle dispatched
+        // the 2 encryption-key GRANTs through the simulator's GRANT
+        // parser, clearing AW's last large structural gap.
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlTable").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPrimaryKeyConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlForeignKeyConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlCheckConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlDefaultConstraint").ToList());
-        IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPermissionStatement").ToList());
+        IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPermissionStatement").ToList());
     }
 
     [TestMethod]
@@ -613,9 +613,9 @@ public sealed class BacpacLoaderTests
         IsFalse(grouped.ContainsKey("SqlView"), "DECOMPRESS landed; Website.VehicleTemperatures view loads.");
         IsFalse(grouped.ContainsKey("SqlScalarFunction"), "WITH EXECUTE AS OWNER landed on scalar UDFs; Website.CalculateCustomerPrice loads.");
         IsFalse(grouped.ContainsKey("SqlFilegroup"), "Filegroup skip-with-diagnostic.");
+        IsFalse(grouped.ContainsKey("SqlCheckConstraint"), "Paren-wrapped value LHS in boolean parser landed; WWI's CK_Sales_SpecialDeals_Exactly_One_NOT_NULL_Pricing_Option_Is_Required loads.");
+        IsFalse(grouped.ContainsKey("SqlPermissionStatement"), "SqlPermissionStatement dispatcher entry landed; the 2 encryption-key VIEW grants emit through the GRANT parser.");
         AreEqual(81, grouped["SqlExtendedProperty"], "Extended properties on table-type columns + a handful of computed-col-adjacent columns the loader doesn't yet host-route.");
-        AreEqual(1, grouped["SqlCheckConstraint"], "1 CHECK constraint with nested (value_expr)=(1) shape hits the boolean-parser's paren-wrapped-value-subexpression gap.");
-        AreEqual(2, grouped["SqlPermissionStatement"], "GRANT VIEW ANY COLUMN [ENCRYPTION|MASTER] KEY DEFINITION TO public — encryption-feature permissions deferred (same gap as AW).");
         AreEqual(1, grouped["SqlDatabaseOptions"], "Non-default collation deferred.");
     }
 
@@ -633,6 +633,60 @@ public sealed class BacpacLoaderTests
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(8, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWI_Encryption_Key_Grants_Land_In_sys_database_permissions()
+    {
+        // The 2 encryption-key VIEW grants
+        // (GRANT VIEW ANY COLUMN ENCRYPTION KEY DEFINITION TO public,
+        // GRANT VIEW ANY COLUMN MASTER KEY DEFINITION TO public) — both
+        // database-scope, granted to the pre-seeded `public` role.
+        // Verify they round-trip through sys.database_permissions.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT permission_name
+            FROM sys.database_permissions p
+            JOIN sys.database_principals g ON p.grantee_principal_id = g.principal_id
+            WHERE g.name = 'public'
+              AND permission_name LIKE 'VIEW ANY COLUMN%'
+            ORDER BY permission_name;
+            """;
+        using var reader = command.ExecuteReader();
+        var names = new List<string>();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        HasCount(2, names);
+        AreEqual("VIEW ANY COLUMN ENCRYPTION KEY DEFINITION", names[0]);
+        AreEqual("VIEW ANY COLUMN MASTER KEY DEFINITION", names[1]);
+    }
+
+    [TestMethod]
+    public void Load_WWI_ParenWrappedValueLhs_Check_Loaded_And_Enforces()
+    {
+        // CK_Sales_SpecialDeals_Exactly_One_NOT_NULL_Pricing_Option_Is_Required
+        // is the canonical paren-wrapped-value-LHS CHECK in WWI: the parsed
+        // expression is `((case_sum) = (1))`. Probe-confirmed against SQL
+        // Server 2025: the constraint rejects 0-set and 2-set inserts. The
+        // BCP-loaded rows already satisfy it; verify the constraint enforces
+        // on new inserts as a proxy for "did this CHECK actually land".
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO Sales.SpecialDeals
+                (SpecialDealID, StockItemID, CustomerID, BuyingGroupID, StockGroupID, DealDescription,
+                 StartDate, EndDate, DiscountAmount, DiscountPercentage, UnitPrice, LastEditedBy)
+            VALUES (99999, NULL, NULL, NULL, NULL, N'Bad — two pricing options',
+                    '2030-01-01', '2030-12-31', 5.00, 10.0, NULL, 1);
+            """;
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        Contains("CK_Sales_SpecialDeals_Exactly_One_NOT_NULL_Pricing_Option_Is_Required", ex.Message);
     }
 
     [TestMethod]

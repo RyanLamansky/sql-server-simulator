@@ -134,6 +134,14 @@ internal static class ModelXmlReader
                     // Phase 1 placement is fine — no dependencies either way.
                     ("SqlFilegroup", 1) => Run(static () => { }),
                     ("SqlExtendedProperty", 9) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
+                    // Permission statements emit after roles + everything-securable
+                    // — phase 7 is "everything is in place except extended
+                    // properties + indexes-on-computed-columns". DACFx-emitted
+                    // SqlPermissionStatement elements in AW + WWI are exclusively
+                    // the database-scope encryption-key VIEW grants; broader
+                    // securables (ON OBJECT::… / ON SCHEMA::…) would also land
+                    // through this path if a future bacpac emitted them.
+                    ("SqlPermissionStatement", 7) => Run(() => EmitPermissionStatement(element, name, connection)),
                     _ => IsHandledByAnotherPhase(type),
                 };
             }
@@ -174,7 +182,8 @@ internal static class ModelXmlReader
         or "SqlView"
         or "SqlScalarFunction" or "SqlMultiStatementTableValuedFunction"
         or "SqlProcedure" or "SqlDmlTrigger" or "SqlDatabaseDdlTrigger"
-        or "SqlExtendedProperty";
+        or "SqlExtendedProperty"
+        or "SqlPermissionStatement";
 
     /// <summary>
     /// Emits <c>CREATE SCHEMA [name]</c>. The default <c>dbo</c> schema is
@@ -455,6 +464,76 @@ internal static class ModelXmlReader
         command.CommandText = $"CREATE ROLE {bracketedName}{authClause};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>GRANT|REVOKE|DENY &lt;perm&gt; [ON &lt;securable&gt;] TO &lt;grantee&gt;</c>
+    /// for a <c>SqlPermissionStatement</c> element. The element's
+    /// <c>Name</c> attribute encodes three dotted parts in its first
+    /// bracketed segment: action (Grant/Revoke/Deny), permission name in
+    /// camel-case, and securable scope (Database/Schema/Object/...). The
+    /// <c>Grantee</c> relationship carries the principal; for AW + WWI's
+    /// emit, both bacpacs ship the two database-scope encryption-key VIEW
+    /// grants (<c>VIEW ANY COLUMN ENCRYPTION KEY DEFINITION</c> /
+    /// <c>VIEW ANY COLUMN MASTER KEY DEFINITION</c>) targeting the
+    /// pre-seeded <c>public</c> role. Schema- / object-scope GRANTs would
+    /// route through this same path with the SecuredObject relationship
+    /// translated to an <c>ON</c> clause (deferred until a bacpac exercises
+    /// that surface).
+    /// </summary>
+    private static void EmitPermissionStatement(XElement element, string? bracketedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(bracketedName))
+            throw new InvalidDataException("bacpac: SqlPermissionStatement element missing Name attribute.");
+
+        // Name format: `[Action.PermissionCamelCase.Scope].[grantee].[grantor]`.
+        // Extract the first bracketed segment (Action.Permission.Scope).
+        var firstSegmentEnd = bracketedName.IndexOf(']', StringComparison.Ordinal);
+        if (!bracketedName.StartsWith('[') || firstSegmentEnd < 0)
+            throw new InvalidDataException($"bacpac: SqlPermissionStatement '{bracketedName}' has unexpected name shape.");
+        var firstSegment = bracketedName[1..firstSegmentEnd];
+        var parts = firstSegment.Split('.');
+        if (parts.Length != 3)
+            throw new InvalidDataException($"bacpac: SqlPermissionStatement '{bracketedName}' first segment must be Action.Permission.Scope (got {parts.Length} parts).");
+
+        var actionKeyword = parts[0].ToUpperInvariant();
+        var permissionText = CamelToSpaceSeparatedUpper(parts[1]);
+        // Scope (Database/Schema/Object/...) currently only exercises
+        // "Database" in AW + WWI; no ON clause is needed for the database-
+        // scope form. Object / schema scope would consult the SecuredObject
+        // relationship; deferred until a bacpac exercises it.
+
+        var grantee = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Grantee")
+            ?.Elements(Ns + "Entry").Elements(Ns + "References")
+            .FirstOrDefault()?.Attribute("Name")?.Value
+            ?? throw new InvalidDataException($"bacpac: SqlPermissionStatement '{bracketedName}' has no Grantee relationship.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"{actionKeyword} {permissionText} TO {grantee};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Splits a camel-case identifier (<c>ViewAnyColumnEncryptionKeyDefinition</c>)
+    /// into space-separated uppercase tokens (<c>VIEW ANY COLUMN ENCRYPTION
+    /// KEY DEFINITION</c>) so the simulator's GRANT parser can re-match it
+    /// as a multi-word permission name. Inserts a space before every
+    /// uppercase letter that's preceded by a lowercase letter; uppercases
+    /// the rest as-is.
+    /// </summary>
+    private static string CamelToSpaceSeparatedUpper(string camel)
+    {
+        var sb = new System.Text.StringBuilder(camel.Length + 8);
+        for (var i = 0; i < camel.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(camel[i]) && char.IsLower(camel[i - 1]))
+                _ = sb.Append(' ');
+            _ = sb.Append(char.ToUpperInvariant(camel[i]));
+        }
+        return sb.ToString();
     }
 
     /// <summary>

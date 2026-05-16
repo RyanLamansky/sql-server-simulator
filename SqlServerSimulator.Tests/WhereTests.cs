@@ -474,6 +474,82 @@ public class WhereTests
     public void Where_FivePartColumnReference_RaisesMsg4104()
         => AssertSqlError("select 1 where a.b.c.d.e = 1", 4104, "The multi-part identifier \"a.b.c.d.e\" could not be bound.");
 
+    /// <summary>
+    /// Paren-wrapped value LHS: <c>(value_expr) cmp rhs</c> is accepted in
+    /// any boolean position. The boolean parser disambiguates via a token-
+    /// lookahead at the matching <c>)</c> — when the next token is an
+    /// arithmetic / comparison operator (or IS / IN / LIKE / BETWEEN / NOT),
+    /// the leading <c>(</c> introduces a value expression rather than a
+    /// boolean group.
+    /// </summary>
+    [TestMethod]
+    public void Where_ParenWrappedArithLhs_FiltersAsExpected()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (3), (5), (7)
+            """).ExecuteNonQuery();
+        AreEqual(2, CountWhere(connection, "(a + 1) > 5"));
+    }
+
+    [TestMethod]
+    public void Where_DoublyParenWrappedLhs_FiltersAsExpected()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (1), (2), (3)
+            """).ExecuteNonQuery();
+        AreEqual(1, CountWhere(connection, "((a + 1)) = 3"));
+    }
+
+    [TestMethod]
+    public void Where_ParenLhs_BetweenOperator_FiltersAsExpected()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (1), (5), (10), (20)
+            """).ExecuteNonQuery();
+        AreEqual(2, CountWhere(connection, "(a * 2) between 10 and 25"));
+    }
+
+    [TestMethod]
+    public void Where_ParenLhs_InList_FiltersAsExpected()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t (a int);
+            insert t values (1), (2), (3), (4)
+            """).ExecuteNonQuery();
+        AreEqual(2, CountWhere(connection, "(a + 1) in (3, 5)"));
+    }
+
+    [TestMethod]
+    public void Where_ParenLhs_AndOuterBooleanGroup_BothShapesCoexist()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (a int, b int);
+            insert t values (1, 10), (2, 20), (3, 30);
+            select count(*) from t where (a + 1) = 3 AND (b > 15)
+            """));
+
+    [TestMethod]
+    public void Having_ParenWrappedAggregateLhs_FiltersAsExpected()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (g int, v int);
+            insert t values (1, 10), (1, 20), (2, 5);
+            select count(*) from (select g from t group by g having (sum(v)) > 25) x
+            """));
+
+    [TestMethod]
+    public void Case_ParenWrappedValueLhs_EvaluatesAsExpected()
+        => AreEqual("yes", new Simulation().ExecuteScalar("select case when (1 + 2) = 3 then 'yes' else 'no' end"));
+
+    [TestMethod]
+    public void Case_DoublyParenWrappedComparison_StillBooleanGroup()
+        => AreEqual("yes", new Simulation().ExecuteScalar("select case when ((1) = (1)) then 'yes' else 'no' end"));
+
     private static int CountWhere(DbConnection connection, string predicate)
     {
         using var reader = connection.CreateCommand($"select a from t where {predicate}").ExecuteReader();

@@ -74,19 +74,28 @@ internal abstract class BooleanExpression
     /// <summary>
     /// Either a parenthesized sub-predicate, an <c>EXISTS (SELECT ...)</c>
     /// subquery, or a single comparison. A leading <c>(</c> at the atom
-    /// level is unambiguously treated as a boolean group: the body is
-    /// recursively parsed as a full predicate via <see cref="ParseOr"/> and
-    /// the closing <c>)</c> is required. Arithmetic parens still work inside
-    /// an expression operand (e.g. <c>where col = (a + 1)</c>) — the
-    /// right-hand side hits <see cref="Expression.Parse"/> which has its own
-    /// <c>Parenthesized</c> dispatch. The pattern that doesn't survive this
-    /// choice is <c>where (arith) cmp rhs</c>; SQL Server accepts that, the
-    /// simulator surfaces it as a syntax error.
+    /// level is ambiguous between two shapes: <c>(boolean_predicate)</c>
+    /// (a redundantly-grouped sub-predicate) and <c>(value_expression) cmp
+    /// rhs</c> (a parens-wrapped value expression sitting on the LHS of a
+    /// comparison). <see cref="LookaheadValueLhs"/> peeks the token
+    /// immediately after the matching <c>)</c> and routes via the operator
+    /// it finds: a comparison or arithmetic operator (= &lt; &gt; &lt;&gt;
+    /// != !&lt; !&gt; LIKE IS IN BETWEEN NOT + - * / % &amp; | ^) flips
+    /// into the value-LHS path (<see cref="Expression.Parse"/> handles
+    /// <c>Parenthesized</c> via its own grouped-expression dispatch);
+    /// anything else stays on the boolean-group path. DACFx emits the
+    /// value-LHS shape in CHECK constraints (e.g. WWI's
+    /// <c>((case_sum) = (1))</c>); user SQL like <c>WHERE (a + b) = 5</c>
+    /// likewise needs it. The boolean-group path remains the default for
+    /// <c>WHERE (col = 5) AND ...</c> shapes.
     /// </summary>
     private static BooleanExpression ParseAtom(ParserContext context)
     {
         if (context.Token is Operator { Character: '(' })
         {
+            if (LookaheadValueLhs(context))
+                return ParseComparison(Expression.Parse(context), context);
+
             context.MoveNextRequired();
             var inner = ParseOr(context);
             if (context.Token is not Operator { Character: ')' })
@@ -105,6 +114,53 @@ internal abstract class BooleanExpression
             ReservedKeyword { Keyword: Keyword.Exists } => ParseExists(context),
             _ => ParseComparison(Expression.Parse(context), context),
         };
+    }
+
+    /// <summary>
+    /// Token-only lookahead that disambiguates <c>(boolean_predicate)</c>
+    /// from <c>(value_expression) cmp rhs</c> without parsing either side.
+    /// Entered with <see cref="ParserContext.Token"/> on the opening
+    /// <c>(</c>. Scans forward tracking paren nesting until the matching
+    /// <c>)</c>, peeks the token immediately following it, then restores
+    /// the cursor to the opening <c>(</c> before returning. A scan that
+    /// reaches end-of-input without balance is treated as boolean-group
+    /// (returns <c>false</c>) — the regular parser then surfaces the
+    /// underlying syntax error with the normal "near 'X'" wording.
+    /// </summary>
+    private static bool LookaheadValueLhs(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var depth = 1;
+        while (context.MoveNext())
+        {
+            switch (context.Token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                // A top-level ',' inside the outer parens means the shape
+                // isn't a single value expression — it's a row-constructor
+                // (`(a, b) IN (...)`), a function argument list, or
+                // similar. Route to the boolean-group path so the existing
+                // grammar surfaces its own "near ','" Msg 4145 rather than
+                // partially consuming the first element.
+                case Operator { Character: ',' } when depth == 1:
+                    context.RestoreCheckpoint(checkpoint);
+                    return false;
+                case Operator { Character: ')' }:
+                    if (--depth == 0)
+                    {
+                        context.MoveNextOptional();
+                        var isValueLhs = context.Token is Operator { Character: '=' or '<' or '>' or '!' or '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' }
+                            or ReservedKeyword { Keyword: Keyword.Like or Keyword.Is or Keyword.In or Keyword.Between or Keyword.Not };
+                        context.RestoreCheckpoint(checkpoint);
+                        return isValueLhs;
+                    }
+                    break;
+            }
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return false;
     }
 
     /// <summary>
