@@ -1007,4 +1007,25 @@ public sealed class BacpacLoaderTests
         AreEqual("Latin1_General_CI_AS", reader.GetString(0));
     }
 
+    [TestMethod]
+    public void Load_WWIFull_ParallelLoad_RowCountsAreDeterministic()
+    {
+        // The parallel loader partitions BCP entries into per-table work
+        // items and distributes them across N workers via a concurrent queue
+        // (longest-table-first). Per-table ownership means no two workers
+        // ever touch the same HeapTable — but a regression that broke that
+        // invariant (e.g., concurrent Heap.Insert on the same table) would
+        // surface as silently dropped rows. Loading WWI-Full twice and
+        // comparing aggregate counts catches that without pinning to a
+        // hard-coded published row total.
+        _ = LoadWideWorldImportersFull(out var first);
+        _ = LoadWideWorldImportersFull(out var second);
+
+        AreEqual(first.ElementCounts["_DataRows"], second.ElementCounts["_DataRows"],
+            "Aggregate row count must be identical across parallel loads.");
+        AreEqual(first.ElementCounts["_DataFile"], second.ElementCounts["_DataFile"],
+            "BCP file count must be identical across parallel loads.");
+        HasCount(second.Skipped.Count, first.Skipped,
+            "Skipped entry count must be identical across parallel loads.");
+    }
 }
