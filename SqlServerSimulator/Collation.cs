@@ -34,6 +34,7 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
         {
             ["SQL_Latin1_General_CP1_CI_AS"] = "Latin1-General, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive for Unicode Data, SQL Server Sort Order 52 on Code Page 1252 for non-Unicode Data",
             ["Latin1_General_100_CI_AS"] = "Latin1-General-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            ["Latin1_General_CI_AS"] = "Latin1-General, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
         }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>

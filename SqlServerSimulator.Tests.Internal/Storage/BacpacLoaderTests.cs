@@ -48,6 +48,16 @@ public sealed class BacpacLoaderTests
         return Simulation.FromBacpac(path, out diagnostics);
     }
 
+    private static Simulation LoadWideWorldImportersFull(out BacpacLoadResult diagnostics)
+    {
+        var path = ResolveBacpacPath("WideWorldImporters-Full.bacpac");
+        if (string.IsNullOrEmpty(path))
+        {
+            Inconclusive(".vs/WideWorldImporters-Full.bacpac not present in this workspace; skipping WWI-Full smoke test.");
+        }
+        return Simulation.FromBacpac(path, out diagnostics);
+    }
+
     [TestMethod]
     public void Load_AW_Creates_All_Five_Schemas()
     {
@@ -860,4 +870,81 @@ public sealed class BacpacLoaderTests
         // level).
         AreEqual(48, reader.GetInt32(0));
     }
+
+    [TestMethod]
+    public void Load_WWIFull_Loads_All_Tables()
+    {
+        // WWI-Full has the same 48 tables as Standard but adds partitioning,
+        // columnstore, and one native-compiled SP. The partition-aware /
+        // columnstore-aware decoration elements (SqlPartitionFunction,
+        // SqlPartitionScheme, SqlColumnStoreIndex) are skip-with-diagnostic;
+        // the native-compiled SP failure is independently tracked.
+        var simulation = LoadWideWorldImportersFull(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.tables;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(48, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWIFull_Known_Gaps_Recorded_In_Skipped()
+    {
+        _ = LoadWideWorldImportersFull(out var diagnostics);
+        var grouped = diagnostics.Skipped.GroupBy(s => s.ElementType)
+            .ToDictionary(g => g.Key, g => g.Count());
+        TestContext.WriteLine("=== WWI-Full Skipped (current) ===");
+        foreach (var kv in grouped.OrderByDescending(k => k.Value))
+            TestContext.WriteLine($"{kv.Value,5}  {kv.Key}");
+
+        // Storage-layout / read-optimization decorations are silent skips,
+        // not Skipped entries (matching SqlFilegroup's pattern). Surfacing
+        // them on Skipped would create category noise for features whose
+        // absence has zero semantic effect on query results.
+        IsFalse(grouped.ContainsKey("SqlColumnStoreIndex"), "Columnstore indexes skip-with-diagnostic; no semantic effect on row-store query results.");
+        IsFalse(grouped.ContainsKey("SqlPartitionFunction"), "Partition functions are filegroup-mapping metadata; skip-with-diagnostic.");
+        IsFalse(grouped.ContainsKey("SqlPartitionScheme"), "Partition schemes are filegroup-mapping metadata; skip-with-diagnostic.");
+
+        // NATIVE_COMPILATION procedure body is the sole remaining loader
+        // gap for WWI-Full (1 procedure: Website.RecordColdRoomTemperatures).
+        // The WITH NATIVE_COMPILATION = ON ... BEGIN ATOMIC body decoration
+        // isn't parsed; the procedure body falls onto Skipped with a
+        // SimulatedSqlException parse failure.
+        IsTrue(grouped.TryGetValue("SqlProcedure", out var procSkipped));
+        AreEqual(1, procSkipped);
+    }
+
+    [TestMethod]
+    public void Load_WWIFull_Latin1_CI_AS_Columns_Warning_Free()
+    {
+        // WWI-Full's Warehouse.VehicleTemperatures table declares two columns
+        // (VehicleRegistration, FullSensorData) with COLLATE Latin1_General_CI_AS.
+        // Before the whitelist entry, this produced 2 Warnings + dropped clauses;
+        // the whitelist entry recognizes the name and the COLLATE clauses land.
+        var simulation = LoadWideWorldImportersFull(out var diagnostics);
+        var collationWarnings = diagnostics.Warnings
+            .Where(w => w.Contains("Latin1_General_CI_AS", StringComparison.Ordinal))
+            .ToList();
+        IsEmpty(collationWarnings);
+
+        // Confirm round-trip via sys.columns.
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT c.collation_name
+            FROM sys.columns c
+            JOIN sys.tables t ON c.object_id = t.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE s.name = 'Warehouse'
+              AND t.name = 'VehicleTemperatures'
+              AND c.name = 'VehicleRegistration';
+            """;
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("Latin1_General_CI_AS", reader.GetString(0));
+    }
+
 }

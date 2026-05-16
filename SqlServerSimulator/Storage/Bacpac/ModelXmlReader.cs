@@ -129,10 +129,20 @@ internal static class ModelXmlReader
                     // so the per-SqlTable computed-column pass completes
                     // before the first SqlIndex emission runs.
                     ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
-                    // Filegroups are storage-layout metadata; the simulator
-                    // has a single in-process heap so they're parse-and-skip.
+                    // Filegroups + partitioning + columnstore are storage-layout
+                    // concerns; the simulator has a single in-process heap so
+                    // all four are parse-and-skip. PartitionFunction /
+                    // PartitionScheme define filegroup-mapping boundaries that
+                    // tables / indexes reference for physical placement (no
+                    // semantic effect when filegroups themselves are skipped).
+                    // ColumnStoreIndex is a read-optimization shape over the
+                    // same row data; the simulator's linear-scan secondary
+                    // indexes don't model column-major vs row-major storage.
                     // Phase 1 placement is fine — no dependencies either way.
                     ("SqlFilegroup", 1) => Run(static () => { }),
+                    ("SqlPartitionFunction", 1) => Run(static () => { }),
+                    ("SqlPartitionScheme", 1) => Run(static () => { }),
+                    ("SqlColumnStoreIndex", 1) => Run(static () => { }),
                     ("SqlExtendedProperty", 9) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
                     // Permission statements emit after roles + everything-securable
                     // — phase 7 is "everything is in place except extended
@@ -174,6 +184,7 @@ internal static class ModelXmlReader
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
         or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlFilegroup"
+        or "SqlPartitionFunction" or "SqlPartitionScheme" or "SqlColumnStoreIndex"
         or "SqlTable"
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
         or "SqlCheckConstraint" or "SqlDefaultConstraint"

@@ -124,8 +124,17 @@ public sealed class CollationMetadataTests
 
     [TestMethod]
     public void FnHelpCollations_ListsRecognized()
-        => AreEqual(2, new Simulation().ExecuteScalar(
+        => AreEqual(3, new Simulation().ExecuteScalar(
             "SELECT COUNT(*) FROM sys.fn_helpcollations()"));
+
+    [TestMethod]
+    public void Column_Collate_Latin1_General_CI_AS_RoundTrips()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("CREATE TABLE t (b nvarchar(50) COLLATE Latin1_General_CI_AS)");
+        AreEqual("Latin1_General_CI_AS", sim.ExecuteScalar(
+            "SELECT collation_name FROM sys.columns WHERE name = 'b'"));
+    }
 
     [TestMethod]
     public void FnHelpCollations_ColumnsAreNameAndDescription()
