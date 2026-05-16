@@ -215,19 +215,102 @@ partial class Simulation
         if (level2Name is null)
             throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
 
-        if (!Collation.Default.Equals(level2Type, "COLUMN"))
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-
         if (obj is not HeapTable table)
             throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
 
-        // 1-based column ordinal (real SQL Server's minor_id convention).
-        for (var i = 0; i < table.Columns.Length; i++)
+        if (Collation.Default.Equals(level2Type, "COLUMN"))
         {
-            if (Collation.Default.Equals(table.Columns[i].Name, level2Name))
-                return (new ExtendedPropertyKey(1, obj.ObjectId, i + 1, propertyName), $"{schema.Name}.{obj.Name}.{table.Columns[i].Name}");
+            // 1-based column ordinal (real SQL Server's minor_id convention).
+            for (var i = 0; i < table.Columns.Length; i++)
+            {
+                if (Collation.Default.Equals(table.Columns[i].Name, level2Name))
+                    return (new ExtendedPropertyKey(1, obj.ObjectId, i + 1, propertyName), $"{schema.Name}.{obj.Name}.{table.Columns[i].Name}");
+            }
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
         }
-        throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
+
+        if (Collation.Default.Equals(level2Type, "CONSTRAINT"))
+        {
+            // Constraints (PK / UQ / FK / CHECK / DEFAULT) all carry their own
+            // object_id and reuse class=1 (OBJECT_OR_COLUMN) like every other
+            // schema object — same wire shape real SQL Server uses.
+            foreach (var k in table.KeyConstraints)
+            {
+                if (Collation.Default.Equals(k.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, k.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{k.Name}");
+            }
+            foreach (var c in table.CheckConstraints)
+            {
+                if (Collation.Default.Equals(c.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, c.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{c.Name}");
+            }
+            foreach (var fk in table.OutgoingForeignKeys)
+            {
+                if (Collation.Default.Equals(fk.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, fk.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{fk.Name}");
+            }
+            foreach (var col in table.Columns)
+            {
+                if (col.DefaultConstraint is { } dc && Collation.Default.Equals(dc.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, dc.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{dc.Name}");
+            }
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
+        }
+
+        if (Collation.Default.Equals(level2Type, "INDEX"))
+        {
+            // INDEX-level uses class=7. major_id=table.object_id, minor_id=
+            // index_id (matches real SQL Server's sys.extended_properties).
+            // The index_id is derived the same way as sys.indexes: PK gets 1
+            // (or HEAP-row 0 if no PK); other key constraints + indexes get
+            // sequential ids in ObjectId order starting at 2 (or 1 if no PK).
+            var indexId = ComputeIndexId(table, level2Name);
+            return indexId < 0
+                ? throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}")
+                : (new ExtendedPropertyKey(7, obj.ObjectId, indexId, propertyName), $"{schema.Name}.{obj.Name}.{level2Name}");
+        }
+
+        throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
+    }
+
+    /// <summary>
+    /// Resolves an index name on a table to its <c>index_id</c> — the same
+    /// numbering <c>sys.indexes</c> exposes (PK = 1 / HEAP = 0; other keys +
+    /// <c>CREATE INDEX</c>-declared indexes get sequential ids in <c>ObjectId</c>
+    /// order starting at the next slot). Returns -1 when no index matches.
+    /// </summary>
+    private static int ComputeIndexId(HeapTable table, string indexName)
+    {
+        KeyConstraint? primaryKey = null;
+        foreach (var k in table.KeyConstraints)
+        {
+            if (k.Kind == KeyConstraintKind.PrimaryKey)
+            {
+                primaryKey = k;
+                break;
+            }
+        }
+        if (primaryKey is not null && Collation.Default.Equals(primaryKey.Name, indexName))
+            return 1;
+
+        var others = new List<(int ObjectId, string Name)>();
+        foreach (var k in table.KeyConstraints)
+        {
+            if (!ReferenceEquals(k, primaryKey))
+                others.Add((k.ObjectId, k.Name));
+        }
+        foreach (var ix in table.Indexes)
+            others.Add((ix.ObjectId, ix.Name));
+        others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+
+        var nextIndexId = primaryKey is null ? 1 : 2;
+        foreach (var (_, name) in others)
+        {
+            if (Collation.Default.Equals(name, indexName))
+                return nextIndexId;
+            nextIndexId++;
+        }
+        return -1;
     }
 
     /// <summary>

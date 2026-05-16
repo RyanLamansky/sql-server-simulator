@@ -1161,6 +1161,7 @@ internal static class BuiltInResources
                 0 => "DATABASE",
                 1 => "OBJECT_OR_COLUMN",
                 3 => "SCHEMA",
+                7 => "INDEX",
                 _ => key.Class.ToString(CultureInfo.InvariantCulture),
             };
             yield return [

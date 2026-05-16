@@ -1041,6 +1041,45 @@ internal static class ModelXmlReader
                 l2type = "COLUMN";
                 l2name = colName;
                 break;
+            case "SqlIndexBase":
+                // 3-part host `[schema].[table].[index]`. sp_addextendedproperty
+                // INDEX level: @level0=SCHEMA, @level1=TABLE|VIEW, @level2=INDEX.
+                if (hostRef is null || !TrySplit3Part(hostRef, out var ixSchema, out var ixTable, out var ixName))
+                {
+                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlIndexBase host '{hostRef}' isn't 3-part qualified."));
+                    return;
+                }
+                l0type = "SCHEMA";
+                l0name = ixSchema;
+                l1type = viewNames.Contains($"[{ixSchema}].[{ixTable}]") ? "VIEW" : "TABLE";
+                l1name = ixTable;
+                l2type = "INDEX";
+                l2name = ixName;
+                break;
+            case "SqlConstraint":
+                // 2-part host `[schema].[constraint_name]` — the bacpac doesn't
+                // directly carry the parent table. Resolve it via sys.objects
+                // (constraint rows carry parent_object_id pointing at the
+                // owning table). The constraint name is unique within a
+                // schema in real SQL Server, so one row at most matches.
+                if (hostRef is null || !TrySplit2Part(hostRef, out var ckSchema, out var ckConstraintName))
+                {
+                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlConstraint host '{hostRef}' isn't 2-part qualified."));
+                    return;
+                }
+                var parentTable = LookupConstraintParentTable(connection, ckSchema, ckConstraintName);
+                if (parentTable is null)
+                {
+                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlConstraint '{hostRef}' has no resolvable parent table."));
+                    return;
+                }
+                l0type = "SCHEMA";
+                l0name = ckSchema;
+                l1type = "TABLE";
+                l1name = parentTable;
+                l2type = "CONSTRAINT";
+                l2name = ckConstraintName;
+                break;
             case "SqlDatabaseDdlTrigger":
             case "SqlFilegroup":
             default:
@@ -1102,6 +1141,37 @@ internal static class ModelXmlReader
 
     private static string Unbracket(string s) =>
         s.Length >= 2 && s[0] == '[' && s[^1] == ']' ? s[1..^1] : s;
+
+    /// <summary>
+    /// Looks up the owning table name for a named constraint (PK / UQ / FK /
+    /// CHECK / DEFAULT) by querying <c>sys.objects</c>. The bacpac's
+    /// SqlConstraint host references are 2-part (schema + constraint name)
+    /// without the parent table — sp_addextendedproperty's CONSTRAINT level
+    /// needs the @level1name table, so the loader resolves it through the
+    /// catalog. Returns null when no constraint matches (the caller records
+    /// the failure on Skipped).
+    /// </summary>
+    private static string? LookupConstraintParentTable(DbConnection connection, string schemaName, string constraintName)
+    {
+        using var lookup = connection.CreateCommand();
+#pragma warning disable CA2100 // schema / constraint names come from the bacpac model.xml — caller-trusted, parameterized through ADO.NET in any case
+        lookup.CommandText = """
+            SELECT OBJECT_NAME(o.parent_object_id)
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE s.name = @s AND o.name = @c AND o.parent_object_id <> 0
+            """;
+#pragma warning restore CA2100
+        var sParam = lookup.CreateParameter();
+        sParam.ParameterName = "@s";
+        sParam.Value = schemaName;
+        _ = lookup.Parameters.Add(sParam);
+        var cParam = lookup.CreateParameter();
+        cParam.ParameterName = "@c";
+        cParam.Value = constraintName;
+        _ = lookup.Parameters.Add(cParam);
+        return lookup.ExecuteScalar() as string;
+    }
 
     private static bool TrySplit2Part(string qualifiedName, out string schema, out string name)
     {

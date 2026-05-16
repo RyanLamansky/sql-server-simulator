@@ -615,7 +615,7 @@ public sealed class BacpacLoaderTests
         IsFalse(grouped.ContainsKey("SqlFilegroup"), "Filegroup skip-with-diagnostic.");
         IsFalse(grouped.ContainsKey("SqlCheckConstraint"), "Paren-wrapped value LHS in boolean parser landed; WWI's CK_Sales_SpecialDeals_Exactly_One_NOT_NULL_Pricing_Option_Is_Required loads.");
         IsFalse(grouped.ContainsKey("SqlPermissionStatement"), "SqlPermissionStatement dispatcher entry landed; the 2 encryption-key VIEW grants emit through the GRANT parser.");
-        AreEqual(81, grouped["SqlExtendedProperty"], "Extended properties on table-type columns + a handful of computed-col-adjacent columns the loader doesn't yet host-route.");
+        IsFalse(grouped.ContainsKey("SqlExtendedProperty"), "Extended-property host-routing landed for SqlIndexBase + SqlConstraint; all 414 WWI extended properties load.");
         AreEqual(1, grouped["SqlDatabaseOptions"], "Non-default collation deferred.");
     }
 
@@ -633,6 +633,68 @@ public sealed class BacpacLoaderTests
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(8, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWI_Extended_Properties_Cover_Index_And_Constraint_Hosts()
+    {
+        // WWI carries 76 SqlIndexBase + 5 SqlConstraint extended properties
+        // that the 2026-05-16 loader-bundle wired through sp_addextendedproperty.
+        // Verify the catalog round-trips a known sample of each:
+        //   INDEX:      Application.Cities.FK_Application_Cities_StateProvinceID
+        //   CONSTRAINT: Sales.CK_Sales_Invoices_ReturnedDeliveryData_Must_Be_Valid_JSON
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+
+        // Index host: class=7 (INDEX), value should land on the named index.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT CAST(ep.value AS nvarchar(MAX))
+                FROM sys.extended_properties ep
+                JOIN sys.indexes i ON ep.major_id = i.object_id AND ep.minor_id = i.index_id
+                JOIN sys.objects o ON i.object_id = o.object_id
+                JOIN sys.schemas s ON o.schema_id = s.schema_id
+                WHERE ep.class = 7
+                  AND s.name = 'Application'
+                  AND o.name = 'Cities'
+                  AND i.name = 'FK_Application_Cities_StateProvinceID'
+                  AND ep.name = 'Description';
+                """;
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read(), "Expected SqlIndexBase host extended property on FK-named index.");
+            AreEqual("Auto-created to support a foreign key", reader.GetString(0));
+        }
+
+        // Constraint host: class=1 (OBJECT_OR_COLUMN), major_id = the
+        // constraint's own object_id (not the table's).
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT CAST(ep.value AS nvarchar(MAX))
+                FROM sys.extended_properties ep
+                JOIN sys.check_constraints c ON ep.major_id = c.object_id
+                JOIN sys.schemas s ON c.schema_id = s.schema_id
+                WHERE ep.class = 1
+                  AND s.name = 'Sales'
+                  AND c.name = 'CK_Sales_Invoices_ReturnedDeliveryData_Must_Be_Valid_JSON'
+                  AND ep.name = 'Description';
+                """;
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read(), "Expected SqlConstraint host extended property on CK constraint.");
+            AreEqual("Ensures that if returned delivery data is present that it is valid JSON", reader.GetString(0));
+        }
+
+        // Aggregate count check — all 414 WWI extended properties landed.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM sys.extended_properties WHERE name = 'Description';";
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            // 292 SqlColumn + 76 SqlIndexBase + 31 SqlTableBase + 10 SqlSchema + 5 SqlConstraint = 414.
+            IsGreaterThanOrEqualTo(410, reader.GetInt32(0));
+        }
     }
 
     [TestMethod]

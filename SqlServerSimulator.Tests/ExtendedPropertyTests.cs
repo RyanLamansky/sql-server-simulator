@@ -286,4 +286,119 @@ public class ExtendedPropertyTests
         AreEqual(2, sim.ExecuteScalar(
             "SELECT COUNT(*) FROM fn_listextendedproperty(NULL, 'SCHEMA', 'dbo', 'TABLE', 'default', NULL, NULL)"));
     }
+
+    [TestMethod]
+    public void AddOnCheckConstraint_RoundTrips()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            CREATE TABLE dbo.t1 (id int, qty int, CONSTRAINT ck_qty_pos CHECK (qty > 0));
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'positive qty rule',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N't1',
+                @level2type=N'CONSTRAINT', @level2name=N'ck_qty_pos';
+            """);
+        AreEqual("positive qty rule", sim.ExecuteScalar(
+            "SELECT CAST(value AS nvarchar(MAX)) FROM sys.extended_properties WHERE name = 'MS_Description'"));
+        // CHECK constraint reuses class=1 (OBJECT_OR_COLUMN); major_id is the
+        // constraint's own object_id (not the table's).
+        AreEqual((byte)1, sim.ExecuteScalar(
+            "SELECT class FROM sys.extended_properties WHERE name = 'MS_Description'"));
+    }
+
+    [TestMethod]
+    public void AddOnPrimaryKeyConstraint_RoundTrips()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            CREATE TABLE dbo.t1 (id int CONSTRAINT pk_t1 PRIMARY KEY);
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'primary key',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N't1',
+                @level2type=N'CONSTRAINT', @level2name=N'pk_t1';
+            """);
+        AreEqual("primary key", sim.ExecuteScalar(
+            "SELECT CAST(value AS nvarchar(MAX)) FROM sys.extended_properties WHERE name = 'MS_Description'"));
+    }
+
+    [TestMethod]
+    public void AddOnForeignKey_RoundTrips()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            CREATE TABLE dbo.p (id int PRIMARY KEY);
+            CREATE TABLE dbo.c (id int PRIMARY KEY, p_id int CONSTRAINT fk_c_p REFERENCES p(id));
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'fk to p',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N'c',
+                @level2type=N'CONSTRAINT', @level2name=N'fk_c_p';
+            """);
+        AreEqual("fk to p", sim.ExecuteScalar(
+            "SELECT CAST(value AS nvarchar(MAX)) FROM sys.extended_properties WHERE name = 'MS_Description'"));
+    }
+
+    [TestMethod]
+    public void AddOnConstraint_MissingName_RaisesTargetMissing()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("CREATE TABLE dbo.t1 (id int);");
+        _ = sim.AssertSqlError("""
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N't1',
+                @level2type=N'CONSTRAINT', @level2name=N'no_such_constraint';
+            """, 15135);
+    }
+
+    [TestMethod]
+    public void AddOnIndex_RoundTrips_WithClass7()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            CREATE TABLE dbo.t1 (id int PRIMARY KEY, name nvarchar(50));
+            CREATE INDEX ix_name ON dbo.t1 (name);
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'name lookup',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N't1',
+                @level2type=N'INDEX', @level2name=N'ix_name';
+            """);
+        AreEqual("name lookup", sim.ExecuteScalar(
+            "SELECT CAST(value AS nvarchar(MAX)) FROM sys.extended_properties WHERE name = 'MS_Description'"));
+        AreEqual((byte)7, sim.ExecuteScalar(
+            "SELECT class FROM sys.extended_properties WHERE name = 'MS_Description'"));
+        AreEqual("INDEX", sim.ExecuteScalar(
+            "SELECT class_desc FROM sys.extended_properties WHERE name = 'MS_Description'"));
+        // minor_id = index_id = 2 (PK is 1, ix_name is the next index in
+        // ObjectId order — matches sys.indexes enumeration).
+        AreEqual(2, sim.ExecuteScalar(
+            "SELECT minor_id FROM sys.extended_properties WHERE name = 'MS_Description'"));
+    }
+
+    [TestMethod]
+    public void AddOnIndex_PrimaryKey_IndexIdIs1()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            CREATE TABLE dbo.t1 (id int CONSTRAINT pk_t1 PRIMARY KEY);
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'pk index',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N't1',
+                @level2type=N'INDEX', @level2name=N'pk_t1';
+            """);
+        AreEqual(1, sim.ExecuteScalar(
+            "SELECT minor_id FROM sys.extended_properties WHERE name = 'MS_Description'"));
+    }
+
+    [TestMethod]
+    public void AddOnIndex_MissingName_RaisesTargetMissing()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("CREATE TABLE dbo.t1 (id int);");
+        _ = sim.AssertSqlError("""
+            EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x',
+                @level0type=N'SCHEMA', @level0name=N'dbo',
+                @level1type=N'TABLE', @level1name=N't1',
+                @level2type=N'INDEX', @level2name=N'no_such_index';
+            """, 15135);
+    }
 }
