@@ -114,6 +114,14 @@ internal static class ModelXmlReader
                     ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
                     ("SqlDefaultConstraint", 3) => Run(() => EmitDefaultConstraint(element, name, connection)),
                     ("SqlForeignKeyConstraint", 4) => Run(() => EmitForeignKeyConstraint(element, name, connection)),
+                    // Phase 5: temporal-table wire-up. Both base + history
+                    // tables exist (phase 2) and constraints are layered
+                    // (phase 3/4) by now; the ALTER … SET (SYSTEM_VERSIONING
+                    // = ON …) just needs both endpoints. Walks SqlTable
+                    // elements a second time, looking for the
+                    // `TemporalSystemVersioningHistoryTable` relationship.
+                    // Elements without the relationship are ignored.
+                    ("SqlTable", 5) => Run(() => EmitDeferredSystemVersioning(element, name, connection)),
                     ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
                     ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
                     ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
@@ -580,6 +588,8 @@ internal static class ModelXmlReader
 
         var columnDdls = new List<string>();
         var perColumnIsAlias = new List<bool>();
+        string? rowStartLeaf = null;
+        string? rowEndLeaf = null;
         foreach (var columnElement in columnsRelationship.Elements(Ns + "Entry").Elements(Ns + "Element"))
         {
             var columnType = columnElement.Attribute("Type")?.Value;
@@ -589,6 +599,19 @@ internal static class ModelXmlReader
                 case "SqlSimpleColumn":
                     columnDdls.Add(TranslateSimpleColumn(columnElement, columnName, result));
                     perColumnIsAlias.Add(IsAliasTypedColumn(columnElement));
+                    // Capture the row-start / row-end column leaves so the
+                    // table-level PERIOD FOR SYSTEM_TIME clause can name them.
+                    // GeneratedAlwaysType only appears on the base side of a
+                    // system-versioned pair.
+                    var leaf = ExtractColumnLeaf(columnName);
+                    if (leaf is not null)
+                    {
+                        switch (ReadStringProperty(columnElement, "GeneratedAlwaysType"))
+                        {
+                            case "1": rowStartLeaf = leaf; break;
+                            case "2": rowEndLeaf = leaf; break;
+                        }
+                    }
                     break;
                 case "SqlComputedColumn":
                     // Deferred until phase 8 (post-functions) — some computed
@@ -609,6 +632,13 @@ internal static class ModelXmlReader
         if (columnDdls.Count == 0)
             throw new InvalidDataException($"bacpac: SqlTable '{qualifiedName}' has no recognized columns.");
 
+        // Append the table-level PERIOD clause when both row-start and row-end
+        // markers are present on this table's columns. The simulator's CREATE
+        // TABLE validates the columns exist + match generated-always kinds and
+        // raises matching errors when they don't.
+        if (rowStartLeaf is not null && rowEndLeaf is not null)
+            columnDdls.Add($"PERIOD FOR SYSTEM_TIME ({rowStartLeaf}, {rowEndLeaf})");
+
         var sql = $"CREATE TABLE {qualifiedName} ({string.Join(", ", columnDdls)});";
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
@@ -620,6 +650,20 @@ internal static class ModelXmlReader
         // columns are filtered out) are UDDT-aliased. The BCP decoder needs
         // this to apply the alias-specific 1-byte-prefix wire format.
         result.TableColumnIsAlias[qualifiedName] = [.. perColumnIsAlias];
+    }
+
+    /// <summary>
+    /// Extracts the bracketed column leaf from a 3-part qualified column
+    /// name (<c>[schema].[table].[column]</c>) — used in CREATE TABLE
+    /// column-list positions where the simulator's parser expects a bare
+    /// identifier reference.
+    /// </summary>
+    private static string? ExtractColumnLeaf(string? qualifiedColumnName)
+    {
+        if (string.IsNullOrEmpty(qualifiedColumnName))
+            return null;
+        var lastDot = qualifiedColumnName.LastIndexOf('.');
+        return lastDot < 0 ? qualifiedColumnName : qualifiedColumnName[(lastDot + 1)..];
     }
 
     /// <summary>
@@ -685,6 +729,19 @@ internal static class ModelXmlReader
         var identityClause = isIdentity
             ? $" IDENTITY({identitySeed ?? "1"}, {identityIncrement ?? "1"})"
             : "";
+
+        // GENERATED ALWAYS AS ROW START / END marker: temporal period columns
+        // on the base side of a system-versioned table. History tables carry
+        // the same column shape minus this marker (they receive materialized
+        // values rather than auto-generated ones).
+        // 1 = ROW START, 2 = ROW END (DACFx-emitted constant).
+        var generatedAlwaysType = ReadStringProperty(columnElement, "GeneratedAlwaysType");
+        var generatedClause = generatedAlwaysType switch
+        {
+            "1" => " GENERATED ALWAYS AS ROW START",
+            "2" => " GENERATED ALWAYS AS ROW END",
+            _ => "",
+        };
         if (isRowGuid)
         {
             // ROWGUIDCOL is metadata-only — it tells SQL Server which
@@ -710,7 +767,7 @@ internal static class ModelXmlReader
                 result.Warnings.Add($"Column '{qualifiedColumnName}' declares COLLATE '{columnCollation}' which isn't recognized — clause dropped, column inherits the database default.");
         }
         var nullability = isNullableExplicit ? (isNullable ? " NULL" : " NOT NULL") : "";
-        return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{nullability}";
+        return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{generatedClause}{nullability}";
     }
 
     /// <summary>
@@ -947,6 +1004,36 @@ internal static class ModelXmlReader
     /// verbatim without re-wrapping. <c>IsPersisted</c> picks the optional
     /// PERSISTED marker.
     /// </summary>
+    /// <summary>
+    /// Emits <c>ALTER TABLE base SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = name))</c>
+    /// for each base SqlTable element that carries the
+    /// <c>TemporalSystemVersioningHistoryTable</c> relationship. Element
+    /// ordering doesn't matter at this phase — both endpoints are guaranteed
+    /// to exist (phase 2) and constraints have layered (phase 3/4). Tables
+    /// without the relationship are ignored. The history reference uses
+    /// DACFx's bracketed <c>[schema].[name]</c> form, which the simulator's
+    /// object-name parser accepts as-is.
+    /// </summary>
+    private static void EmitDeferredSystemVersioning(XElement tableElement, string? qualifiedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(qualifiedName))
+            return;
+        var historyRel = tableElement.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "TemporalSystemVersioningHistoryTable");
+        if (historyRel is null)
+            return;
+        var historyName = historyRel.Elements(Ns + "Entry").Elements(Ns + "References")
+            .FirstOrDefault()?.Attribute("Name")?.Value;
+        if (string.IsNullOrEmpty(historyName))
+            return;
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER TABLE {qualifiedName} SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = {historyName}));";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
     private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacLoadResult result)
     {
         var tableName = tableElement.Attribute("Name")?.Value;

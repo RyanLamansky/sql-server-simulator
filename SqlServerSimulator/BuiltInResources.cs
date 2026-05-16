@@ -133,13 +133,23 @@ internal static class BuiltInResources
             }));
 
         // sys.tables: object_id / name / schema_id / type / type_desc /
-        // create_date / modify_date / is_ms_shipped. Real SQL Server has many
-        // more columns; the shipped subset covers the dominant query shapes.
-        // type is char(2) with trailing space ('U ') — probe-confirmed.
+        // create_date / modify_date / is_ms_shipped + temporal_type /
+        // temporal_type_desc / history_table_id (temporal-table state).
+        // Real SQL Server has many more columns; the shipped subset covers
+        // the dominant query shapes. type is char(2) with trailing space
+        // ('U ') — probe-confirmed.
         var charTwo = CharSqlType.Get(2);
         var tableType = SqlValue.FromChar(charTwo, "U ");
         var tableTypeDesc = SqlValue.FromNVarchar("USER_TABLE");
         var notMsShipped = SqlValue.FromBoolean(false);
+        // temporal_type: 0 = NON_TEMPORAL_TABLE, 1 = HISTORY_TABLE,
+        // 2 = SYSTEM_VERSIONED_TEMPORAL_TABLE (probe-confirmed).
+        var temporalTypeNone = SqlValue.FromByte(0);
+        var temporalTypeHistory = SqlValue.FromByte(1);
+        var temporalTypeBase = SqlValue.FromByte(2);
+        var temporalDescNone = SqlValue.FromNVarchar("NON_TEMPORAL_TABLE");
+        var temporalDescHistory = SqlValue.FromNVarchar("HISTORY_TABLE");
+        var temporalDescBase = SqlValue.FromNVarchar("SYSTEM_VERSIONED_TEMPORAL_TABLE");
         var tablesColumns = new HeapColumn[]
         {
             new("object_id", SqlType.Int32, null, false),
@@ -150,21 +160,36 @@ internal static class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
+            new("temporal_type", SqlType.TinyInt, null, true),
+            new("temporal_type_desc", SqlType.NVarchar, 60, true),
+            new("history_table_id", SqlType.Int32, null, true),
         };
         var tablesView = new CatalogView("tables", tablesColumns, batch =>
             batch.CurrentDatabase.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
                 .OrderBy(t => t.ObjectId)
-                .Select(t => new SqlValue[]
+                .Select(t =>
                 {
-                    SqlValue.FromInt32(t.ObjectId),
-                    SqlValue.FromSystemName(t.Name),
-                    SqlValue.FromInt32(t.SchemaId),
-                    tableType,
-                    tableTypeDesc,
-                    SqlValue.FromDateTime(t.CreateDate),
-                    SqlValue.FromDateTime(t.ModifyDate),
-                    notMsShipped,
+                    var (tt, ttd, htid) = (t.SystemVersioning, t.IsHistoryTable) switch
+                    {
+                        ({ } hist, _) => (temporalTypeBase, temporalDescBase, SqlValue.FromInt32(hist.ObjectId)),
+                        (_, true) => (temporalTypeHistory, temporalDescHistory, SqlValue.Null(SqlType.Int32)),
+                        _ => (temporalTypeNone, temporalDescNone, SqlValue.Null(SqlType.Int32)),
+                    };
+                    return new SqlValue[]
+                    {
+                        SqlValue.FromInt32(t.ObjectId),
+                        SqlValue.FromSystemName(t.Name),
+                        SqlValue.FromInt32(t.SchemaId),
+                        tableType,
+                        tableTypeDesc,
+                        SqlValue.FromDateTime(t.CreateDate),
+                        SqlValue.FromDateTime(t.ModifyDate),
+                        notMsShipped,
+                        tt,
+                        ttd,
+                        htid,
+                    };
                 }));
 
         // sys.objects: every <see cref="SchemaObject"/> emits one row, plus

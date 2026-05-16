@@ -278,4 +278,103 @@ public sealed class TemporalTableTests
         _ = ThrowsExactly<NotSupportedException>(
             () => simulation.ExecuteNonQuery("alter table Customers rebuild"));
     }
+
+    // -- ALTER … SET (SYSTEM_VERSIONING = ON …) tests --
+    // Inverse of the OFF tests above. SqlPackage emits this shape post-CREATE
+    // for system-versioned tables; the loader's phase-5 wire-up step relies
+    // on this grammar to link base and history siblings after both exist.
+
+    private const string CreateUnversionedTemporalPair = """
+        create table Customers (
+            Id int not null primary key,
+            Name nvarchar(30) not null,
+            Vf datetime2 generated always as row start not null,
+            Vt datetime2 generated always as row end not null,
+            period for system_time (Vf, Vt)
+        );
+        create table CustomersHistory (
+            Id int not null,
+            Name nvarchar(30) not null,
+            Vf datetime2 not null,
+            Vt datetime2 not null
+        );
+        """;
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_LinksBaseAndHistory()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateUnversionedTemporalPair,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        // temporal_type 2 = SYSTEM_VERSIONED_TEMPORAL_TABLE on the base,
+        // 1 = HISTORY_TABLE on the sibling.
+        AreEqual((byte)2, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'Customers'"));
+        AreEqual((byte)1, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'CustomersHistory'"));
+    }
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_WithDataConsistencyCheck_Parses()
+    {
+        // SQL Server's full grammar accepts an optional comma-separated
+        // DATA_CONSISTENCY_CHECK = ON|OFF after HISTORY_TABLE. The simulator
+        // parses but doesn't enforce the consistency check (history rows
+        // are caller-trusted in the loader path).
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateUnversionedTemporalPair,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, data_consistency_check = off))");
+        AreEqual((byte)2, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_BaseWithoutPeriod_RaisesMsg13558()
+        => new Simulation().AssertSqlError("""
+            create table base (Id int);
+            create table h (Id int);
+            alter table base set (system_versioning = on (history_table = dbo.h))
+            """,
+            13558,
+            "Setting SYSTEM_VERSIONING to ON failed because table 'simulated.dbo.base' does not have a PERIOD FOR SYSTEM_TIME declaration.");
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_AlreadyOn_RaisesMsg13530()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))",
+            13530,
+            "Setting SYSTEM_VERSIONING to ON failed because table 'simulated.dbo.Customers' already has SYSTEM_VERSIONING turned ON.");
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_HistoryAlreadyInUse_RaisesMsg13533()
+    {
+        // First pair establishes h as one base's history; second base then
+        // tries to link the same h — must fail.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("""
+            create table base1 (Id int not null primary key,
+                                Vf datetime2 generated always as row start not null,
+                                Vt datetime2 generated always as row end not null,
+                                period for system_time (Vf, Vt)) with (system_versioning = on (history_table = dbo.h));
+            create table base2 (Id int not null primary key,
+                                Vf datetime2 generated always as row start not null,
+                                Vt datetime2 generated always as row end not null,
+                                period for system_time (Vf, Vt))
+            """);
+        simulation.AssertSqlError(
+            "alter table base2 set (system_versioning = on (history_table = dbo.h))",
+            13533,
+            "Setting SYSTEM_VERSIONING to ON failed because history table 'simulated.dbo.h' is already in use as a temporal table sibling.");
+    }
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_MissingHistoryTable_RaisesMsg4902()
+        => new Simulation().AssertSqlError("""
+            create table base (Id int not null primary key,
+                               Vf datetime2 generated always as row start not null,
+                               Vt datetime2 generated always as row end not null,
+                               period for system_time (Vf, Vt));
+            alter table base set (system_versioning = on (history_table = dbo.tNoSuch))
+            """,
+            4902,
+            "Cannot find the object \"dbo.tNoSuch\" because it does not exist or you do not have permissions.");
 }

@@ -872,6 +872,66 @@ public sealed class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void Load_WWI_Temporal_Tables_Linked_To_History_Siblings()
+    {
+        // WWI has 17 system-versioned base tables; each carries a
+        // TemporalSystemVersioningHistoryTable relationship to its
+        // *_Archive sibling. Phase 5's EmitDeferredSystemVersioning emits
+        // ALTER TABLE base SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))
+        // for each pair after both endpoints exist. Verify the count.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.tables WHERE temporal_type = 2;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(17, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWI_Temporal_History_Tables_Are_Marked()
+    {
+        // Each *_Archive sibling should report temporal_type = 1
+        // (HISTORY_TABLE) once linked.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.tables WHERE temporal_type = 1;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(17, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWI_Temporal_Cities_AsOf_Query_Works()
+    {
+        // End-to-end: pick a known WWI temporal table (Application.Cities),
+        // run a FOR SYSTEM_TIME ALL query, and confirm it returns rows
+        // (current + history). The simulator's FOR SYSTEM_TIME query path
+        // ships separately — this verifies the link landed via the loader.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        var current = Scalar(connection, "SELECT COUNT(*) FROM Application.Cities;");
+        var archive = Scalar(connection, "SELECT COUNT(*) FROM Application.Cities_Archive;");
+        var all = Scalar(connection, "SELECT COUNT(*) FROM Application.Cities FOR SYSTEM_TIME ALL;");
+        // ALL returns current + archive (the FOR SYSTEM_TIME query path
+        // UNIONs the base table with its history sibling).
+        AreEqual(current + archive, all);
+
+        static int Scalar(SimulatedDbConnection conn, string sql)
+        {
+            using var command = conn.CreateCommand();
+            command.CommandText = sql;
+            using var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            return reader.GetInt32(0);
+        }
+    }
+
+    [TestMethod]
     public void Load_WWIFull_Loads_All_Tables()
     {
         // WWI-Full has the same 48 tables as Standard but adds partitioning,

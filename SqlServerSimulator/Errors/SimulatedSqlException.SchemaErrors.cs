@@ -683,6 +683,35 @@ partial class SimulatedSqlException
         new($"SYSTEM_VERSIONING is not turned ON for table '{qualifiedTableName}'.", 13591, 16, 1);
 
     /// <summary>
+    /// <c>ALTER TABLE … SET (SYSTEM_VERSIONING = ON …)</c> targeted a base
+    /// table that doesn't have a <c>PERIOD FOR SYSTEM_TIME</c> declaration.
+    /// SQL Server reports a related Msg 13558 family; the simulator surfaces
+    /// the requirement as a single canonical wording until verbatim
+    /// probe-matching lands.
+    /// </summary>
+    internal static SimulatedSqlException SystemVersioningOnRequiresPeriod(string qualifiedTableName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' does not have a PERIOD FOR SYSTEM_TIME declaration.", 13558, 16, 1);
+
+    /// <summary>
+    /// <c>ALTER TABLE … SET (SYSTEM_VERSIONING = ON …)</c> targeted a base
+    /// table that's already system-versioned. SQL Server's matching error is
+    /// in the 13530+ range; the simulator's wording carries the same intent
+    /// until verbatim probe-matching lands.
+    /// </summary>
+    internal static SimulatedSqlException SystemVersioningAlreadyOn(string qualifiedTableName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' already has SYSTEM_VERSIONING turned ON.", 13530, 16, 1);
+
+    /// <summary>
+    /// <c>ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = name))</c>
+    /// named a history table that's already serving as another base table's
+    /// history sibling (<c>IsHistoryTable=true</c>) or is itself a
+    /// system-versioned base. SQL Server's matching error is in the 13533
+    /// family; canonical simulator wording until verbatim probe-matching.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableAlreadyInUse(string qualifiedTableName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedTableName}' is already in use as a temporal table sibling.", 13533, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 4902: <c>ALTER TABLE</c> named a target that
     /// doesn't resolve to an existing table. The qualified name is reported
     /// verbatim in double-quotes (distinct from the single-quoted form Msg

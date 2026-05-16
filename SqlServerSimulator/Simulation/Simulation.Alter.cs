@@ -811,12 +811,18 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>ALTER TABLE … SET (SYSTEM_VERSIONING = OFF)</c>. Cursor is
-    /// on the <c>SET</c> keyword on entry. Probe-confirmed flow: target table
-    /// must resolve (Msg 4902 otherwise), must be system-versioned (Msg 13591
-    /// otherwise); the parent's link to its history sibling clears and the
-    /// sibling's history-role flag flips. Period / GENERATED-ALWAYS column
-    /// metadata is preserved.
+    /// Parses <c>ALTER TABLE … SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))</c>.
+    /// Cursor is on the <c>SET</c> keyword on entry. Probe-confirmed flow for
+    /// OFF: target table must resolve (Msg 4902 otherwise), must be
+    /// system-versioned (Msg 13591 otherwise); the parent's link to its
+    /// history sibling clears and the sibling's history-role flag flips.
+    /// Period / GENERATED-ALWAYS column metadata is preserved. For ON: base
+    /// must already have a PERIOD FOR SYSTEM_TIME declaration; the named
+    /// history table must resolve and not already be linked elsewhere; the
+    /// link is established and the sibling's history-role flag is set.
+    /// <c>DATA_CONSISTENCY_CHECK = ON|OFF</c> parses-and-discards (the
+    /// simulator doesn't enforce the temporal-data-consistency rules that
+    /// the option toggles).
     /// </summary>
     private static bool TryParseAlterTableSetSystemVersioning(ParserContext context, MultiPartName tableName)
     {
@@ -824,29 +830,80 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
-            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF) is supported.");
+            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name)) is supported.");
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Off })
-            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF) is supported (the = ON form requires the parent column-list grammar which isn't modeled).");
+        var onOff = context.GetNextRequired();
+        if (onOff is ReservedKeyword { Keyword: Keyword.Off })
+        {
+            if (context.GetNextRequired() is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
 
+            if (context.Batch.IsSkipping)
+                return true;
+
+            if (!context.Batch.TryResolveTable(tableName, out var table))
+                throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+
+            if (table.SystemVersioning is null)
+                throw SimulatedSqlException.SystemVersioningNotOn(QualifyTableName(table, context.CurrentDatabase));
+
+            var historyTable = table.SystemVersioning;
+            table.SystemVersioning = null;
+            historyTable.IsHistoryTable = false;
+            return true;
+        }
+
+        if (onOff is not ReservedKeyword { Keyword: Keyword.On })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.History_Table })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var historyName = BatchContext.ParseObjectName(context);
+
+        // Optional `, DATA_CONSISTENCY_CHECK = ON|OFF` — simulator parses but
+        // doesn't enforce the temporal data-consistency rules the toggle gates.
+        context.MoveNextRequired();
+        if (context.Token is Operator { Character: ',' })
+        {
+            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Data_Consistency_Check })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!context.Batch.TryResolveTable(tableName, out var table))
+        if (!context.Batch.TryResolveTable(tableName, out var baseTable))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (baseTable.PeriodColumns is null)
+            throw SimulatedSqlException.SystemVersioningOnRequiresPeriod(QualifyTableName(baseTable, context.CurrentDatabase));
+        if (baseTable.SystemVersioning is not null)
+            throw SimulatedSqlException.SystemVersioningAlreadyOn(QualifyTableName(baseTable, context.CurrentDatabase));
 
-        if (table.SystemVersioning is null)
-            throw SimulatedSqlException.SystemVersioningNotOn(QualifyTableName(table, context.CurrentDatabase));
+        if (!context.Batch.TryResolveTable(historyName, out var resolvedHistory))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(historyName.ToString());
+        if (resolvedHistory.IsHistoryTable || resolvedHistory.SystemVersioning is not null)
+            throw SimulatedSqlException.HistoryTableAlreadyInUse(QualifyTableName(resolvedHistory, context.CurrentDatabase));
 
-        var historyTable = table.SystemVersioning;
-        table.SystemVersioning = null;
-        historyTable.IsHistoryTable = false;
+        baseTable.SystemVersioning = resolvedHistory;
+        resolvedHistory.IsHistoryTable = true;
         return true;
     }
 

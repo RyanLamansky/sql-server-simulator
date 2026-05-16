@@ -34,6 +34,7 @@ enum ContextualKeyword
     Configuration,
     Cube,
     Cycle,
+    Data_Consistency_Check,
     Delay,
     Disable,
     Enable,
