@@ -680,8 +680,11 @@ public sealed partial class Simulation
                                 yield return o;
                             break;
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Atomic }:
-                            throw new NotSupportedException(
-                                "BEGIN ATOMIC blocks aren't modeled (natively-compiled stored-proc semantics).");
+                            foreach (var o in ParseBeginAtomicBlock(batch))
+                                yield return o;
+                            if (!batch.IsSkipping)
+                                connection.LastStatementRowCount = 0;
+                            break;
                         default:
                             foreach (var o in ParseBeginBlock(batch))
                                 yield return o;

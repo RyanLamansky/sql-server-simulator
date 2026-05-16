@@ -239,7 +239,7 @@ partial class Simulation
                         returnsNullOnNullInput = true;
                         context.MoveNextRequired();
                         break;
-                    case UnquotedString { ContextualKeyword: ContextualKeyword.Schemabinding }:
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
                     case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
                         context.MoveNextRequired();
                         break;
@@ -410,7 +410,7 @@ partial class Simulation
         {
             switch (context.Token)
             {
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Schemabinding }:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
                     // Parse-and-ignore. Fidelity gap on SCHEMABINDING
                     // documented in CLAUDE.md.

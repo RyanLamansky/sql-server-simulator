@@ -176,7 +176,7 @@ partial class Simulation
         while (true)
         {
             if (context.Token is not UnquotedString opt
-                || opt.ContextualKeyword is not (ContextualKeyword.Schemabinding or ContextualKeyword.Encryption or ContextualKeyword.View_Metadata))
+                || opt.ContextualKeyword is not (ContextualKeyword.SchemaBinding or ContextualKeyword.Encryption or ContextualKeyword.View_Metadata))
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }

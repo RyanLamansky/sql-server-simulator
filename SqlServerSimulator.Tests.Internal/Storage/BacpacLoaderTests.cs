@@ -382,29 +382,30 @@ public sealed class BacpacLoaderTests
     }
 
     [TestMethod]
-    public void Load_AW_Geography_Column_Drops_To_Null()
+    public void Load_AW_Geography_Column_Decodes_To_Point_Wkt()
     {
         var simulation = LoadAdventureWorks(out _);
         using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
         connection.Open();
 
-        // Person.Address rows load (geography wire format decoded) but
-        // SpatialLocation column stores NULL — WKB-to-WKT translation is
-        // deferred so the bytes are read-and-discarded. The row count
-        // proves the wire-format reader didn't corrupt subsequent column
-        // boundaries (rowguid + ModifiedDate after SpatialLocation must
-        // round-trip cleanly).
+        // After the simple-point WKB decoder bundle (2026-05-16), every AW
+        // SpatialLocation row decodes to a `POINT (long lat)` WKT string.
+        // AW's geography values are all simple points (no LineString /
+        // Polygon / etc.), so 19,614 / 19,614 round-trip.
         AreEqual(19614, QueryCount(connection, "SELECT COUNT(*) FROM Person.Address;"));
-        AreEqual(19614, QueryCount(connection, "SELECT COUNT(*) FROM Person.Address WHERE SpatialLocation IS NULL;"));
+        AreEqual(0, QueryCount(connection, "SELECT COUNT(*) FROM Person.Address WHERE SpatialLocation IS NULL;"));
 
-        // Spot-check that following columns survived the geography read.
+        // Spot-check that the WKT round-trips through CAST AS nvarchar(max).
+        // AddressID = 1 is a Bothell, WA address; longitude ~-122, latitude ~47.
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT TOP(1) AddressID, City, PostalCode FROM Person.Address WHERE AddressID = 1;";
+        command.CommandText = "SELECT TOP(1) AddressID, City, PostalCode, CAST(SpatialLocation AS nvarchar(max)) FROM Person.Address WHERE AddressID = 1;";
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(1, reader.GetInt32(0));
         AreEqual("Bothell", reader.GetString(1));
         AreEqual("98011", reader.GetString(2));
+        var wkt = reader.GetString(3);
+        IsTrue(wkt.StartsWith("POINT (", StringComparison.Ordinal), $"expected WKT to start with 'POINT (' but got '{wkt}'");
     }
 
     [TestMethod]
@@ -967,13 +968,12 @@ public sealed class BacpacLoaderTests
         IsFalse(grouped.ContainsKey("SqlPartitionFunction"), "Partition functions are filegroup-mapping metadata; skip-with-diagnostic.");
         IsFalse(grouped.ContainsKey("SqlPartitionScheme"), "Partition schemes are filegroup-mapping metadata; skip-with-diagnostic.");
 
-        // NATIVE_COMPILATION procedure body is the sole remaining loader
-        // gap for WWI-Full (1 procedure: Website.RecordColdRoomTemperatures).
-        // The WITH NATIVE_COMPILATION = ON ... BEGIN ATOMIC body decoration
-        // isn't parsed; the procedure body falls onto Skipped with a
-        // SimulatedSqlException parse failure.
-        IsTrue(grouped.TryGetValue("SqlProcedure", out var procSkipped));
-        AreEqual(1, procSkipped);
+        // NATIVE_COMPILATION + BEGIN ATOMIC body parsers shipped 2026-05-16:
+        // Website.RecordColdRoomTemperatures (the sole natively-compiled SP
+        // in WWI-Full) loads. Combined with the temporal-table wire-up
+        // landing the same day, WWI-Full reaches zero Skipped categories.
+        IsFalse(grouped.ContainsKey("SqlProcedure"), "NATIVE_COMPILATION + BEGIN ATOMIC body parsers landed; the natively-compiled SP loads.");
+        IsEmpty(diagnostics.Skipped);
     }
 
     [TestMethod]

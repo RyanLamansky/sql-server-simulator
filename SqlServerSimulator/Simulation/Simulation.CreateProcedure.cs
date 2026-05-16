@@ -316,6 +316,13 @@ partial class Simulation
             {
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Recompile }:
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Native_Compilation }:
+                    // SCHEMABINDING / NATIVE_COMPILATION parse-and-ignore: the
+                    // simulator doesn't model schema-binding enforcement or
+                    // native-compilation code paths. NATIVE_COMPILATION pairs
+                    // with a BEGIN ATOMIC body block (which the dispatcher
+                    // handles by re-using the regular BEGIN…END flow).
                     context.MoveNextRequired();
                     break;
                 case ReservedKeyword { Keyword: Keyword.Execute }:

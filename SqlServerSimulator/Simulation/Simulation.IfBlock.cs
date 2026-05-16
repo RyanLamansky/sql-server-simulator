@@ -390,4 +390,74 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional(); // consume END
     }
+
+    /// <summary>
+    /// Parses a <c>BEGIN ATOMIC [WITH (option [, option ...])] body END</c>
+    /// block — the body shape natively-compiled procedures use. Cursor on
+    /// entry: the <c>BEGIN</c> keyword. Cursor on exit: the first token
+    /// after <c>END</c>.
+    /// </summary>
+    /// <remarks>
+    /// The WITH options (TRANSACTION ISOLATION LEVEL, LANGUAGE, DATEFORMAT,
+    /// DATEFIRST, DELAYED_DURABILITY) are parse-and-discard. The simulator
+    /// doesn't enforce per-block isolation overrides or language-specific
+    /// date parsing inside the block, and DELAYED_DURABILITY has no
+    /// performance meaning in an in-process emulator. The body dispatches
+    /// statements like a regular BEGIN…END block — the atomic-transaction
+    /// boundary that real SQL Server enforces (the block is its own
+    /// transaction) is approximated by the simulator's implicit
+    /// per-statement undo plus any outer explicit transaction; explicit
+    /// COMMIT / ROLLBACK inside the body would surprise a caller but isn't
+    /// rejected.
+    /// </remarks>
+    private IEnumerable<SimulatedStatementOutcome> ParseBeginAtomicBlock(BatchContext batch)
+    {
+        var context = batch.Parser;
+        context.MoveNextRequired(); // consume BEGIN
+        context.MoveNextRequired(); // consume ATOMIC
+
+        // Optional WITH (...) options block. Real SQL Server requires this
+        // for natively-compiled procs but the grammar allows omission for
+        // future ATOMIC use cases. Skip token-by-token with paren balancing —
+        // the options have no semantic effect in the simulator, so loose
+        // consumption avoids per-option dispatch.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var depth = 1;
+            context.MoveNextRequired();
+            while (depth > 0)
+            {
+                if (context.Token is null)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.Token is Operator op)
+                {
+                    if (op.Character == '(')
+                        depth++;
+                    else if (op.Character == ')')
+                        depth--;
+                }
+                context.MoveNextRequired();
+            }
+        }
+
+        // Body dispatch mirrors ParseBeginBlock — leading separators drained,
+        // empty body rejected, statements dispatched until END.
+        while (context.Token is Operator { Character: ';' })
+            context.MoveNextOptional();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.End })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
+            yield return o;
+
+        if (batch.ReturnSignaled)
+            yield break;
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional(); // consume END
+    }
 }

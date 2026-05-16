@@ -428,6 +428,118 @@ public sealed class StoredProcedureTests
         IsGreaterThan(0, IsInstanceOfType<int>(id));
     }
 
+    // -- WITH NATIVE_COMPILATION / SCHEMABINDING + BEGIN ATOMIC body --
+    // Tests cover the natively-compiled procedure shape SqlPackage emits in
+    // bacpacs (WWI-Full's Website.RecordColdRoomTemperatures is the canonical
+    // example). The simulator's semantic model doesn't change: NATIVE_COMPILATION
+    // is parse-and-discard, BEGIN ATOMIC is parsed as a regular block whose
+    // WITH (...) options block is consumed without enforcement.
+
+    [TestMethod]
+    public void Create_With_NativeCompilation_Schemabinding_Parses()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create procedure dbo.p
+            with native_compilation, schemabinding, execute as owner
+            as
+            begin atomic with (transaction isolation level = snapshot, language = N'English')
+                select 1;
+            end
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.procedures where name = 'p'"));
+    }
+
+    [TestMethod]
+    public void BeginAtomic_Body_Runs()
+    {
+        // Verify the BEGIN ATOMIC body actually dispatches: a procedure with
+        // a body that inserts into a table should land the row when EXEC'd.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, v int)",
+            """
+            create procedure dbo.add_row @id int, @v int
+            with native_compilation, schemabinding, execute as owner
+            as
+            begin atomic with (transaction isolation level = snapshot, language = N'us_english')
+                insert into t (id, v) values (@id, @v);
+            end
+            """,
+            "exec dbo.add_row 1, 100",
+            "exec dbo.add_row 2, 200");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+        AreEqual(200, sim.ExecuteScalar("select v from t where id = 2"));
+    }
+
+    [TestMethod]
+    public void BeginAtomic_With_TryCatch_Body()
+    {
+        // Mirrors WWI-Full's Website.RecordColdRoomTemperatures shape:
+        // BEGIN ATOMIC WITH (...) wrapping a BEGIN TRY / BEGIN CATCH block.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table failures (msg nvarchar(200))",
+            """
+            create procedure dbo.try_or_log @raise bit
+            with native_compilation, schemabinding, execute as owner
+            as
+            begin atomic with (transaction isolation level = snapshot, language = N'English')
+                begin try
+                    if @raise = 1
+                        throw 51000, N'boom', 1;
+                end try
+                begin catch
+                    insert into failures (msg) values (error_message());
+                end catch
+            end
+            """,
+            "exec dbo.try_or_log 0",
+            "exec dbo.try_or_log 1");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from failures"));
+        AreEqual("boom", sim.ExecuteScalar("select msg from failures"));
+    }
+
+    [TestMethod]
+    public void BeginAtomic_Without_With_Options_Block_Parses()
+    {
+        // The grammar allows BEGIN ATOMIC without a WITH (...) options
+        // block (future ATOMIC use cases outside natively-compiled procs).
+        // Verify the path doesn't reject.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int)",
+            """
+            create procedure dbo.p
+            as
+            begin atomic
+                insert into t values (42);
+            end
+            """,
+            "exec dbo.p");
+        AreEqual(42, sim.ExecuteScalar("select id from t"));
+    }
+
+    [TestMethod]
+    public void BeginAtomic_Empty_Body_RaisesSyntax_On_Exec()
+    {
+        // Empty atomic body should be rejected (matches the regular
+        // BEGIN…END empty-body rule). The procedure CREATE captures the
+        // body as opaque text; the rejection fires when EXEC re-parses
+        // and dispatches the body. ExecuteBatches keeps the CREATE and
+        // EXEC in separate batches so the body text doesn't accidentally
+        // include the EXEC.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create procedure dbo.p
+            as
+            begin atomic with (transaction isolation level = snapshot, language = N'English')
+            end
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("exec dbo.p"));
+        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+    }
+
     private static void StringContains(string actual, string needle)
         => IsTrue(actual.Contains(needle, StringComparison.Ordinal), $"expected '{actual}' to contain '{needle}'");
 

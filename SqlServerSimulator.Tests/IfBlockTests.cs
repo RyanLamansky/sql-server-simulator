@@ -172,9 +172,17 @@ public sealed class IfBlockTests
             "begin if 1=1 select 'inside-if' end"));
 
     [TestMethod]
-    public void BeginAtomic_NotSupported()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
+    public void BeginAtomic_AtBatchTopLevel_DispatchesBody()
+    {
+        // BEGIN ATOMIC at batch top level (no enclosing CREATE PROCEDURE)
+        // is uncommon but legal grammar. The body dispatches like a regular
+        // BEGIN…END block; the WITH (...) options block parses-and-discards.
+        // Coverage of the natively-compiled-SP shape lives in
+        // StoredProcedureTests; this one verifies the dispatcher path
+        // outside the procedure context.
+        AreEqual(1, new Simulation().ExecuteScalar(
             "begin atomic with (transaction isolation level = snapshot, language = N'us_english') select 1 end"));
+    }
 
     [TestMethod]
     public void BeginDistributedTran_NotSupported()

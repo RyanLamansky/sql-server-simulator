@@ -111,7 +111,8 @@ internal static class BcpRowReader
         // 0xFFFFFFFFFFFFFFFF = NULL; otherwise N bytes inline (no TDS-PLP
         // chunk markers — probe-confirmed against AW on 2026-05-15).
         if (type is XmlSqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.Xml);
-        if (type is GeographySqlType or GeometrySqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.SpatialDeferToNull);
+        if (type is GeographySqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.Geography);
+        if (type is GeometrySqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.Geometry);
         if (type is HierarchyIdSqlType) return ReadEightBytePrefixed(stream, type, EightBytePayload.HierarchyId);
         if (type is VarcharSqlType vc && vc.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.VarcharMax);
         if (type is NVarcharSqlType nv && nv.length == -1) return ReadEightBytePrefixed(stream, type, EightBytePayload.NVarcharMax);
@@ -144,11 +145,19 @@ internal static class BcpRowReader
         VarbinaryMax,
         Xml,
         /// <summary>
-        /// Geography / geometry: read the length, drain the bytes, return
-        /// <c>SqlValue.Null</c>. Spatial WKB decoding deferred to a later
-        /// bundle; this lets the row load without breaking column count.
+        /// Geography: read the length + N bytes, try
+        /// <see cref="SpatialWkbDecoder.TryDecodeSimplePoint"/> for the
+        /// simple-point case (the dominant AW shape). Anything else
+        /// (LineString / Polygon / MultiPolygon / future versions) falls
+        /// back to <c>SqlValue.Null</c> — the row loads without breaking
+        /// column count.
         /// </summary>
-        SpatialDeferToNull,
+        Geography,
+        /// <summary>
+        /// Geometry: same decode strategy as <see cref="Geography"/> but
+        /// with axis order (x, y) instead of (lat, long).
+        /// </summary>
+        Geometry,
         /// <summary>
         /// Hierarchyid: read the length + N bytes, decode the OrdPath
         /// binary form via <see cref="HierarchyIdWireDecoder.Decode"/>, and
@@ -187,7 +196,12 @@ internal static class BcpRowReader
             EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
             EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
             EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
-            EightBytePayload.SpatialDeferToNull => SqlValue.Null(type),
+            EightBytePayload.Geography => SpatialWkbDecoder.TryDecodeSimplePoint(data, isGeography: true) is { } gwkt
+                ? SqlValue.FromGeography(gwkt)
+                : SqlValue.Null(type),
+            EightBytePayload.Geometry => SpatialWkbDecoder.TryDecodeSimplePoint(data, isGeography: false) is { } mwkt
+                ? SqlValue.FromGeometry(mwkt)
+                : SqlValue.Null(type),
             EightBytePayload.HierarchyId => SqlValue.FromHierarchyId(HierarchyIdWireDecoder.Decode(data)),
             _ => throw new InvalidOperationException($"unknown EightBytePayload {kind}"),
         };
