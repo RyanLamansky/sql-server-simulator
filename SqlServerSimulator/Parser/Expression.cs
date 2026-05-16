@@ -564,6 +564,7 @@ internal abstract class Expression
                 "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
                 "FORMAT" => new Format(context),
                 "ISDATE" => new IsDate(context),
+                "ISJSON" => new IsJson(context),
                 "ISNULL" => new IsNullExpression(context),
                 "NULLIF" => new NullIf(context),
                 "SQUARE" => new TrigFunction(context, TrigKind.Square),
@@ -588,6 +589,7 @@ internal abstract class Expression
             8 => uppercaseName switch
             {
                 "COALESCE" => new Coalesce(context),
+                "COMPRESS" => new Compress(context),
                 "DATEDIFF" => new DateDiff.Standard(context),
                 "DATEPART" => new DatePart(context),
                 "GROUPING" => new Grouping(context),
@@ -611,6 +613,7 @@ internal abstract class Expression
             10 => uppercaseName switch
             {
                 "DATALENGTH" => new DataLength(context),
+                "DECOMPRESS" => new Decompress(context),
                 "DENSE_RANK" => WindowExpression.ParseDenseRank(context),
                 "ERROR_LINE" => new ErrorLineFunction(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),

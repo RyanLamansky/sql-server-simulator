@@ -12,4 +12,6 @@ Unlocks EF's owned-types-as-JSON (`OwnsOne(...).ToJson()`) and primitive-collect
 
 OPENJSON WITH-clause types: `int`/`bigint`/`decimal(p,s)`/`float`/`bit`/`nvarchar(N|max)`/`varchar(N)`/`date`/`datetime2(N)`/`datetimeoffset(N)`/`uniqueidentifier`. Coercion via `SqlValue.CoerceTo`. Backed by `System.Text.Json`. JSON-path quoted-property escape `""` → literal `"`.
 
-Not emitted by EF / not modeled: `ISJSON`, `FOR JSON PATH`/`AUTO`. Reachable only via raw SQL.
+`ISJSON(expression)` returns `int` (1 / 0 / NULL). Wraps `JsonDocument.Parse` in try/catch: NULL input → NULL, non-string input → 0 (real SQL Server raises Msg 8116 — the simulator's lax disposition is harmless for the CHECK-constraint use case), valid JSON object/array/scalar → 1, parse-fail → 0. The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
+
+Not emitted by EF / not modeled: `FOR JSON PATH`/`AUTO`. Reachable only via raw SQL.

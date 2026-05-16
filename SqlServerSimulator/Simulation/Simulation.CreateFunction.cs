@@ -215,26 +215,54 @@ partial class Simulation
     {
         var returnType = ParseFunctionReturnType(context);
 
-        // Optional WITH RETURNS NULL ON NULL INPUT.
+        // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
+        // is the only option that affects runtime semantics (NULL-propagation
+        // skips the body); SCHEMABINDING / ENCRYPTION / EXECUTE AS parse-and-
+        // discard. Multiple options separate by commas.
         var returnsNullOnNullInput = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             context.MoveNextRequired();
-            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Returns })
+            while (true)
             {
-                throw new NotSupportedException(
-                    "Only WITH RETURNS NULL ON NULL INPUT is modeled for scalar UDFs (SCHEMABINDING / ENCRYPTION / EXECUTE AS aren't).");
+                switch (context.Token)
+                {
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.Returns }:
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Input })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        returnsNullOnNullInput = true;
+                        context.MoveNextRequired();
+                        break;
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.Schemabinding }:
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
+                        context.MoveNextRequired();
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.Execute }:
+                    case ReservedKeyword { Keyword: Keyword.Exec }:
+                        // EXECUTE AS <caller> — consume EXECUTE, AS, and the
+                        // following principal token (CALLER / SELF / OWNER /
+                        // a quoted name). No principal model in the simulator.
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                        if (context.Token is not (Name or Literal))
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                        break;
+                    default:
+                        throw new NotSupportedException(
+                            "Scalar UDF WITH options accept RETURNS NULL ON NULL INPUT / SCHEMABINDING / ENCRYPTION / EXECUTE AS …; everything else is unmodeled.");
+                }
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
             }
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Input })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            returnsNullOnNullInput = true;
-            context.MoveNextRequired();
         }
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })

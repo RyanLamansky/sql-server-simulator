@@ -293,4 +293,47 @@ public sealed class ScalarFunctionTests
         var id = connection.CreateCommand("select object_id('dbo.f')").ExecuteScalar();
         _ = IsInstanceOfType<int>(id);
     }
+
+    /// <summary>WITH SCHEMABINDING parse-and-discard — accepted, no runtime semantic effect.</summary>
+    [TestMethod]
+    public void CreateFunction_WithSchemabinding_Accepted()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create function dbo.lpad(@v int) returns varchar(8) with schemabinding as begin return right('0000000' + cast(@v as varchar(8)), 8) end");
+        AreEqual("00000042", simulation.ExecuteScalar("select dbo.lpad(42)"));
+    }
+
+    /// <summary>WITH EXECUTE AS OWNER parse-and-discard — no principal model.</summary>
+    [TestMethod]
+    public void CreateFunction_WithExecuteAsOwner_Accepted()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create function dbo.double_it(@v int) returns int with execute as owner as begin return @v * 2 end");
+        AreEqual(84, simulation.ExecuteScalar("select dbo.double_it(42)"));
+    }
+
+    /// <summary>WITH SCHEMABINDING, EXECUTE AS OWNER — comma-separated multi-option shape.</summary>
+    [TestMethod]
+    public void CreateFunction_WithMultipleOptions_Accepted()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create function dbo.tripled(@v int) returns int with schemabinding, execute as owner as begin return @v * 3 end");
+        AreEqual(15, simulation.ExecuteScalar("select dbo.tripled(5)"));
+    }
+
+    /// <summary>WITH RETURNS NULL ON NULL INPUT + SCHEMABINDING — order-independent.</summary>
+    [TestMethod]
+    public void CreateFunction_ReturnsNullOnNullInput_PairsWithSchemabinding()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create function dbo.safe_add(@a int, @b int) returns int with returns null on null input, schemabinding as begin return @a + @b end");
+        _ = IsInstanceOfType<DBNull>(simulation.ExecuteScalar("select dbo.safe_add(null, 5)"));
+        AreEqual(7, simulation.ExecuteScalar("select dbo.safe_add(3, 4)"));
+    }
+
+    /// <summary>Unknown WITH option still raises NotSupportedException — closed accept-list enforced.</summary>
+    [TestMethod]
+    public void CreateFunction_UnknownWithOption_Rejected()
+        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
+            "create function dbo.bad(@v int) returns int with native_compilation as begin return @v end"));
 }

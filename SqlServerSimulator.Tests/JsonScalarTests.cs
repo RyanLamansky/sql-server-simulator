@@ -169,4 +169,50 @@ public sealed class JsonScalarTests
         => AreEqual(
             "Spanish",
             new Simulation().ExecuteScalar("select [value] from openjson(json_query('{\"OtherLanguages\":[\"Spanish\"]}', '$.OtherLanguages'))"));
+
+    /// <summary>ISJSON on a syntactically-valid JSON object returns 1.</summary>
+    [TestMethod]
+    public void IsJson_ValidObject_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar("select isjson('{\"a\":1,\"b\":\"x\"}')"));
+
+    /// <summary>ISJSON on a syntactically-valid JSON array returns 1.</summary>
+    [TestMethod]
+    public void IsJson_ValidArray_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar("select isjson('[1,2,3]')"));
+
+    /// <summary>ISJSON on garbage returns 0.</summary>
+    [TestMethod]
+    public void IsJson_InvalidText_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar("select isjson('not json at all')"));
+
+    /// <summary>ISJSON on an unterminated object returns 0.</summary>
+    [TestMethod]
+    public void IsJson_UnterminatedObject_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar("select isjson('{\"a\":1')"));
+
+    /// <summary>ISJSON on NULL input returns NULL.</summary>
+    [TestMethod]
+    public void IsJson_NullInput_ReturnsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select isjson(cast(null as nvarchar(100)))"));
+
+    /// <summary>The WWI CHECK-constraint shape: ISJSON(col)&lt;&gt;0 — should evaluate as the boolean predicate used in CK_*_Must_Be_Valid_JSON.</summary>
+    [TestMethod]
+    public void IsJson_BooleanPredicateShape_AcceptsValidJson()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int primary key, doc nvarchar(max) check (doc is null or isjson(doc) <> 0));
+            insert t values (1, '{"valid":true}');
+            insert t values (2, null);
+            """);
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    /// <summary>The CHECK constraint rejects garbage at INSERT.</summary>
+    [TestMethod]
+    public void IsJson_CheckConstraint_RejectsInvalidJson()
+        => new Simulation().AssertSqlError("""
+            create table t (id int primary key, doc nvarchar(max) check (doc is null or isjson(doc) <> 0));
+            insert t values (1, 'not json')
+            """, 547);
 }

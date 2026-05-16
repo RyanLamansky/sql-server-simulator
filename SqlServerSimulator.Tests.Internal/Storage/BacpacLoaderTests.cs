@@ -93,17 +93,20 @@ public sealed class BacpacLoaderTests
     public void Load_AW_Unhandled_Elements_Recorded_In_Skipped()
     {
         _ = LoadAdventureWorks(out var diagnostics);
-        // Phases A-F handled types are off Skipped; the few remaining bucket
-        // types (SqlComputedColumn, SqlPermissionStatement, full-text, XML
-        // schema collections / indexes, filegroup-hosted extended properties)
-        // appear awaiting their own bundles.
+        // Phases A-F handled types are off Skipped. Computed columns +
+        // dependent filtered indexes used to be the dominant remaining
+        // gap; the 2026-05-15 WITH SCHEMABINDING / EXECUTE AS scalar-UDF
+        // parser fix unblocked `dbo.ufnLeadingZeros`, which in turn
+        // unblocked every AW computed column referencing it (and the
+        // filtered indexes whose predicates depend on those columns).
+        // SqlPermissionStatement remains — encryption-feature permissions
+        // not yet wired to the simulator's GRANT surface.
         IsNotEmpty(diagnostics.Skipped);
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlTable").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPrimaryKeyConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlForeignKeyConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlCheckConstraint").ToList());
         IsEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlDefaultConstraint").ToList());
-        IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlComputedColumn").ToList());
         IsNotEmpty(diagnostics.Skipped.Where(s => s.ElementType == "SqlPermissionStatement").ToList());
     }
 
@@ -194,16 +197,16 @@ public sealed class BacpacLoaderTests
         command.CommandText = "SELECT COUNT(*) FROM sys.indexes WHERE name LIKE 'AK[_]%' OR name LIKE 'IX[_]%';";
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
-        // 89 user indexes land = 95 SqlIndex - 2 view-targeted (deferred:
-        // indexed views need SCHEMABINDING) - 4 that reference computed
-        // columns the loader currently defers until functions land. The 6
-        // deferrals all surface as Skipped entries.
-        AreEqual(89, reader.GetInt32(0));
+        // 93 user indexes land = 95 SqlIndex - 2 view-targeted (deferred:
+        // indexed views need SCHEMABINDING). The 2 remaining Skipped
+        // entries (down from 6 before the 2026-05-15 index-after-computed
+        // reorder) are the view-targeted indexes.
+        AreEqual(93, reader.GetInt32(0));
         var skippedIndexEntries = diagnostics.Skipped.Where(s => s.ElementType == "SqlIndex").ToList();
-        HasCount(6, skippedIndexEntries);
-        // Both deferral reasons appear in Skipped.
-        IsNotEmpty(skippedIndexEntries.Where(s => s.Reason.Contains("on view '", StringComparison.OrdinalIgnoreCase)).ToList());
-        IsNotEmpty(skippedIndexEntries.Where(s => s.Reason.Contains("CREATE INDEX", StringComparison.OrdinalIgnoreCase) && s.Reason.Contains("failed", StringComparison.OrdinalIgnoreCase)).ToList());
+        HasCount(2, skippedIndexEntries);
+        // Both remaining Skipped entries are view-targeted (indexed views
+        // need SCHEMABINDING — not modeled).
+        AreEqual(2, skippedIndexEntries.Count(s => s.Reason.Contains("on view '", StringComparison.OrdinalIgnoreCase)));
     }
 
     [TestMethod]
@@ -238,7 +241,7 @@ public sealed class BacpacLoaderTests
         //     separately via SqlDatabaseDdlTrigger.)
         AreEqual(11, views);
         AreEqual(8, procs);
-        AreEqual(10, funcs);
+        AreEqual(11, funcs);
         AreEqual(10, triggers);
 
         // Any Skipped programmable entries name their reason (helps the
@@ -598,17 +601,22 @@ public sealed class BacpacLoaderTests
         _ = LoadWideWorldImporters(out var diagnostics);
         var grouped = diagnostics.Skipped.GroupBy(s => s.ElementType)
             .ToDictionary(g => g.Key, g => g.Count());
-        IsFalse(grouped.ContainsKey("SqlTableType"), "SqlTableType is dispatched; should not appear in Skipped.");
-        IsFalse(grouped.ContainsKey("SqlProcedure"), "All 3 previously-failing sysname-using procs now load (sysname keyword wired into SqlType.ResolveSimpleKeyword).");
-        IsFalse(grouped.ContainsKey("SqlComputedColumn"), "JSON_QUERY now supported; all 8 WWI computed columns load.");
-        AreEqual(81, grouped["SqlExtendedProperty"], "Extended properties on table-type columns + filegroup + a handful of computed-col-adjacent columns the loader doesn't yet host-route.");
-        AreEqual(3, grouped["SqlIndex"], "3 filtered indexes reference computed columns that don't yet exist at phase 5 (computed columns land in phase 8). Reordering indexes to a later phase tripped an unrelated UDF-resolution gap in ALTER TABLE ADD AS for AW; deferred.");
-        AreEqual(2, grouped["SqlCheckConstraint"], "2 JSON check constraints deferred.");
-        AreEqual(2, grouped["SqlPermissionStatement"], "GRANT/REVOKE wire-up deferred (same as AW).");
+        TestContext.WriteLine("=== WWI Skipped (current) ===");
+        foreach (var kv in grouped.OrderByDescending(k => k.Value))
+            TestContext.WriteLine($"{kv.Value,5}  {kv.Key}");
+        foreach (var s in diagnostics.Skipped.Where(s => s.ElementType is "SqlCheckConstraint" or "SqlView" or "SqlScalarFunction" or "SqlIndex" or "SqlPermissionStatement"))
+            TestContext.WriteLine($"  [{s.ElementType}] {s.ElementName}: {s.Reason}");
+        IsFalse(grouped.ContainsKey("SqlTableType"), "SqlTableType dispatched.");
+        IsFalse(grouped.ContainsKey("SqlProcedure"), "sysname keyword landed; all procs load.");
+        IsFalse(grouped.ContainsKey("SqlComputedColumn"), "JSON_QUERY landed; all 8 WWI computed columns load.");
+        IsFalse(grouped.ContainsKey("SqlIndex"), "Indexes moved to phase 8 (after computed columns); filtered indexes on computed columns now resolve.");
+        IsFalse(grouped.ContainsKey("SqlView"), "DECOMPRESS landed; Website.VehicleTemperatures view loads.");
+        IsFalse(grouped.ContainsKey("SqlScalarFunction"), "WITH EXECUTE AS OWNER landed on scalar UDFs; Website.CalculateCustomerPrice loads.");
+        IsFalse(grouped.ContainsKey("SqlFilegroup"), "Filegroup skip-with-diagnostic.");
+        AreEqual(81, grouped["SqlExtendedProperty"], "Extended properties on table-type columns + a handful of computed-col-adjacent columns the loader doesn't yet host-route.");
+        AreEqual(1, grouped["SqlCheckConstraint"], "1 CHECK constraint with nested (value_expr)=(1) shape hits the boolean-parser's paren-wrapped-value-subexpression gap.");
+        AreEqual(2, grouped["SqlPermissionStatement"], "GRANT VIEW ANY COLUMN [ENCRYPTION|MASTER] KEY DEFINITION TO public — encryption-feature permissions deferred (same gap as AW).");
         AreEqual(1, grouped["SqlDatabaseOptions"], "Non-default collation deferred.");
-        AreEqual(1, grouped["SqlView"], "1 WWI view (Website.VehicleTemperatures) uses DECOMPRESS (not modeled).");
-        AreEqual(1, grouped["SqlScalarFunction"], "1 WWI scalar function uses SCHEMABINDING / WITH EXEC AS clauses beyond RETURNS NULL ON NULL INPUT.");
-        AreEqual(1, grouped["SqlFilegroup"], "Filegroup not in dispatcher.");
     }
 
     [TestMethod]

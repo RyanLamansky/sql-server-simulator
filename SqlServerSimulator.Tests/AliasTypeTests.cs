@@ -227,4 +227,58 @@ public class AliasTypeTests
             """);
         AreEqual(1, sim.ExecuteScalar("SELECT Id FROM HR.Employee"));
     }
+
+    /// <summary>
+    /// <c>sysname</c> is SQL Server's built-in alias for <c>nvarchar(128) NOT NULL</c>.
+    /// Reachable as a bare keyword in column / parameter / DECLARE positions.
+    /// </summary>
+    [TestMethod]
+    public void Sysname_AsColumnType_StoresNvarcharBytes()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table o (id int primary key, name sysname);
+            insert o values (1, N'my-object'), (2, N'another');
+            """);
+        AreEqual("my-object", simulation.ExecuteScalar("select name from o where id = 1"));
+        AreEqual("another", simulation.ExecuteScalar("select name from o where id = 2"));
+    }
+
+    /// <summary><c>DECLARE @x sysname</c> creates a string-typed scalar variable.</summary>
+    [TestMethod]
+    public void Sysname_AsVariableType_Works()
+        => AreEqual("hello", new Simulation().ExecuteScalar("""
+            declare @x sysname = N'hello';
+            select @x
+            """));
+
+    /// <summary>
+    /// <c>sysname</c> as a procedure parameter type — the path that WWI's
+    /// <c>AddRoleMemberIfNonexistent</c>, <c>CreateRoleIfNonexistent</c>,
+    /// and <c>ReseedSequenceBeyondTableValues</c> all depend on.
+    /// </summary>
+    [TestMethod]
+    public void Sysname_AsProcedureParameter_Works()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table msgs (id int identity primary key, body nvarchar(200))",
+            "create procedure dbo.log_msg @text sysname as insert msgs (body) values (@text)");
+        _ = simulation.ExecuteNonQuery("exec dbo.log_msg N'a sysname-typed parameter'");
+        AreEqual("a sysname-typed parameter", simulation.ExecuteScalar("select body from msgs"));
+    }
+
+    /// <summary><c>sys.columns</c> reports the sysname type-name for a sysname-declared column (was nvarchar(128) before the keyword landed).</summary>
+    [TestMethod]
+    public void Sysname_SurfacesAs_sysname_InSysColumns()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key, label sysname)");
+        AreEqual("sysname", simulation.ExecuteScalar("""
+            select ty.name from sys.columns c
+            join sys.types ty on c.user_type_id = ty.user_type_id
+            join sys.tables tab on c.object_id = tab.object_id
+            where tab.name = 't' and c.name = 'label'
+            """));
+    }
 }

@@ -732,6 +732,21 @@ internal abstract partial class SqlType
         if (declaredMaxLength == MaxLengthSentinel)
             return (ResolveVarFamilyForLength(resolved, MaxLengthSentinel), MaxLengthSentinel);
 
+        // sysname has a fixed intrinsic length (nvarchar(128) NOT NULL — SQL
+        // Server's sys-schema alias). A length spec on the keyword is grammar-
+        // rejected by real SQL Server; we mirror that by raising Msg 2716 here
+        // when one is supplied. The 128-character cap is enforced via
+        // HeapColumn.MaxLength = 128 (the row encoder treats sysname-typed
+        // columns identically to nvarchar(128) at storage).
+        if (resolved is SystemNameSqlType)
+        {
+            return declaredMaxLength is not null
+                ? throw (columnName is not null
+                    ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
+                    : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
+                : (resolved, 128);
+        }
+
         // Variable-length string types are bounded per type. SQL Server has the
         // same two-context rule as fixed-length char/nchar/binary: missing
         // length defaults to 1 in a column declaration but 30 in a CAST/CONVERT

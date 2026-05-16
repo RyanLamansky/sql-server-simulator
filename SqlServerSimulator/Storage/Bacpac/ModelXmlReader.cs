@@ -73,23 +73,19 @@ internal static class ModelXmlReader
         // columns only (depend on phase 1; computed columns deferred);
         // phase 3 = PK/UQ/CHECK/DEFAULT constraints (depend on tables);
         // phase 4 = FK constraints (depend on PK/UQ on referenced tables);
-        // phase 5 = indexes (depend on tables); phase 6 = views (body is
-        // deferred-parsed so cross-references inside the same phase work);
-        // phase 7 = functions + procedures + DML triggers (bodies also
-        // deferred-parsed); phase 8 = deferred computed columns via
-        // ALTER TABLE ADD col AS expr (depend on functions landing in
-        // phase 7 — some computed expressions invoke UDFs and CREATE
-        // TABLE's column-list parser can't tolerate forward function refs);
-        // phase 9 = extended properties (depend on every covered host type,
-        // including the computed columns just promoted in phase 8).
-        // Skipped-element recording happens on the last phase so each
-        // unhandled type is reported once. Filtered indexes whose predicate
-        // references a computed column run in phase 5 and fail because the
-        // column doesn't yet exist; those land on Skipped with a "Column
-        // name X does not exist" reason. Could be lifted later by moving
-        // indexes after computed columns, but that reorder cascaded into
-        // AW regressions (ALTER TABLE ADD col AS dbo.ufn(...) hits a UDF
-        // resolution gap in the simulator's column-expression parser).
+        // phase 5 = unused (was indexes; moved to phase 8 so filtered-index
+        // predicates referencing computed columns resolve); phase 6 = views
+        // (body is deferred-parsed so cross-references inside the same phase
+        // work); phase 7 = functions + procedures + DML triggers (bodies
+        // also deferred-parsed); phase 8 = deferred computed columns
+        // (ALTER TABLE ADD col AS expr — depend on functions landing in
+        // phase 7) + indexes (depend on tables AND computed columns; within
+        // phase 8 document order puts SqlTable's deferred-computed-column
+        // ALTERs ahead of SqlIndex emissions); phase 9 = extended properties
+        // (depend on every covered host type, including the computed
+        // columns and indexes just landed in phase 8). Skipped-element
+        // recording happens on the last phase so each unhandled type is
+        // reported once.
         const int LastPhase = 9;
         for (var phase = 1; phase <= LastPhase; phase++)
             RunPhase(elements, connection, result, phase, viewNames, isLastPhase: phase == LastPhase);
@@ -118,7 +114,6 @@ internal static class ModelXmlReader
                     ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
                     ("SqlDefaultConstraint", 3) => Run(() => EmitDefaultConstraint(element, name, connection)),
                     ("SqlForeignKeyConstraint", 4) => Run(() => EmitForeignKeyConstraint(element, name, connection)),
-                    ("SqlIndex", 5) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
                     ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
                     ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
                     ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
@@ -126,6 +121,18 @@ internal static class ModelXmlReader
                     ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
                     ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
                     ("SqlTable", 8) => Run(() => EmitDeferredComputedColumns(element, connection, result)),
+                    // Indexes run AFTER computed columns so filtered-index
+                    // predicates / INCLUDE lists referencing those columns
+                    // resolve correctly. Element-order within phase 8: all
+                    // SqlTable entries (and their deferred-computed-column
+                    // ALTERs) come before SqlIndex entries in document order,
+                    // so the per-SqlTable computed-column pass completes
+                    // before the first SqlIndex emission runs.
+                    ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
+                    // Filegroups are storage-layout metadata; the simulator
+                    // has a single in-process heap so they're parse-and-skip.
+                    // Phase 1 placement is fine — no dependencies either way.
+                    ("SqlFilegroup", 1) => Run(static () => { }),
                     ("SqlExtendedProperty", 9) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
                     _ => IsHandledByAnotherPhase(type),
                 };
@@ -158,7 +165,7 @@ internal static class ModelXmlReader
     /// </summary>
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
-        or "SqlSequence" or "SqlRole" or "SqlTableType"
+        or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlFilegroup"
         or "SqlTable"
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
         or "SqlCheckConstraint" or "SqlDefaultConstraint"
