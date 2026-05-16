@@ -120,18 +120,19 @@ internal static class RowEncoder
 
         for (var i = 0; i < n; i++)
         {
-            if (!values[i].IsNull && !IsCompatibleColumnType(values[i].Type, schema[i].Type))
-                throw new ArgumentException($"Value at column {i} has type {values[i].Type}, schema declares {schema[i].Type}.", nameof(values));
+            var t = schema[i].Type;
+            if (!values[i].IsNull && !IsCompatibleColumnType(values[i].Type, t))
+                throw new ArgumentException($"Value at column {i} has type {values[i].Type}, schema declares {t}.", nameof(values));
 
-            if (schema[i].Type == SqlType.Bit)
+            if (t == SqlType.Bit)
             {
                 if (bitsInRun % 8 == 0)
                     fixedSectionLength++;
                 bitsInRun++;
             }
-            else if (schema[i].Type.IsFixedLength)
+            else if (t.IsFixedLength)
             {
-                fixedSectionLength += schema[i].Type.FixedLength;
+                fixedSectionLength += t.FixedLength;
                 bitsInRun = 0;
             }
             else
@@ -207,7 +208,8 @@ internal static class RowEncoder
             if (values[i].IsNull)
                 bytes[bitmapStart + (i / 8)] |= (byte)(1 << (i % 8));
 
-            if (schema[i].Type == SqlType.Bit)
+            var t = schema[i].Type;
+            if (t == SqlType.Bit)
             {
                 if (bitsInRun % 8 == 0)
                 {
@@ -218,11 +220,11 @@ internal static class RowEncoder
                     bytes[bitByteOffset] |= (byte)(1 << (bitsInRun % 8));
                 bitsInRun++;
             }
-            else if (schema[i].Type.IsFixedLength)
+            else if (t.IsFixedLength)
             {
-                var width = schema[i].Type.FixedLength;
+                var width = t.FixedLength;
                 if (!values[i].IsNull)
-                    _ = schema[i].Type.Encode(values[i], bytes.AsSpan(fixedOffset, width));
+                    _ = t.Encode(values[i], bytes.AsSpan(fixedOffset, width));
                 fixedOffset += width;
                 bitsInRun = 0;
             }

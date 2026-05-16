@@ -66,7 +66,8 @@ internal static class BacpacReader
 
             try
             {
-                using var bcpStream = entry.Open();
+                using var rawStream = entry.Open();
+                using var bcpStream = new BufferedStream(rawStream, 64 * 1024);
                 LoadRowsFromBcp(bcpStream, table, schemaName, tableName, result);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException
@@ -91,7 +92,7 @@ internal static class BacpacReader
     /// values), no FK enforcement, no triggers (data is already consistent
     /// from the source DB).
     /// </summary>
-    private static void LoadRowsFromBcp(Stream bcpStream, HeapTable table, string schemaName, string tableName, BacpacLoadResult result)
+    private static void LoadRowsFromBcp(BufferedStream bcpStream, HeapTable table, string schemaName, string tableName, BacpacLoadResult result)
     {
         // Look up the per-column alias map populated during model.xml table
         // emission. Key uses bracketed [schema].[table] form to match the
