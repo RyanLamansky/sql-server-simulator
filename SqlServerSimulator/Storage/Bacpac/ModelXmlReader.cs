@@ -212,21 +212,33 @@ internal static class ModelXmlReader
     /// </summary>
     private static void EmitDatabaseOptions(XElement element, DbConnection connection, BacpacLoadResult result)
     {
-        // Collation: hard-error in the simulator on anything other than
-        // SQL_Latin1_General_CP1_CI_AS. Surface here as a Skipped entry
-        // rather than throwing — the loader's goal is best-effort import.
+        using var command = connection.CreateCommand();
+
+        // Collation: emit ALTER DATABASE COLLATE when the name is on the
+        // recognized whitelist; the simulator stores it as metadata on
+        // Database.CollationName for catalog-view round-trip. Comparison /
+        // sort / LIKE still route through Collation.Default — see
+        // docs/claude/bacpac-prerequisites.md collation note. An unrecognized
+        // name lands on Warnings rather than aborting the load (the loader's
+        // best-effort contract).
         var collation = element.Elements(Ns + "Property")
             .FirstOrDefault(p => p.Attribute("Name")?.Value == "Collation")
             ?.Attribute("Value")?.Value;
-        if (collation is { } c && c != "SQL_Latin1_General_CP1_CI_AS")
+        if (collation is not null)
         {
-            result.Skipped.Add(new BacpacSkipped(
-                "SqlDatabaseOptions",
-                "Collation",
-                $"Collation '{c}' isn't modeled; only SQL_Latin1_General_CP1_CI_AS is supported."));
+            if (Collation.IsRecognized(collation))
+            {
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+                command.CommandText = $"ALTER DATABASE [simulated] COLLATE {collation};";
+#pragma warning restore CA2100
+                _ = command.ExecuteNonQuery();
+            }
+            else
+            {
+                result.Warnings.Add($"Database declares Collation '{collation}' which isn't on the simulator's recognized list — stored as metadata, but comparison semantics fall back to the default. Add it to Collation.Recognized to surface in catalog views.");
+            }
         }
 
-        using var command = connection.CreateCommand();
         foreach (var property in element.Elements(Ns + "Property"))
         {
             var name = property.Attribute("Name")?.Value;
@@ -673,8 +685,21 @@ internal static class ModelXmlReader
             // so the diagnostics report names the deferred surface.
             result.Warnings.Add($"ROWGUIDCOL clause on column '{qualifiedColumnName}' dropped — the simulator doesn't model this metadata annotation; storage behavior is unaffected.");
         }
+        // Per-column COLLATE override — emitted only when on the whitelist.
+        // An unrecognized name lands on Warnings; the simulator's parser
+        // would reject it otherwise (the loader's best-effort contract
+        // prefers a partial column over an aborted table load).
+        var collateClause = "";
+        var columnCollation = ReadStringProperty(columnElement, "Collation");
+        if (columnCollation is not null)
+        {
+            if (Collation.IsRecognized(columnCollation))
+                collateClause = $" COLLATE {columnCollation}";
+            else
+                result.Warnings.Add($"Column '{qualifiedColumnName}' declares COLLATE '{columnCollation}' which isn't recognized — clause dropped, column inherits the database default.");
+        }
         var nullability = isNullableExplicit ? (isNullable ? " NULL" : " NOT NULL") : "";
-        return $"{columnLeaf} {typeDdl}{identityClause}{nullability}";
+        return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{nullability}";
     }
 
     /// <summary>

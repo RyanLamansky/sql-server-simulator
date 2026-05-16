@@ -1020,8 +1020,41 @@ internal static class BuiltInResources
         };
         var spatialReferenceSystemsView = new CatalogView("spatial_reference_systems", spatialReferenceSystemsColumns, EnumerateSysSpatialReferenceSystems);
 
+        // sys.databases: real SQL Server emits ~95 columns; the simulator
+        // exposes the load-bearing subset that tooling actually queries (name,
+        // database_id, compatibility_level, collation_name, snapshot-isolation
+        // state, and the common boolean toggles). Single row for the current
+        // database; multi-database support would extend this enumeration.
+        var databasesColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, false),
+            new("database_id", SqlType.SmallInt, null, false),
+            new("compatibility_level", SqlType.TinyInt, null, true),
+            new("collation_name", SqlType.SystemName, 128, true),
+            new("snapshot_isolation_state", SqlType.TinyInt, null, false),
+            new("snapshot_isolation_state_desc", SqlType.NVarchar, 60, true),
+            new("is_read_committed_snapshot_on", SqlType.Bit, null, false),
+            new("state", SqlType.TinyInt, null, false),
+            new("state_desc", SqlType.NVarchar, 60, true),
+        };
+        var databasesView = new CatalogView("databases", databasesColumns, EnumerateSysDatabases);
+
+        // sys.fn_helpcollations() — table-valued metadata function listing the
+        // collations the simulator recognizes. Real SQL Server emits ~5540
+        // rows; the simulator emits the whitelist defined in Collation.Recognized
+        // (currently 2). Each row carries the canonical name + a human
+        // description, matching real SQL Server's column shape.
+        var fnHelpCollationsColumns = new HeapColumn[]
+        {
+            new("name", SqlType.SystemName, 128, true),
+            new("description", SqlType.NVarchar, 1000, true),
+        };
+        var fnHelpCollationsView = new CatalogView("fn_helpcollations", fnHelpCollationsColumns, EnumerateFnHelpCollations);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
+            ["sys.databases"] = databasesView,
+            ["sys.fn_helpcollations"] = fnHelpCollationsView,
             ["sys.schemas"] = schemasView,
             ["sys.tables"] = tablesView,
             ["sys.objects"] = objectsView,
@@ -2193,6 +2226,47 @@ internal static class BuiltInResources
         yield break;
     }
 
+    /// <summary>
+    /// Rows for <c>sys.databases</c>. Single row for the current database
+    /// (the simulator's database dictionary is single-entry by default); a
+    /// future <c>USE &lt;db&gt;</c> expansion would extend this enumeration to
+    /// iterate <see cref="Simulation.Databases"/>. State is always
+    /// <c>0 / ONLINE</c>; snapshot-isolation columns track the live
+    /// <see cref="Database.AllowSnapshotIsolation"/> /
+    /// <c>ReadCommittedSnapshot</c> flags.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch)
+    {
+        var db = batch.CurrentDatabase;
+        var snapshotState = (byte)(db.AllowSnapshotIsolation ? 1 : 0);
+        yield return [
+            SqlValue.FromSystemName(db.Name),
+            SqlValue.FromInt16(1),
+            SqlValue.FromByte((byte)db.CompatibilityLevel),
+            SqlValue.FromSystemName(db.CollationName),
+            SqlValue.FromByte(snapshotState),
+            SqlValue.FromNVarchar(db.AllowSnapshotIsolation ? "ON" : "OFF"),
+            SqlValue.FromBoolean(db.ReadCommittedSnapshot),
+            SqlValue.FromByte(0),
+            SqlValue.FromNVarchar("ONLINE"),
+        ];
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.fn_helpcollations()</c>. Emits one row per entry in
+    /// <see cref="Collation.Recognized"/> — the simulator's whitelist of
+    /// metadata-accepted collation names. Real SQL Server returns ~5540
+    /// rows here; the simulator's shorter list is honest about which
+    /// collation names round-trip through <see cref="Database.CollationName"/>
+    /// / <see cref="HeapColumn.Collation"/>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateFnHelpCollations(Parser.BatchContext batch)
+    {
+        _ = batch;
+        foreach (var entry in Collation.Recognized.OrderBy(e => e.Key, StringComparer.Ordinal))
+            yield return [SqlValue.FromSystemName(entry.Key), SqlValue.FromNVarchar(entry.Value)];
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
@@ -2546,6 +2620,16 @@ internal static class BuiltInResources
         SqlValue nullCollation)
     {
         var falseBit = SqlValue.FromBoolean(false);
+        // The per-database default collation flows from CurrentDatabase.
+        // The captured defaultCollation arg is a legacy fallback; today the
+        // active database's CollationName drives the value, with per-column
+        // overrides taking precedence when present.
+        var dbDefaultCollation = SqlValue.FromSystemName(batch.CurrentDatabase.CollationName);
+        _ = defaultCollation;
+        SqlValue CollationFor(HeapColumn c) =>
+            c.Type.Category != SqlTypeCategory.String ? nullCollation
+            : c.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
+            : dbDefaultCollation;
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
@@ -2567,7 +2651,7 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Nullable),
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
-                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                        CollationFor(col),
                     ];
                 }
             }
@@ -2593,7 +2677,7 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Nullable),
                         falseBit,
                         falseBit,
-                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                        CollationFor(col),
                     ];
                 }
             }
@@ -2619,7 +2703,7 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Nullable),
                         falseBit,
                         falseBit,
-                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                        CollationFor(col),
                     ];
                 }
             }
@@ -2645,7 +2729,7 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Nullable),
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
-                        col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullCollation,
+                        CollationFor(col),
                     ];
                 }
             }
@@ -2695,6 +2779,8 @@ internal static class BuiltInResources
         var nullSysName = SqlValue.Null(SqlType.SystemName);
         var yesNullable = SqlValue.FromVarchar("YES");
         var noNullable = SqlValue.FromVarchar("NO");
+        var dbDefaultCollation = SqlValue.FromSystemName(batch.CurrentDatabase.CollationName);
+        _ = defaultCollation;
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
@@ -2711,7 +2797,9 @@ internal static class BuiltInResources
                         SqlTypeCategory.String => isoCs,
                         _ => nullSysName,
                     };
-                    var collation = col.Type.Category == SqlTypeCategory.String ? defaultCollation : nullSysName;
+                    var collation = col.Type.Category != SqlTypeCategory.String ? nullSysName
+                        : col.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
+                        : dbDefaultCollation;
                     yield return [
                         catalog,
                         schemaName,

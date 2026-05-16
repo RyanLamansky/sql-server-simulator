@@ -86,6 +86,20 @@ internal sealed class Database
     public CompatibilityLevel CompatibilityLevel = CompatibilityLevel.Sql170;
 
     /// <summary>
+    /// Database-scope <c>COLLATE</c> declaration. The simulator routes every
+    /// comparison / sort / LIKE through <see cref="Collation.Default"/>
+    /// regardless of what this names — it's a metadata field for BACPAC
+    /// round-trip and catalog-view fidelity (<c>sys.databases.collation_name</c>,
+    /// <c>DATABASEPROPERTYEX(name, 'Collation')</c>,
+    /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c>). Whitelist of accepted
+    /// names lives in <see cref="Collation.Recognized"/>; <c>ALTER DATABASE
+    /// name COLLATE name</c> raises <see cref="NotSupportedException"/> on an
+    /// unrecognized name. Defaults to the simulator's modeled collation
+    /// (<see cref="Collation.Default"/>.Name).
+    /// </summary>
+    public string CollationName = Collation.Default.Name;
+
+    /// <summary>
     /// Explicit override of the per-database <c>VERBOSE_TRUNCATION_WARNINGS</c>
     /// scoped configuration; <c>null</c> means follow the compatibility-level
     /// default. Set via

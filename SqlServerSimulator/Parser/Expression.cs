@@ -673,6 +673,7 @@ internal abstract class Expression
             },
             18 => uppercaseName switch
             {
+                "DATABASEPROPERTYEX" => new DatabasePropertyEx(context),
                 "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
                 "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
                 _ => null

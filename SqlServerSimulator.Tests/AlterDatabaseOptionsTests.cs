@@ -104,7 +104,7 @@ public class AlterDatabaseOptionsTests
         var ex = Throws<NotSupportedException>(() =>
             new Simulation().ExecuteNonQuery("ALTER DATABASE claude COLLATE Japanese_CI_AS"));
         Contains("Japanese_CI_AS", ex.Message);
-        Contains("SQL_Latin1_General_CP1_CI_AS", ex.Message);
+        Contains("recognized list", ex.Message);
     }
 
     [TestMethod]

@@ -616,7 +616,7 @@ public sealed class BacpacLoaderTests
         IsFalse(grouped.ContainsKey("SqlCheckConstraint"), "Paren-wrapped value LHS in boolean parser landed; WWI's CK_Sales_SpecialDeals_Exactly_One_NOT_NULL_Pricing_Option_Is_Required loads.");
         IsFalse(grouped.ContainsKey("SqlPermissionStatement"), "SqlPermissionStatement dispatcher entry landed; the 2 encryption-key VIEW grants emit through the GRANT parser.");
         IsFalse(grouped.ContainsKey("SqlExtendedProperty"), "Extended-property host-routing landed for SqlIndexBase + SqlConstraint; all 414 WWI extended properties load.");
-        AreEqual(1, grouped["SqlDatabaseOptions"], "Non-default collation deferred.");
+        IsFalse(grouped.ContainsKey("SqlDatabaseOptions"), "Collation metadata round-trip landed; Latin1_General_100_CI_AS recognized and stored on Database.CollationName.");
     }
 
     [TestMethod]
@@ -633,6 +633,30 @@ public sealed class BacpacLoaderTests
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
         AreEqual(8, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void Load_WWI_Database_Collation_Round_Trips()
+    {
+        // WWI declares Latin1_General_100_CI_AS in its SqlDatabaseOptions
+        // element. The 2026-05-16 collation metadata bundle stores that on
+        // Database.CollationName and surfaces it through both sys.databases
+        // and DATABASEPROPERTYEX. Comparison semantics still route through
+        // the simulator's default collation — the metadata is honest about
+        // the declaration without claiming full fidelity.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT collation_name FROM sys.databases";
+            AreEqual("Latin1_General_100_CI_AS", command.ExecuteScalar());
+        }
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT DATABASEPROPERTYEX('simulated', 'Collation')";
+            AreEqual("Latin1_General_100_CI_AS", command.ExecuteScalar());
+        }
     }
 
     [TestMethod]

@@ -16,7 +16,7 @@ namespace SqlServerSimulator.Storage;
 /// </para>
 /// </remarks>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null)
 {
     public readonly string Name = name;
 
@@ -25,6 +25,18 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public readonly int? MaxLength = maxLength;
 
     public readonly bool Nullable = nullable;
+
+    /// <summary>
+    /// Declared per-column <c>COLLATE name</c> override. <c>null</c> when
+    /// the column inherits the database default (<see cref="Database.CollationName"/>).
+    /// Metadata-only — every comparison / sort / LIKE in the simulator still
+    /// routes through <see cref="Collation.Default"/> regardless of what
+    /// this names. Surfaces through <c>sys.columns.collation_name</c> /
+    /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c> so BACPAC round-trip
+    /// preserves the declaration; comparison semantics are a separate
+    /// project.
+    /// </summary>
+    public readonly string? Collation = collation;
 
     /// <summary>
     /// Non-<see cref="GeneratedAlwaysAsRow.None"/> when the column was declared

@@ -640,6 +640,7 @@ partial class Simulation
         Expression? defaultExpression = null;
         var generatedAs = GeneratedAlwaysAsRow.None;
         var isHidden = false;
+        string? columnCollation = null;
         var inlineKeyKind = (KeyConstraintKind?)null;
         string? inlineKeyName = null;
         string? inlineFkName = null;
@@ -647,6 +648,25 @@ partial class Simulation
         {
             switch (context.Token)
             {
+                case ReservedKeyword { Keyword: Keyword.Collate } when columnCollation is null:
+                    // Column-level COLLATE clause. Validated against the
+                    // recognized whitelist; the parsed name is stored as
+                    // metadata on the HeapColumn for catalog-view round-trip
+                    // (sys.columns.collation_name). Comparison semantics
+                    // continue to use Collation.Default regardless.
+                    if (context.GetNextRequired() is not { } collationToken)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    var collationName = collationToken switch
+                    {
+                        UnquotedString us => us.Value,
+                        Name n => n.Value,
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    };
+                    if (!Collation.IsRecognized(collationName))
+                        throw new NotSupportedException($"COLLATE: collation '{collationName}' isn't on the simulator's recognized list.");
+                    columnCollation = collationName;
+                    context.MoveNextOptional();
+                    continue;
                 case ReservedKeyword { Keyword: Keyword.Identity } when identity is null:
                     identity = ParseIdentitySpec(context, columnName.Value);
                     continue;
@@ -768,7 +788,7 @@ partial class Simulation
             actualNullable = false;
         }
 
-        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden);
+        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation);
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         if (defaultExpression is not null)

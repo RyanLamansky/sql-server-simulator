@@ -361,20 +361,25 @@ partial class Simulation
 
     /// <summary>
     /// Parses <c>ALTER DATABASE name COLLATE &lt;collation_name&gt;</c>.
-    /// The simulator is single-collation (SQL_Latin1_General_CP1_CI_AS) by
-    /// design; an attempt to flip to anything else raises
-    /// <see cref="NotSupportedException"/> rather than silently accepting
-    /// (a parse-and-discard would mean string comparisons diverge from
-    /// declared semantics).
+    /// Validates the name against <see cref="Collation.Recognized"/> and
+    /// stores it on <see cref="Database.CollationName"/> — comparisons /
+    /// sort / LIKE still route through <see cref="Collation.Default"/>; the
+    /// stored name is metadata for catalog-view round-trip
+    /// (<c>sys.databases.collation_name</c>, <c>DATABASEPROPERTYEX</c>).
+    /// An unrecognized name raises <see cref="NotSupportedException"/> in
+    /// direct SQL; the BACPAC loader catches and records on Warnings.
     /// </summary>
-    private static bool TryParseAlterDatabaseCollate(ParserContext context) =>
-        context.GetNextRequired() switch
-        {
-            UnquotedString token when context.Batch.IsSkipping
-                                       || Collation.Default.Equals(token.Value, Collation.Default.Name) => true,
-            UnquotedString token => throw new NotSupportedException($"ALTER DATABASE COLLATE: only '{Collation.Default.Name}' is supported (requested '{token.Value}')."),
-            _ => false,
-        };
+    private static bool TryParseAlterDatabaseCollate(ParserContext context)
+    {
+        if (context.GetNextRequired() is not UnquotedString token)
+            return false;
+        if (context.Batch.IsSkipping)
+            return true;
+        if (!Collation.IsRecognized(token.Value))
+            throw new NotSupportedException($"ALTER DATABASE COLLATE: collation '{token.Value}' isn't on the simulator's recognized list.");
+        context.Batch.CurrentDatabase.CollationName = token.Value;
+        return true;
+    }
 
     private static bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
     {
