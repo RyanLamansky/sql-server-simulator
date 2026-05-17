@@ -278,4 +278,12 @@ public sealed class ConvertTests
         AreEqual("281", ex.Data["HelpLink.EvtID"]);
         Contains("money", ex.Message);
     }
+
+    [TestMethod]
+    public void Convert_NullStringSource_WithStyle_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select convert(datetime2, cast(null as nvarchar(50)), 126)"));
+
+    [TestMethod]
+    public void Convert_NullDateSource_WithStyle_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select convert(varchar(40), cast(null as datetime2), 121)"));
 }

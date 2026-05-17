@@ -35,10 +35,10 @@ internal abstract class Aggregator
         AggregateKind.Count => new CountAggregator(isStar: aggregate.Operand is null, isBigCount: false, distinct: aggregate.Distinct),
         AggregateKind.CountBig => new CountAggregator(isStar: aggregate.Operand is null, isBigCount: true, distinct: aggregate.Distinct),
         AggregateKind.ApproxCountDistinct => new CountAggregator(isStar: false, isBigCount: true, distinct: true),
-        AggregateKind.Max => operandType.IsLob
+        AggregateKind.Max => operandType.IsLob || operandType is BitSqlType
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "max")
             : new MinMaxAggregator(resultType, isMax: true),
-        AggregateKind.Min => operandType.IsLob
+        AggregateKind.Min => operandType.IsLob || operandType is BitSqlType
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "min")
             : new MinMaxAggregator(resultType, isMax: false),
         AggregateKind.Sum => SumAggregator.Create(resultType, aggregate.Distinct),

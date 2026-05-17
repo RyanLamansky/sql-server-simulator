@@ -80,6 +80,8 @@ internal sealed class ConvertExpression : Expression
         }
 
         var sourceValue = this.source.Run(runtime);
+        if (sourceValue.IsNull)
+            return SqlValue.Null(this.targetType);
 
         try
         {

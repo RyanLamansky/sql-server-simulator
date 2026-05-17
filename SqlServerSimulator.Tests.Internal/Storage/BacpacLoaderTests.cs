@@ -808,6 +808,48 @@ public sealed class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void Load_WWI_InvoiceLines_Decimals_Decode_With_Correct_Magnitude()
+    {
+        // Regression pin for the BCP decimal wire-format fix (2026-05-17):
+        // the on-disk layout is [prefix N][precision][scale][sign][N-3 bytes mantissa LE],
+        // not [prefix N][sign][N-1 bytes mantissa LE] as previously assumed.
+        // The earlier decoder treated the precision byte as the sign (always
+        // non-zero → always positive) and started the mantissa 2 bytes too
+        // early, multiplying every decoded value by 2^16 ≈ 65,536.
+        // Probe-confirmed against the live WWI server:
+        //   MAX(UnitPrice) over Sales.InvoiceLines = 1899.00 (decimal(18,2)).
+        // The pre-fix simulator returned 124,452,866.58 (= 1899 × 65,536 plus
+        // contributions from rows that maxed slightly higher post-shift).
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MAX(UnitPrice), MIN(UnitPrice), MAX(TaxRate), MIN(TaxRate) FROM Sales.InvoiceLines;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(1899.00m, reader.GetDecimal(0));
+        AreEqual(0.66m, reader.GetDecimal(1));
+        AreEqual(15.000m, reader.GetDecimal(2));
+        AreEqual(10.000m, reader.GetDecimal(3));
+    }
+
+    [TestMethod]
+    public void Load_WWI_StockItemTransactions_Decimals_Decode_Negative_Values()
+    {
+        // Same regression as above but specifically pins the sign handling.
+        // Pre-fix the simulator's "sign byte" was actually the precision byte
+        // (always non-zero), so every decoded decimal was rendered positive.
+        // StockItemTransactions.Quantity (decimal(10,3)) has both negative
+        // and positive values on the live server — probed MIN(Quantity) = -360.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MIN(Quantity) FROM Warehouse.StockItemTransactions;";
+        AreEqual(-360.000m, command.ExecuteScalar());
+    }
+
+    [TestMethod]
     public void Load_WWI_Sysname_Procs_Land_In_sys_procedures()
     {
         // The three WWI procs taking sysname parameters

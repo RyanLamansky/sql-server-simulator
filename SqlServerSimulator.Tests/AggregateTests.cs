@@ -397,4 +397,18 @@ public sealed class AggregateTests
         }
         AreEqual(1, rows);
     }
+
+    [TestMethod]
+    public void Min_BitColumn_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "create table t (b bit not null); insert t values (1), (0); select min(b) from t",
+            8117,
+            "Operand data type bit is invalid for min operator.");
+
+    [TestMethod]
+    public void Max_BitColumn_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "create table t (b bit not null); insert t values (1), (0); select max(b) from t",
+            8117,
+            "Operand data type bit is invalid for max operator.");
 }

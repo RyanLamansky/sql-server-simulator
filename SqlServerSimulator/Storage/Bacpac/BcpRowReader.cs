@@ -94,9 +94,9 @@ internal static class BcpRowReader
         // emits its 0x10 prefix per probe.
         if (type == SqlType.UniqueIdentifier) return ReadLengthPrefixed1(ref stream, 16, type, b => SqlValue.FromGuid(new Guid(b)));
 
-        // Decimal/numeric — 1-byte length prefix + sign byte + LE mantissa.
-        // Mantissa bytes depend on precision: 1-9 = 4 bytes, 10-19 = 8 bytes,
-        // 20-28 = 12 bytes, 29-38 = 16 bytes. Prefix = sign(1) + mantissa.
+        // Decimal/numeric — see ReadDecimal for the full wire layout (the
+        // BCP form prepends an inline precision + scale + sign before the
+        // mantissa, which the TDS wire spec does not).
         if (type is DecimalSqlType decimalType) return ReadDecimal(ref stream, decimalType);
 
         // datetime2 / time / datetimeoffset — precision-dependent fixed width
@@ -237,10 +237,14 @@ internal static class BcpRowReader
     }
 
     /// <summary>
-    /// Decimal/numeric BCP encoding: 1-byte prefix (= 1 sign byte + N mantissa
-    /// bytes), 1 byte sign (0=negative, 1=positive), N bytes LE unsigned
-    /// mantissa. The mantissa is the value times 10^scale, parsed as an
-    /// arbitrarily-large integer.
+    /// Decimal/numeric BCP encoding (probed against the WideWorldImporters
+    /// bacpac, distinct from the TDS-wire layout):
+    /// <c>[1-byte prefix N][1-byte precision][1-byte scale][1-byte sign 0/1][N-3 byte mantissa LE]</c>.
+    /// Mantissa width depends on precision per the TDS spec (4/8/12/16 bytes
+    /// for precision 1-9 / 10-19 / 20-28 / 29-38) so the BCP payload total
+    /// is always one of 7/11/15/19 bytes; the simulator trusts the
+    /// destination <see cref="DecimalSqlType"/> for the storage scale and
+    /// uses the on-disk scale only for the value calculation.
     /// </summary>
     private static SqlValue ReadDecimal(ref PushbackStream stream, DecimalSqlType type)
     {
@@ -249,32 +253,34 @@ internal static class BcpRowReader
             return SqlValue.Null(type);
         Span<byte> bytes = stackalloc byte[prefix];
         stream.ReadExact(bytes);
-        var positive = bytes[0] != 0;
-        var mantissaSpan = bytes[1..];
+        var onDiskScale = bytes[1];
+        var positive = bytes[2] != 0;
+        var mantissaSpan = bytes[3..];
 
-        // Fast path: mantissa fits in 12 bytes (96 bits) and scale fits in
-        // System.Decimal's 28-digit ceiling — construct the decimal directly
-        // from its (lo, mid, hi, sign, scale) representation with zero
-        // arithmetic. SQL Server BCP mantissa for precision ≤ 28 always fits.
-        // Skips BigInteger.Pow + BigInteger division, which profiled as ~15%
-        // of total BACPAC load wall clock against WideWorldImporters-Full.
-        if (mantissaSpan.Length <= 12 && type.scale <= 28)
+        // Fast path: mantissa fits in 96 bits (System.Decimal's ceiling) —
+        // either the BCP layout already has ≤ 12 mantissa bytes (precision
+        // ≤ 28), or the 16-byte form's top 4 bytes are zero (the actual
+        // value happens to fit). Construct the decimal directly from its
+        // (lo, mid, hi, sign, scale) representation with zero arithmetic.
+        // Skips BigInteger.Pow + BigInteger division, which profiled as
+        // ~15% of total BACPAC load wall clock against WWI-Full.
+        if (onDiskScale <= 28
+            && (mantissaSpan.Length <= 12 || mantissaSpan[12..].IndexOfAnyExcept((byte)0) < 0))
         {
             Span<byte> padded = stackalloc byte[12];
-            mantissaSpan.CopyTo(padded);
+            mantissaSpan[..Math.Min(12, mantissaSpan.Length)].CopyTo(padded);
             var lo = BinaryPrimitives.ReadInt32LittleEndian(padded[..4]);
             var mid = BinaryPrimitives.ReadInt32LittleEndian(padded[4..8]);
             var hi = BinaryPrimitives.ReadInt32LittleEndian(padded[8..12]);
-            return SqlValue.FromDecimal(type, new decimal(lo, mid, hi, isNegative: !positive, scale: type.scale));
+            return SqlValue.FromDecimal(type, new decimal(lo, mid, hi, isNegative: !positive, scale: onDiskScale));
         }
 
-        // Wide path (precision > 28, mantissa > 12 bytes) — use BigInteger.
-        // The .NET decimal type itself maxes at 28-29 significant digits, so
-        // anything in this branch is out of the simulator's modeled range
-        // and may lose precision (matches the simulator's documented quirk).
+        // Wide path (mantissa > 96 bits) — use BigInteger. Anything in this
+        // branch exceeds System.Decimal's 28-digit ceiling and may lose
+        // precision (matches the simulator's documented quirk).
         var unsigned = new System.Numerics.BigInteger(mantissaSpan, isUnsigned: true, isBigEndian: false);
         var signed = positive ? unsigned : -unsigned;
-        var scaleDivisor = System.Numerics.BigInteger.Pow(10, type.scale);
+        var scaleDivisor = System.Numerics.BigInteger.Pow(10, onDiskScale);
         var quotient = signed / scaleDivisor;
         var remainder = signed % scaleDivisor;
         var value = (decimal)quotient + ((decimal)remainder / (decimal)scaleDivisor);
