@@ -107,7 +107,7 @@ internal abstract class BooleanExpression
         {
             // Full-text predicates aren't modeled — raise NotSupportedException
             // at parse time so apps see a loud failure rather than a silent
-            // miss. See [bacpac-prerequisites.md] for skip-with-diagnostic.
+            // miss. See [docs/claude/full-text.md] for skip-with-diagnostic.
             ReservedKeyword { Keyword: Keyword.Contains or Keyword.FreeText } predicate
                 => throw new NotSupportedException(
                     $"Full-text search predicates ({predicate.Keyword.ToString().ToUpperInvariant()}) are not modeled."),

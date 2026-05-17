@@ -236,9 +236,9 @@ internal static class ModelXmlReader
         // recognized whitelist; the simulator stores it as metadata on
         // Database.CollationName for catalog-view round-trip. Comparison /
         // sort / LIKE still route through Collation.Default — see
-        // docs/claude/bacpac-prerequisites.md collation note. An unrecognized
-        // name lands on Warnings rather than aborting the load (the loader's
-        // best-effort contract).
+        // docs/claude/database-options.md COLLATE-clause caveat. An
+        // unrecognized name lands on Warnings rather than aborting the load
+        // (the loader's best-effort contract).
         var collation = element.Elements(Ns + "Property")
             .FirstOrDefault(p => p.Attribute("Name")?.Value == "Collation")
             ?.Attribute("Value")?.Value;

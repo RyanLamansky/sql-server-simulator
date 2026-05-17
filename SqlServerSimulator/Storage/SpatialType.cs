@@ -52,7 +52,7 @@ internal abstract class SpatialSqlType() : SqlType(SqlTypeCategory.String)
 /// Real OGC predicates (<c>.STDistance</c>, <c>.STIntersects</c>, etc.) parse
 /// cleanly so CREATE VIEW / CREATE PROCEDURE bodies that reference them store
 /// verbatim, matching the skip-with-diagnostic stance documented in
-/// <c>docs/claude/bacpac-prerequisites.md</c>.
+/// <c>docs/claude/spatial.md</c>.
 /// </remarks>
 internal sealed class GeographySqlType() : SpatialSqlType
 {

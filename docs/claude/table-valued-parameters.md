@@ -6,7 +6,7 @@ User-defined table types + their TVP / `DECLARE @t MyType` consumers. Probed aga
 
 `CREATE TYPE schema.name AS TABLE (column_list)` registers a `TableType` in `Schema.TableTypes` (per-database, per-schema dict). Each consumer site (`DECLARE @t MyType`, TVP procedure parameter, ADO.NET `SqlDbType.Structured`-shaped parameter) calls `TableType.Clone` to materialize a fresh `HeapTable` instance with `IsTableVariable = true` and (for procedure parameters / ADO.NET TVPs) `IsTableValuedParameter = true`. The clone's `object_id` is freshly allocated; constraint names are regenerated per clone (matching probe — each `DECLARE @t MyType` gets unique PK / UNIQUE name hashes).
 
-Type-name namespace is separate from the object namespace: a table named `foo` and a table type named `foo` coexist (probe-confirmed; Msg 2714 only fires within the object namespace).
+Type-name namespace is separate from the object namespace: a table named `foo` and a table type named `foo` coexist (probe-confirmed; Msg 2714 only fires within the object namespace). The type-name namespace **is** shared with `Schema.AliasTypes` (scalar UDDTs) — duplicate-name collisions across either dict raise Msg 219 verbatim. See [`alias-types.md`](alias-types.md) for the parallel `CREATE TYPE … FROM <builtin>` shape.
 
 Allocators:
 - `Database.AllocateObjectId()` — assigns `type_table_object_id` per type (and the per-clone object_id at each `Clone` call).

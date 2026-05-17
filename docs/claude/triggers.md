@@ -1,6 +1,8 @@
-# DML triggers
+# Triggers (DML + DDL)
 
 `CREATE [OR ALTER] TRIGGER [schema.]name ON [schema.]parent { AFTER | FOR | INSTEAD OF } { INSERT | UPDATE | DELETE } [, ...] AS body`, mutated via `ALTER TRIGGER`, dropped via `DROP TRIGGER [IF EXISTS]`, toggled via `{ DISABLE | ENABLE } TRIGGER { name | ALL } ON parent`, fired automatically by the matching DML against the parent. Body source is captured between `AS` and end-of-batch; re-tokenized per fire inside a child `BatchContext` with a [`TriggerFrame`](../../SqlServerSimulator/Parser/TriggerFrame.cs) seeded with the `INSERTED` / `DELETED` pseudo-tables. AFTER (and its `FOR` synonym) attaches to heap tables only; INSTEAD OF attaches to heap tables and views. Probed against SQL Server 2025 (2026-05-13).
+
+Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse-and-store fidelity tier — see the DDL triggers section below.
 
 ## What ships
 
@@ -29,10 +31,25 @@
 - **DML hooks**: `Simulation.Insert.cs` (INSERT + INSERT … SELECT + INSERT … OUTPUT) detects INSTEAD OF on either the destination view or the destination table and either routes through `ProcessInsteadOfInsertOnView` (for view targets — view INSERT may include non-updatable views) or threads an `insteadOfActive` flag through `ProcessHeapInsert` (for table targets, which skips identity allocation, constraint enforcement, and heap write). `Simulation.Update.cs` and `Simulation.Delete.cs` thread the per-target INSTEAD OF detection through their `CommitUpdate` / `CommitDelete` helpers; for view targets with INSTEAD OF, INSERTED / DELETED are projected through `View.BaseColumnOrdinals` via a `ProjectThroughView` helper. `Simulation.Merge.cs` detects per-action INSTEAD OF at the top of `CommitMerge` and routes each pending list (inserts, updates, deletes) independently through trigger-fire or heap-write paths.
 - **Connection state**: [`SimulatedDbConnection.FiringTriggerIds`](../../SqlServerSimulator/SimulatedDbConnection.cs) (recursion guard) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
 
+## DDL triggers — `CREATE TRIGGER … ON DATABASE`
+
+Parse-and-store-but-no-fire surface for database-scope DDL triggers. AW's `[ddlDatabaseTriggerLog]` (`FOR DDL_DATABASE_LEVEL_EVENTS`) loads end-to-end and surfaces in `sys.triggers` with the probe-confirmed shape: `parent_class=0`, `parent_class_desc='DATABASE'`, `parent_id=0`, `type_desc='SQL_TRIGGER'`, `is_instead_of_trigger=0`. Body source is captured verbatim for the eventual `sys.sql_modules` row (not yet shipped).
+
+**Storage**: `DdlTrigger` class (`SqlServerSimulator/DdlTrigger.cs`) carries name + object_id + event-type list + body source + `is_disabled` flag. `Database.DdlTriggers` is the per-database `ConcurrentDictionary<string, DdlTrigger>` (case-insensitive keys); not per-schema because DDL triggers belong to the database itself. The class extends `SchemaObject` for the object-id + create-date pattern but doesn't participate in any schema's shared namespace except for name collision detection at CREATE time (probe-confirmed: a DDL trigger named `foo` collides with a same-named DML trigger / table / view / proc in the same schema).
+
+**Parser**: `Simulation.CreateTrigger.cs::TryParseCreateTrigger` — after `ON`, if the next token is `DATABASE`, dispatch to `ParseDdlTriggerBody` which handles `[WITH options] {FOR|AFTER} <event_type_list> AS <body>`. Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTypes`. `DROP TRIGGER name ON DATABASE` lives in `Simulation.Drop.cs::DropOneTrigger`, which peeks the next tokens via `SaveCheckpoint` / `RestoreCheckpoint` to decide between the DML-trigger and DDL-trigger paths.
+
+**Catalog**: `sys.triggers` enumerator in `BuiltInResources.cs::EnumerateSysTriggers` yields rows for `Database.DdlTriggers` after the per-schema DML trigger loop, with the `parent_class=0` shape above.
+
+**Deferred**:
+- Trigger firing — the simulator doesn't dispatch DDL events to any trigger loop. Accepted as a documented behavior gap; AW's trigger body is an audit-log writer, not a load-bearing dependency.
+- `sys.sql_modules` to surface the body — not modeled.
+- `DISABLE` / `ENABLE TRIGGER … ON DATABASE` — the per-schema disable/enable path doesn't extend to the per-database dict.
+
 ## Not modeled
 
 - **INSTEAD OF UPDATE / DELETE on non-updatable views** — INSTEAD OF INSERT on any view ships; INSTEAD OF UPDATE / DELETE on an updatable (single-base, no DISTINCT / JOIN / aggregate) view ships. INSTEAD OF UPDATE / DELETE on a join / aggregate / DISTINCT view raises `NotSupportedException` — implementing it requires executing the view's selection to enumerate would-be-affected rows, which loses heap-row identity and bypasses the existing visibility-filter machinery. Deferred.
-- **DDL / logon / server triggers** — only OBJECT-scoped DML triggers ship. `parent_class` is hardcoded to 1 in `sys.triggers`.
+- **Logon / server triggers** — only DML triggers (DATABASE-scope and OBJECT-scope) ship.
 - **`RECURSIVE_TRIGGERS ON`** — direct recursion is unconditionally suppressed. The database option to allow it isn't surfaced.
 - **`is_nested_triggers_on = OFF`** — cross-table cascading triggers always fire (depth-limited only by `MaxNestingLevel`).
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`). `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.

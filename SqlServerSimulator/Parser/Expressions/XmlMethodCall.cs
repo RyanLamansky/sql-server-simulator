@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// PROCEDURE bodies that reference XML methods can be stored verbatim);
 /// raises <see cref="NotSupportedException"/> at <see cref="Run"/> time
 /// with a wording naming the method, matching the skip-with-diagnostic
-/// stance documented in <c>docs/claude/bacpac-prerequisites.md</c>.
+/// stance documented in <c>docs/claude/xml.md</c>.
 /// </summary>
 /// <remarks>
 /// The closed accept-list (<c>value</c>, <c>nodes</c>, <c>query</c>,

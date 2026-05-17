@@ -11,8 +11,8 @@ namespace SqlServerSimulator;
 /// failure path for unrecognized names. Comparison / sort / LIKE still route
 /// through the simulator's default collation regardless of declared metadata —
 /// these tests cover the round-trip, not the semantic divergence (the
-/// fidelity gap is documented in <c>docs/claude/bacpac-prerequisites.md</c>
-/// step 13 collation entry).
+/// fidelity gap is documented in
+/// <c>docs/claude/database-options.md</c>'s COLLATE-clause caveat).
 /// </summary>
 [TestClass]
 public sealed class CollationMetadataTests

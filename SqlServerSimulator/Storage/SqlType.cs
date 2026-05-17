@@ -446,10 +446,8 @@ internal abstract partial class SqlType
     /// XQuery method dispatch layered on top. The simulator stores payload
     /// identically to <c>nvarchar(MAX)</c>; XML methods (<c>.value()</c> /
     /// <c>.nodes()</c> / <c>.query()</c> / <c>.exist()</c> / <c>.modify()</c>)
-    /// raise <see cref="NotSupportedException"/> at execute time. See the
-    /// "Full-text catalog + index" and "xml" sections of
-    /// <c>docs/claude/bacpac-prerequisites.md</c> for the skip-with-diagnostic
-    /// rationale.
+    /// raise <see cref="NotSupportedException"/> at execute time. See
+    /// <c>docs/claude/xml.md</c> for the skip-with-diagnostic rationale.
     /// </remarks>
     public static readonly XmlSqlType Xml = new();
 

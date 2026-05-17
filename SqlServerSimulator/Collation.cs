@@ -22,7 +22,8 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// database / column for catalog-view round-trip but every comparison
     /// continues to route through <see cref="Default"/> (the actual
     /// collation algorithms aren't modeled — see
-    /// <c>docs/claude/bacpac-prerequisites.md</c> step 13 collation entry).
+    /// <c>docs/claude/database-options.md</c> for the COLLATE-clause
+    /// fidelity caveat).
     /// Names outside this set surface as <see cref="NotSupportedException"/>
     /// in direct SQL; the BACPAC loader catches and records on
     /// <c>BacpacLoadResult.Warnings</c>. Each entry carries a human-readable

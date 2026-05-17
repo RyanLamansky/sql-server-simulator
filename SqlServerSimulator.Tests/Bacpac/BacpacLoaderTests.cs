@@ -982,7 +982,7 @@ public class BacpacLoaderTests
         // SqlDatabaseDdlTrigger arm (phase 7) which routes to the DDL-trigger
         // path. sys.triggers row: parent_class = 0 / parent_class_desc =
         // 'DATABASE'. No fire — DDL events aren't dispatched to a trigger
-        // loop (per docs/claude/bacpac-prerequisites.md).
+        // loop (per docs/claude/triggers.md DDL section).
         using var bacpac = BacpacBuilder.Create()
             .DatabaseDdlTrigger("trgAuditDDL", """
                 CREATE TRIGGER trgAuditDDL ON DATABASE

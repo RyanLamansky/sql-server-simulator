@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// spatial methods store verbatim; raises <see cref="NotSupportedException"/>
 /// at <see cref="Run"/> time naming the method, matching the
 /// skip-with-diagnostic stance documented in
-/// <c>docs/claude/bacpac-prerequisites.md</c>. Special case:
+/// <c>docs/claude/spatial.md</c>. Special case:
 /// <c>.ToString()</c> returns the stored WKT (the simulator's storage form),
 /// which is the only method whose result is recoverable from the degraded
 /// in-memory representation.
