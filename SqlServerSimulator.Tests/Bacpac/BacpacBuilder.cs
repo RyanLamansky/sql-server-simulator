@@ -22,19 +22,191 @@ namespace SqlServerSimulator.Bacpac;
 /// <para>Feature surface grows as tests demand it. v0 supports
 /// <c>int</c> columns (NULL / NOT NULL), one schema, one or more tables,
 /// zero or more rows. New types layer in via
-/// <see cref="TableBuilder.Column(string, string, bool)"/> + the
+/// <see cref="TableBuilder.Column"/> + the
 /// per-type branch in <see cref="EncodeBcpValue"/>.</para>
 /// </remarks>
-public sealed class BacpacBuilder
+public sealed partial class BacpacBuilder
 {
     internal const string ModelNs = "http://schemas.microsoft.com/sqlserver/dac/Serialization/2012/02";
 
     private readonly HashSet<string> _schemas = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<TableBuilder> _tables = [];
+    private readonly Dictionary<string, string> _databaseOptions = new(StringComparer.Ordinal);
+    private readonly List<ProgrammableObjectDef> _programmableObjects = [];
+    private readonly List<ExtendedPropertyDef> _extendedProperties = [];
+    private readonly List<SequenceDef> _sequences = [];
+    private readonly List<string> _roles = [];
+    private readonly List<TableTypeDef> _tableTypes = [];
+    private readonly List<PermissionDef> _permissions = [];
+    private readonly List<ViewIndexDef> _viewIndexes = [];
+    private readonly List<UserDefinedDataTypeDef> _uddts = [];
 
     private BacpacBuilder() { }
 
     public static BacpacBuilder Create() => new();
+
+    /// <summary>
+    /// Sets a database-level option that lands as a property on the
+    /// <c>SqlDatabaseOptions</c> element. <paramref name="name"/> is the
+    /// DACFx property name as it appears in model.xml (e.g.
+    /// <c>"IsReadCommittedSnapshot"</c>); <paramref name="value"/> is the
+    /// raw string form (<c>"True"</c> / <c>"False"</c> for toggles, the
+    /// DACFx integer enum string for enum-shaped options). All
+    /// <see cref="DatabaseOption"/> calls accumulate into one
+    /// SqlDatabaseOptions element on Build.
+    /// </summary>
+    public BacpacBuilder DatabaseOption(string name, string value)
+    {
+        _databaseOptions[name] = value;
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a CREATE VIEW emission. <paramref name="createStatement"/> is
+    /// the full raw T-SQL CREATE VIEW … AS … body — the builder splits it
+    /// into HeaderContents + QueryScript that the loader concatenates back
+    /// into the same string before re-tokenizing.
+    /// </summary>
+    public BacpacBuilder View(string schemaName, string viewName, string createStatement)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlView", "QueryScript", schemaName, viewName, createStatement, FunctionBodyHost: false));
+        return this;
+    }
+
+    /// <summary>Adds a CREATE PROCEDURE emission.</summary>
+    public BacpacBuilder Procedure(string schemaName, string procedureName, string createStatement)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlProcedure", "BodyScript", schemaName, procedureName, createStatement, FunctionBodyHost: false));
+        return this;
+    }
+
+    /// <summary>Adds a CREATE FUNCTION emission (scalar UDF).</summary>
+    public BacpacBuilder ScalarFunction(string schemaName, string functionName, string createStatement)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlScalarFunction", "BodyScript", schemaName, functionName, createStatement, FunctionBodyHost: true));
+        return this;
+    }
+
+    /// <summary>Adds a CREATE FUNCTION emission (multi-statement table-valued function).</summary>
+    public BacpacBuilder MultiStatementTvf(string schemaName, string functionName, string createStatement)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlMultiStatementTableValuedFunction", "BodyScript", schemaName, functionName, createStatement, FunctionBodyHost: true));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a CREATE TRIGGER emission. The 4-segment qualified Name attribute
+    /// DACFx uses is <c>[schema].[parentTable].[triggerName]</c>; the
+    /// builder produces that shape so the simulator's name resolver routes
+    /// the trigger to its parent table correctly.
+    /// </summary>
+    public BacpacBuilder Trigger(string schemaName, string parentTable, string triggerName, string createStatement)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlDmlTrigger", "BodyScript", schemaName, triggerName, createStatement, FunctionBodyHost: false, ParentTable: parentTable));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a <c>SqlExtendedProperty</c> element. Host is inferred from
+    /// which arguments are provided: column-level (all three), table-level
+    /// (schema + table), schema-level (schema only), database-level (none).
+    /// </summary>
+    public BacpacBuilder ExtendedProperty(string propertyName, string value, string? schemaName = null, string? tableName = null, string? columnName = null)
+    {
+        _extendedProperties.Add(new ExtendedPropertyDef(schemaName, tableName, columnName, propertyName, value, ExtendedPropertyHost.AutoDetect));
+        return this;
+    }
+
+    /// <summary>Adds an extended property bound to an index host (SqlIndexBase).</summary>
+    public BacpacBuilder IndexExtendedProperty(string schemaName, string tableName, string indexName, string propertyName, string value)
+    {
+        _extendedProperties.Add(new ExtendedPropertyDef(schemaName, tableName, indexName, propertyName, value, ExtendedPropertyHost.Index));
+        return this;
+    }
+
+    /// <summary>Adds an extended property bound to a constraint host (SqlConstraint).</summary>
+    public BacpacBuilder ConstraintExtendedProperty(string schemaName, string constraintName, string propertyName, string value)
+    {
+        _extendedProperties.Add(new ExtendedPropertyDef(schemaName, constraintName, null, propertyName, value, ExtendedPropertyHost.Constraint));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a CREATE SEQUENCE … AS &lt;type&gt; START WITH … INCREMENT BY …
+    /// emission. Type defaults to <c>bigint</c> (matches DACFx default);
+    /// startValue / increment default to 1 / 1.
+    /// </summary>
+    public BacpacBuilder Sequence(string schemaName, string sequenceName, string sqlType = "bigint", long startValue = 1, long increment = 1)
+    {
+        _ = _schemas.Add(schemaName);
+        _sequences.Add(new SequenceDef(schemaName, sequenceName, sqlType, startValue, increment));
+        return this;
+    }
+
+    /// <summary>Adds a CREATE ROLE emission.</summary>
+    public BacpacBuilder Role(string roleName)
+    {
+        _roles.Add(roleName);
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a CREATE TYPE … AS TABLE (cols [, PRIMARY KEY (cols)]) emission.
+    /// </summary>
+    public BacpacBuilder TableType(string schemaName, string typeName, Action<TableBuilder> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        _ = _schemas.Add(schemaName);
+        var builder = new TableBuilder(schemaName, typeName);
+        configure(builder);
+        _tableTypes.Add(new TableTypeDef(schemaName, typeName, builder));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a database-scope <c>GRANT … TO …</c> emission. The
+    /// <paramref name="permission"/> is the camel-case DACFx token (e.g.
+    /// <c>"ViewAnyColumnEncryptionKeyDefinition"</c>); the loader splits
+    /// each camel-case boundary into a space-separated uppercase
+    /// permission name for the simulator's GRANT parser.
+    /// </summary>
+    public BacpacBuilder Grant(string permission, string grantee)
+    {
+        _permissions.Add(new PermissionDef("Grant", permission, grantee));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits an <c>SqlIndex</c> element whose IndexedObject points at a
+    /// view. The loader detects view-targeted indexes via a pre-scan of
+    /// SqlView Names and records them on Skipped with a clear reason
+    /// (indexed views need SCHEMABINDING — not modeled). Use this to
+    /// exercise that deferral path.
+    /// </summary>
+    public BacpacBuilder IndexOnView(string viewSchema, string viewName, string indexName, string[] columns)
+    {
+        _viewIndexes.Add(new ViewIndexDef(viewSchema, viewName, indexName, columns));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a user-defined data type (alias type) over a built-in
+    /// (<c>CREATE TYPE [schema].[name] FROM &lt;builtin&gt; [NULL|NOT NULL]</c>).
+    /// Reference the alias in subsequent columns by passing its bracketed
+    /// 2-part name as the <c>sqlType</c> argument to
+    /// <see cref="TableBuilder.Column"/>.
+    /// </summary>
+    public BacpacBuilder UserDefinedDataType(string schemaName, string typeName, string baseType, bool nullable = true)
+    {
+        _ = _schemas.Add(schemaName);
+        _uddts.Add(new UserDefinedDataTypeDef(schemaName, typeName, baseType, nullable));
+        return this;
+    }
 
     /// <summary>
     /// Adds a <c>dbo</c>-default-schema or named-schema to the model.
@@ -87,6 +259,20 @@ public sealed class BacpacBuilder
         XNamespace ns = ModelNs;
         var model = new XElement(ns + "Model");
 
+        if (_databaseOptions.Count > 0)
+        {
+            var options = new XElement(ns + "Element",
+                new XAttribute("Type", "SqlDatabaseOptions"),
+                new XAttribute("Name", "[simulated]"));
+            foreach (var (name, value) in _databaseOptions)
+            {
+                options.Add(new XElement(ns + "Property",
+                    new XAttribute("Name", name),
+                    new XAttribute("Value", value)));
+            }
+            model.Add(options);
+        }
+
         // dbo is pre-seeded on every Database — emitting CREATE SCHEMA dbo
         // raises Msg 2714 (or similar). Real DACFx omits dbo from the
         // SqlSchema element list for the same reason; the builder mirrors.
@@ -101,6 +287,46 @@ public sealed class BacpacBuilder
 
         foreach (var table in _tables)
             model.Add(table.ToModelElement(ns));
+
+        // Constraints are sibling top-level Elements (not nested inside the
+        // SqlTable element). The loader's multi-phase dispatch orders them
+        // after the table-creation phase regardless of their document
+        // position, so emitting them after every table is fine.
+        foreach (var table in _tables)
+        {
+            foreach (var constraint in table.ConstraintElements(ns))
+                model.Add(constraint);
+        }
+
+        foreach (var table in _tables)
+        {
+            foreach (var index in table.IndexElements(ns))
+                model.Add(index);
+        }
+
+        foreach (var vi in _viewIndexes)
+            model.Add(BuildViewIndexElement(ns, vi));
+
+        foreach (var uddt in _uddts)
+            model.Add(BuildUddtElement(ns, uddt));
+
+        foreach (var seq in _sequences)
+            model.Add(BuildSequenceElement(ns, seq));
+
+        foreach (var role in _roles)
+            model.Add(BuildRoleElement(ns, role));
+
+        foreach (var tt in _tableTypes)
+            model.Add(BuildTableTypeElement(ns, tt));
+
+        foreach (var prog in _programmableObjects)
+            model.Add(BuildProgrammableObjectElement(ns, prog));
+
+        foreach (var perm in _permissions)
+            model.Add(BuildPermissionElement(ns, perm));
+
+        foreach (var ep in _extendedProperties)
+            model.Add(BuildExtendedPropertyElement(ns, ep));
 
         var doc = new XDocument(new XElement(ns + "DataSchemaModel", model));
         var entry = archive.CreateEntry("model.xml");
@@ -128,19 +354,198 @@ public sealed class BacpacBuilder
     /// </summary>
     internal static void EncodeBcpValue(Stream stream, ColumnDef column, object? value)
     {
-        switch (column.SqlType)
+        var sqlType = column.SqlType.Trim();
+        var openParen = sqlType.IndexOf('(');
+        var baseName = (openParen < 0 ? sqlType : sqlType[..openParen]).Trim().ToLowerInvariant();
+        var args = openParen < 0 ? "" : sqlType[(openParen + 1)..^1].Trim();
+        var isMax = string.Equals(args, "max", StringComparison.OrdinalIgnoreCase);
+
+        switch (baseName)
         {
             case "int":
-                EncodeInt32(stream, column.Nullable, value);
+                EncodeFixedRaw(stream, column.Nullable, 4, value, buf => BinaryPrimitives.WriteInt32LittleEndian(buf, Convert.ToInt32(value)));
+                return;
+            case "bigint":
+                EncodeFixedRaw(stream, column.Nullable, 8, value, buf => BinaryPrimitives.WriteInt64LittleEndian(buf, Convert.ToInt64(value)));
+                return;
+            case "smallint":
+                EncodeFixedRaw(stream, column.Nullable, 2, value, buf => BinaryPrimitives.WriteInt16LittleEndian(buf, Convert.ToInt16(value)));
+                return;
+            case "tinyint":
+                EncodeFixedRaw(stream, column.Nullable, 1, value, buf => buf[0] = Convert.ToByte(value));
+                return;
+            case "bit":
+                // bit is always 1-byte length-prefixed regardless of nullability.
+                if (value is null) { stream.WriteByte(0xFF); return; }
+                stream.WriteByte(0x01);
+                stream.WriteByte((bool)value ? (byte)1 : (byte)0);
+                return;
+            case "datetime":
+                EncodeFixedRaw(stream, column.Nullable, 8, value, buf => WriteDateTime(buf, (DateTime)value!));
+                return;
+            case "date":
+                EncodeFixedRaw(stream, column.Nullable, 3, value, buf => WriteDate(buf, value is DateOnly d ? d : DateOnly.FromDateTime((DateTime)value!)));
+                return;
+            case "uniqueidentifier":
+                EncodeOneByteLengthPrefixed(stream, 16, value, buf => ((Guid)value!).TryWriteBytes(buf));
+                return;
+            case "decimal" or "numeric":
+                EncodeDecimal(stream, (decimal?)value, args);
+                return;
+            case "money":
+                EncodeFixedRaw(stream, column.Nullable, 8, value, buf => WriteMoney(buf, (decimal)value!));
+                return;
+            case "smallmoney":
+                EncodeFixedRaw(stream, column.Nullable, 4, value, buf => BinaryPrimitives.WriteInt32LittleEndian(buf, checked((int)((decimal)value! * 10000m))));
+                return;
+            case "datetime2":
+                EncodeDateTime2(stream, column.Nullable, args, value);
+                return;
+            case "varchar" or "nvarchar" or "char" or "nchar" or "sysname" when !isMax:
+                Encode2BytePrefixedString(stream, value as string);
+                return;
+            case "varbinary" or "binary" when !isMax:
+                Encode2BytePrefixedBytes(stream, value as byte[]);
+                return;
+            case "varchar" or "nvarchar" when isMax:
+                Encode8BytePrefixedString(stream, value as string);
+                return;
+            case "varbinary" when isMax:
+                Encode8BytePrefixedBytes(stream, value as byte[]);
+                return;
+            case "xml":
+                Encode8BytePrefixedString(stream, value as string);
+                return;
+            case "geography" or "geometry":
+                // Geography / geometry values are pre-encoded into Microsoft's
+                // spatial UDT binary (typically via MakeGeographyPoint /
+                // MakeGeometryPoint) and serialized with the same 8-byte
+                // length-prefix shape as varbinary(MAX).
+                Encode8BytePrefixedBytes(stream, value as byte[]);
+                return;
+            case "hierarchyid":
+                // Hierarchyid values are pre-encoded via MakeHierarchyIdBytes
+                // (bit-packed OrdPath form).
+                Encode8BytePrefixedBytes(stream, value as byte[]);
                 return;
             default:
                 throw new NotSupportedException($"BacpacBuilder doesn't model BCP encoding for type '{column.SqlType}' yet.");
         }
     }
 
-    private static void EncodeInt32(Stream stream, bool nullable, object? value)
+    /// <summary>
+    /// Builds Microsoft's geography simple-point wire form (22 bytes:
+    /// 4-byte SRID + 1-byte version + 1-byte properties (IsSinglePoint) +
+    /// 16-byte lat/long doubles). Pass as a row value for a column of
+    /// type <c>geography</c>; the loader's WKB decoder converts back
+    /// to a WKT <c>POINT (long lat)</c> string for the simulator's
+    /// <c>SpatialSqlType</c> storage.
+    /// </summary>
+    public static byte[] MakeGeographyPoint(double latitude, double longitude, int srid = 4326)
+        => MakeSimplePointBytes(srid, latitude, longitude);
+
+    /// <summary>
+    /// Builds Microsoft's geometry simple-point wire form (axis order
+    /// is (x, y) — the simulator's decoder honors the inversion vs
+    /// geography's (lat, long) ordering).
+    /// </summary>
+    public static byte[] MakeGeometryPoint(double x, double y, int srid = 0)
+        => MakeSimplePointBytes(srid, x, y);
+
+    /// <summary>
+    /// Builds the hierarchyid OrdPath wire bytes for a path like
+    /// <c>"/1/2/"</c>. Each segment <paramref name="ordinals"/> is bit-encoded
+    /// using SQL Server's prefix code (range [0..3] uses 5 bits, [4..7] 6 bits,
+    /// [8..15] 7 bits, [16..79] 12 bits). Returns empty array for the root
+    /// path. Negative ordinals + ordinals ≥ 80 are deferred.
+    /// </summary>
+    public static byte[] MakeHierarchyIdBytes(params int[] ordinals)
     {
-        Span<byte> buf = stackalloc byte[4];
+        if (ordinals.Length == 0)
+            return [];
+        var bits = new List<bool>();
+        foreach (var ord in ordinals)
+            AppendOrdinalBits(bits, ord);
+        var bytes = new byte[(bits.Count + 7) / 8];
+        for (var i = 0; i < bits.Count; i++)
+        {
+            if (bits[i])
+                bytes[i / 8] |= (byte)(0x80 >> (i % 8));
+        }
+        return bytes;
+    }
+
+    private static void AppendOrdinalBits(List<bool> bits, int ord)
+    {
+        if (ord < 0)
+            throw new NotSupportedException("MakeHierarchyIdBytes doesn't yet support negative ordinals.");
+        if (ord < 4)
+        {
+            // Range [0..3]: prefix 01, 2 value bits, terminator 1.
+            bits.Add(false);
+            bits.Add(true);
+            bits.Add((ord & 2) != 0);
+            bits.Add((ord & 1) != 0);
+            bits.Add(true);
+        }
+        else if (ord < 8)
+        {
+            // Range [4..7]: prefix 100, 2 value bits, terminator 1.
+            bits.Add(true); bits.Add(false); bits.Add(false);
+            var v = ord - 4;
+            bits.Add((v & 2) != 0);
+            bits.Add((v & 1) != 0);
+            bits.Add(true);
+        }
+        else if (ord < 16)
+        {
+            // Range [8..15]: prefix 101, 3 value bits, terminator 1.
+            bits.Add(true); bits.Add(false); bits.Add(true);
+            var v = ord - 8;
+            bits.Add((v & 4) != 0);
+            bits.Add((v & 2) != 0);
+            bits.Add((v & 1) != 0);
+            bits.Add(true);
+        }
+        else if (ord < 80)
+        {
+            // Range [16..79]: prefix 110, 2 high bits, static 0, 1 mid bit,
+            // static 1, 3 low bits, terminator 1. The decoder reconstructs
+            // value = (high2 << 4) | (midHigh << 3) | low3, then adds 16.
+            bits.Add(true); bits.Add(true); bits.Add(false);
+            var v = ord - 16;
+            var high2 = (v >> 4) & 0x3;
+            var midHigh = (v >> 3) & 0x1;
+            var low3 = v & 0x7;
+            bits.Add((high2 & 2) != 0);
+            bits.Add((high2 & 1) != 0);
+            bits.Add(false);
+            bits.Add(midHigh != 0);
+            bits.Add(true);
+            bits.Add((low3 & 4) != 0);
+            bits.Add((low3 & 2) != 0);
+            bits.Add((low3 & 1) != 0);
+            bits.Add(true);
+        }
+        else
+        {
+            throw new NotSupportedException($"MakeHierarchyIdBytes doesn't yet support ordinal {ord} (>= 80).");
+        }
+    }
+
+    private static byte[] MakeSimplePointBytes(int srid, double first, double second)
+    {
+        var buf = new byte[22];
+        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(0, 4), srid);
+        buf[4] = 0x01;
+        buf[5] = 0x08;
+        BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(6, 8), first);
+        BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(14, 8), second);
+        return buf;
+    }
+
+    private static void EncodeFixedRaw(Stream stream, bool nullable, int width, object? value, SpanWriter writer)
+    {
         if (nullable)
         {
             if (value is null)
@@ -148,9 +553,528 @@ public sealed class BacpacBuilder
                 stream.WriteByte(0xFF);
                 return;
             }
-            stream.WriteByte(0x04);
+            stream.WriteByte((byte)width);
         }
-        BinaryPrimitives.WriteInt32LittleEndian(buf, Convert.ToInt32(value));
+        Span<byte> buf = stackalloc byte[width];
+        writer(buf);
         stream.Write(buf);
+    }
+
+    private static void EncodeOneByteLengthPrefixed(Stream stream, int width, object? value, SpanWriter writer)
+    {
+        if (value is null)
+        {
+            stream.WriteByte(0xFF);
+            return;
+        }
+        stream.WriteByte((byte)width);
+        Span<byte> buf = stackalloc byte[width];
+        writer(buf);
+        stream.Write(buf);
+    }
+
+    private static void Encode2BytePrefixedString(Stream stream, string? value)
+    {
+        Span<byte> prefix = stackalloc byte[2];
+        if (value is null)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(prefix, 0xFFFF);
+            stream.Write(prefix);
+            return;
+        }
+        var bytes = Encoding.Unicode.GetBytes(value);
+        BinaryPrimitives.WriteUInt16LittleEndian(prefix, checked((ushort)bytes.Length));
+        stream.Write(prefix);
+        stream.Write(bytes);
+    }
+
+    private static void Encode2BytePrefixedBytes(Stream stream, byte[]? value)
+    {
+        Span<byte> prefix = stackalloc byte[2];
+        if (value is null)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(prefix, 0xFFFF);
+            stream.Write(prefix);
+            return;
+        }
+        BinaryPrimitives.WriteUInt16LittleEndian(prefix, checked((ushort)value.Length));
+        stream.Write(prefix);
+        stream.Write(value);
+    }
+
+    private static void Encode8BytePrefixedString(Stream stream, string? value)
+    {
+        Span<byte> prefix = stackalloc byte[8];
+        if (value is null)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(prefix, -1);
+            stream.Write(prefix);
+            return;
+        }
+        var bytes = Encoding.Unicode.GetBytes(value);
+        BinaryPrimitives.WriteInt64LittleEndian(prefix, bytes.Length);
+        stream.Write(prefix);
+        stream.Write(bytes);
+    }
+
+    private static void Encode8BytePrefixedBytes(Stream stream, byte[]? value)
+    {
+        Span<byte> prefix = stackalloc byte[8];
+        if (value is null)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(prefix, -1);
+            stream.Write(prefix);
+            return;
+        }
+        BinaryPrimitives.WriteInt64LittleEndian(prefix, value.Length);
+        stream.Write(prefix);
+        stream.Write(value);
+    }
+
+    private static void WriteDateTime(Span<byte> buf, DateTime dt)
+    {
+        // SQL Server datetime: 4-byte int32 days since 1900-01-01 + 4-byte uint32 1/300-second ticks since midnight.
+        var epoch = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var diff = dt - epoch;
+        var days = diff.Days;
+        var ticks300 = (uint)((diff.Ticks - (TimeSpan.TicksPerDay * days)) / (TimeSpan.TicksPerSecond / 300L));
+        BinaryPrimitives.WriteInt32LittleEndian(buf[..4], days);
+        BinaryPrimitives.WriteUInt32LittleEndian(buf[4..8], ticks300);
+    }
+
+    /// <summary>
+    /// Encodes a decimal in DACFx's BCP wire format:
+    /// <c>[1-byte length N][precision][scale][sign][N-3 mantissa bytes LE]</c>.
+    /// Mantissa width comes from the precision bucket (≤9 → 4, ≤19 → 8, ≤28 → 12,
+    /// ≤38 → 16 bytes). <c>System.Decimal.GetBits</c> covers up to 28 digits;
+    /// values needing more precision fall outside the simulator's storage model.
+    /// </summary>
+    private static void EncodeDecimal(Stream stream, decimal? value, string args)
+    {
+        if (value is null)
+        {
+            stream.WriteByte(0xFF);
+            return;
+        }
+        var commaIndex = args.IndexOf(',');
+        var precision = commaIndex < 0
+            ? int.Parse(args, System.Globalization.CultureInfo.InvariantCulture)
+            : int.Parse(args[..commaIndex].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        var declaredScale = commaIndex < 0 ? 0 : int.Parse(args[(commaIndex + 1)..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        var mantissaWidth = precision switch
+        {
+            <= 9 => 4,
+            <= 19 => 8,
+            <= 28 => 12,
+            _ => 16,
+        };
+
+        var d = value.Value;
+        var bits = decimal.GetBits(d);
+        var actualScale = (bits[3] >> 16) & 0x7F;
+        var negative = (bits[3] & unchecked((int)0x80000000)) != 0;
+
+        // Rescale to declared scale by multiplying / dividing the mantissa.
+        var rescaled = d;
+        if (actualScale != declaredScale)
+        {
+            // Adjust by multiplying by 10^(declaredScale - actualScale)
+            var diff = declaredScale - actualScale;
+            for (var i = 0; i < diff; i++) rescaled *= 10m;
+            for (var i = 0; i < -diff; i++) rescaled /= 10m;
+            bits = decimal.GetBits(rescaled);
+            negative = (bits[3] & unchecked((int)0x80000000)) != 0;
+        }
+
+        Span<byte> mantissa = stackalloc byte[mantissaWidth];
+        BinaryPrimitives.WriteUInt32LittleEndian(mantissa[..4], (uint)bits[0]);
+        if (mantissaWidth >= 8)
+            BinaryPrimitives.WriteUInt32LittleEndian(mantissa[4..8], (uint)bits[1]);
+        if (mantissaWidth >= 12)
+            BinaryPrimitives.WriteUInt32LittleEndian(mantissa[8..12], (uint)bits[2]);
+
+        var payloadLength = 3 + mantissaWidth;
+        stream.WriteByte((byte)payloadLength);
+        stream.WriteByte((byte)precision);
+        stream.WriteByte((byte)declaredScale);
+        stream.WriteByte(negative ? (byte)0 : (byte)1);
+        stream.Write(mantissa);
+    }
+
+    private static void WriteMoney(Span<byte> buf, decimal value)
+    {
+        // money: scaled = value * 10000, stored as int64 split high (signed)
+        // / low (unsigned) — bytes[0..4] = high 32 bits LE, [4..8] = low.
+        var scaled = (long)(value * 10000m);
+        var high = (int)(scaled >> 32);
+        var low = (uint)(scaled & 0xFFFFFFFFu);
+        BinaryPrimitives.WriteInt32LittleEndian(buf[..4], high);
+        BinaryPrimitives.WriteUInt32LittleEndian(buf[4..8], low);
+    }
+
+    /// <summary>
+    /// Encodes a datetime2(N) value: variable-byte LE ticks-since-midnight
+    /// at the precision's unit + 3-byte LE days-since-0001-01-01.
+    /// Width = 6 / 7 / 8 bytes for precision 0-2 / 3-4 / 5-7.
+    /// </summary>
+    private static void EncodeDateTime2(Stream stream, bool nullable, string args, object? value)
+    {
+        // args is the precision number ("7" / "3" / etc.) per ParseSqlType.
+        var precision = string.IsNullOrEmpty(args) ? 7 : int.Parse(args.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        var timeBytes = precision switch
+        {
+            <= 2 => 3,
+            <= 4 => 4,
+            _ => 5,
+        };
+        var totalBytes = timeBytes + 3;
+        if (nullable)
+        {
+            if (value is null)
+            {
+                stream.WriteByte(0xFF);
+                return;
+            }
+            stream.WriteByte((byte)totalBytes);
+        }
+        var dt = (DateTime)value!;
+        var ticksPerUnit = precision switch
+        {
+            0 => TimeSpan.TicksPerSecond,
+            1 => TimeSpan.TicksPerSecond / 10,
+            2 => TimeSpan.TicksPerSecond / 100,
+            3 => TimeSpan.TicksPerMillisecond,
+            4 => TimeSpan.TicksPerMillisecond / 10,
+            5 => TimeSpan.TicksPerMillisecond / 100,
+            6 => 10L,
+            _ => 1L,
+        };
+        var days = DateOnly.FromDateTime(dt).DayNumber;
+        var timeOfDayTicks = dt.TimeOfDay.Ticks;
+        var unitTicks = timeOfDayTicks / ticksPerUnit;
+        Span<byte> buf = stackalloc byte[totalBytes];
+        for (var i = 0; i < timeBytes; i++)
+        {
+            buf[i] = (byte)(unitTicks & 0xFF);
+            unitTicks >>= 8;
+        }
+        buf[timeBytes] = (byte)(days & 0xFF);
+        buf[timeBytes + 1] = (byte)((days >> 8) & 0xFF);
+        buf[timeBytes + 2] = (byte)((days >> 16) & 0xFF);
+        stream.Write(buf);
+    }
+
+    private static void WriteDate(Span<byte> buf, DateOnly d)
+    {
+        // SQL Server date: 3-byte LE days since 0001-01-01.
+        var days = d.DayNumber;
+        buf[0] = (byte)(days & 0xFF);
+        buf[1] = (byte)((days >> 8) & 0xFF);
+        buf[2] = (byte)((days >> 16) & 0xFF);
+    }
+
+    private delegate void SpanWriter(Span<byte> buf);
+
+    private static XElement BuildProgrammableObjectElement(XNamespace ns, ProgrammableObjectDef prog)
+    {
+        var qualifiedName = prog.ParentTable is null
+            ? $"[{prog.SchemaName}].[{prog.ObjectName}]"
+            : $"[{prog.SchemaName}].[{prog.ParentTable}].[{prog.ObjectName}]";
+
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", prog.ElementType),
+            new XAttribute("Name", qualifiedName));
+
+        // Header lives on either the element itself or the nested
+        // SqlScriptFunctionImplementation (for scalar / multi-stmt TVF).
+        // Use a minimal "-- header" marker — the loader concatenates
+        // header + "\n" + body before parsing, so the content just needs
+        // to be a valid T-SQL comment that won't break the statement.
+        XElement bodyHost;
+        if (prog.FunctionBodyHost)
+        {
+            bodyHost = new XElement(ns + "Element",
+                new XAttribute("Type", "SqlScriptFunctionImplementation"));
+            element.Add(new XElement(ns + "Relationship",
+                new XAttribute("Name", "FunctionBody"),
+                new XElement(ns + "Entry", bodyHost)));
+        }
+        else
+        {
+            bodyHost = element;
+        }
+
+        bodyHost.Add(new XElement(ns + "Annotation",
+            new XAttribute("Type", "SysCommentsObjectAnnotation"),
+            new XElement(ns + "Property",
+                new XAttribute("Name", "HeaderContents"),
+                new XAttribute("Value", "-- header"))));
+        bodyHost.Add(new XElement(ns + "Property",
+            new XAttribute("Name", prog.BodyPropertyName),
+            new XElement(ns + "Value", new XCData(prog.CreateStatement))));
+
+        return element;
+    }
+}
+
+/// <summary>
+/// Internal capture of a programmable-object emission targeted at a
+/// specific element-type emitter inside the loader.
+/// </summary>
+internal sealed record ProgrammableObjectDef(
+    string ElementType,
+    string BodyPropertyName,
+    string SchemaName,
+    string ObjectName,
+    string CreateStatement,
+    bool FunctionBodyHost,
+    string? ParentTable = null);
+
+internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint }
+
+internal sealed record ExtendedPropertyDef(string? SchemaName, string? TableName, string? ColumnName, string PropertyName, string Value, ExtendedPropertyHost Host = ExtendedPropertyHost.AutoDetect);
+
+internal sealed record SequenceDef(string SchemaName, string SequenceName, string SqlType, long StartValue, long Increment);
+
+internal sealed record TableTypeDef(string SchemaName, string TypeName, TableBuilder Body);
+
+internal sealed record PermissionDef(string Action, string Permission, string Grantee);
+
+internal sealed record ViewIndexDef(string ViewSchema, string ViewName, string IndexName, string[] KeyColumns);
+
+internal sealed record UserDefinedDataTypeDef(string SchemaName, string TypeName, string BaseType, bool Nullable);
+
+sealed partial class BacpacBuilder
+{
+    private static XElement BuildUddtElement(XNamespace ns, UserDefinedDataTypeDef uddt)
+    {
+        // The UDDT element IS the TypeSpecifier — TranslateTypeSpecifier is
+        // called on it directly, looking for "Type" relationship + Length /
+        // Precision / Scale / IsMax properties.
+        var (baseName, length, precision, scale, isMax) = ParseUddtBaseType(uddt.BaseType);
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlUserDefinedDataType"),
+            new XAttribute("Name", $"[{uddt.SchemaName}].[{uddt.TypeName}]"));
+
+        element.Add(new XElement(ns + "Property",
+            new XAttribute("Name", "IsNullable"),
+            new XAttribute("Value", uddt.Nullable ? "True" : "False")));
+
+        element.Add(new XElement(ns + "Relationship",
+            new XAttribute("Name", "Type"),
+            new XElement(ns + "Entry",
+                new XElement(ns + "References",
+                    new XAttribute("Name", $"[{baseName}]"),
+                    new XAttribute("ExternalSource", "BuiltIns")))));
+
+        if (isMax)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "IsMax"), new XAttribute("Value", "True")));
+        if (length is not null)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "Length"), new XAttribute("Value", length)));
+        if (precision is not null)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "Precision"), new XAttribute("Value", precision)));
+        if (scale is not null)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "Scale"), new XAttribute("Value", scale)));
+        return element;
+    }
+
+    private static (string Base, string? Length, string? Precision, string? Scale, bool IsMax) ParseUddtBaseType(string sqlType)
+    {
+        var trimmed = sqlType.Trim();
+        var openParen = trimmed.IndexOf('(');
+        if (openParen < 0)
+            return (trimmed.ToLowerInvariant(), null, null, null, false);
+        var baseName = trimmed[..openParen].Trim().ToLowerInvariant();
+        var args = trimmed[(openParen + 1)..^1].Trim();
+        if (string.Equals(args, "max", StringComparison.OrdinalIgnoreCase))
+            return (baseName, null, null, null, true);
+        var commaIndex = args.IndexOf(',');
+        if (commaIndex < 0)
+        {
+            return baseName is "decimal" or "numeric"
+                ? (baseName, null, args.Trim(), null, false)
+                : (baseName, args.Trim(), null, null, false);
+        }
+        return (baseName, null, args[..commaIndex].Trim(), args[(commaIndex + 1)..].Trim(), false);
+    }
+
+    private static XElement BuildSequenceElement(XNamespace ns, SequenceDef seq)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlSequence"),
+            new XAttribute("Name", $"[{seq.SchemaName}].[{seq.SequenceName}]"));
+
+        element.Add(new XElement(ns + "Relationship",
+            new XAttribute("Name", "TypeSpecifier"),
+            new XElement(ns + "Entry",
+                new XElement(ns + "Element",
+                    new XAttribute("Type", "SqlTypeSpecifier"),
+                    new XElement(ns + "Relationship",
+                        new XAttribute("Name", "Type"),
+                        new XElement(ns + "Entry",
+                            new XElement(ns + "References",
+                                new XAttribute("Name", $"[{seq.SqlType}]"),
+                                new XAttribute("ExternalSource", "BuiltIns"))))))));
+
+        element.Add(new XElement(ns + "Property",
+            new XAttribute("Name", "StartValue"),
+            new XAttribute("Value", seq.StartValue.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        element.Add(new XElement(ns + "Property",
+            new XAttribute("Name", "Increment"),
+            new XAttribute("Value", seq.Increment.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        return element;
+    }
+
+    private static XElement BuildRoleElement(XNamespace ns, string roleName) =>
+        new(ns + "Element",
+            new XAttribute("Type", "SqlRole"),
+            new XAttribute("Name", $"[{roleName}]"));
+
+    private static XElement BuildTableTypeElement(XNamespace ns, TableTypeDef tt)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlTableType"),
+            new XAttribute("Name", $"[{tt.SchemaName}].[{tt.TypeName}]"));
+
+        var columnsRel = new XElement(ns + "Relationship",
+            new XAttribute("Name", "Columns"));
+        foreach (var column in tt.Body.Columns)
+            columnsRel.Add(new XElement(ns + "Entry", tt.Body.TableTypeColumnElement(ns, column)));
+        element.Add(columnsRel);
+
+        // Optional PK constraint inside the table-type body. Looks for any
+        // PrimaryKeyDef accumulated through TableBuilder.PrimaryKey.
+        var pks = tt.Body.Constraints.OfType<PrimaryKeyDef>().ToList();
+        if (pks.Count > 0)
+        {
+            var constraintsRel = new XElement(ns + "Relationship",
+                new XAttribute("Name", "Constraints"));
+            foreach (var pk in pks)
+            {
+                var pkElement = new XElement(ns + "Element",
+                    new XAttribute("Type", "SqlTableTypePrimaryKeyConstraint"));
+                var specs = new XElement(ns + "Relationship",
+                    new XAttribute("Name", "ColumnSpecifications"));
+                foreach (var col in pk.Columns)
+                {
+                    specs.Add(new XElement(ns + "Entry",
+                        new XElement(ns + "Element",
+                            new XAttribute("Type", "SqlTableTypeIndexedColumnSpecification"),
+                            new XElement(ns + "Relationship",
+                                new XAttribute("Name", "Column"),
+                                new XElement(ns + "Entry",
+                                    new XElement(ns + "References",
+                                        new XAttribute("Name", $"[{tt.SchemaName}].[{tt.TypeName}].[{col}]")))))));
+                }
+                pkElement.Add(specs);
+                constraintsRel.Add(new XElement(ns + "Entry", pkElement));
+            }
+            element.Add(constraintsRel);
+        }
+        return element;
+    }
+
+    private static XElement BuildViewIndexElement(XNamespace ns, ViewIndexDef vi)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlIndex"),
+            new XAttribute("Name", $"[{vi.ViewSchema}].[{vi.ViewName}].[{vi.IndexName}]"),
+            new XElement(ns + "Relationship",
+                new XAttribute("Name", "IndexedObject"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", $"[{vi.ViewSchema}].[{vi.ViewName}]")))));
+
+        var columnSpecs = new XElement(ns + "Relationship",
+            new XAttribute("Name", "ColumnSpecifications"));
+        foreach (var col in vi.KeyColumns)
+        {
+            var spec = new XElement(ns + "Element",
+                new XAttribute("Type", "SqlIndexedColumnSpecification"),
+                new XElement(ns + "Relationship",
+                    new XAttribute("Name", "Column"),
+                    new XElement(ns + "Entry",
+                        new XElement(ns + "References",
+                            new XAttribute("Name", $"[{vi.ViewSchema}].[{vi.ViewName}].[{col}]")))));
+            columnSpecs.Add(new XElement(ns + "Entry", spec));
+        }
+        element.Add(columnSpecs);
+        return element;
+    }
+
+    private static XElement BuildPermissionElement(XNamespace ns, PermissionDef perm)
+    {
+        // Name shape: `[Action.PermissionCamelCase.Database].[grantee].[grantor]`.
+        // Database-scope only — Object / Schema scope would consult a
+        // SecuredObject relationship; defer until tests exercise it.
+        var name = $"[{perm.Action}.{perm.Permission}.Database].[{perm.Grantee}].[dbo]";
+        return new XElement(ns + "Element",
+            new XAttribute("Type", "SqlPermissionStatement"),
+            new XAttribute("Name", name),
+            new XElement(ns + "Relationship",
+                new XAttribute("Name", "Grantee"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", $"[{perm.Grantee}]")))));
+    }
+
+    private static XElement BuildExtendedPropertyElement(XNamespace ns, ExtendedPropertyDef ep)
+    {
+        // Host-kind: explicit override for Index / Constraint (Column-shaped
+        // payloads collide with SqlColumn auto-detect); otherwise inferred
+        // from which target-name slots are populated.
+        var (hostKind, name, hostRef) = ep.Host switch
+        {
+            ExtendedPropertyHost.Index =>
+                ("SqlIndexBase",
+                 $"[SqlIndexBase].[{ep.SchemaName}].[{ep.TableName}].[{ep.ColumnName}].[{ep.PropertyName}]",
+                 $"[{ep.SchemaName}].[{ep.TableName}].[{ep.ColumnName}]"),
+            ExtendedPropertyHost.Constraint =>
+                ("SqlConstraint",
+                 $"[SqlConstraint].[{ep.SchemaName}].[{ep.TableName}].[{ep.PropertyName}]",
+                 $"[{ep.SchemaName}].[{ep.TableName}]"),
+            _ => ep switch
+            {
+                { ColumnName: not null, TableName: not null, SchemaName: not null } =>
+                    ("SqlColumn",
+                     $"[SqlColumn].[{ep.SchemaName}].[{ep.TableName}].[{ep.ColumnName}].[{ep.PropertyName}]",
+                     $"[{ep.SchemaName}].[{ep.TableName}].[{ep.ColumnName}]"),
+                { TableName: not null, SchemaName: not null } =>
+                    ("SqlTableBase",
+                     $"[SqlTableBase].[{ep.SchemaName}].[{ep.TableName}].[{ep.PropertyName}]",
+                     $"[{ep.SchemaName}].[{ep.TableName}]"),
+                { SchemaName: not null } =>
+                    ("SqlSchema",
+                     $"[SqlSchema].[{ep.SchemaName}].[{ep.PropertyName}]",
+                     $"[{ep.SchemaName}]"),
+                _ =>
+                    ("SqlDatabaseOptions",
+                     $"[SqlDatabaseOptions].[simulated].[{ep.PropertyName}]",
+                     null),
+            },
+        };
+
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlExtendedProperty"),
+            new XAttribute("Name", name));
+
+        if (hostRef is not null)
+        {
+            element.Add(new XElement(ns + "Relationship",
+                new XAttribute("Name", "Host"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", hostRef)))));
+        }
+        // DACFx encodes the Value pre-wrapped (N'…' or numeric); the loader
+        // splices it directly into `EXEC sp_addextendedproperty @value = …`.
+        // Escape single quotes the SQL way (' → '').
+        var wrappedValue = "N'" + ep.Value.Replace("'", "''", StringComparison.Ordinal) + "'";
+        element.Add(new XElement(ns + "Property",
+            new XAttribute("Name", "Value"),
+            new XElement(ns + "Value", new XCData(wrappedValue))));
+
+        _ = hostKind; // host-kind isn't a stored attribute — it's recoverable from the Name shape.
+        return element;
     }
 }

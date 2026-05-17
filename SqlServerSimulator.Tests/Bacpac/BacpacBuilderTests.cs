@@ -6,6 +6,30 @@ namespace SqlServerSimulator.Bacpac;
 public class BacpacBuilderTests
 {
     [TestMethod]
+    public void FromBacpac_FilePath_Overload_RoundTrips()
+    {
+        // Write a synthetic bacpac to a temp file + load via the
+        // Simulation.FromBacpac(string path, …) overload.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t.Column("Id", "int").Row(1).Row(2).Row(3))
+            .Build();
+        var tempPath = Path.Combine(Path.GetTempPath(), $"bacpac-builder-test-{Guid.NewGuid():N}.bacpac");
+        try
+        {
+            using (var file = File.Create(tempPath))
+                bacpac.CopyTo(file);
+            var sim = Simulation.FromBacpac(tempPath, out var diag);
+            IsEmpty(diag.Skipped);
+            AreEqual(3, sim.ExecuteScalar("SELECT COUNT(*) FROM T;"));
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
+
+    [TestMethod]
     public void OneTable_TwoIntRows_RoundTrips()
     {
         using var bacpac = BacpacBuilder.Create()
