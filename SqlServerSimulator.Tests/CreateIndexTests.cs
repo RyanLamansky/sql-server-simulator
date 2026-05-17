@@ -386,4 +386,77 @@ public sealed class CreateIndexTests
             update t set id = id + 100;
             select count(*) from t
             """));
+
+    // --- SSMS-emitted index-options and filegroup trailers ---
+    //
+    // SSMS scripts every CREATE / ALTER constraint and CREATE INDEX with the
+    // full storage-tuning option set (PAD_INDEX / IGNORE_DUP_KEY / ONLINE /
+    // ALLOW_ROW_LOCKS / ALLOW_PAGE_LOCKS / etc.) plus an `ON [PRIMARY]`
+    // filegroup placement. The simulator has no B-tree storage and no
+    // filegroup model, so both trailers parse-and-discard. Probed against
+    // the Optimizely Configured Commerce v4.x starting-database script on
+    // 2026-05-17 (1.6 MB, 17 K lines, all 700 `ON [PRIMARY]` occurrences).
+
+    [TestMethod]
+    public void CreateIndex_WithFullOptionsAndOnPrimary_Accepted()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, a int);
+            create nonclustered index ix_a on t(a)
+              with (pad_index = off, statistics_norecompute = off, sort_in_tempdb = off,
+                    drop_existing = off, online = off,
+                    allow_row_locks = on, allow_page_locks = on)
+              on [primary];
+            select count(*) from sys.indexes where name = 'ix_a'
+            """));
+
+    [TestMethod]
+    public void CreateTable_TableLevelPkClustered_WithOptionsAndOnPrimary_Accepted()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table [dbo].[ac](
+                [id] [uniqueidentifier] not null,
+                [name] [nvarchar](100) not null,
+                constraint [pk_ac] primary key clustered ([id] asc)
+                    with (pad_index = off, statistics_norecompute = off,
+                          ignore_dup_key = off,
+                          allow_row_locks = on, allow_page_locks = on) on [primary]
+            ) on [primary];
+            select count(*) from [dbo].[ac]
+            """));
+
+    [TestMethod]
+    public void CreateTable_TextImageOnPrimary_Accepted()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table t (
+                id int not null primary key,
+                blob varbinary(max) null
+            ) on [primary] textimage_on [primary];
+            select count(*) from t
+            """));
+
+    [TestMethod]
+    public void AlterTableAddConstraintUnique_WithOptionsAndOnPrimary_Accepted()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, code nvarchar(50) not null);
+            alter table t add constraint ux_code unique nonclustered (code asc)
+              with (pad_index = off, statistics_norecompute = off, sort_in_tempdb = off,
+                    ignore_dup_key = off, online = off,
+                    allow_row_locks = on, allow_page_locks = on) on [primary];
+            select count(*) from sys.indexes where name = 'ux_code'
+            """));
+
+    [TestMethod]
+    public void AppDictSchema_RealCreateTableAndDefault_BothAccepted()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create schema appdict;
+            create table [appdict].[adminactionconfiguration](
+                [id] [uniqueidentifier] not null,
+                [formname] [nvarchar](256) not null,
+                constraint [pk_aac] primary key clustered ([id] asc)
+                    with (pad_index = off, ignore_dup_key = off,
+                          allow_row_locks = on, allow_page_locks = on) on [primary]
+            ) on [primary];
+            alter table [appdict].[adminactionconfiguration]
+              add constraint [df_aac_id] default (newsequentialid()) for [id];
+            select count(*) from [appdict].[adminactionconfiguration]
+            """));
 }

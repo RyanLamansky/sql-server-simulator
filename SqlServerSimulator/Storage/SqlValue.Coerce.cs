@@ -153,6 +153,7 @@ internal readonly partial struct SqlValue
         _ when this.Type == SqlType.SmallDateTime => FromDate(DateOnly.FromDateTime(this.AsSmallDateTime)),
         DateTime2SqlType => FromDate(DateOnly.FromDateTime(this.AsDateTime2)),
         DateTimeOffsetSqlType => FromDate(DateOnly.FromDateTime(this.AsDateTimeOffset.DateTime)),
+        VarbinarySqlType or BinarySqlType => FromDate(DecodeDateFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, SqlType.Date),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {SqlType.Date}."),
     };
@@ -165,6 +166,7 @@ internal readonly partial struct SqlValue
         DateTime2SqlType => FromDateTime(this.AsDateTime2),
         TimeSqlType => FromDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
         DateTimeOffsetSqlType => FromDateTime(this.AsDateTimeOffset.DateTime),
+        VarbinarySqlType or BinarySqlType => FromDateTime(DecodeLegacyDateTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToDateTime(this.AsDecimal),
         _ when this.Type == SqlType.Float => CoerceFractionalDaysToDateTime((decimal)this.AsDouble),
@@ -181,6 +183,7 @@ internal readonly partial struct SqlValue
         DateTime2SqlType => FromSmallDateTime(this.AsDateTime2),
         TimeSqlType => FromSmallDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
         DateTimeOffsetSqlType => FromSmallDateTime(this.AsDateTimeOffset.DateTime),
+        VarbinarySqlType or BinarySqlType => FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToSmallDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToSmallDateTime(this.AsDecimal),
         _ when this.Type == SqlType.Float => CoerceFractionalDaysToSmallDateTime((decimal)this.AsDouble),
@@ -202,6 +205,7 @@ internal readonly partial struct SqlValue
         // datetimeoffset → datetime2 returns the local (offset-bearing)
         // wall-clock and discards the offset, not the UTC instant.
         DateTimeOffsetSqlType => FromDateTime2(target, this.AsDateTimeOffset.DateTime),
+        VarbinarySqlType or BinarySqlType => FromDateTime2(target, DecodeDateTime2FromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {target}."),
     };
@@ -214,6 +218,7 @@ internal readonly partial struct SqlValue
         _ when this.Type == SqlType.SmallDateTime => FromTime(target, this.AsSmallDateTime.TimeOfDay),
         DateTime2SqlType => FromTime(target, this.AsDateTime2.TimeOfDay),
         DateTimeOffsetSqlType => FromTime(target, this.AsDateTimeOffset.DateTime.TimeOfDay),
+        VarbinarySqlType or BinarySqlType => FromTime(target, DecodeTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {target}."),
     };
@@ -229,6 +234,7 @@ internal readonly partial struct SqlValue
         DateTime2SqlType => FromDateTimeOffset(target, new DateTimeOffset(this.AsDateTime2, TimeSpan.Zero)),
         TimeSqlType => FromDateTimeOffset(target, new DateTimeOffset(new DateTime(1900, 1, 1).Add(this.AsTime), TimeSpan.Zero)),
         DateTimeOffsetSqlType => FromDateTimeOffset(target, this.AsDateTimeOffset),
+        VarbinarySqlType or BinarySqlType => FromDateTimeOffset(target, DecodeDateTimeOffsetFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {target}."),
     };
@@ -1049,6 +1055,141 @@ internal readonly partial struct SqlValue
         Span<byte> buffer = stackalloc byte[16];
         bytes.AsSpan(0, Math.Min(16, bytes.Length)).CopyTo(buffer);
         return new Guid(buffer);
+    }
+
+    // Binary wire-format decoders for the date/time family. Encodings probed
+    // against SQL Server 2025 on 2026-05-17 via
+    // CAST(CAST(<literal> AS <date-type>) AS varbinary(20)). The layouts
+    // documented at each helper match the bytes SSMS emits in BACPAC-style
+    // INSERT statements (`CAST(0x… AS DateTimeOffset)`), which is how
+    // Optimizely Configured Commerce and many other partner products
+    // serialize their seed-data date columns.
+    //
+    // Common to time(N) / datetime2(N) / datetimeoffset(N):
+    //   scale byte 0–7, then a little-endian unsigned integer giving the
+    //   wall-clock time in 10^(-scale)-second units, sized 3 / 4 / 5 bytes
+    //   for scales 0–2 / 3–4 / 5–7 respectively. Followed (for datetime2 and
+    //   datetimeoffset) by 3 little-endian bytes of days since 0001-01-01,
+    //   and (for datetimeoffset only) a 2-byte signed little-endian offset
+    //   in minutes. datetimeoffset stores time + date as UTC; the offset
+    //   shifts back to the original wall-clock during round-trip.
+
+    private static DateOnly DecodeDateFromBytes(byte[] bytes) =>
+        bytes.Length != 3
+            ? throw new NotSupportedException($"CAST(varbinary(…) AS date) requires exactly 3 bytes; got {bytes.Length}.")
+            : DateOnly.MinValue.AddDays((int)ReadLittleEndianUInt(bytes, 0, 3));
+
+    private static TimeSpan DecodeTimeFromBytes(byte[] bytes)
+    {
+        if (bytes.Length < 1)
+            throw new NotSupportedException($"CAST(varbinary(…) AS time) requires at least 1 byte; got {bytes.Length}.");
+        var scale = bytes[0];
+        var timeBytes = TimeWidthForScale(scale);
+        return bytes.Length != 1 + timeBytes
+            ? throw new NotSupportedException($"CAST(varbinary(…) AS time({scale})) requires {1 + timeBytes} bytes; got {bytes.Length}.")
+            : DecodeTimeOfDay(bytes, 1, timeBytes, scale);
+    }
+
+    private static DateTime DecodeDateTime2FromBytes(byte[] bytes)
+    {
+        if (bytes.Length < 4)
+            throw new NotSupportedException($"CAST(varbinary(…) AS datetime2) requires at least 4 bytes; got {bytes.Length}.");
+        var scale = bytes[0];
+        var timeBytes = TimeWidthForScale(scale);
+        if (bytes.Length != 1 + timeBytes + 3)
+            throw new NotSupportedException($"CAST(varbinary(…) AS datetime2({scale})) requires {1 + timeBytes + 3} bytes; got {bytes.Length}.");
+        var time = DecodeTimeOfDay(bytes, 1, timeBytes, scale);
+        var date = DateOnly.MinValue.AddDays((int)ReadLittleEndianUInt(bytes, 1 + timeBytes, 3));
+        return date.ToDateTime(TimeOnly.MinValue).Add(time);
+    }
+
+    private static DateTimeOffset DecodeDateTimeOffsetFromBytes(byte[] bytes)
+    {
+        if (bytes.Length < 6)
+            throw new NotSupportedException($"CAST(varbinary(…) AS datetimeoffset) requires at least 6 bytes; got {bytes.Length}.");
+        var scale = bytes[0];
+        var timeBytes = TimeWidthForScale(scale);
+        if (bytes.Length != 1 + timeBytes + 3 + 2)
+            throw new NotSupportedException($"CAST(varbinary(…) AS datetimeoffset({scale})) requires {1 + timeBytes + 5} bytes; got {bytes.Length}.");
+        var utcTime = DecodeTimeOfDay(bytes, 1, timeBytes, scale);
+        var utcDate = DateOnly.MinValue.AddDays((int)ReadLittleEndianUInt(bytes, 1 + timeBytes, 3));
+        var offsetMinutes = (short)(bytes[1 + timeBytes + 3] | (bytes[1 + timeBytes + 4] << 8));
+        // SQL Server stores the UTC instant; the constructor expects a local
+        // wall-clock + offset, so shift back by adding the offset to the UTC
+        // components before composing.
+        var utc = new DateTime(utcDate.Year, utcDate.Month, utcDate.Day, 0, 0, 0, DateTimeKind.Unspecified).Add(utcTime);
+        var localWallClock = utc.AddMinutes(offsetMinutes);
+        return new DateTimeOffset(localWallClock, TimeSpan.FromMinutes(offsetMinutes));
+    }
+
+    /// <summary>
+    /// Decodes the legacy 8-byte <c>datetime</c> binary format: 4 bytes
+    /// big-endian signed day count from 1900-01-01, then 4 bytes big-endian
+    /// unsigned 1/300-second ticks since midnight.
+    /// </summary>
+    private static DateTime DecodeLegacyDateTimeFromBytes(byte[] bytes)
+    {
+        if (bytes.Length != 8)
+            throw new NotSupportedException($"CAST(varbinary(…) AS datetime) requires exactly 8 bytes; got {bytes.Length}.");
+        // Day count is a signed 32-bit integer (the byte-rebuild is intentional
+        // wrap-aware to recover the sign bit). Tick count is an unsigned 32-bit
+        // count of 1/300-second granules.
+        var days = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+        var ticks300 = (uint)(bytes[4] << 24) | (uint)(bytes[5] << 16) | (uint)(bytes[6] << 8) | bytes[7];
+        // 1/300-second granularity. The literal `TicksPerSecond / 300L`
+        // truncates because 10_000_000 / 300 isn't whole — keep the
+        // multiplication on the high side of the division.
+        var baseDate = new DateTime(1900, 1, 1).AddDays(days);
+        return baseDate.AddTicks(ticks300 * TimeSpan.TicksPerSecond / 300L);
+    }
+
+    /// <summary>
+    /// Decodes the legacy 4-byte <c>smalldatetime</c> binary format: 2 bytes
+    /// big-endian unsigned days since 1900-01-01, then 2 bytes big-endian
+    /// unsigned minutes since midnight.
+    /// </summary>
+    private static DateTime DecodeSmallDateTimeFromBytes(byte[] bytes)
+    {
+        if (bytes.Length != 4)
+            throw new NotSupportedException($"CAST(varbinary(…) AS smalldatetime) requires exactly 4 bytes; got {bytes.Length}.");
+        var days = (bytes[0] << 8) | bytes[1];
+        var minutes = (bytes[2] << 8) | bytes[3];
+        return new DateTime(1900, 1, 1).AddDays(days).AddMinutes(minutes);
+    }
+
+    private static int TimeWidthForScale(byte scale) => scale switch
+    {
+        <= 2 => 3,
+        <= 4 => 4,
+        <= 7 => 5,
+        _ => throw new NotSupportedException($"varbinary→time/datetime2/datetimeoffset scale must be 0–7; got {scale}."),
+    };
+
+    private static TimeSpan DecodeTimeOfDay(byte[] bytes, int offset, int width, byte scale)
+    {
+        var raw = ReadLittleEndianUInt(bytes, offset, width);
+        // raw is in 10^(-scale)-second units. Convert to .NET Ticks (10^-7 s):
+        // multiplier = 10^(7-scale).
+        var multiplier = scale switch
+        {
+            0 => 10_000_000L,
+            1 => 1_000_000L,
+            2 => 100_000L,
+            3 => 10_000L,
+            4 => 1_000L,
+            5 => 100L,
+            6 => 10L,
+            _ => 1L,
+        };
+        return TimeSpan.FromTicks(raw * multiplier);
+    }
+
+    private static long ReadLittleEndianUInt(byte[] bytes, int offset, int width)
+    {
+        long acc = 0;
+        for (var i = 0; i < width; i++)
+            acc |= (long)bytes[offset + i] << (i * 8);
+        return acc;
     }
 
     /// <summary>

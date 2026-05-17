@@ -149,4 +149,24 @@ public sealed class DefaultClauseTests
     public void NewSequentialId_WithArguments_RaisesMsg302()
         => _ = new Simulation().AssertSqlError(
             "create table t (g uniqueidentifier not null default newsequentialid(1))", 302);
+
+    // SSMS-emitted DDL scripts wrap the DEFAULT body in parens around a
+    // named constraint: `ALTER TABLE t ADD CONSTRAINT df DEFAULT
+    // (newsequentialid()) FOR col`. Real SQL Server accepts both the bare
+    // and parenthesized forms here. Probed against Optimizely Configured
+    // Commerce v4.x's starting-database script on 2026-05-17.
+    [TestMethod]
+    public void NewSequentialId_AlterTableAddNamedDefault_Accepted()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, g uniqueidentifier not null);
+            alter table t add constraint df_t_g default (newsequentialid()) for g;
+            insert t (id) values (1)
+            """);
+        using var connection = sim.CreateOpenConnection();
+        using var reader = connection.CreateCommand("select g from t").ExecuteReader();
+        Assert.IsTrue(reader.Read());
+        Assert.AreNotEqual(Guid.Empty, reader.GetGuid(0));
+    }
 }

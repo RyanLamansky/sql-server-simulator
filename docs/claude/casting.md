@@ -12,6 +12,19 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 
 **CAST/CONVERT context defaults missing length to 30** for `varchar`/`nvarchar`/`varbinary` (column-context default is 1).
 
+## `varbinary` → date-time family (SSMS wire format)
+
+`CAST(0x… AS date | time | datetime | datetime2 | datetimeoffset | smalldatetime)` decodes the byte payload via SQL Server's documented wire format. SSMS bulk-INSERT exports emit every date column literal this way (e.g. `CAST(0x07A00627C0A5173D0B0000 AS DateTimeOffset)`), so this path is load-bearing for BACPAC-style seed-data scripts. Layouts probed against SQL Server 2025:
+
+- `date` — 3 bytes LE: days since `0001-01-01`.
+- `time(N)` — 1 scale byte + LE time count in `10^(-N)`-second units; 3 / 4 / 5 bytes for scales 0–2 / 3–4 / 5–7.
+- `datetime2(N)` — scale + LE time + LE 3-byte date.
+- `datetimeoffset(N)` — same as `datetime2(N)` + LE `int16` offset minutes. SQL Server stores the time + date in **UTC**; the offset shifts back to the original wall-clock during round-trip.
+- `datetime` — 8 bytes **BE**: `int32` days since `1900-01-01` + `uint32` 1/300-second ticks since midnight.
+- `smalldatetime` — 4 bytes **BE**: `uint16` days + `uint16` minutes.
+
+Decoders live next to `VarbinaryToGuid` in `Storage/SqlValue.Coerce.cs`. Reverse direction (date-family → varbinary) isn't modeled — no production scripts emit that direction; `bcp` and BACPAC do the encoding upstream.
+
 `VarcharSqlType`/`NVarcharSqlType`/`VarbinarySqlType` are per-length singletons via `Get(N)` (parallel to `CharSqlType`); `Unspecified` (length 0) is the runtime sentinel; `MaxForm` (length -1) is the LOB form. **Equality**: `value.Type == SqlType.Varchar` is true only for the unspecified form; "is any varchar" needs `is VarcharSqlType`. The encoder accepts any same-family pair regardless of length (write-time truncation enforced upstream).
 
 ## `TRY_CAST` / `TRY_CONVERT`

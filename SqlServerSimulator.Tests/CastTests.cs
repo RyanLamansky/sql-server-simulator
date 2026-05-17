@@ -498,4 +498,60 @@ public sealed class CastTests
         var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar("select try_cast(cast('abc' as int) as bigint)"));
         Contains("Conversion failed", ex.Message);
     }
+
+    // --- varbinary → date-family decoding ---
+    //
+    // SSMS bulk-INSERT export emits each date/time/datetime/datetimeoffset
+    // literal as `CAST(0x… AS <type>)` against the SQL Server binary wire
+    // format. The reference bytes below were probed against SQL Server 2025
+    // on 2026-05-17 using
+    // `select cast(cast('2017-07-26T19:46:29.3386912+00:00' as datetimeoffset(7)) as varbinary(20))`
+    // and matching variants for each target type. Layouts:
+    //   date              — 3 bytes LE: days since 0001-01-01
+    //   time(N)           — 1 scale byte + LE time ticks (10^-N s units),
+    //                       3 / 4 / 5 bytes for scales 0–2 / 3–4 / 5–7
+    //   datetime2(N)      — 1 scale byte + LE time + LE 3-byte date
+    //   datetimeoffset(N) — same as datetime2 + LE int16 offset minutes;
+    //                       SQL Server stores the time + date in UTC
+    //   datetime          — 8 bytes BE: int32 days since 1900-01-01 + uint32
+    //                       1/300-second ticks since midnight
+    //   smalldatetime     — 4 bytes BE: uint16 days + uint16 minutes
+
+    [TestMethod]
+    public void CastVarbinaryToDate_RoundTripsViaWireFormat() =>
+        AreEqual(new DateTime(2017, 7, 26), ExecuteScalar("select cast(0x173D0B as date)"));
+
+    [TestMethod]
+    public void CastVarbinaryToDateTime2Scale7_RoundTripsViaWireFormat() =>
+        AreEqual(new DateTime(2017, 7, 26, 19, 46, 29), ExecuteScalar("select cast(0x078058F3BFA5173D0B as datetime2(7))"));
+
+    [TestMethod]
+    public void CastVarbinaryToDateTime2Scale0_RoundTripsViaWireFormat() =>
+        AreEqual(new DateTime(2017, 7, 26, 19, 46, 29), ExecuteScalar("select cast(0x00151601173D0B as datetime2(0))"));
+
+    [TestMethod]
+    public void CastVarbinaryToDateTimeOffsetUtc_RoundTripsViaWireFormat() =>
+        AreEqual(
+            new DateTimeOffset(2017, 7, 26, 19, 46, 29, TimeSpan.Zero).AddTicks(3386912),
+            ExecuteScalar("select cast(0x07A00627C0A5173D0B0000 as datetimeoffset(7))"));
+
+    // -05:00 wall-clock has UTC components 2017-07-27T00:46:29.3386912,
+    // stored as the UTC time/date bytes plus a signed offset of -300 minutes.
+    [TestMethod]
+    public void CastVarbinaryToDateTimeOffsetWithOffset_RoundTripsViaWireFormat() =>
+        AreEqual(
+            new DateTimeOffset(2017, 7, 26, 19, 46, 29, TimeSpan.FromHours(-5)).AddTicks(3386912),
+            ExecuteScalar("select cast(0x07A04E937E06183D0BD4FE as datetimeoffset(7))"));
+
+    [TestMethod]
+    public void CastVarbinaryToLegacyDateTime_RoundTripsViaWireFormat() =>
+        AreEqual(new DateTime(2017, 7, 26, 19, 46, 29), ExecuteScalar("select cast(0x0000A7BC0145E09C as datetime)"));
+
+    [TestMethod]
+    public void CastVarbinaryToSmallDateTime_RoundTripsViaWireFormat() =>
+        AreEqual(new DateTime(2017, 7, 26, 19, 46, 0), ExecuteScalar("select cast(0xA7BC04A2 as smalldatetime)"));
+
+    [TestMethod]
+    public void CastVarbinaryToTime_RoundTripsViaWireFormat() =>
+        AreEqual(new TimeSpan(19, 46, 29), ExecuteScalar("select cast(0x078058F3BFA5 as time(7))"));
 }

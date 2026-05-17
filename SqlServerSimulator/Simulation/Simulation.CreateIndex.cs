@@ -129,28 +129,12 @@ partial class Simulation
             // indexes' definition until ParserContext gains span tracking.
         }
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            if (context.GetNextRequired() is not Operator { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            // Parens-balanced skip — accept any option list since the
-            // simulator doesn't honor any index option semantically.
-            var depth = 1;
-            while (depth > 0)
-            {
-                context.MoveNextRequired();
-                switch (context.Token)
-                {
-                    case Operator { Character: '(' }:
-                        depth++;
-                        break;
-                    case Operator { Character: ')' }:
-                        depth--;
-                        break;
-                }
-            }
-            context.MoveNextOptional();
-        }
+        // WITH (option = value, …) followed by an optional ON <filegroup>.
+        // Both are parsed and discarded — the simulator has no B-tree
+        // storage and no filegroup model, so none of the options are
+        // semantically meaningful.
+        SkipOptionalIndexWithClause(context);
+        SkipOptionalFilegroupClause(context);
 
         if (context.Batch.IsSkipping)
             return true;

@@ -9,12 +9,13 @@ CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX name
     ON table (col [ASC | DESC] [, …])
     [INCLUDE (col [, …])]
     [WHERE filter]
-    [WITH (option = value [, …])];
+    [WITH (option = value [, …])]
+    [ON <filegroup>];
 
 DROP INDEX [IF EXISTS] name ON table [, name ON table [, …]];
 ```
 
-The simulator has no B-tree storage; non-UNIQUE indexes are catalog metadata only (visible through `sys.indexes` / `sys.index_columns` but not used for query acceleration). UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`. The `WITH (...)` clause is parsed parens-balanced and discarded — none of `FILLFACTOR` / `PAD_INDEX` / `IGNORE_DUP_KEY` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior.
+The simulator has no B-tree storage; non-UNIQUE indexes are catalog metadata only (visible through `sys.indexes` / `sys.index_columns` but not used for query acceleration). UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`. The `WITH (...)` clause is parsed parens-balanced and discarded — none of `FILLFACTOR` / `PAD_INDEX` / `IGNORE_DUP_KEY` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior. The trailing `ON <filegroup>` placement clause (e.g. `ON [PRIMARY]`) is also parsed and discarded — no filegroup model. The same two trailers are accepted on inline `CONSTRAINT … PRIMARY KEY | UNIQUE` clauses inside CREATE TABLE and on `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY | UNIQUE (cols)`, plus `) ON [PRIMARY] [TEXTIMAGE_ON [PRIMARY]]` at the end of CREATE TABLE — the full SSMS-scripting verbosity surface.
 
 ## Storage
 

@@ -216,6 +216,12 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
+        // SSMS emits `ADD CONSTRAINT name UNIQUE NONCLUSTERED (cols) WITH
+        // (PAD_INDEX = OFF, …) ON [PRIMARY]`. Both trailers are no-ops in
+        // the simulator (no B-tree storage, no filegroup model).
+        SkipOptionalIndexWithClause(context);
+        SkipOptionalFilegroupClause(context);
+
         if (context.Batch.IsSkipping)
             return true;
 
@@ -290,7 +296,14 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var expression = Expression.Parse(context);
+        // Mark the expression body as a DEFAULT clause so NEWSEQUENTIALID()'s
+        // grammar gate accepts it (parity with the inline-DEFAULT path in
+        // ParseOneColumnIntoLists). The flag is the only thing distinguishing
+        // a legal DEFAULT context from an illegal scalar use of the function.
+        context.InDefaultClause = true;
+        Expression expression;
+        try { expression = Expression.Parse(context); }
+        finally { context.InDefaultClause = false; }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })

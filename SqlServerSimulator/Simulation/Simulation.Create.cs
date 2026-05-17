@@ -78,11 +78,19 @@ partial class Simulation
         if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys))
             return false;
 
-        // Optional trailing WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X))
-        // clause. Parsed regardless of skip mode so the cursor advances past
-        // it cleanly; the resulting historyTableName is only used after the
-        // skip-mode gate below.
+        // Optional trailing placement and option clauses, in any order:
+        //   ON <filegroup> [TEXTIMAGE_ON <filegroup>] — parsed and discarded
+        //     (the simulator has no filegroup model).
+        //   WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X)) — load-bearing.
+        // SSMS-emitted CREATE TABLE always trails `) ON [PRIMARY]` and may
+        // additionally trail `TEXTIMAGE_ON [PRIMARY]`; SYSTEM_VERSIONING is
+        // table-author-emitted and doesn't coexist with the SSMS form in
+        // observed scripts, but we accept either ordering for generality.
+        // Parsed regardless of skip mode so the cursor advances cleanly;
+        // the resulting historyTableName is only used after the skip-mode
+        // gate below.
         context.MoveNextOptional();
+        SkipOptionalFilegroupClause(context);
         MultiPartName? historyTableName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
             historyTableName = ParseSystemVersioningOption(context);
@@ -337,6 +345,68 @@ partial class Simulation
     {
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Skips a trailing <c>WITH (option = value, …)</c> index-options clause
+    /// (the SSMS-emitted <c>PAD_INDEX</c> / <c>STATISTICS_NORECOMPUTE</c> /
+    /// <c>IGNORE_DUP_KEY</c> / <c>ALLOW_ROW_LOCKS</c> / <c>ALLOW_PAGE_LOCKS</c>
+    /// / etc. block) when the cursor is sitting on a <c>WITH</c> keyword.
+    /// Parens-balanced skip — the simulator doesn't honor any of these
+    /// options semantically (no B-tree storage, no allocation knobs), so the
+    /// option list itself isn't inspected. No-op when the cursor isn't on
+    /// <c>WITH</c>. Cursor on exit: first token past the closing <c>)</c>,
+    /// or unchanged when no clause was present.
+    /// </summary>
+    internal static void SkipOptionalIndexWithClause(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return;
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var depth = 1;
+        while (depth > 0)
+        {
+            context.MoveNextRequired();
+            switch (context.Token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+            }
+        }
+        context.MoveNextOptional();
+    }
+
+    /// <summary>
+    /// Skips trailing <c>ON &lt;filegroup&gt;</c> and <c>TEXTIMAGE_ON &lt;filegroup&gt;</c>
+    /// placement clauses on tables / indexes / inline PK-UNIQUE constraints
+    /// (e.g. <c>ON [PRIMARY]</c>). The simulator has no filegroup model —
+    /// every heap lives in a single flat page list — so the clauses are
+    /// parsed and discarded. The filegroup name accepts the same shapes as a
+    /// regular identifier (bare, bracketed, or quoted) so SSMS's bracketed
+    /// <c>[PRIMARY]</c> and the unbracketed grammar form both pass. No-op
+    /// when the cursor isn't on a recognized leading keyword. Cursor on
+    /// exit: first token past the consumed clause(s), or unchanged when no
+    /// clause was present.
+    /// </summary>
+    internal static void SkipOptionalFilegroupClause(ParserContext context)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+        {
+            if (context.GetNextRequired() is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.TextImage_On })
+        {
+            if (context.GetNextRequired() is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
     }
 
     /// <summary>
@@ -1164,6 +1234,14 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+
+        // SSMS emits `… PRIMARY KEY CLUSTERED (cols) WITH (PAD_INDEX = OFF, …)
+        // ON [PRIMARY]` for inline table-level PK / UNIQUE constraints. Both
+        // trailers are no-ops in the simulator (no B-tree storage, no
+        // filegroup model) but the parser must consume them so the
+        // column-list do-while sees a comma or closing paren next.
+        SkipOptionalIndexWithClause(context);
+        SkipOptionalFilegroupClause(context);
 
         pendingKeys.Add((kind, constraintName, [.. ordinals]));
     }

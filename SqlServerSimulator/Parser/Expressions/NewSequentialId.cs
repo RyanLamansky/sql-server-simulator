@@ -8,10 +8,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// successive values compare strictly greater than every prior value
 /// produced for the same <see cref="Simulation"/>. SQL Server's grammar
 /// restricts this function to a column's <c>DEFAULT</c> clause; using it
-/// elsewhere — bare <c>SELECT</c>, INSERT VALUES list, an arithmetic
-/// expression, even nested inside a parenthesized DEFAULT body — raises
-/// Msg 302. The parser threads a flag through
-/// <see cref="ParserContext.InDefaultClause"/>; this constructor checks it.
+/// elsewhere — bare <c>SELECT</c>, INSERT VALUES list, or any composing
+/// arithmetic expression — raises Msg 302. The parser threads a flag
+/// through <see cref="ParserContext.InDefaultClause"/>; this constructor
+/// checks it. Both DEFAULT positions are covered: inline column
+/// (<c>CREATE TABLE … col uniqueidentifier DEFAULT newsequentialid()</c>)
+/// and named constraint (<c>ALTER TABLE t ADD CONSTRAINT df DEFAULT
+/// (newsequentialid()) FOR col</c>). Argumented calls
+/// (<c>newsequentialid(1)</c>) also raise Msg 302.
 /// </summary>
 /// <remarks>
 /// Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/newsequentialid-transact-sql

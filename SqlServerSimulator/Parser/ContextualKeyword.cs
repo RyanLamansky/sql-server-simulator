@@ -92,6 +92,7 @@ enum ContextualKeyword
     Start,
     System_Time,
     System_Versioning,
+    TextImage_On,
     Throw,
     Time,
     TraceOff,
