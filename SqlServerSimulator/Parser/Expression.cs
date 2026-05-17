@@ -507,6 +507,7 @@ internal abstract class Expression
                 "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
                 "COS" => new TrigFunction(context, TrigKind.Cos),
                 "COT" => new TrigFunction(context, TrigKind.Cot),
+                "DAY" => new DatePart(context, DatePartKind.Day, "day"),
                 "EXP" => new Exp(context),
                 "IIF" => new Iif(context),
                 "LAG" => WindowExpression.ParseLag(context),
@@ -536,6 +537,7 @@ internal abstract class Expression
                 "SQRT" => new Sqrt(context),
                 "TRIM" => new Trim(context),
                 "VARP" => AggregateExpression.Parse(context, AggregateKind.VarP),
+                "YEAR" => new DatePart(context, DatePartKind.Year, "year"),
                 _ => null
             },
             5 => uppercaseName switch
@@ -546,6 +548,7 @@ internal abstract class Expression
                 "LOG10" => new Log10(context),
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
+                "MONTH" => new DatePart(context, DatePartKind.Month, "month"),
                 "NCHAR" => new NCharFromCode(context),
                 "NEWID" => new NewId(context),
                 "NTILE" => WindowExpression.ParseNTile(context),

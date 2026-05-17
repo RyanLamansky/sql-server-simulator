@@ -237,20 +237,20 @@ public sealed class BacpacLoaderTests
         var funcs = QueryCount(connection, "SELECT COUNT(*) FROM sys.objects WHERE type IN ('FN', 'TF', 'IF');");
         var triggers = QueryCount(connection, "SELECT COUNT(*) FROM sys.triggers WHERE parent_class = 1;");
 
-        // Current landing rates against AW (probed 2026-05-15). Gaps:
-        //   views: 11/20 — 3 vJobCandidate-family views use CROSS APPLY in
-        //     a shape the simulator's view-body parser rejects; the rest
-        //     reference computed columns (deferred until functions land) or
-        //     other unsupported syntax.
-        //   procs: 8/10 — 2 reject the unbracketed UDDT `dbo.Flag` parameter
-        //     type (1-part alias resolution in proc param list).
-        //   funcs: 10/11 — 3 scalar UDFs hit RETURN-with-value-in-context
-        //     diagnostic; the multi-stmt TVF lands.
-        //   triggers: 10/10 — all DML triggers land after the NOT FOR
-        //     REPLICATION reserved-keyword fix. (1 DDL trigger lands
+        // Current landing rates against AW (probed 2026-05-17). Gaps:
+        //   views: 11/20 — 3 vJobCandidate-family views + 3 other views use
+        //     CROSS APPLY / OPENXML / other shapes the view-body parser
+        //     rejects; the rest reference computed columns or syntax not
+        //     yet modeled.
+        //   procs: 10/10 — all procs load after dbo.Flag UDDT resolution
+        //     fell through correctly in the procedure-parameter parser.
+        //   funcs: 11/11 — all funcs load after the CASE/END body-span
+        //     fix for scalar UDFs (the 3 ufnGet*StatusText functions used
+        //     CASE inside their BEGIN/END body).
+        //   triggers: 10/10 — all DML triggers load. (1 DDL trigger lands
         //     separately via SqlDatabaseDdlTrigger.)
         AreEqual(11, views);
-        AreEqual(8, procs);
+        AreEqual(10, procs);
         AreEqual(11, funcs);
         AreEqual(10, triggers);
 

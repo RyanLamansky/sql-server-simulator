@@ -33,6 +33,18 @@ internal sealed class DatePart : Expression
         this.source = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    /// <summary>
+    /// Constructs the single-argument shorthand form (<c>YEAR(x)</c> /
+    /// <c>MONTH(x)</c> / <c>DAY(x)</c>) — kind is supplied by the caller,
+    /// argument is parsed from the open-paren-advanced position.
+    /// </summary>
+    public DatePart(ParserContext context, DatePartKind fixedKind, string fixedKeywordText)
+    {
+        this.kind = fixedKind;
+        this.keywordText = fixedKeywordText;
+        this.source = Parse(context);
+    }
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = source.Run(runtime);

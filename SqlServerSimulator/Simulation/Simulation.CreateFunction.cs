@@ -153,6 +153,7 @@ partial class Simulation
         context.MoveNextRequired(); // step past BEGIN
         var bodyStart = context.Token.StartIndex;
         var depth = 1;
+        var caseDepth = 0;
         while (depth > 0)
         {
             if (context.Token is null)
@@ -169,7 +170,15 @@ partial class Simulation
                             depth++;
                         break;
                     }
+                case ReservedKeyword { Keyword: Keyword.Case }:
+                    caseDepth++;
+                    break;
                 case ReservedKeyword { Keyword: Keyword.End }:
+                    if (caseDepth > 0)
+                    {
+                        caseDepth--;
+                        break;
+                    }
                     depth--;
                     if (depth == 0)
                         goto bodyCaptured;
@@ -279,6 +288,7 @@ partial class Simulation
         context.MoveNextRequired(); // step past BEGIN
         var bodyStart = context.Token.StartIndex;
         var depth = 1;
+        var caseDepth = 0;
         while (depth > 0)
         {
             if (context.Token is null)
@@ -295,7 +305,15 @@ partial class Simulation
                             depth++;
                         break;
                     }
+                case ReservedKeyword { Keyword: Keyword.Case }:
+                    caseDepth++;
+                    break;
                 case ReservedKeyword { Keyword: Keyword.End }:
+                    if (caseDepth > 0)
+                    {
+                        caseDepth--;
+                        break;
+                    }
                     depth--;
                     if (depth == 0)
                         goto bodyCaptured;

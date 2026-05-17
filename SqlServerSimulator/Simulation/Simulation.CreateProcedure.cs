@@ -233,15 +233,19 @@ partial class Simulation
 
         if (sawDot)
         {
-            // Multi-part name: only resolvable as user-defined type.
-            // Built-in scalars are 1-part only; a 2-part scalar reference
-            // would already fail in the scalar parser, so consuming the
-            // name here is safe.
+            // Multi-part name: could be a user-defined table type OR a
+            // schema-qualified alias type (UDDT). Try table types first;
+            // on miss, restore the checkpoint so the scalar parameter-type
+            // parser can resolve the alias.
+            var beforeParse = context.SaveCheckpoint();
             var objectName = BatchContext.ParseObjectName(context);
-            if (!context.Batch.TryResolveTableType(objectName, out var tableType))
-                throw SimulatedSqlException.CannotFindDataType(parameterIndex: 1, objectName.ToString(), "@" + parameterName);
-            context.MoveNextOptional();
-            return tableType;
+            if (context.Batch.TryResolveTableType(objectName, out var tableType))
+            {
+                context.MoveNextOptional();
+                return tableType;
+            }
+            context.RestoreCheckpoint(beforeParse);
+            return null;
         }
 
         // 1-part: try TableTypes, fall through to scalar on miss.

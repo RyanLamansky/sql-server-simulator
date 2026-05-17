@@ -517,6 +517,28 @@ internal sealed partial class Selection
                     }
                     break;
 
+                // Column-alias-on-left shorthand: `alias = expr` at
+                // projection-element-start position is equivalent to
+                // `expr AS alias`. Peek past the Name token to disambiguate
+                // from a column-reference-in-comparison expression.
+                case Name aliasCandidate:
+                    {
+                        var checkpoint = context.SaveCheckpoint();
+                        _ = context.MoveNext();
+                        if (context.Token is Operator { Character: '=' })
+                        {
+                            context.MoveNextRequired();
+                            var rhs = Expression.Parse(context);
+                            expressions.Add(Expression.AssignName(rhs, aliasCandidate));
+                        }
+                        else
+                        {
+                            context.RestoreCheckpoint(checkpoint);
+                            expressions.Add(Expression.Parse(context));
+                        }
+                    }
+                    break;
+
                 default:
                     expressions.Add(Expression.Parse(context));
                     break;

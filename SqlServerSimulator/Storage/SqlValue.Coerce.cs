@@ -902,6 +902,7 @@ internal readonly partial struct SqlValue
         _ when SqlType.IsStringCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(ParseDecimal(this.AsString, this.Type), target)),
         _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(AsInt64Widened(this), target)),
         DecimalSqlType => FromDecimal(target, RoundAndOverflowCheck(this.AsDecimal, target)),
+        _ when SqlType.IsMoneyCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(this.AsMoney, target)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
 

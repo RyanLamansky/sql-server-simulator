@@ -121,11 +121,11 @@ internal static class BcpRowReader
         // Variable-length bounded (text/binary) — 2-byte LE prefix, 0xFFFF = NULL.
         return type switch
         {
-            VarcharSqlType => ReadVarchar2(ref stream, type, ansi: true),
-            NVarcharSqlType => ReadVarchar2(ref stream, type, ansi: false),
-            SystemNameSqlType => ReadVarchar2(ref stream, type, ansi: false),
-            NCharSqlType => ReadVarchar2(ref stream, type, ansi: false),
-            CharSqlType => ReadVarchar2(ref stream, type, ansi: true),
+            VarcharSqlType => ReadVarchar2(ref stream, type),
+            NVarcharSqlType => ReadVarchar2(ref stream, type),
+            SystemNameSqlType => ReadVarchar2(ref stream, type),
+            NCharSqlType => ReadVarchar2(ref stream, type),
+            CharSqlType => ReadVarchar2(ref stream, type),
             VarbinarySqlType => ReadVarbinary2(ref stream, type),
             BinarySqlType => ReadVarbinary2(ref stream, type),
             _ => throw new NotSupportedException($"BCP decoder doesn't yet handle type {type}."),
@@ -192,7 +192,7 @@ internal static class BcpRowReader
         stream.ReadExact(data);
         return kind switch
         {
-            EightBytePayload.VarcharMax => SqlValue.FromVarchar(Encoding.GetEncoding(1252).GetString(data)),
+            EightBytePayload.VarcharMax => SqlValue.FromVarchar(Encoding.Unicode.GetString(data)),
             EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
             EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
             EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
@@ -351,7 +351,7 @@ internal static class BcpRowReader
         _ => 1,
     };
 
-    private static SqlValue ReadVarchar2(ref PushbackStream stream, SqlType type, bool ansi)
+    private static SqlValue ReadVarchar2(ref PushbackStream stream, SqlType type)
     {
         Span<byte> prefixBytes = stackalloc byte[2];
         stream.ReadExact(prefixBytes);
@@ -360,7 +360,15 @@ internal static class BcpRowReader
             return SqlValue.Null(type);
         var data = new byte[byteLength];
         stream.ReadExact(data);
-        var text = ansi ? Encoding.GetEncoding(1252).GetString(data) : Encoding.Unicode.GetString(data);
+        // DACFx writes BCP payloads for every character column as UTF-16-LE
+        // regardless of varchar vs nvarchar declaration (probe-confirmed
+        // against AW2025 Person.Password where the column declares
+        // varchar(128) but every byte pair in the BCP file is UTF-16-LE).
+        // The decoded .NET string is then handed to the matching FromX
+        // factory; DATALENGTH semantics still derive from the SqlType, so
+        // a varchar(128) decoded from "++bTDOq..." reports 43 bytes the
+        // way SQL Server does, not 86.
+        var text = Encoding.Unicode.GetString(data);
         return type switch
         {
             VarcharSqlType => SqlValue.FromVarchar(text),

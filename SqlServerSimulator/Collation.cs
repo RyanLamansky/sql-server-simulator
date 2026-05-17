@@ -57,24 +57,28 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
         /// <summary>
         /// Ordering ignores apostrophe and hyphen so leading-punctuation
         /// values (place names like <c>'Aiea</c>, hyphenated entries) sort
-        /// alongside their unpunctuated peers. Matches the Windows-100
-        /// collation behavior (<c>Latin1_General_100_CI_AS</c>, which WWI
-        /// declares) at the primary sort-key level. Strict
-        /// <c>SQL_Latin1_General_CP1_CI_AS</c> would not strip these, but
-        /// the loaded data in this codebase's reference workloads (AW + WWI)
-        /// all uses Windows-style collation in practice. Equality still
-        /// distinguishes punctuation (see <see cref="Equals"/>) so
-        /// identifier-dict lookups, schema-name comparisons, and SQL <c>=</c>
-        /// predicates remain strict (matching real-server behavior for both
-        /// collations).
+        /// alongside their unpunctuated peers — matches Windows-100
+        /// (<c>Latin1_General_100_CI_AS</c>, which WWI declares) at the
+        /// primary sort-key level. Comparison after stripping uses
+        /// <see cref="StringComparer.OrdinalIgnoreCase"/> rather than the
+        /// invariant culture so non-stripped punctuation (base64 <c>+</c>
+        /// vs <c>/</c>, etc.) byte-orders the way both SQL Server SQL
+        /// collations and Windows binary-tail collations do. Strict
+        /// <c>SQL_Latin1_General_CP1_CI_AS</c> wouldn't strip apostrophe or
+        /// hyphen — pure ordinal would. The compromise reproduces the most
+        /// common observed behavior across both reference workloads
+        /// (AW + WWI). Equality still distinguishes punctuation (see
+        /// <see cref="Equals"/>) so identifier-dict lookups,
+        /// schema-name comparisons, and SQL <c>=</c> predicates remain
+        /// strict for both collations.
         /// </summary>
         public override int Compare(string? x, string? y) =>
-            StringComparer.InvariantCultureIgnoreCase.Compare(StripSortIgnorable(x), StripSortIgnorable(y));
+            StringComparer.OrdinalIgnoreCase.Compare(StripSortIgnorable(x), StripSortIgnorable(y));
 
         public override bool Equals(string? x, string? y) =>
-            StringComparer.InvariantCultureIgnoreCase.Equals(x, y);
+            StringComparer.OrdinalIgnoreCase.Equals(x, y);
 
-        public override int GetHashCode(string obj) => StringComparer.InvariantCultureIgnoreCase.GetHashCode(obj);
+        public override int GetHashCode(string obj) => StringComparer.OrdinalIgnoreCase.GetHashCode(obj);
 
         /// <summary>
         /// Removes characters that have primary-weight zero in
