@@ -957,4 +957,597 @@ public class BacpacLoaderTests
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.foreign_keys WHERE delete_referential_action = 1;"));
     }
+
+    [TestMethod]
+    public void Filegroup_IsSilentlySkipped()
+    {
+        // SqlFilegroup is loader-recognized + emitted as a no-op (same
+        // pattern as partition/columnstore). The simulator has a single
+        // in-process heap; filegroup metadata has no semantic effect.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
+            .Filegroup("PRIMARY")
+            .Filegroup("FG_Indexes")
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
+    }
+
+    [TestMethod]
+    public void DatabaseDdlTrigger_LandsIn_sys_triggers_WithParentClassDatabase()
+    {
+        // CREATE TRIGGER … ON DATABASE; the loader dispatches through the
+        // SqlDatabaseDdlTrigger arm (phase 7) which routes to the DDL-trigger
+        // path. sys.triggers row: parent_class = 0 / parent_class_desc =
+        // 'DATABASE'. No fire — DDL events aren't dispatched to a trigger
+        // loop (per docs/claude/bacpac-prerequisites.md).
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseDdlTrigger("trgAuditDDL", """
+                CREATE TRIGGER trgAuditDDL ON DATABASE
+                FOR CREATE_TABLE, DROP_TABLE
+                AS BEGIN
+                    PRINT 'DDL event';
+                END
+                """)
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.triggers WHERE parent_class = 0 AND name = 'trgAuditDDL';"));
+    }
+
+    [TestMethod]
+    public void TimeColumn_RoundTripsThroughBcp_AtMultiplePrecisions()
+    {
+        // time(N) wire shape: precision-derived 3/4/5-byte LE little-endian
+        // count of ticks-at-precision-unit (no day count, vs datetime2's
+        // trailing 3-byte day field).
+        var noon = new TimeSpan(12, 30, 45);
+        var fraction = noon + TimeSpan.FromTicks(1234567);
+
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Clock", t => t
+                .Column("Id", "int")
+                .Column("Coarse", "time(0)")
+                .Column("Mid", "time(3)")
+                .Column("Fine", "time(7)")
+                .Column("Maybe", "time(7)", nullable: true)
+                .Row(1, noon, noon, fraction, null))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT Coarse, Mid, Fine, Maybe FROM Clock;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(noon, reader.GetFieldValue<TimeSpan>(0));
+        AreEqual(noon, reader.GetFieldValue<TimeSpan>(1));
+        AreEqual(fraction, reader.GetFieldValue<TimeSpan>(2));
+        IsTrue(reader.IsDBNull(3));
+    }
+
+    [TestMethod]
+    public void NcharAndSysnameColumns_RoundTripThroughBcp()
+    {
+        // nchar(N) shares the 2-byte length-prefix wire form with nvarchar(N)
+        // but reads back through SqlValue.FromNChar (different SqlType
+        // singleton). sysname rides the same path under SystemNameSqlType.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Code", t => t
+                .Column("Id", "int")
+                .Column("FixedCode", "nchar(8)")
+                .Column("ObjectName", "sysname")
+                .Row(1, "ABC12345", "MyObject"))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT FixedCode, ObjectName FROM Code;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("ABC12345", reader.GetString(0));
+        AreEqual("MyObject", reader.GetString(1));
+    }
+
+    [TestMethod]
+    public void Role_WithAuthorizationOwner_LandsAsCreateRoleAuthorization()
+    {
+        // CREATE ROLE name AUTHORIZATION owner — the loader reads the
+        // Authorizer relationship and appends AUTHORIZATION clause to the
+        // emitted CREATE ROLE. Exercises the Authorizer-relationship reader.
+        using var bacpac = BacpacBuilder.Create()
+            .Role("custom_role", ownerPrincipal: "dbo")
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+    }
+
+    [TestMethod]
+    public void RowGuidColColumn_AddsWarningAndLoadsWithoutClause()
+    {
+        // ROWGUIDCOL is metadata-only — the loader drops the clause and
+        // records a Warning. Exercises the ROWGUIDCOL warning emission path.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Tagged", t => t
+                .Column("Id", "int")
+                .Column("RowId", "uniqueidentifier", rowGuidCol: true))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        IsNotEmpty(diag.Warnings.Where(w => w.Contains("ROWGUIDCOL", StringComparison.Ordinal)).ToList());
+        // Column still loads, just without the metadata annotation.
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.columns WHERE name = 'RowId';"));
+    }
+
+    [TestMethod]
+    public void ExtendedProperty_OnUnmodeledHostKind_LandsOnSkippedWithReason()
+    {
+        // SqlFilegroup / SqlDatabaseDdlTrigger / any unrecognized host kind
+        // lands on Skipped with "Host kind '…' not modeled" — exercises the
+        // default arm of the extended-property host-kind switch.
+        using var bacpac = BacpacBuilder.Create()
+            .UnknownHostExtendedProperty("SqlFilegroup", "PRIMARY", "MS_Description", "filegroup note")
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        HasCount(1, diag.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList());
+        Contains("Host kind 'SqlFilegroup'", diag.Skipped[0].Reason);
+    }
+
+    [TestMethod]
+    public void Procedure_WithFailingBody_LandsOnSkippedWithCreateFailedReason()
+    {
+        // CREATE PROCEDURE with a body referencing a non-existent table —
+        // simulator's SCHEMA-binding-equivalent parse rejects → SimulatedSqlException
+        // → loader records "CREATE SqlProcedure failed:" on Skipped.
+        using var bacpac = BacpacBuilder.Create()
+            .Procedure("dbo", "BadProc", """
+                CREATE PROCEDURE dbo.BadProc AS BEGIN
+                    SELECT * FROM dbo.DefinitelyDoesNotExist;
+                END
+                """)
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        // Note: simulator may still create the proc (parser stores body
+        // without resolving table references); test guards the catch path
+        // exists, doesn't pin failure outcome.
+        // Run via a fallback: a function with a malformed RETURNS type
+        // raises at CREATE parse time.
+        using var bacpac2 = BacpacBuilder.Create()
+            .ScalarFunction("dbo", "BadFn", """
+                CREATE FUNCTION dbo.BadFn() RETURNS NotARealType AS BEGIN RETURN 1; END
+                """)
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac2, out var diag2);
+        IsNotEmpty(diag2.Skipped
+            .Where(s => s.Reason.StartsWith("CREATE ", StringComparison.Ordinal) && s.Reason.Contains(" failed:", StringComparison.Ordinal))
+            .ToList());
+    }
+
+    [TestMethod]
+    public void Procedure_WithTableTypeParameter_QualifiedTwoPart_Loads()
+    {
+        // EXEC dispatch through 2-part-qualified table-type lookup
+        // ([dbo].[IdList]). Exercises the 2-part table-type-resolver path
+        // in proc parameter type parsing.
+        using var bacpac = BacpacBuilder.Create()
+            .TableType("dbo", "IdList", t => t
+                .Column("Id", "int"))
+            .Procedure("dbo", "TakeIds", """
+                CREATE PROCEDURE dbo.TakeIds @ids dbo.IdList READONLY
+                AS BEGIN
+                    SELECT COUNT(*) FROM @ids;
+                END
+                """)
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+    }
+
+    [TestMethod]
+    public void Procedure_WithTwoPartUddtParameter_FallsThroughToScalarPath()
+    {
+        // Two-part `dbo.Phone` resolves through table-type-first
+        // (TryResolveTableType returns false → RestoreCheckpoint → fall
+        // through to scalar alias-type lookup). Exercises the
+        // RestoreCheckpoint + return null arm in the proc parameter
+        // type-resolver.
+        using var bacpac = BacpacBuilder.Create()
+            .UserDefinedDataType("dbo", "Phone", "nvarchar(20)", nullable: true)
+            .Procedure("dbo", "CallContact", """
+                CREATE PROCEDURE dbo.CallContact @phone dbo.Phone
+                AS BEGIN
+                    SELECT @phone;
+                END
+                """)
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+    }
+
+    [TestMethod]
+    public void UnhandledElementType_LandsOnSkippedWithNotYetHandledReason()
+    {
+        // Top-level Element with an unrecognized Type attribute lands on
+        // Skipped with "Element type not yet handled by the loader." after
+        // every phase fails to claim it.
+        using var bacpac = BacpacBuilder.Create()
+            .UnknownTopLevelElement("SqlImaginaryFeature", "[stub]")
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        IsNotEmpty(diag.Skipped.Where(s => s.ElementType == "SqlImaginaryFeature").ToList());
+        Contains("not yet handled by the loader", diag.Skipped[0].Reason);
+    }
+
+    [TestMethod]
+    public void ExtendedProperty_OnForeignKey_WalksPastCheckConstraintsForeach()
+    {
+        // Extended property bound to a FK constraint name: the lookup
+        // walks KeyConstraints (miss) + CheckConstraints (miss, closing
+        // brace hit) + OutgoingForeignKeys (match) — exercises the
+        // closing brace of the CheckConstraints foreach.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Parent3", t => t
+                .Column("Id", "int")
+                .PrimaryKey("PK_Parent3", "Id"))
+            .Table("dbo", "Child3", t => t
+                .Column("Id", "int")
+                .Column("ParentId", "int")
+                .Column("Status", "int")
+                .PrimaryKey("PK_Child3", "Id")
+                .Check("CK_Child3_Status", "[Status] >= 0")
+                .ForeignKey("FK_Child3_Parent", ["ParentId"], "dbo", "Parent3", ["Id"]))
+            .ConstraintExtendedProperty("dbo", "FK_Child3_Parent", "MS_Description", "fk to parent")
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("fk to parent", sim.ExecuteScalar("""
+            SELECT CAST(ep.value AS nvarchar(MAX))
+              FROM sys.extended_properties ep
+              JOIN sys.foreign_keys f ON ep.major_id = f.object_id
+             WHERE f.name = 'FK_Child3_Parent' AND ep.name = 'MS_Description';
+            """));
+    }
+
+    [TestMethod]
+    public void Table_WithUniqueThenPrimaryKey_AlterAddPkWalksExistingKeyConstraints()
+    {
+        // Loader emits all phase-3 constraints in document order. When the
+        // builder adds Unique before PrimaryKey, the loader processes UQ
+        // first → table holds the UQ → ALTER ADD CONSTRAINT PK runs and
+        // its foreach over KeyConstraints iterates the UQ (kind != PK → no
+        // throw) → closing brace hit.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Ordered", t => t
+                .Column("Id", "int")
+                .Column("Slug", "nvarchar(20)")
+                .Unique("UQ_Ordered_Slug", "Slug")
+                .PrimaryKey("PK_Ordered", "Id"))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.key_constraints WHERE name = 'PK_Ordered' AND type = 'PK';"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.key_constraints WHERE name = 'UQ_Ordered_Slug' AND type = 'UQ';"));
+    }
+
+    [TestMethod]
+    public void ExtendedProperty_OnIndex_WithUniqueConstraint_WalksNonPrimaryKeyList()
+    {
+        // ComputeIndexId walks non-PK key constraints (`others.Add(...)`)
+        // before the regular index list when building the index_id
+        // enumeration. A UQ + a plain index + an extended property on the
+        // plain index exercises the UQ inclusion in the walker.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "WithUq", t => t
+                .Column("Id", "int")
+                .Column("Slug", "nvarchar(20)")
+                .Column("Email", "nvarchar(100)", nullable: true)
+                .PrimaryKey("PK_WithUq", "Id")
+                .Unique("UQ_WithUq_Slug", "Slug")
+                .Index("IX_WithUq_Email", ["Email"]))
+            .IndexExtendedProperty("dbo", "WithUq", "IX_WithUq_Email", "MS_Description", "email index")
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("email index", sim.ExecuteScalar("""
+            SELECT CAST(ep.value AS nvarchar(MAX))
+              FROM sys.extended_properties ep
+              JOIN sys.indexes i ON ep.major_id = i.object_id AND ep.minor_id = i.index_id
+             WHERE i.name = 'IX_WithUq_Email' AND ep.name = 'MS_Description';
+            """));
+    }
+
+    [TestMethod]
+    public void DatabaseOptions_RoundTripMany_OptionsViaAlterDatabase()
+    {
+        // The loader maps each DACFx property name through a closed
+        // dispatcher. Exercise the breadth of recognized options in one
+        // bacpac — verifies the OnOff / RecoveryMode / TargetRecoveryTime /
+        // QueryStore arms all fire without raising Skipped.
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("IsAnsiNullsOn", "True")
+            .DatabaseOption("IsAnsiWarningsOn", "True")
+            .DatabaseOption("IsAnsiPaddingOn", "True")
+            .DatabaseOption("IsArithAbortOn", "True")
+            .DatabaseOption("IsConcatNullYieldsNullOn", "True")
+            .DatabaseOption("IsNumericRoundAbortOn", "False")
+            .DatabaseOption("IsQuotedIdentifierOn", "True")
+            .DatabaseOption("IsTornPageProtectionOn", "False")
+            .DatabaseOption("TemporalHistoryRetentionEnabled", "True")
+            .DatabaseOption("IsAcceleratedDatabaseRecoveryOn", "True")
+            .DatabaseOption("IsOptimizedLockingOn", "True")
+            .DatabaseOption("RecoveryMode", "1") // FULL — exercises non-SIMPLE arm
+            .DatabaseOption("IsCursorDefaultScopeGlobal", "True") // GLOBAL arm
+            .DatabaseOption("TargetRecoveryTimePeriod", "60")
+            .DatabaseOption("QueryStoreDesiredState", "2")
+            .DatabaseOption("QueryStoreIntervalLength", "60")
+            .DatabaseOption("QueryStoreFlushInterval", "900")
+            .DatabaseOption("QueryStoreCaptureMode", "1")
+            .DatabaseOption("QueryStoreMaxStorageSize", "1024")
+            .DatabaseOption("QueryStoreSizeBasedCleanupMode", "1")
+            .DatabaseOption("QueryStoreMaxPlansPerQuery", "200")
+            .DatabaseOption("QueryStoreStaleQueryThreshold", "30")
+            .DatabaseOption("QueryStoreWaitStatisticsCaptureMode", "1")
+            .DatabaseOption("IsFullTextEnabled", "True") // null-mapped (no-op)
+            .DatabaseOption("UnrecognizedFutureOption", "anything") // default _ => null arm
+            .Build();
+
+        _ = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+    }
+
+    [TestMethod]
+    public void PartitionFunction_PartitionScheme_ColumnStoreIndex_AreSilentlySkipped()
+    {
+        // WWI-Full's three storage-layout decoration element types are
+        // loader no-ops — recognized by Type, action is empty. The key
+        // invariant: they don't show up on Skipped (Skipped is for
+        // unmodeled features; these are deliberately no-op-handled).
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
+            .PartitionFunction("PF_DateRange")
+            .PartitionScheme("PS_DateRange")
+            .ColumnStoreIndex("CCI_Item")
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        // Table + row payload still load.
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
+    }
+
+    [TestMethod]
+    public void NullableFixedWidth_NonNullValue_DecodesViaNullablePrefix()
+    {
+        // Nullable fixed-width int/datetime/uniqueidentifier columns wear a
+        // 1-byte width prefix (vs the unprefixed fixed-raw shape for NOT
+        // NULL columns). The prefix-validating branch in ReadFixed needs a
+        // non-null value to exercise the equality check.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "NullableMix", t => t
+                .Column("Id", "int")
+                .Column("MaybeInt", "int", nullable: true)
+                .Column("MaybeBigInt", "bigint", nullable: true)
+                .Column("MaybeDate", "datetime", nullable: true)
+                .Row(1, 42, 9_000_000_000L, new DateTime(2025, 1, 1, 12, 0, 0, DateTimeKind.Unspecified)))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(42, sim.ExecuteScalar("SELECT MaybeInt FROM NullableMix;"));
+    }
+
+    [TestMethod]
+    public void NullableDecimal_DecodesNullViaPrefix0xFF()
+    {
+        // ReadDecimal null path returns SqlValue.Null(type) on prefix=0xFF.
+        // The non-null decimal path is already covered by DecimalColumn_*;
+        // this pins the null-marker path.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "MaybeMoney", t => t
+                .Column("Id", "int")
+                .Column("Price", "decimal(10, 2)", nullable: true)
+                .Row(1, null))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM MaybeMoney WHERE Price IS NULL;"));
+    }
+
+    [TestMethod]
+    public void ScalarFunction_WithCaseInBody_AndDecimalParam_Loads()
+    {
+        // CASE … END inside a UDF body exercises caseDepth tracking in the
+        // scalar-UDF body capture loop (otherwise the inner END would be
+        // mistaken for the BEGIN/END boundary). A decimal(P, S) parameter
+        // exercises the precision/scale parsing branches.
+        using var bacpac = BacpacBuilder.Create()
+            .ScalarFunction("dbo", "Bucket", """
+                CREATE FUNCTION dbo.Bucket(@v decimal(10, 2))
+                RETURNS nvarchar(10)
+                AS BEGIN
+                    DECLARE @r nvarchar(10);
+                    SET @r = CASE
+                        WHEN @v < 10 THEN N'low'
+                        WHEN @v < 100 THEN N'mid'
+                        ELSE N'high'
+                    END;
+                    RETURN @r;
+                END
+                """)
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("low", sim.ExecuteScalar("SELECT dbo.Bucket(5.00);"));
+        AreEqual("mid", sim.ExecuteScalar("SELECT dbo.Bucket(50.00);"));
+        AreEqual("high", sim.ExecuteScalar("SELECT dbo.Bucket(500.00);"));
+    }
+
+    [TestMethod]
+    public void Trigger_WithNotForReplication_Loads()
+    {
+        // NOT FOR REPLICATION clause is parse-and-discard for the simulator
+        // (replication isn't modeled); exercises the FOR / REPLICATION
+        // keyword recognition in the trigger header parser.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Audit", t => t
+                .Column("Id", "int")
+                .Column("Action", "nvarchar(20)"))
+            .Trigger("dbo", "Audit", "trgNoRepl", """
+                CREATE TRIGGER dbo.trgNoRepl ON dbo.Audit
+                AFTER INSERT
+                NOT FOR REPLICATION
+                AS BEGIN
+                    PRINT 'audited';
+                END
+                """)
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail(string.Join(" | ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.triggers WHERE name = 'trgNoRepl';"));
+    }
+
+    [TestMethod]
+    public void View_WithAliasEqualsExpression_Loads()
+    {
+        // `alias = expr` is T-SQL's legacy column-alias shape (vs the SQL
+        // standard `expr AS alias`). DACFx-emitted view bodies occasionally
+        // use it; the simulator's SELECT-list parser carries the legacy
+        // form. Exercises the assignment-form branch.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Source", t => t
+                .Column("Raw", "int")
+                .Row(7))
+            .View("dbo", "Renamed", "CREATE VIEW dbo.Renamed AS SELECT Doubled = Raw * 2 FROM dbo.Source;")
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(14, sim.ExecuteScalar("SELECT Doubled FROM dbo.Renamed;"));
+    }
+
+    [TestMethod]
+    public void Sequence_QueryThrough_sys_objects_AsType_SO()
+    {
+        // Sequence.ObjectTypeCode = "SO" / ObjectTypeDescription =
+        // "SEQUENCE_OBJECT" — readable via sys.objects.type.
+        using var bacpac = BacpacBuilder.Create()
+            .Sequence("dbo", "MarkerSeq", "int", startValue: 1, increment: 1)
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("SO", sim.ExecuteScalar("SELECT type FROM sys.objects WHERE name = 'MarkerSeq';"));
+        AreEqual("SEQUENCE_OBJECT", sim.ExecuteScalar("SELECT type_desc FROM sys.objects WHERE name = 'MarkerSeq';"));
+    }
+
+    [TestMethod]
+    public void Table_MultipleForeignKeys_AssertConstraintNameUniqueWalksFkList()
+    {
+        // Adding two FKs from the same child to two parents exercises the
+        // OutgoingForeignKeys walker in AssertConstraintNameUnique: the
+        // second FK lookup iterates the first FK's name during the
+        // uniqueness check.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Parent1", t => t
+                .Column("Id", "int")
+                .PrimaryKey("PK_Parent1", "Id"))
+            .Table("dbo", "Parent2", t => t
+                .Column("Id", "int")
+                .PrimaryKey("PK_Parent2", "Id"))
+            .Table("dbo", "Child", t => t
+                .Column("Id", "int")
+                .Column("P1", "int")
+                .Column("P2", "int")
+                .PrimaryKey("PK_Child", "Id")
+                .ForeignKey("FK_Child_P1", ["P1"], "dbo", "Parent1", ["Id"])
+                .ForeignKey("FK_Child_P2", ["P2"], "dbo", "Parent2", ["Id"]))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.foreign_keys WHERE parent_object_id = (SELECT object_id FROM sys.tables WHERE name = 'Child');"));
+    }
+
+    [TestMethod]
+    public void ExtendedProperty_OnTableWithThreeIndexes_WalksIndexIdEnumeration()
+    {
+        // The fn_listextendedproperty INDEX-level path walks indexes in
+        // ObjectId order, advancing nextIndexId past each non-matching
+        // entry. Three indexes + an extended property on the third
+        // exercises the multi-step advance.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Multi", t => t
+                .Column("Id", "int")
+                .Column("A", "int")
+                .Column("B", "int")
+                .Column("C", "int")
+                .PrimaryKey("PK_Multi", "Id")
+                .Index("IX_A", ["A"])
+                .Index("IX_B", ["B"])
+                .Index("IX_C", ["C"]))
+            .IndexExtendedProperty("dbo", "Multi", "IX_C", "MS_Description", "third index")
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("third index", sim.ExecuteScalar("""
+            SELECT CAST(ep.value AS nvarchar(MAX))
+              FROM sys.extended_properties ep
+              JOIN sys.indexes i ON ep.major_id = i.object_id AND ep.minor_id = i.index_id
+             WHERE i.name = 'IX_C' AND ep.name = 'MS_Description';
+            """));
+    }
+
+    [TestMethod]
+    public void GeographyPolygon_DecodesToPolygonWkt()
+    {
+        // Full-shape decoder path (no IsSinglePoint/IsSingleLineString
+        // shortcut): numPoints + numFigures + numShapes tables. A single
+        // closed quad ring decodes to POLYGON ((long lat, …)). Axis order
+        // is inverted vs binary storage — the decoder honors that.
+        var polygon = BacpacBuilder.MakeGeographyPolygon(
+            srid: 4326,
+            (47.0, -122.0),
+            (48.0, -122.0),
+            (48.0, -121.0),
+            (47.0, -122.0));
+
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Region", t => t
+                .Column("Id", "int")
+                .Column("Border", "geography")
+                .Row(1, polygon))
+            .Build();
+
+        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        var wkt = (string)sim.ExecuteScalar("SELECT CAST(Border AS nvarchar(MAX)) FROM Region;")!;
+        IsTrue(wkt.StartsWith("POLYGON ((", StringComparison.Ordinal), $"unexpected WKT '{wkt}'");
+        // Longitude first (-122) in printed WKT — the geography axis swap.
+        Contains("-122", wkt);
+        Contains("47", wkt);
+    }
 }

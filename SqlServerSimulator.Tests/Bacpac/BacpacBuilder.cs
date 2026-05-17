@@ -36,10 +36,13 @@ public sealed partial class BacpacBuilder
     private readonly List<ExtendedPropertyDef> _extendedProperties = [];
     private readonly List<SequenceDef> _sequences = [];
     private readonly List<string> _roles = [];
+    private readonly Dictionary<string, string> _roleAuthorizers = new(StringComparer.Ordinal);
     private readonly List<TableTypeDef> _tableTypes = [];
     private readonly List<PermissionDef> _permissions = [];
     private readonly List<ViewIndexDef> _viewIndexes = [];
     private readonly List<UserDefinedDataTypeDef> _uddts = [];
+    private readonly List<(string ElementType, string Name)> _silentlySkipped = [];
+    private readonly List<(string ElementType, string Name)> _unknownElements = [];
 
     private BacpacBuilder() { }
 
@@ -137,6 +140,18 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
+    /// Adds an extended property whose host kind is one the loader doesn't
+    /// model (e.g. <c>SqlFilegroup</c> / <c>SqlDatabaseDdlTrigger</c>). Lands
+    /// on <c>Skipped</c> with a "Host kind … not modeled" reason; exercises
+    /// the default arm of the host-kind switch.
+    /// </summary>
+    public BacpacBuilder UnknownHostExtendedProperty(string hostKind, string hostName, string propertyName, string value)
+    {
+        _extendedProperties.Add(new ExtendedPropertyDef(hostName, null, null, propertyName, value, ExtendedPropertyHost.Unknown) { UnknownHostKind = hostKind });
+        return this;
+    }
+
+    /// <summary>
     /// Adds a CREATE SEQUENCE … AS &lt;type&gt; START WITH … INCREMENT BY …
     /// emission. Type defaults to <c>bigint</c> (matches DACFx default);
     /// startValue / increment default to 1 / 1.
@@ -148,10 +163,16 @@ public sealed partial class BacpacBuilder
         return this;
     }
 
-    /// <summary>Adds a CREATE ROLE emission.</summary>
-    public BacpacBuilder Role(string roleName)
+    /// <summary>
+    /// Adds a CREATE ROLE emission. <paramref name="ownerPrincipal"/>, when
+    /// non-null, attaches an <c>Authorizer</c> Relationship → <c>CREATE ROLE
+    /// name AUTHORIZATION owner</c>. Bare form omits the clause.
+    /// </summary>
+    public BacpacBuilder Role(string roleName, string? ownerPrincipal = null)
     {
         _roles.Add(roleName);
+        if (ownerPrincipal is not null)
+            _roleAuthorizers[roleName] = ownerPrincipal;
         return this;
     }
 
@@ -205,6 +226,76 @@ public sealed partial class BacpacBuilder
     {
         _ = _schemas.Add(schemaName);
         _uddts.Add(new UserDefinedDataTypeDef(schemaName, typeName, baseType, nullable));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlPartitionFunction</c> element. The loader treats this
+    /// as a silent no-op (filegroup-mapping metadata with no semantic effect
+    /// on the simulator's row-store-only storage); the test surface for
+    /// this builder method is "presence of the element doesn't add a
+    /// Skipped entry".
+    /// </summary>
+    public BacpacBuilder PartitionFunction(string name)
+    {
+        _silentlySkipped.Add(("SqlPartitionFunction", $"[{name}]"));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlPartitionScheme</c> element. Same silent-skip path as
+    /// <see cref="PartitionFunction"/>.
+    /// </summary>
+    public BacpacBuilder PartitionScheme(string name)
+    {
+        _silentlySkipped.Add(("SqlPartitionScheme", $"[{name}]"));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlColumnStoreIndex</c> element. Read-optimization shape
+    /// over the same row data; same silent-skip path as
+    /// <see cref="PartitionFunction"/>.
+    /// </summary>
+    public BacpacBuilder ColumnStoreIndex(string name)
+    {
+        _silentlySkipped.Add(("SqlColumnStoreIndex", $"[{name}]"));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a top-level element with an arbitrary, loader-unrecognized
+    /// <paramref name="elementType"/>. The dispatcher walks every phase
+    /// without matching → lands on Skipped with "Element type not yet
+    /// handled by the loader."
+    /// </summary>
+    public BacpacBuilder UnknownTopLevelElement(string elementType, string elementName)
+    {
+        _unknownElements.Add((elementType, elementName));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlFilegroup</c> element. Silent no-op in the loader
+    /// (matches partition/columnstore — physical-storage decoration with
+    /// no semantic effect on row-store query results).
+    /// </summary>
+    public BacpacBuilder Filegroup(string name)
+    {
+        _silentlySkipped.Add(("SqlFilegroup", $"[{name}]"));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a CREATE TRIGGER … ON DATABASE … emission (database-scope DDL
+    /// trigger). The loader dispatches through the same programmable-object
+    /// path as DML triggers but routes to <c>Database.DdlTriggers</c> via
+    /// the CREATE TRIGGER … ON DATABASE grammar. Body is wrapped in the
+    /// HeaderContents / BodyScript envelope.
+    /// </summary>
+    public BacpacBuilder DatabaseDdlTrigger(string triggerName, string createStatement)
+    {
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlDatabaseDdlTrigger", "BodyScript", "", triggerName, createStatement, FunctionBodyHost: false));
         return this;
     }
 
@@ -314,7 +405,7 @@ public sealed partial class BacpacBuilder
             model.Add(BuildSequenceElement(ns, seq));
 
         foreach (var role in _roles)
-            model.Add(BuildRoleElement(ns, role));
+            model.Add(BuildRoleElement(ns, role, _roleAuthorizers.GetValueOrDefault(role)));
 
         foreach (var tt in _tableTypes)
             model.Add(BuildTableTypeElement(ns, tt));
@@ -327,6 +418,25 @@ public sealed partial class BacpacBuilder
 
         foreach (var ep in _extendedProperties)
             model.Add(BuildExtendedPropertyElement(ns, ep));
+
+        // Silent-skip elements: the loader recognizes the Type and runs an
+        // empty action. Name attribute is required by the dispatcher's
+        // element-iteration contract but isn't parsed for these types.
+        foreach (var (elementType, elementName) in _silentlySkipped)
+        {
+            model.Add(new XElement(ns + "Element",
+                new XAttribute("Type", elementType),
+                new XAttribute("Name", elementName)));
+        }
+
+        // Unknown-type elements: dispatcher fails to claim them in any
+        // phase → record on Skipped.
+        foreach (var (elementType, elementName) in _unknownElements)
+        {
+            model.Add(new XElement(ns + "Element",
+                new XAttribute("Type", elementType),
+                new XAttribute("Name", elementName)));
+        }
 
         var doc = new XDocument(new XElement(ns + "DataSchemaModel", model));
         var entry = archive.CreateEntry("model.xml");
@@ -400,6 +510,9 @@ public sealed partial class BacpacBuilder
                 return;
             case "datetime2":
                 EncodeDateTime2(stream, column.Nullable, args, value);
+                return;
+            case "time":
+                EncodeTime(stream, column.Nullable, args, value);
                 return;
             case "varchar" or "nvarchar" or "char" or "nchar" or "sysname" when !isMax:
                 Encode2BytePrefixedString(stream, value as string);
@@ -531,6 +644,56 @@ public sealed partial class BacpacBuilder
         {
             throw new NotSupportedException($"MakeHierarchyIdBytes doesn't yet support ordinal {ord} (>= 80).");
         }
+    }
+
+    /// <summary>
+    /// Builds Microsoft's geography full-shape wire form for a single-ring
+    /// polygon. The ring is given as <c>(latitude, longitude)</c> pairs and
+    /// must close (last point equals first); the loader's
+    /// <c>SpatialWkbDecoder</c> reads back <c>POLYGON ((long lat, …))</c>
+    /// WKT with axis order inverted vs storage. Use for exercising the
+    /// full-shape decoder path (numPoints/figures/shapes tables) that the
+    /// simple-point shortcut bypasses.
+    /// </summary>
+    public static byte[] MakeGeographyPolygon(int srid, params (double Latitude, double Longitude)[] ring)
+    {
+        ArgumentNullException.ThrowIfNull(ring);
+        return ring.Length < 4
+            ? throw new ArgumentException("Ring must have at least 4 points (3 distinct corners closed back to start).", nameof(ring))
+            : MakeSinglePolygonBytes(srid, ring);
+    }
+
+    private static byte[] MakeSinglePolygonBytes(int srid, (double Latitude, double Longitude)[] ring)
+    {
+        // 6-byte header + (4 + n*16) points + (4 + 1*5) figures + (4 + 1*9) shapes.
+        var size = 6 + 4 + (ring.Length * 16) + 4 + 5 + 4 + 9;
+        var buf = new byte[size];
+        var span = buf.AsSpan();
+        BinaryPrimitives.WriteInt32LittleEndian(span[..4], srid);
+        span[4] = 0x01; // version
+        span[5] = 0x00; // properties (no IsSinglePoint, no IsSingleLineString, no Z/M)
+        var pos = 6;
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(pos, 4), ring.Length);
+        pos += 4;
+        foreach (var (lat, lon) in ring)
+        {
+            BinaryPrimitives.WriteDoubleLittleEndian(span.Slice(pos, 8), lat);
+            BinaryPrimitives.WriteDoubleLittleEndian(span.Slice(pos + 8, 8), lon);
+            pos += 16;
+        }
+        // 1 figure: 1-byte attribute (decoder ignores) + 4-byte pointOffset = 0.
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(pos, 4), 1);
+        pos += 4;
+        span[pos] = 0x02; // attribute — ExteriorRing-equivalent; decoder ignores
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(pos + 1, 4), 0);
+        pos += 5;
+        // 1 shape: parent=-1, figureOffset=0, type=Polygon (0x03).
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(pos, 4), 1);
+        pos += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(pos, 4), -1);
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(pos + 4, 4), 0);
+        span[pos + 8] = 0x03;
+        return buf;
     }
 
     private static byte[] MakeSimplePointBytes(int srid, double first, double second)
@@ -764,6 +927,51 @@ public sealed partial class BacpacBuilder
         stream.Write(buf);
     }
 
+    /// <summary>
+    /// Encodes a <c>time(N)</c> value: precision-derived 3/4/5-byte LE
+    /// little-endian count of ticks-at-precision-unit. Matches the time-bytes
+    /// portion of datetime2 (no trailing day count).
+    /// </summary>
+    private static void EncodeTime(Stream stream, bool nullable, string args, object? value)
+    {
+        var precision = string.IsNullOrEmpty(args) ? 7 : int.Parse(args.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        var width = precision switch
+        {
+            <= 2 => 3,
+            <= 4 => 4,
+            _ => 5,
+        };
+        if (nullable)
+        {
+            if (value is null)
+            {
+                stream.WriteByte(0xFF);
+                return;
+            }
+            stream.WriteByte((byte)width);
+        }
+        var span = value is TimeOnly to ? to.ToTimeSpan() : (TimeSpan)value!;
+        var ticksPerUnit = precision switch
+        {
+            0 => TimeSpan.TicksPerSecond,
+            1 => TimeSpan.TicksPerSecond / 10,
+            2 => TimeSpan.TicksPerSecond / 100,
+            3 => TimeSpan.TicksPerMillisecond,
+            4 => TimeSpan.TicksPerMillisecond / 10,
+            5 => TimeSpan.TicksPerMillisecond / 100,
+            6 => 10L,
+            _ => 1L,
+        };
+        var unitTicks = span.Ticks / ticksPerUnit;
+        Span<byte> buf = stackalloc byte[width];
+        for (var i = 0; i < width; i++)
+        {
+            buf[i] = (byte)(unitTicks & 0xFF);
+            unitTicks >>= 8;
+        }
+        stream.Write(buf);
+    }
+
     private static void WriteDate(Span<byte> buf, DateOnly d)
     {
         // SQL Server date: 3-byte LE days since 0001-01-01.
@@ -777,9 +985,13 @@ public sealed partial class BacpacBuilder
 
     private static XElement BuildProgrammableObjectElement(XNamespace ns, ProgrammableObjectDef prog)
     {
-        var qualifiedName = prog.ParentTable is null
-            ? $"[{prog.SchemaName}].[{prog.ObjectName}]"
-            : $"[{prog.SchemaName}].[{prog.ParentTable}].[{prog.ObjectName}]";
+        // DDL triggers (database-scope) carry a 1-part bracketed name with
+        // no schema prefix; every other programmable object is schema-qualified.
+        var qualifiedName = string.IsNullOrEmpty(prog.SchemaName)
+            ? $"[{prog.ObjectName}]"
+            : prog.ParentTable is null
+                ? $"[{prog.SchemaName}].[{prog.ObjectName}]"
+                : $"[{prog.SchemaName}].[{prog.ParentTable}].[{prog.ObjectName}]";
 
         var element = new XElement(ns + "Element",
             new XAttribute("Type", prog.ElementType),
@@ -830,9 +1042,12 @@ internal sealed record ProgrammableObjectDef(
     bool FunctionBodyHost,
     string? ParentTable = null);
 
-internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint }
+internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint, Unknown }
 
-internal sealed record ExtendedPropertyDef(string? SchemaName, string? TableName, string? ColumnName, string PropertyName, string Value, ExtendedPropertyHost Host = ExtendedPropertyHost.AutoDetect);
+internal sealed record ExtendedPropertyDef(string? SchemaName, string? TableName, string? ColumnName, string PropertyName, string Value, ExtendedPropertyHost Host = ExtendedPropertyHost.AutoDetect)
+{
+    public string? UnknownHostKind { get; init; }
+}
 
 internal sealed record SequenceDef(string SchemaName, string SequenceName, string SqlType, long StartValue, long Increment);
 
@@ -925,10 +1140,21 @@ sealed partial class BacpacBuilder
         return element;
     }
 
-    private static XElement BuildRoleElement(XNamespace ns, string roleName) =>
-        new(ns + "Element",
+    private static XElement BuildRoleElement(XNamespace ns, string roleName, string? authorizer)
+    {
+        var element = new XElement(ns + "Element",
             new XAttribute("Type", "SqlRole"),
             new XAttribute("Name", $"[{roleName}]"));
+        if (!string.IsNullOrEmpty(authorizer))
+        {
+            element.Add(new XElement(ns + "Relationship",
+                new XAttribute("Name", "Authorizer"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", $"[{authorizer}]")))));
+        }
+        return element;
+    }
 
     private static XElement BuildTableTypeElement(XNamespace ns, TableTypeDef tt)
     {
@@ -1033,6 +1259,10 @@ sealed partial class BacpacBuilder
                 ("SqlConstraint",
                  $"[SqlConstraint].[{ep.SchemaName}].[{ep.TableName}].[{ep.PropertyName}]",
                  $"[{ep.SchemaName}].[{ep.TableName}]"),
+            ExtendedPropertyHost.Unknown =>
+                (ep.UnknownHostKind ?? "Unknown",
+                 $"[{ep.UnknownHostKind}].[{ep.SchemaName}].[{ep.PropertyName}]",
+                 $"[{ep.SchemaName}]"),
             _ => ep switch
             {
                 { ColumnName: not null, TableName: not null, SchemaName: not null } =>

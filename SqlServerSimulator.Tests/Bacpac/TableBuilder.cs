@@ -41,9 +41,9 @@ public sealed class TableBuilder
     /// IsNullable=True default, but for test setup NOT NULL is more
     /// useful so explicit assertions on NULL-handling become opt-in.
     /// </summary>
-    public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null)
+    public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null, bool rowGuidCol = false)
     {
-        _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation));
+        _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol));
         return this;
     }
 
@@ -449,6 +449,8 @@ public sealed class TableBuilder
             element.Add(PropertyElement(ns, "GeneratedAlwaysType", "2"));
         if (column.Collation is not null)
             element.Add(PropertyElement(ns, "Collation", column.Collation));
+        if (column.RowGuidCol)
+            element.Add(PropertyElement(ns, "IsRowGuidColumn", "True"));
 
         element.Add(new XElement(ns + "Relationship",
             new XAttribute("Name", "TypeSpecifier"),
@@ -538,7 +540,7 @@ public enum PeriodColumnKind
 }
 
 /// <summary>Column metadata captured by <see cref="TableBuilder.Column"/>.</summary>
-internal readonly record struct ColumnDef(string Name, string SqlType, bool Nullable, bool Identity = false, int IdentitySeed = 1, int IdentityIncrement = 1, PeriodColumnKind PeriodKind = PeriodColumnKind.None, string? Collation = null);
+internal readonly record struct ColumnDef(string Name, string SqlType, bool Nullable, bool Identity = false, int IdentitySeed = 1, int IdentityIncrement = 1, PeriodColumnKind PeriodKind = PeriodColumnKind.None, string? Collation = null, bool RowGuidCol = false);
 
 /// <summary>Base for constraint declarations accumulated on a table.</summary>
 internal abstract record ConstraintDef(string Name);
