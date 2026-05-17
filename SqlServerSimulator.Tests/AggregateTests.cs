@@ -411,4 +411,26 @@ public sealed class AggregateTests
             "create table t (b bit not null); insert t values (1), (0); select max(b) from t",
             8117,
             "Operand data type bit is invalid for max operator.");
+
+    /// <summary>
+    /// Real SQL Server's Windows-100 CI_AS treats apostrophe as primary-
+    /// weight zero; "'Aiea" sorts among "A…" entries, so MIN of
+    /// ('Aaronsburg', "'Aiea") is "Aaronsburg" — apostrophe is ignored
+    /// for ordering. Probe-confirmed against WideWorldImporters'
+    /// Application.Cities table (collation Latin1_General_100_CI_AS).
+    /// </summary>
+    [TestMethod]
+    public void Min_String_IgnoresLeadingApostrophe_InSortOrder()
+        => AreEqual("Aaronsburg", new Simulation().ExecuteScalar(
+            "create table t (s nvarchar(40) not null); insert t values (N'Aaronsburg'), (N'''Aiea'); select min(s) from t"));
+
+    /// <summary>
+    /// Equality (=) IS strict about apostrophe even in Windows-100 CI_AS
+    /// — the primary-weight-zero treatment only applies to sort/MIN/MAX.
+    /// 'OBrien' = 'O''Brien' returns 0.
+    /// </summary>
+    [TestMethod]
+    public void Equality_String_DistinguishesApostrophe()
+        => AreEqual(0, new Simulation().ExecuteScalar(
+            "select case when N'OBrien' = N'O''Brien' then 1 else 0 end"));
 }

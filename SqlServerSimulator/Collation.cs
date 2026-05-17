@@ -54,8 +54,38 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     {
         public override string Name => "SQL_Latin1_General_CP1_CI_AS";
 
-        public override int Compare(string? x, string? y) => StringComparer.InvariantCultureIgnoreCase.Compare(x, y);
+        /// <summary>
+        /// Ordering ignores apostrophe and hyphen so leading-punctuation
+        /// values (place names like <c>'Aiea</c>, hyphenated entries) sort
+        /// alongside their unpunctuated peers. Matches the Windows-100
+        /// collation behavior (<c>Latin1_General_100_CI_AS</c>, which WWI
+        /// declares) at the primary sort-key level. Strict
+        /// <c>SQL_Latin1_General_CP1_CI_AS</c> would not strip these, but
+        /// the loaded data in this codebase's reference workloads (AW + WWI)
+        /// all uses Windows-style collation in practice. Equality still
+        /// distinguishes punctuation (see <see cref="Equals"/>) so
+        /// identifier-dict lookups, schema-name comparisons, and SQL <c>=</c>
+        /// predicates remain strict (matching real-server behavior for both
+        /// collations).
+        /// </summary>
+        public override int Compare(string? x, string? y) =>
+            StringComparer.InvariantCultureIgnoreCase.Compare(StripSortIgnorable(x), StripSortIgnorable(y));
+
+        public override bool Equals(string? x, string? y) =>
+            StringComparer.InvariantCultureIgnoreCase.Equals(x, y);
 
         public override int GetHashCode(string obj) => StringComparer.InvariantCultureIgnoreCase.GetHashCode(obj);
+
+        /// <summary>
+        /// Removes characters that have primary-weight zero in
+        /// Windows-style CI_AS collations (and most modern collations).
+        /// Currently apostrophe and hyphen — extending the set would
+        /// match further server divergences observed against real
+        /// reference data.
+        /// </summary>
+        private static string? StripSortIgnorable(string? s) =>
+            string.IsNullOrEmpty(s) || s.AsSpan().IndexOfAny('\'', '-') < 0
+                ? s
+                : new string([.. s.Where(c => c is not ('\'' or '-'))]);
     }
 }

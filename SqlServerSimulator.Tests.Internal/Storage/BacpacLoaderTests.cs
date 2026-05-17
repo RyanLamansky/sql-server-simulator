@@ -850,6 +850,38 @@ public sealed class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void Load_WWI_Countries_Border_Polygons_Decode_To_NonNull()
+    {
+        // Regression pin for the SpatialWkbDecoder polygon / MultiPolygon
+        // support (2026-05-17). Before this bundle the decoder only handled
+        // simple-point shapes, so Application.Countries.Border read as NULL
+        // for all 190 rows (every value is a Polygon or MultiPolygon).
+        // Live server reports 190 non-null Border values.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(Border) FROM Application.Countries;";
+        AreEqual(190, command.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Load_WWI_Cities_Min_CityName_Matches_Windows100_Sort()
+    {
+        // Regression pin for the Collation.Default apostrophe-stripping
+        // tweak. WWI uses Latin1_General_100_CI_AS which treats apostrophe
+        // as primary-weight zero, so MIN(CityName) = "Aaronsburg" (not
+        // "'Aiea"). Pre-fix the simulator's byte-ordinal comparison
+        // returned "'Aiea". Live-server-confirmed against the WWI sample.
+        var simulation = LoadWideWorldImporters(out _);
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MIN(CityName) FROM Application.Cities;";
+        AreEqual("Aaronsburg", command.ExecuteScalar());
+    }
+
+    [TestMethod]
     public void Load_WWI_Sysname_Procs_Land_In_sys_procedures()
     {
         // The three WWI procs taking sysname parameters
