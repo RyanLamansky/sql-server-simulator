@@ -225,4 +225,43 @@ public class RowRoundTripTests
         AreEqual(12, BitConverter.ToUInt16(bytes, 2));                  // fixed-length end offset (4 + 8)
         AreEqual(-420, BitConverter.ToInt16(bytes, 10));                // -07:00 in minutes
     }
+
+    [TestMethod]
+    public void WideVarOffsets_RoundTrip_TwoLargeVarbinaryValues()
+    {
+        // Two ~40 KB varbinary blobs in a single projection-style row push
+        // the var section past the 16-bit dataPos cap. The encoder switches
+        // to the 4-byte offset format (TagA bit 0x40); the decoder reads
+        // the flag and uses 4-byte offsets. Without the wide-offset path
+        // the encoder would have thrown OverflowException at the second
+        // offset write — see Production.Document MIN/MAX in AW2025.
+        var blobA = new byte[40_000];
+        var blobB = new byte[40_000];
+        for (var i = 0; i < blobA.Length; i++) blobA[i] = (byte)(i & 0xFF);
+        for (var i = 0; i < blobB.Length; i++) blobB[i] = (byte)(0xFF - (i & 0xFF));
+
+        SqlType[] schema = [VarbinarySqlType.MaxForm, VarbinarySqlType.MaxForm];
+        SqlValue[] values = [SqlValue.FromVarbinary(blobA), SqlValue.FromVarbinary(blobB)];
+        var bytes = RowEncoder.EncodeRow(schema, values);
+
+        AreEqual(0x10 | 0x20 | 0x40, bytes[0] & 0xF0);                   // wide-offset flag set
+        IsGreaterThan(65_535, bytes.Length);
+
+        var decoded = RowDecoder.DecodeRow(schema, bytes);
+        HasCount(2, decoded);
+        CollectionAssert.AreEqual(blobA, decoded[0].AsBytes);
+        CollectionAssert.AreEqual(blobB, decoded[1].AsBytes);
+    }
+
+    [TestMethod]
+    public void WideVarOffsets_NotUsed_WhenRowFitsIn16Bit()
+    {
+        // The wide-offset path is gated on totalLength > 65535 — a row
+        // that fits comfortably stays on the legacy 2-byte format so
+        // existing-storage rows continue to decode unchanged.
+        SqlType[] schema = [SqlType.NVarchar];
+        SqlValue[] values = [SqlValue.FromNVarchar(new string('x', 100))];
+        var bytes = RowEncoder.EncodeRow(schema, values);
+        AreEqual(0x10 | 0x20, bytes[0] & 0xF0);                          // wide-offset flag clear
+    }
 }

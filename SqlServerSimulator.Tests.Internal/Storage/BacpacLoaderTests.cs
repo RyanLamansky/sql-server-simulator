@@ -28,33 +28,76 @@ public sealed class BacpacLoaderTests
         return string.Empty;
     }
 
-    private static Simulation LoadAdventureWorks(out BacpacLoadResult diagnostics)
+    /// <summary>
+    /// Process-shared, lazy-initialized bacpac loads. Each reference workload
+    /// loads once per test-host process even when MSTest runs tests in
+    /// parallel — without this, every test instantiates its own ~1.5 GB
+    /// Simulation and the parallel-worker fleet collectively peaks well past
+    /// available RAM. Sharing is safe because every test in this class
+    /// validates loaded state (sys.* reads, single-row content checks, etc.)
+    /// without mutating it. The one parallelism-determinism test that
+    /// genuinely needs two fresh loads calls <see cref="Simulation.FromBacpac(string, out BacpacLoadResult)"/>
+    /// directly.
+    /// </summary>
+    private static readonly Lazy<(Simulation Sim, BacpacLoadResult Diag)> CachedAw = new(() =>
     {
         var path = ResolveBacpacPath("AdventureWorks2025.bacpac");
-        if (string.IsNullOrEmpty(path))
-        {
+        return string.IsNullOrEmpty(path)
+            ? default
+            : (Simulation.FromBacpac(path, out var d), d);
+    }, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static readonly Lazy<(Simulation Sim, BacpacLoadResult Diag)> CachedWwi = new(() =>
+    {
+        var path = ResolveBacpacPath("WideWorldImporters-Standard.bacpac");
+        return string.IsNullOrEmpty(path)
+            ? default
+            : (Simulation.FromBacpac(path, out var d), d);
+    }, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static readonly Lazy<(Simulation Sim, BacpacLoadResult Diag)> CachedWwiFull = new(() =>
+    {
+        var path = ResolveBacpacPath("WideWorldImporters-Full.bacpac");
+        return string.IsNullOrEmpty(path)
+            ? default
+            : (Simulation.FromBacpac(path, out var d), d);
+    }, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static Simulation LoadAdventureWorks(out BacpacLoadResult diagnostics)
+    {
+        if (CachedAw.Value.Sim is null)
             Inconclusive(".vs/AdventureWorks2025.bacpac not present in this workspace; skipping AW smoke test.");
-        }
-        return Simulation.FromBacpac(path, out diagnostics);
+        diagnostics = CachedAw.Value.Diag;
+        return CachedAw.Value.Sim;
     }
 
     private static Simulation LoadWideWorldImporters(out BacpacLoadResult diagnostics)
     {
-        var path = ResolveBacpacPath("WideWorldImporters-Standard.bacpac");
-        if (string.IsNullOrEmpty(path))
-        {
+        if (CachedWwi.Value.Sim is null)
             Inconclusive(".vs/WideWorldImporters-Standard.bacpac not present in this workspace; skipping WWI smoke test.");
-        }
-        return Simulation.FromBacpac(path, out diagnostics);
+        diagnostics = CachedWwi.Value.Diag;
+        return CachedWwi.Value.Sim;
     }
 
     private static Simulation LoadWideWorldImportersFull(out BacpacLoadResult diagnostics)
     {
+        if (CachedWwiFull.Value.Sim is null)
+            Inconclusive(".vs/WideWorldImporters-Full.bacpac not present in this workspace; skipping WWI-Full smoke test.");
+        diagnostics = CachedWwiFull.Value.Diag;
+        return CachedWwiFull.Value.Sim;
+    }
+
+    /// <summary>
+    /// Fresh-load escape hatch for the one test that genuinely needs two
+    /// separate Simulations side by side — every other test in this class
+    /// goes through the cached <see cref="LoadWideWorldImportersFull(out BacpacLoadResult)"/>
+    /// path so the heavy load runs once per process.
+    /// </summary>
+    private static Simulation LoadWideWorldImportersFullFresh(out BacpacLoadResult diagnostics)
+    {
         var path = ResolveBacpacPath("WideWorldImporters-Full.bacpac");
         if (string.IsNullOrEmpty(path))
-        {
             Inconclusive(".vs/WideWorldImporters-Full.bacpac not present in this workspace; skipping WWI-Full smoke test.");
-        }
         return Simulation.FromBacpac(path, out diagnostics);
     }
 
@@ -238,10 +281,10 @@ public sealed class BacpacLoaderTests
         var triggers = QueryCount(connection, "SELECT COUNT(*) FROM sys.triggers WHERE parent_class = 1;");
 
         // Current landing rates against AW (probed 2026-05-17). Gaps:
-        //   views: 11/20 — 3 vJobCandidate-family views + 3 other views use
-        //     CROSS APPLY / OPENXML / other shapes the view-body parser
-        //     rejects; the rest reference computed columns or syntax not
-        //     yet modeled.
+        //   views: 13/20 — 6 vJobCandidate-family + vAdditionalContactInfo +
+        //     vProductModelInstructions + vPersonDemographics views use XML
+        //     `.nodes()` in CROSS APPLY which the FROM-source parser
+        //     rejects; 1 view (vSalesPersonSalesByFiscalYears) uses PIVOT.
         //   procs: 10/10 — all procs load after dbo.Flag UDDT resolution
         //     fell through correctly in the procedure-parameter parser.
         //   funcs: 11/11 — all funcs load after the CASE/END body-span
@@ -249,7 +292,7 @@ public sealed class BacpacLoaderTests
         //     CASE inside their BEGIN/END body).
         //   triggers: 10/10 — all DML triggers load. (1 DDL trigger lands
         //     separately via SqlDatabaseDdlTrigger.)
-        AreEqual(11, views);
+        AreEqual(13, views);
         AreEqual(10, procs);
         AreEqual(11, funcs);
         AreEqual(10, triggers);
@@ -1092,8 +1135,8 @@ public sealed class BacpacLoaderTests
         // surface as silently dropped rows. Loading WWI-Full twice and
         // comparing aggregate counts catches that without pinning to a
         // hard-coded published row total.
-        _ = LoadWideWorldImportersFull(out var first);
-        _ = LoadWideWorldImportersFull(out var second);
+        _ = LoadWideWorldImportersFullFresh(out var first);
+        _ = LoadWideWorldImportersFullFresh(out var second);
 
         AreEqual(first.ElementCounts["_DataRows"], second.ElementCounts["_DataRows"],
             "Aggregate row count must be identical across parallel loads.");

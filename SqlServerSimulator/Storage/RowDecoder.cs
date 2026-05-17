@@ -15,6 +15,20 @@ internal static class RowDecoder
 {
     private const byte TagA_NullBitmap = 0x10;
     private const byte TagA_VarSection = 0x20;
+    private const byte TagA_WideVarOffsets = 0x40;
+
+    /// <summary>
+    /// Reads the var-section offset entry at the supplied index, honoring
+    /// the row header's 2-byte vs 4-byte offset width. Wide offsets show
+    /// up only on rows the encoder produced when the inline var section
+    /// would overflow the legacy 16-bit cap — projection result rows that
+    /// hold MAX-form varbinary / varchar / nvarchar values are the only
+    /// path that triggers this in practice.
+    /// </summary>
+    private static int ReadVarOffset(in RowHeader header, ReadOnlySpan<byte> bytes, int varIndex) =>
+        header.VarOffsetEntrySize == 2
+            ? BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(header.VarOffsetArrayStart + (2 * varIndex), 2))
+            : (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(header.VarOffsetArrayStart + (4 * varIndex), 4));
 
     /// <summary>
     /// <see cref="SqlType"/>-only entry point. LOB-eligibility is determined
@@ -73,7 +87,7 @@ internal static class RowDecoder
             }
             else
             {
-                var end = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(header.VarOffsetArrayStart + (2 * varIndex), 2));
+                var end = ReadVarOffset(header, bytes, varIndex);
                 if (end < prevVarEnd)
                     throw new InvalidDataException($"Var offset {end} at index {varIndex} regresses past previous {prevVarEnd}.");
 
@@ -146,7 +160,7 @@ internal static class RowDecoder
             }
             else
             {
-                var end = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(header.VarOffsetArrayStart + (2 * varIndex), 2));
+                var end = ReadVarOffset(header, bytes, varIndex);
                 if (end < prevVarEnd)
                     throw new InvalidDataException($"Var offset {end} at index {varIndex} regresses past previous {prevVarEnd}.");
 
@@ -188,7 +202,7 @@ internal static class RowDecoder
     private static bool IsNullColumn(ReadOnlySpan<byte> bytes, int bitmapStart, int ordinal) =>
         (bytes[bitmapStart + (ordinal / 8)] & (1 << (ordinal % 8))) != 0;
 
-    private readonly record struct RowHeader(int BitmapStart, int VarOffsetArrayStart, int VarDataStart);
+    private readonly record struct RowHeader(int BitmapStart, int VarOffsetArrayStart, int VarDataStart, int VarOffsetEntrySize);
 
     private static RowHeader ValidateHeader(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes)
     {
@@ -223,14 +237,20 @@ internal static class RowDecoder
         var bitmapStart = expectedFixedEnd + 2;
         var bitmapEnd = bitmapStart + nullBitmapLength;
         var hasVar = varColumnCount > 0;
-        var minLength = bitmapEnd + (hasVar ? 2 + (2 * varColumnCount) : 0);
 
+        if (bytes.Length < 1)
+            throw new InvalidDataException($"Row is too short: {bytes.Length} bytes (need at least 1 for the tag byte).");
+
+        var tagA = bytes[0];
+        var wideVarOffsets = (tagA & TagA_WideVarOffsets) != 0;
+        var varOffsetEntrySize = wideVarOffsets ? 4 : 2;
+        var expectedTagA = hasVar ? (byte)(TagA_NullBitmap | TagA_VarSection | (wideVarOffsets ? TagA_WideVarOffsets : 0)) : TagA_NullBitmap;
+        if (tagA != expectedTagA)
+            throw new InvalidDataException($"Unexpected TagA: 0x{tagA:X2} (expected 0x{expectedTagA:X2}).");
+
+        var minLength = bitmapEnd + (hasVar ? 2 + (varOffsetEntrySize * varColumnCount) : 0);
         if (bytes.Length < minLength)
             throw new InvalidDataException($"Row is too short: {bytes.Length} bytes (need at least {minLength} for this schema).");
-
-        var expectedTagA = hasVar ? (byte)(TagA_NullBitmap | TagA_VarSection) : TagA_NullBitmap;
-        if (bytes[0] != expectedTagA)
-            throw new InvalidDataException($"Unexpected TagA: 0x{bytes[0]:X2} (expected 0x{expectedTagA:X2}).");
 
         var fixedEnd = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(2, 2));
         if (fixedEnd != expectedFixedEnd)
@@ -249,15 +269,17 @@ internal static class RowDecoder
                 throw new InvalidDataException($"Var column count mismatch: schema has {varColumnCount} var columns, header declares {declaredVarCount}.");
 
             offsetArrayStart = bitmapEnd + 2;
-            varDataStart = offsetArrayStart + (2 * varColumnCount);
+            varDataStart = offsetArrayStart + (varOffsetEntrySize * varColumnCount);
 
-            var lastEnd = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offsetArrayStart + (2 * (varColumnCount - 1)), 2));
+            var lastEnd = wideVarOffsets
+                ? (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(offsetArrayStart + (4 * (varColumnCount - 1)), 4))
+                : BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offsetArrayStart + (2 * (varColumnCount - 1)), 2));
             if (lastEnd > bytes.Length)
                 throw new InvalidDataException($"Var offset array references byte {lastEnd}, beyond row length {bytes.Length}.");
             if (lastEnd < varDataStart)
                 throw new InvalidDataException($"Var offset array's last entry {lastEnd} precedes var data start {varDataStart}.");
         }
 
-        return new RowHeader(bitmapStart, offsetArrayStart, varDataStart);
+        return new RowHeader(bitmapStart, offsetArrayStart, varDataStart, varOffsetEntrySize);
     }
 }

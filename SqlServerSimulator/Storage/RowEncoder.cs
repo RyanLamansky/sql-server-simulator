@@ -25,6 +25,7 @@ internal static class RowEncoder
 {
     private const byte TagA_NullBitmap = 0x10;
     private const byte TagA_VarSection = 0x20;
+    private const byte TagA_WideVarOffsets = 0x40;
 
     /// <summary>
     /// First byte of every non-NULL variable-length column's payload.
@@ -153,7 +154,8 @@ internal static class RowEncoder
         var bitmapStart = fixedEnd + 2;
         var bitmapEnd = bitmapStart + nullBitmapLength;
         var hasVar = varColumnCount > 0;
-        var headerOverhead = bitmapEnd + (hasVar ? 2 + (2 * varColumnCount) : 0);
+        var varOffsetEntrySize = 2;
+        var headerOverhead = bitmapEnd + (hasVar ? 2 + (varOffsetEntrySize * varColumnCount) : 0);
         var totalLength = headerOverhead + varDataLength;
 
         // Greedy row-overflow push: when the encoded row would exceed
@@ -195,9 +197,23 @@ internal static class RowEncoder
                 throw SimulatedSqlException.RowSizeExceedsAllowableMaximum(totalLength, Heap.MaxRowSize);
         }
 
+        // When no lobStore is provided (projection result rows are the main
+        // path here — they have no associated heap) and the var section
+        // would push the offset entries past the 16-bit cap, widen the
+        // offset entries to 4 bytes. Heap-stored rows always stay under
+        // the 8060-byte MaxRowSize so they keep the legacy 2-byte width.
+        if (hasVar && totalLength > 65535)
+        {
+            varOffsetEntrySize = 4;
+            headerOverhead = bitmapEnd + 2 + (varOffsetEntrySize * varColumnCount);
+            totalLength = headerOverhead + varDataLength;
+        }
+
         var bytes = new byte[totalLength];
 
-        bytes[0] = hasVar ? (byte)(TagA_NullBitmap | TagA_VarSection) : TagA_NullBitmap;
+        bytes[0] = hasVar
+            ? (byte)(TagA_NullBitmap | TagA_VarSection | (varOffsetEntrySize == 4 ? TagA_WideVarOffsets : 0))
+            : TagA_NullBitmap;
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(2, 2), checked((ushort)fixedEnd));
 
         var fixedOffset = 4;
@@ -237,7 +253,7 @@ internal static class RowEncoder
             BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(bitmapEnd, 2), checked((ushort)varColumnCount));
 
             var offsetArrayStart = bitmapEnd + 2;
-            var dataPos = offsetArrayStart + (2 * varColumnCount);
+            var dataPos = offsetArrayStart + (varOffsetEntrySize * varColumnCount);
             var varIndex = 0;
             for (var i = 0; i < n; i++)
             {
@@ -251,7 +267,10 @@ internal static class RowEncoder
                     dataPos += width;
                 }
 
-                BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offsetArrayStart + (2 * varIndex), 2), checked((ushort)dataPos));
+                if (varOffsetEntrySize == 4)
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offsetArrayStart + (4 * varIndex), 4), checked((uint)dataPos));
+                else
+                    BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offsetArrayStart + (2 * varIndex), 2), checked((ushort)dataPos));
                 varIndex++;
             }
         }

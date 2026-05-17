@@ -172,7 +172,7 @@ partial class Simulation
         // Try table-valued-parameter binding first. A multi-part name (e.g.
         // `dbo.MyType`) unambiguously means user-defined type; a 1-part name
         // checks TableTypes first with fallback to the scalar parser.
-        var tableType = TryResolveProcedureTableTypeParameter(context, name);
+        var tableType = TryResolveProcedureTableTypeParameter(context);
         if (tableType is not null)
         {
             // READONLY is mandatory after a TVP parameter (probe-confirmed:
@@ -221,7 +221,7 @@ partial class Simulation
     /// type name; returns null (cursor unchanged) for any other shape so the
     /// caller falls through to the scalar parameter-type parser.
     /// </summary>
-    private static TableType? TryResolveProcedureTableTypeParameter(ParserContext context, string parameterName)
+    private static TableType? TryResolveProcedureTableTypeParameter(ParserContext context)
     {
         if (context.Token is not Name firstName)
             return null;
