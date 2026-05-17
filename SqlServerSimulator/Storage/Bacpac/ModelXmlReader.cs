@@ -51,8 +51,7 @@ internal static class ModelXmlReader
         {
             var type = element.Attribute("Type")?.Value
                 ?? throw new InvalidDataException("bacpac: <Element> missing Type attribute.");
-            _ = result.ElementCounts.TryGetValue(type, out var current);
-            result.ElementCounts[type] = current + 1;
+            result.IncrementElementCount(type);
         }
 
         using var connection = simulation.CreateDbConnection();
@@ -170,11 +169,11 @@ internal static class ModelXmlReader
                 // translated, and continue with the rest of the model. Cascade
                 // failures (a later element depending on the failed one) land
                 // on Skipped with their own messages.
-                result.Skipped.Add(new BacpacSkipped(type, name, $"Load failed: {ex.GetType().Name}: {ex.Message}"));
+                result.AddSkipped(new BacpacSkipped(type, name, $"Load failed: {ex.GetType().Name}: {ex.Message}"));
                 continue;
             }
             if (!handled && isLastPhase)
-                result.Skipped.Add(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
+                result.AddSkipped(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
         }
     }
 
@@ -254,7 +253,7 @@ internal static class ModelXmlReader
             }
             else
             {
-                result.Warnings.Add($"Database declares Collation '{collation}' which isn't on the simulator's recognized list — stored as metadata, but comparison semantics fall back to the default. Add it to Collation.Recognized to surface in catalog views.");
+                result.AddWarning($"Database declares Collation '{collation}' which isn't on the simulator's recognized list — stored as metadata, but comparison semantics fall back to the default. Add it to Collation.Recognized to surface in catalog views.");
             }
         }
 
@@ -434,7 +433,7 @@ internal static class ModelXmlReader
             }
             else
             {
-                result.Skipped.Add(new BacpacSkipped(colType ?? "<unknown>", colName, $"Table-type column kind not handled inside '{qualifiedName}'."));
+                result.AddSkipped(new BacpacSkipped(colType ?? "<unknown>", colName, $"Table-type column kind not handled inside '{qualifiedName}'."));
             }
         }
 
@@ -621,7 +620,7 @@ internal static class ModelXmlReader
                     // time and emits ALTER TABLE … ADD col AS (expr).
                     break;
                 default:
-                    result.Skipped.Add(new BacpacSkipped(
+                    result.AddSkipped(new BacpacSkipped(
                         columnType ?? "<unknown>",
                         columnName,
                         $"Unrecognized column element on '{qualifiedName}'."));
@@ -751,7 +750,7 @@ internal static class ModelXmlReader
             // are unaffected by its absence (DEFAULT NEWID() arrives as a
             // separate SqlDefaultConstraint element). Record a Warning once
             // so the diagnostics report names the deferred surface.
-            result.Warnings.Add($"ROWGUIDCOL clause on column '{qualifiedColumnName}' dropped — the simulator doesn't model this metadata annotation; storage behavior is unaffected.");
+            result.AddWarning($"ROWGUIDCOL clause on column '{qualifiedColumnName}' dropped — the simulator doesn't model this metadata annotation; storage behavior is unaffected.");
         }
         // Per-column COLLATE override — emitted only when on the whitelist.
         // An unrecognized name lands on Warnings; the simulator's parser
@@ -764,7 +763,7 @@ internal static class ModelXmlReader
             if (Collation.IsRecognized(columnCollation))
                 collateClause = $" COLLATE {columnCollation}";
             else
-                result.Warnings.Add($"Column '{qualifiedColumnName}' declares COLLATE '{columnCollation}' which isn't recognized — clause dropped, column inherits the database default.");
+                result.AddWarning($"Column '{qualifiedColumnName}' declares COLLATE '{columnCollation}' which isn't recognized — clause dropped, column inherits the database default.");
         }
         var nullability = isNullableExplicit ? (isNullable ? " NULL" : " NOT NULL") : "";
         return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{generatedClause}{nullability}";
@@ -1054,7 +1053,7 @@ internal static class ModelXmlReader
             var expression = ReadScriptProperty(col, "ExpressionScript");
             if (string.IsNullOrEmpty(expression))
             {
-                result.Skipped.Add(new BacpacSkipped("SqlComputedColumn", columnName, "Missing ExpressionScript property."));
+                result.AddSkipped(new BacpacSkipped("SqlComputedColumn", columnName, "Missing ExpressionScript property."));
                 continue;
             }
             // PERSISTED dropped intentionally: the simulator's read path for
@@ -1082,7 +1081,7 @@ internal static class ModelXmlReader
                 // are expected (UDF resolution at ALTER TABLE ADD AS, the
                 // unmodeled built-ins JSON_QUERY / DECOMPRESS / etc.), not
                 // regressions.
-                result.Skipped.Add(new BacpacSkipped("SqlComputedColumn", columnName, $"Deferred: {ex.GetType().Name}: {ex.Message}"));
+                result.AddSkipped(new BacpacSkipped("SqlComputedColumn", columnName, $"Deferred: {ex.GetType().Name}: {ex.Message}"));
             }
         }
     }
@@ -1107,7 +1106,7 @@ internal static class ModelXmlReader
         var segments = SplitBracketedSegments(elementName);
         if (segments.Count < 2)
         {
-            result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, "Couldn't split Name into host-kind + property-name segments."));
+            result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, "Couldn't split Name into host-kind + property-name segments."));
             return;
         }
         var hostKind = segments[0];
@@ -1116,7 +1115,7 @@ internal static class ModelXmlReader
         var value = ReadScriptProperty(element, "Value");
         if (value is null)
         {
-            result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, "Missing Value property."));
+            result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, "Missing Value property."));
             return;
         }
 
@@ -1134,7 +1133,7 @@ internal static class ModelXmlReader
             case "SqlSchema":
                 if (hostRef is null)
                 {
-                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, "SqlSchema host missing reference."));
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, "SqlSchema host missing reference."));
                     return;
                 }
                 l0type = "SCHEMA";
@@ -1143,7 +1142,7 @@ internal static class ModelXmlReader
             case "SqlTableBase":
                 if (hostRef is null || !TrySplit2Part(hostRef, out var tabSchema, out var tabName))
                 {
-                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlTableBase host '{hostRef}' isn't 2-part qualified."));
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlTableBase host '{hostRef}' isn't 2-part qualified."));
                     return;
                 }
                 l0type = "SCHEMA";
@@ -1154,7 +1153,7 @@ internal static class ModelXmlReader
             case "SqlColumn":
                 if (hostRef is null || !TrySplit3Part(hostRef, out var colSchema, out var colTable, out var colName))
                 {
-                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlColumn host '{hostRef}' isn't 3-part qualified."));
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlColumn host '{hostRef}' isn't 3-part qualified."));
                     return;
                 }
                 l0type = "SCHEMA";
@@ -1169,7 +1168,7 @@ internal static class ModelXmlReader
                 // INDEX level: @level0=SCHEMA, @level1=TABLE|VIEW, @level2=INDEX.
                 if (hostRef is null || !TrySplit3Part(hostRef, out var ixSchema, out var ixTable, out var ixName))
                 {
-                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlIndexBase host '{hostRef}' isn't 3-part qualified."));
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlIndexBase host '{hostRef}' isn't 3-part qualified."));
                     return;
                 }
                 l0type = "SCHEMA";
@@ -1187,13 +1186,13 @@ internal static class ModelXmlReader
                 // schema in real SQL Server, so one row at most matches.
                 if (hostRef is null || !TrySplit2Part(hostRef, out var ckSchema, out var ckConstraintName))
                 {
-                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlConstraint host '{hostRef}' isn't 2-part qualified."));
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlConstraint host '{hostRef}' isn't 2-part qualified."));
                     return;
                 }
                 var parentTable = LookupConstraintParentTable(connection, ckSchema, ckConstraintName);
                 if (parentTable is null)
                 {
-                    result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlConstraint '{hostRef}' has no resolvable parent table."));
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"SqlConstraint '{hostRef}' has no resolvable parent table."));
                     return;
                 }
                 l0type = "SCHEMA";
@@ -1206,7 +1205,7 @@ internal static class ModelXmlReader
             case "SqlDatabaseDdlTrigger":
             case "SqlFilegroup":
             default:
-                result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName, $"Host kind '{hostKind}' not modeled for sp_addextendedproperty."));
+                result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"Host kind '{hostKind}' not modeled for sp_addextendedproperty."));
                 return;
         }
 
@@ -1243,7 +1242,7 @@ internal static class ModelXmlReader
         }
         catch (SimulatedSqlException ex)
         {
-            result.Skipped.Add(new BacpacSkipped("SqlExtendedProperty", elementName,
+            result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName,
                 $"sp_addextendedproperty failed: {ex.Message}"));
         }
     }
@@ -1357,7 +1356,7 @@ internal static class ModelXmlReader
 
         if (string.IsNullOrEmpty(headerContents) || string.IsNullOrEmpty(body))
         {
-            result.Skipped.Add(new BacpacSkipped(objectType, name,
+            result.AddSkipped(new BacpacSkipped(objectType, name,
                 $"Missing HeaderContents or {bodyPropertyName} — can't reconstruct CREATE statement."));
             return;
         }
@@ -1372,12 +1371,12 @@ internal static class ModelXmlReader
         }
         catch (SimulatedSqlException ex)
         {
-            result.Skipped.Add(new BacpacSkipped(objectType, name,
+            result.AddSkipped(new BacpacSkipped(objectType, name,
                 $"CREATE {objectType} failed: {ex.Message}"));
         }
         catch (NotSupportedException ex)
         {
-            result.Skipped.Add(new BacpacSkipped(objectType, name,
+            result.AddSkipped(new BacpacSkipped(objectType, name,
                 $"CREATE {objectType} hit unsupported feature: {ex.Message}"));
         }
     }
@@ -1400,7 +1399,7 @@ internal static class ModelXmlReader
             ?? throw new InvalidDataException($"bacpac: SqlIndex '{indexName}' missing IndexedObject.");
         if (viewNames.Contains(indexedObject))
         {
-            result.Skipped.Add(new BacpacSkipped(
+            result.AddSkipped(new BacpacSkipped(
                 "SqlIndex",
                 indexName,
                 $"Index on view '{indexedObject}' deferred — indexed views need view support + SCHEMABINDING machinery the simulator doesn't model."));
@@ -1441,7 +1440,7 @@ internal static class ModelXmlReader
             // failure lands on Skipped with the simulator's diagnostic so the
             // caller has a precise inventory of what didn't make it; future
             // phase work shrinks this set.
-            result.Skipped.Add(new BacpacSkipped("SqlIndex", indexName,
+            result.AddSkipped(new BacpacSkipped("SqlIndex", indexName,
                 $"CREATE INDEX on '{indexedObject}' failed: {ex.Message}"));
         }
     }

@@ -140,14 +140,13 @@ internal static class BacpacReader
                 continue;
             }
 
-            _ = result.ElementCounts.TryGetValue("_DataFile", out var current);
-            result.ElementCounts["_DataFile"] = current + 1;
+            result.IncrementElementCount("_DataFile");
 
             var (schemaName, tableName) = ParseDataFolderName(entry.FullName);
             if (!database.Schemas.TryGetValue(schemaName, out var schema)
                 || !schema.HeapTables.TryGetValue(tableName, out var table))
             {
-                result.Skipped.Add(new BacpacSkipped("_DataFile", entry.FullName,
+                result.AddSkipped(new BacpacSkipped("_DataFile", entry.FullName,
                     $"Destination table {schemaName}.{tableName} not found — likely failed to load during DDL phase."));
                 continue;
             }
@@ -199,7 +198,7 @@ internal static class BacpacReader
             {
                 lock (resultLock)
                 {
-                    result.Skipped.Add(new BacpacSkipped("_DataFile", entryName,
+                    result.AddSkipped(new BacpacSkipped("_DataFile", entryName,
                         $"BCP decode failed ({ex.GetType().Name}): {ex.Message}"));
                 }
             }
@@ -209,8 +208,7 @@ internal static class BacpacReader
         {
             lock (resultLock)
             {
-                _ = result.ElementCounts.TryGetValue("_DataRows", out var rowsSoFar);
-                result.ElementCounts["_DataRows"] = rowsSoFar + tableRowCount;
+                result.AddToElementCount("_DataRows", tableRowCount);
             }
         }
     }

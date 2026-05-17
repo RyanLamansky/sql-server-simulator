@@ -1,4 +1,6 @@
-﻿namespace SqlServerSimulator;
+﻿using SqlServerSimulator.Storage.Bacpac;
+
+namespace SqlServerSimulator;
 
 [TestClass]
 public class QualityTests
@@ -15,24 +17,31 @@ public class QualityTests
             .Where(type => type.IsPublic)
             .ToArray();
 
-        HashSet<Type> allowedTypes = [simulation, typeof(TableValuedParameterExtensions)];
+        HashSet<Type> allowedTypes = [
+            simulation,
+            typeof(TableValuedParameterExtensions),
+            typeof(BacpacLoadResult),
+            typeof(BacpacSkipped),
+        ];
         Assert.HasCount(allowedTypes.Count, types);
         foreach (var type in types)
             Assert.Contains(type, allowedTypes);
 
-        var members = simulation
+        var memberNames = simulation
             .GetMembers()
             .Where(member => member.DeclaringType == simulation)
-            .ToArray();
+            .Select(member => member.Name)
+            .ToHashSet();
 
         HashSet<string> allowedMemberNames = [
             ".ctor",
             nameof(Simulation.CreateDbConnection),
+            nameof(Simulation.FromBacpac),
         ];
 
-        Assert.HasCount(allowedMemberNames.Count, members);
+        Assert.HasCount(allowedMemberNames.Count, memberNames);
 
-        foreach (var member in members)
-            Assert.Contains(member.Name, allowedMemberNames);
+        foreach (var name in memberNames)
+            Assert.Contains(name, allowedMemberNames);
     }
 }

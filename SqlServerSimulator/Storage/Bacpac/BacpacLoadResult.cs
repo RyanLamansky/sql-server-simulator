@@ -6,29 +6,11 @@ namespace SqlServerSimulator.Storage.Bacpac;
 /// (e.g. a feature the simulator doesn't model end-to-end) so the caller has
 /// a feature-gap report rather than a single throw.
 /// </summary>
-/// <remarks>
-/// The list shape evolves as the loader matures. The baseline goal is "every
-/// AW element loads without an entry on Skipped"; entries that show up during
-/// the baseline pass become the next development checklist.
-/// </remarks>
-internal sealed class BacpacLoadResult
+public sealed class BacpacLoadResult
 {
-    /// <summary>
-    /// Model.xml elements the loader didn't translate to a CREATE statement.
-    /// Each entry names the element type (e.g. <c>SqlFullTextIndex</c>) and
-    /// the failing element's <c>Name</c> attribute when present.
-    /// </summary>
-    internal readonly List<BacpacSkipped> Skipped = [];
-
-    /// <summary>
-    /// Non-fatal warnings — element accepted but with reduced fidelity
-    /// (e.g. a body whose embedded SQL the simulator's parser rejected,
-    /// loaded as a no-op placeholder).
-    /// </summary>
-    internal readonly List<string> Warnings = [];
-
-    /// <summary>Element counts seen during the walk, keyed by element type.</summary>
-    internal readonly Dictionary<string, int> ElementCounts = new(StringComparer.Ordinal);
+    private readonly List<BacpacSkipped> _skipped = [];
+    private readonly List<string> _warnings = [];
+    private readonly Dictionary<string, int> _elementCounts = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Per-table per-column "declared via UDDT alias" flags, keyed by
@@ -39,10 +21,43 @@ internal sealed class BacpacLoadResult
     /// emission, consumed during the data-load pass.
     /// </summary>
     internal readonly Dictionary<string, bool[]> TableColumnIsAlias = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Model.xml elements the loader didn't translate to a CREATE statement.
+    /// Each entry names the element type (e.g. <c>SqlFullTextIndex</c>) and
+    /// the failing element's <c>Name</c> attribute when present.
+    /// </summary>
+    public IReadOnlyList<BacpacSkipped> Skipped => _skipped;
+
+    /// <summary>
+    /// Non-fatal warnings — element accepted but with reduced fidelity
+    /// (e.g. a body whose embedded SQL the simulator's parser rejected,
+    /// loaded as a no-op placeholder).
+    /// </summary>
+    public IReadOnlyList<string> Warnings => _warnings;
+
+    /// <summary>Element counts seen during the walk, keyed by element type.</summary>
+    public IReadOnlyDictionary<string, int> ElementCounts => _elementCounts;
+
+    internal void AddSkipped(BacpacSkipped entry) => _skipped.Add(entry);
+
+    internal void AddWarning(string warning) => _warnings.Add(warning);
+
+    internal void IncrementElementCount(string elementType)
+    {
+        _ = _elementCounts.TryGetValue(elementType, out var c);
+        _elementCounts[elementType] = c + 1;
+    }
+
+    internal void AddToElementCount(string elementType, int by)
+    {
+        _ = _elementCounts.TryGetValue(elementType, out var c);
+        _elementCounts[elementType] = c + by;
+    }
 }
 
 /// <summary>
 /// One entry in <see cref="BacpacLoadResult.Skipped"/> — names the element
 /// type and its <c>Name</c> attribute, plus a free-form reason.
 /// </summary>
-internal readonly record struct BacpacSkipped(string ElementType, string? ElementName, string Reason);
+public readonly record struct BacpacSkipped(string ElementType, string? ElementName, string Reason);
