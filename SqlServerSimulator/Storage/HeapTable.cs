@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using SqlServerSimulator.Schemas;
 
 namespace SqlServerSimulator.Storage;
 

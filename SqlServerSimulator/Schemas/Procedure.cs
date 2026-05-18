@@ -1,7 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One user-defined stored procedure. Created via <c>CREATE [OR ALTER]

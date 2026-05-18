@@ -1,4 +1,6 @@
-namespace SqlServerSimulator;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// Common metadata base for every named, schema-resident database object —

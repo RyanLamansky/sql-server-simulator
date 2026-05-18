@@ -1,6 +1,6 @@
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One full-text index attached to a heap table — at most one per table

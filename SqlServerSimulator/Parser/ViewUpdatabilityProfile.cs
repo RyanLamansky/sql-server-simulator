@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Expressions;
+using SqlServerSimulator.Schemas;
 
 namespace SqlServerSimulator.Parser;
 

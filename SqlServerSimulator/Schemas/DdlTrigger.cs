@@ -1,4 +1,4 @@
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One database-scope DDL trigger created via

@@ -1,3 +1,4 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 using System.Globalization;
 

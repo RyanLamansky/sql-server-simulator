@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 using System.Data.Common;
 

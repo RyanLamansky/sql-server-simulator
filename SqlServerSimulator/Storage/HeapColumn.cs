@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Schemas;
 
 namespace SqlServerSimulator.Storage;
 

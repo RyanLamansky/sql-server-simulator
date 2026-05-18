@@ -1,4 +1,6 @@
-namespace SqlServerSimulator;
+using SqlServerSimulator.Schemas;
+
+namespace SqlServerSimulator.Storage;
 
 /// <summary>
 /// Lock modes recognized by <see cref="LockManager"/>. Three orthogonal

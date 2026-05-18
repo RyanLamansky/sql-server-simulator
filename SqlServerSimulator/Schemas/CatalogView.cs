@@ -1,7 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// A virtual table in the <c>sys</c> schema — backs <c>sys.tables</c>,

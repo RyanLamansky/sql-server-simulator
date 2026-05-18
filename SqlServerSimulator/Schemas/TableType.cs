@@ -1,7 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One user-defined table type. Created via <c>CREATE TYPE schema.name AS

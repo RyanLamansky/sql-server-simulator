@@ -1,4 +1,4 @@
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One spatial index attached to a heap table. Created via

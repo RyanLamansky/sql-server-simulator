@@ -1,6 +1,6 @@
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// Which DML actions a trigger fires on. Real SQL Server's <c>CREATE

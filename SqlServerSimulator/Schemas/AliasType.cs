@@ -1,6 +1,6 @@
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One scalar user-defined alias type (UDDT). Created via

@@ -1,4 +1,4 @@
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// A registered XML schema collection: name + raw XSD source text. Created

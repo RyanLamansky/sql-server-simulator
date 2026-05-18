@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;

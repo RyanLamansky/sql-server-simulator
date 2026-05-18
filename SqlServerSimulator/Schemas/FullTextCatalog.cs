@@ -1,4 +1,4 @@
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// A database-scope full-text catalog created via

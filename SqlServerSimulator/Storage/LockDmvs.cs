@@ -1,7 +1,6 @@
 using SqlServerSimulator.Parser;
-using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Storage;
 
 /// <summary>
 /// Row generators for the <c>sys.dm_tran_locks</c> and

@@ -1,7 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One user-defined view. Created via <c>CREATE VIEW schema.name [(col_list)]

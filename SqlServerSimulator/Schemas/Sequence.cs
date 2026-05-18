@@ -1,6 +1,6 @@
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// One user-defined sequence object. Created via <c>CREATE SEQUENCE

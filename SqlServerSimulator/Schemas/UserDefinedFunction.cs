@@ -1,7 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
-namespace SqlServerSimulator;
+namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// A user-defined function — either a <see cref="ScalarFunction"/>
