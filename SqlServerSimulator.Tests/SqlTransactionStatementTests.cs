@@ -176,4 +176,41 @@ public sealed class SqlTransactionStatementTests
         AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
         AreEqual(1, CountRows(conn, "t"));
     }
+
+    [TestMethod]
+    public void BeginTran_SkippedBranch_DoesNotOpenTransaction()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        _ = conn.CreateCommand("if 1=0 begin tran").ExecuteNonQuery();
+        AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SaveTran_SkippedBranch_DoesNotRecordSavepoint()
+    {
+        // No active tx; the un-taken branch must short-circuit before the
+        // active-tx lookup that would otherwise throw.
+        using var conn = new Simulation().CreateOpenConnection();
+        _ = conn.CreateCommand("if 1=0 save tran my_sp").ExecuteNonQuery();
+        AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void RollbackTranNamed_SkippedBranch_DoesNotThrow()
+    {
+        // Without skip mode, ROLLBACK TRAN <name> with no active tx raises
+        // Msg 3903; the un-taken branch short-circuits before that.
+        using var conn = new Simulation().CreateOpenConnection();
+        _ = conn.CreateCommand("if 1=0 rollback tran my_sp").ExecuteNonQuery();
+        AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void RollbackTran_UnknownSavepoint_Throws()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        _ = conn.CreateCommand("begin tran").ExecuteNonQuery();
+        _ = Throws<DbException>(() =>
+            conn.CreateCommand("rollback tran nosuch").ExecuteNonQuery());
+    }
 }

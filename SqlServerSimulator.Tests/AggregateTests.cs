@@ -441,4 +441,26 @@ public sealed class AggregateTests
     public void Equality_String_DistinguishesApostrophe()
         => AreEqual(0, new Simulation().ExecuteScalar(
             "select case when N'OBrien' = N'O''Brien' then 1 else 0 end"));
+
+    [TestMethod]
+    public void Sum_Distinct_DedupesDuplicates()
+        => AreEqual(6, new Simulation().ExecuteScalar(
+            "create table t (v int); insert t values (1), (2), (3), (2), (1); select sum(distinct v) from t"));
+
+    [TestMethod]
+    public void Avg_Distinct_DedupesDuplicates()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            "create table t (v int); insert t values (1), (2), (3), (2), (1); select avg(distinct v) from t"));
+
+    [TestMethod]
+    public void Avg_Decimal_WidensScaleTo6()
+    {
+        // AVG(decimal(p, s)) → decimal(38, max(s, 6)) per DeriveAvgResultType.
+        var result = (decimal)new Simulation().ExecuteScalar("""
+            create table t (v decimal(10, 2));
+            insert t values (1.0), (2.0);
+            select avg(v) from t
+            """)!;
+        AreEqual(1.500000m, result);
+    }
 }

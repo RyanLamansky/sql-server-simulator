@@ -193,4 +193,15 @@ public class CrossDatabaseTests
         AreEqual(4, conn.CreateCommand("SELECT COUNT(*) FROM Customer").ExecuteScalar());
     }
 
+    [TestMethod]
+    public void Use_SkippedBranch_DoesNotSwitchDatabase()
+    {
+        // Un-taken branch short-circuits before the database lookup — the
+        // target name doesn't need to exist for skip-mode to be exercised.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table only_in_simulated (id int); insert only_in_simulated values (42)");
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("if 1=0 use no_such_database").ExecuteNonQuery();
+        AreEqual(42, conn.CreateCommand("select id from only_in_simulated").ExecuteScalar());
+    }
 }

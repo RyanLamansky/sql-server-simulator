@@ -1,3 +1,4 @@
+using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -154,4 +155,66 @@ public sealed class CollationMetadataTests
         AreEqual((short)1, sim.ExecuteScalar("SELECT database_id FROM sys.databases"));
         AreEqual("ONLINE", sim.ExecuteScalar("SELECT state_desc FROM sys.databases"));
     }
+
+    [TestMethod]
+    public void DatabasePropertyEx_Status_ReturnsOnline()
+        => AreEqual("ONLINE", new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'Status')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_Version_ReturnsZero()
+        => AreEqual("0", new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'Version')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_Recovery_ReturnsFull()
+        => AreEqual("FULL", new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'Recovery')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_UserAccess_ReturnsMultiUser()
+        => AreEqual("MULTI_USER", new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'UserAccess')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_IsAutoClose_ReturnsZero()
+        => AreEqual("0", new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'IsAutoClose')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_IsAutoShrink_ReturnsZero()
+        => AreEqual("0", new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'IsAutoShrink')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_SnapshotIsolationState_ReflectsToggle()
+    {
+        var sim = new Simulation();
+        AreEqual("0", sim.ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'SnapshotIsolationState')"));
+        _ = sim.ExecuteNonQuery("ALTER DATABASE simulated SET ALLOW_SNAPSHOT_ISOLATION ON");
+        AreEqual("1", sim.ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'SnapshotIsolationState')"));
+    }
+
+    [TestMethod]
+    public void DatabasePropertyEx_IsReadCommittedSnapshotOn_ReflectsToggle()
+    {
+        var sim = new Simulation();
+        AreEqual("0", sim.ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'IsReadCommittedSnapshotOn')"));
+        _ = sim.ExecuteNonQuery("ALTER DATABASE simulated SET READ_COMMITTED_SNAPSHOT ON");
+        AreEqual("1", sim.ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'IsReadCommittedSnapshotOn')"));
+    }
+
+    [TestMethod]
+    public void DatabasePropertyEx_MissingComma_RaisesMsg174()
+        => _ = new Simulation().AssertSqlError(
+            "SELECT DATABASEPROPERTYEX('simulated' 'Status')", 174);
+
+    [TestMethod]
+    public void DatabasePropertyEx_MissingCloseParen_RaisesSyntaxError()
+        => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'Status' extra"));
 }

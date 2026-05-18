@@ -93,4 +93,15 @@ public sealed class DdlTriggerTests
             """);
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.triggers where name = 'ddlDatabaseTriggerLog'"));
     }
+
+    [TestMethod]
+    public void SysTriggers_DdlTrigger_ReportsTrAndSqlTriggerType()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create trigger trg_ddl on database for create_table as select 1");
+        AreEqual("TR", sim.ExecuteScalar(
+            "select rtrim(type) from sys.triggers where name = 'trg_ddl'"));
+        AreEqual("SQL_TRIGGER", sim.ExecuteScalar(
+            "select type_desc from sys.triggers where name = 'trg_ddl'"));
+    }
 }

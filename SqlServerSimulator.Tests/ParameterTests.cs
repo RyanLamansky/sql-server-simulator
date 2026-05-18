@@ -59,4 +59,52 @@ public class ParameterTests
 
         AreEqual(42, result);
     }
+
+    [TestMethod]
+    public void DbType_NullValue_DefaultsToString()
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        var p = cmd.CreateParameter();
+        p.Value = null;
+        AreEqual(DbType.String, p.DbType);
+    }
+
+    [TestMethod]
+    public void DbType_UnsupportedValueType_ThrowsArgumentException()
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        var p = cmd.CreateParameter();
+        p.Value = new Dictionary<string, string>();
+        _ = Throws<ArgumentException>(() => _ = p.DbType);
+    }
+
+    [TestMethod]
+    public void SourceColumn_ThrowsNotImplemented()
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        var p = cmd.CreateParameter();
+        _ = Throws<NotImplementedException>(() => _ = p.SourceColumn);
+        _ = Throws<NotImplementedException>(() => p.SourceColumn = "x");
+    }
+
+    [TestMethod]
+    public void SourceColumnNullMapping_ThrowsNotImplemented()
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        var p = cmd.CreateParameter();
+        _ = Throws<NotImplementedException>(() => _ = p.SourceColumnNullMapping);
+        _ = Throws<NotImplementedException>(() => p.SourceColumnNullMapping = true);
+    }
+
+    [TestMethod]
+    public void ResetDbType_ClearsExplicitOverride()
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        var p = cmd.CreateParameter();
+        p.Value = 1;
+        p.DbType = DbType.Int64;
+        AreEqual(DbType.Int64, p.DbType);
+        p.ResetDbType();
+        AreEqual(DbType.Int32, p.DbType);
+    }
 }

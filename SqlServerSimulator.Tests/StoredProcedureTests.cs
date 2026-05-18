@@ -540,6 +540,30 @@ public sealed class StoredProcedureTests
         AreEqual("102", ex.Data["HelpLink.EvtID"]);
     }
 
+    [TestMethod]
+    public void CommandType_StoredProcedure_UnknownProc_RaisesMsg2812()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandType = CommandType.StoredProcedure;
+        cmd.CommandText = "no_such_proc";
+        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
+        AreEqual("2812", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void CommandType_StoredProcedure_NonNameCommandText_RaisesMsg2812()
+    {
+        // Leading non-identifier token in CommandText doesn't tokenize as a
+        // Name — the dispatch's first guard rejects before name parsing.
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandType = CommandType.StoredProcedure;
+        cmd.CommandText = "123_not_a_name";
+        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
+        AreEqual("2812", ex.Data["HelpLink.EvtID"]);
+    }
+
     private static void StringContains(string actual, string needle)
         => IsTrue(actual.Contains(needle, StringComparison.Ordinal), $"expected '{actual}' to contain '{needle}'");
 

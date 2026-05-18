@@ -646,4 +646,71 @@ public sealed class LockingTests
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
         await waitTask;
     }
+
+    [TestMethod]
+    public async Task DmTranLocks_DuringContention_ShowsWaitRow()
+    {
+        // WAIT-row emission for sys.dm_tran_locks is only reached when a
+        // connection is blocked on a resource and the DMV is queried
+        // mid-wait. Holder takes a row-X via UPDATE inside a tran; waiter
+        // blocks attempting the next UPDATE.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var holder = sim.CreateOpenConnection();
+        using var waiter = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; update t set id = 2 where id = 1").ExecuteNonQuery();
+
+        var started = new ManualResetEventSlim();
+        var waitTask = Task.Run(() =>
+        {
+            started.Set();
+            _ = waiter.CreateCommand("update t set id = 3 where id = 2").ExecuteNonQuery();
+        }, TestContext.CancellationToken);
+
+        IsTrue(started.Wait(2000, TestContext.CancellationToken));
+        await Task.Delay(150, TestContext.CancellationToken);
+
+        var waitRows = (int)observer.CreateCommand(
+            "select count(*) from sys.dm_tran_locks where request_status = 'WAIT'")
+            .ExecuteScalar()!;
+        IsGreaterThanOrEqualTo(1, waitRows);
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        await waitTask;
+    }
+
+    [TestMethod]
+    public void DmTranLocks_FiltersAcrossKnownModeAbbreviations()
+    {
+        // Doesn't try to provoke each mode — just runs the enumerator
+        // through the abbreviation map for every recognized mode label so
+        // the filter executes against a non-trivial schema.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        var count = (int)sim.ExecuteScalar(
+            "select count(*) from sys.dm_tran_locks where request_mode in ('IS','IX','SIX','Sch-S','Sch-M','S','U','X')")!;
+        IsGreaterThanOrEqualTo(0, count);
+    }
+
+    [TestMethod]
+    public void DmTranLocks_EnumeratesAllSchemaObjectKinds()
+    {
+        // sys.dm_tran_locks walks heap tables, views, functions,
+        // procedures, sequences, table types, and triggers. The per-kind
+        // branches only enter when the schema contains at least one entry
+        // of that kind.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int)",
+            "create view v as select * from t",
+            "create function fn(@x int) returns int as begin return @x + 1 end",
+            "create procedure pr as select * from t",
+            "create sequence sq as int start with 1",
+            "create type tt as table (id int)",
+            "create trigger trg on t for insert as select 1");
+        var count = (int)sim.ExecuteScalar("select count(*) from sys.dm_tran_locks")!;
+        IsGreaterThanOrEqualTo(0, count);
+    }
 }

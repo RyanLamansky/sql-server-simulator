@@ -358,4 +358,94 @@ public sealed class DataReaderTests
         IsTrue(reader.Read());
         _ = Throws<SqlNullValueException>(() => reader.GetFloat(0));
     }
+
+    [TestMethod]
+    public void GetBytes_NullColumn_ThrowsSqlNullValueException()
+    {
+        using var reader = OpenReader("select cast(null as varbinary(8))");
+        IsTrue(reader.Read());
+        _ = Throws<SqlNullValueException>(() => reader.GetBytes(0, 0, new byte[4], 0, 4));
+    }
+
+    [TestMethod]
+    public void GetBytes_NegativeDataOffset_ThrowsArgumentOutOfRange()
+    {
+        using var reader = OpenReader("select cast(0x010203 as varbinary(8))");
+        IsTrue(reader.Read());
+        _ = Throws<ArgumentOutOfRangeException>(() => reader.GetBytes(0, -1, new byte[4], 0, 4));
+    }
+
+    [TestMethod]
+    public void GetBytes_DataOffsetAtEnd_ReturnsZero()
+    {
+        using var reader = OpenReader("select cast(0x010203 as varbinary(8))");
+        IsTrue(reader.Read());
+        AreEqual(0L, reader.GetBytes(0, 3, new byte[4], 0, 4));
+    }
+
+    [TestMethod]
+    public void GetBytes_ZeroLength_ReturnsZero()
+    {
+        using var reader = OpenReader("select cast(0x010203 as varbinary(8))");
+        IsTrue(reader.Read());
+        AreEqual(0L, reader.GetBytes(0, 0, new byte[4], 0, 0));
+    }
+
+    [TestMethod]
+    public void GetChars_NullColumn_ThrowsSqlNullValueException()
+    {
+        using var reader = OpenReader("select cast(null as nvarchar(8))");
+        IsTrue(reader.Read());
+        _ = Throws<SqlNullValueException>(() => reader.GetChars(0, 0, new char[4], 0, 4));
+    }
+
+    [TestMethod]
+    public void GetChars_NegativeDataOffset_ThrowsArgumentOutOfRange()
+    {
+        using var reader = OpenReader("select cast(N'abc' as nvarchar(8))");
+        IsTrue(reader.Read());
+        _ = Throws<ArgumentOutOfRangeException>(() => reader.GetChars(0, -1, new char[4], 0, 4));
+    }
+
+    [TestMethod]
+    public void GetChars_DataOffsetAtEnd_ReturnsZero()
+    {
+        using var reader = OpenReader("select cast(N'abc' as nvarchar(8))");
+        IsTrue(reader.Read());
+        AreEqual(0L, reader.GetChars(0, 3, new char[4], 0, 4));
+    }
+
+    [TestMethod]
+    public void GetChars_ZeroLength_ReturnsZero()
+    {
+        using var reader = OpenReader("select cast(N'abc' as nvarchar(8))");
+        IsTrue(reader.Read());
+        AreEqual(0L, reader.GetChars(0, 0, new char[4], 0, 0));
+    }
+
+    [TestMethod]
+    public void GetDateTime_NonDateColumn_ThrowsInvalidCast()
+    {
+        using var reader = OpenReader("select 42");
+        IsTrue(reader.Read());
+        _ = Throws<InvalidCastException>(() => reader.GetDateTime(0));
+    }
+
+    [TestMethod]
+    public void GetName_OutOfRange_ThrowsIndexOutOfRange()
+    {
+        // Range check is by ordinal, independent of whether Read has been
+        // called.
+        using var reader = OpenReader("select 1 as x");
+        _ = Throws<IndexOutOfRangeException>(() => reader.GetName(5));
+    }
+
+    [TestMethod]
+    public void BeforeFirstRead_OrdinalAccess_ThrowsInvalidOperation()
+    {
+        // Before any Read(), the underlying cursor is the EmptyCursor
+        // sentinel; ordinal access throws.
+        using var reader = OpenReader("select 42 as v");
+        _ = Throws<InvalidOperationException>(() => _ = reader.GetValue(0));
+    }
 }

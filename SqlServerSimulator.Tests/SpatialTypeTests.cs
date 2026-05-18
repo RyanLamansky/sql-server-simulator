@@ -1,3 +1,4 @@
+using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -229,5 +230,59 @@ public sealed class SpatialTypeTests
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(0 0)'))");
         AreEqual("POINT(0 0)", sim.ExecuteScalar("select cast(g as nvarchar(max)) from dbo.loc"));
+    }
+
+    [TestMethod]
+    public void GeographyParse_NullWkt_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select cast(geography::Parse(cast(null as nvarchar(max))) as nvarchar(max))"));
+
+    [TestMethod]
+    public void GeometryStGeomFromText_NullWkt_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select cast(geometry::STGeomFromText(cast(null as nvarchar(max)), 0) as nvarchar(max))"));
+
+    [TestMethod]
+    public void GeographyPoint_NullCoord_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select cast(geography::Point(cast(null as float), 1, 4326) as nvarchar(max))"));
+
+    [TestMethod]
+    public void GeographyParse_NoArgs_Throws()
+        => _ = Throws<Exception>(() => new Simulation().ExecuteScalar("select geography::Parse()"));
+
+    [TestMethod]
+    public void GeometryStaticCall_MissingOpenParen_Throws()
+        => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
+            "select geometry::Parse 'POINT (0 0)'"));
+
+    [TestMethod]
+    public void GeographyStaticCall_TrailingGarbage_Throws()
+        => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
+            "select geography::Parse('POINT (0 0)' garbage)"));
+
+    [TestMethod]
+    public void GeographyParse_InSelectInto_ProjectsSpatialColumnType()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("select geography::Parse('POINT(0 0)') as g into #t").ExecuteNonQuery();
+        AreEqual(1, conn.CreateCommand("select count(*) from #t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void GeographyParse_AsComputedColumn_AlterPeerColumn_WalksExpression()
+    {
+        // ALTER COLUMN walks every computed column on the table to detect
+        // whether it transitively depends on the column being altered, by
+        // calling VisitColumnReferences on each computed expression. A
+        // spatial static call has no column refs but the walk still
+        // recurses into its arguments.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table c1 (id int, dummy varchar(10), g as geography::Parse('POINT(0 0)') persisted);
+            alter table c1 alter column dummy varchar(20)
+            """);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from c1"));
     }
 }
