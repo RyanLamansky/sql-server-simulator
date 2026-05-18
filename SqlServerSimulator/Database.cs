@@ -8,10 +8,10 @@ namespace SqlServerSimulator;
 /// One simulated SQL Server database. A <see cref="Simulation"/> hosts a
 /// dictionary of these, keyed by name; each <see cref="SimulatedDbConnection"/>
 /// tracks which one is active via <see cref="SimulatedDbConnection.CurrentDatabase"/>.
-/// The shape is in place so <c>USE &lt;db&gt;</c> / temp-table / cross-database
-/// features can graft on cleanly later — at the moment every
-/// <see cref="Simulation"/> ships with exactly one entry named
-/// <see cref="Simulation.DefaultDatabaseName"/>.
+/// <see cref="Simulation.Databases"/> starts empty; the first connection lazily
+/// seeds <see cref="Simulation.DefaultDatabaseName"/> if no import has landed
+/// a database first. <c>USE &lt;db&gt;</c> / temp-table / cross-database
+/// features can graft on cleanly later.
 /// </summary>
 internal sealed class Database
 {

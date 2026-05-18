@@ -20,7 +20,8 @@ public class QualityTests
         HashSet<Type> allowedTypes = [
             simulation,
             typeof(TableValuedParameterExtensions),
-            typeof(BacpacLoadResult),
+            typeof(BacpacImportOptions),
+            typeof(BacpacImportResult),
             typeof(BacpacSkipped),
         ];
         Assert.HasCount(allowedTypes.Count, types);
@@ -36,7 +37,7 @@ public class QualityTests
         HashSet<string> allowedMemberNames = [
             ".ctor",
             nameof(Simulation.CreateDbConnection),
-            nameof(Simulation.FromBacpac),
+            nameof(Simulation.ImportBacpac),
         ];
 
         Assert.HasCount(allowedMemberNames.Count, memberNames);

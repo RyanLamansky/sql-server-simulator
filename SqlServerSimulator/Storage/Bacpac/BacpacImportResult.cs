@@ -1,12 +1,13 @@
 namespace SqlServerSimulator.Storage.Bacpac;
 
 /// <summary>
-/// Diagnostics carrier returned from <see cref="Simulation.FromBacpac(string, out BacpacLoadResult)"/>.
-/// Tracks model.xml elements the loader recognized but couldn't fully apply
-/// (e.g. a feature the simulator doesn't model end-to-end) so the caller has
-/// a feature-gap report rather than a single throw.
+/// Diagnostics carrier returned from <see cref="Simulation.ImportBacpac(string, out BacpacImportResult, BacpacImportOptions?)"/>
+/// and its <see cref="System.IO.Stream"/> overload. Tracks model.xml elements
+/// the loader recognized but couldn't fully apply (e.g. a feature the
+/// simulator doesn't model end-to-end) so the caller has a feature-gap report
+/// rather than a single throw.
 /// </summary>
-public sealed class BacpacLoadResult
+public sealed class BacpacImportResult
 {
     private readonly List<BacpacSkipped> _skipped = [];
     private readonly List<string> _warnings = [];
@@ -57,7 +58,7 @@ public sealed class BacpacLoadResult
 }
 
 /// <summary>
-/// One entry in <see cref="BacpacLoadResult.Skipped"/> — names the element
+/// One entry in <see cref="BacpacImportResult.Skipped"/> — names the element
 /// type and its <c>Name</c> attribute, plus a free-form reason.
 /// </summary>
 public readonly record struct BacpacSkipped(string ElementType, string? ElementName, string Reason);

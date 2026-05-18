@@ -46,15 +46,16 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Per-database state hosted by this server instance, keyed by name.
-    /// Constructor seeds one entry (<see cref="DefaultDatabaseName"/>);
-    /// <c>USE &lt;db&gt;</c> / multi-database support graft onto the dictionary
-    /// when needed. <see cref="SimulatedDbConnection.CurrentDatabase"/>
-    /// tracks which entry the session is pointed at.
+    /// Starts empty; <see cref="SimulatedDbConnection"/>'s constructor
+    /// lazily seeds <see cref="DefaultDatabaseName"/> on first connection
+    /// to a Simulation that has no databases (so the all-T-SQL use case
+    /// keeps working without an explicit import / CREATE DATABASE).
+    /// <see cref="ImportBacpac(System.IO.Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>
+    /// adds further entries; <c>USE &lt;db&gt;</c> isn't wired up yet, so
+    /// <see cref="SimulatedDbConnection.CurrentDatabase"/> picks the lazy
+    /// seed when present, else the sole entry when there's exactly one.
     /// </summary>
-    internal readonly Dictionary<string, Database> Databases = new(Collation.Default)
-    {
-        [DefaultDatabaseName] = new Database(DefaultDatabaseName),
-    };
+    internal readonly Dictionary<string, Database> Databases = new(Collation.Default);
 
     /// <summary>
     /// System tables (e.g. <c>systypes</c>). Materialized once per process and

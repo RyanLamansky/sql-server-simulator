@@ -2253,29 +2253,36 @@ internal static class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.databases</c>. Single row for the current database
-    /// (the simulator's database dictionary is single-entry by default); a
-    /// future <c>USE &lt;db&gt;</c> expansion would extend this enumeration to
-    /// iterate <see cref="Simulation.Databases"/>. State is always
-    /// <c>0 / ONLINE</c>; snapshot-isolation columns track the live
-    /// <see cref="Database.AllowSnapshotIsolation"/> /
+    /// Rows for <c>sys.databases</c>. One row per <see cref="Database"/>
+    /// hosted by the connected <see cref="Simulation"/>; matches real SQL
+    /// Server's "instance-scoped catalog view" semantic. State is always
+    /// <c>0 / ONLINE</c>; snapshot-isolation columns track each
+    /// <see cref="Database"/>'s live <c>AllowSnapshotIsolation</c> /
     /// <c>ReadCommittedSnapshot</c> flags.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch)
     {
-        var db = batch.CurrentDatabase;
-        var snapshotState = (byte)(db.AllowSnapshotIsolation ? 1 : 0);
-        yield return [
-            SqlValue.FromSystemName(db.Name),
-            SqlValue.FromInt16(1),
-            SqlValue.FromByte((byte)db.CompatibilityLevel),
-            SqlValue.FromSystemName(db.CollationName),
-            SqlValue.FromByte(snapshotState),
-            SqlValue.FromNVarchar(db.AllowSnapshotIsolation ? "ON" : "OFF"),
-            SqlValue.FromBoolean(db.ReadCommittedSnapshot),
-            SqlValue.FromByte(0),
-            SqlValue.FromNVarchar("ONLINE"),
-        ];
+        // Stable ordering: by name. Real SQL Server orders sys.databases by
+        // database_id; the simulator doesn't allocate per-database ids yet,
+        // so name-ordering is the next-best deterministic choice.
+        var databases = batch.Connection.Simulation.Databases.Values
+            .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
+        short id = 1;
+        foreach (var db in databases)
+        {
+            var snapshotState = (byte)(db.AllowSnapshotIsolation ? 1 : 0);
+            yield return [
+                SqlValue.FromSystemName(db.Name),
+                SqlValue.FromInt16(id++),
+                SqlValue.FromByte((byte)db.CompatibilityLevel),
+                SqlValue.FromSystemName(db.CollationName),
+                SqlValue.FromByte(snapshotState),
+                SqlValue.FromNVarchar(db.AllowSnapshotIsolation ? "ON" : "OFF"),
+                SqlValue.FromBoolean(db.ReadCommittedSnapshot),
+                SqlValue.FromByte(0),
+                SqlValue.FromNVarchar("ONLINE"),
+            ];
+        }
     }
 
     /// <summary>

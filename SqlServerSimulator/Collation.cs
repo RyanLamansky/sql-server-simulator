@@ -61,7 +61,7 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// <c>docs/claude/database-options.md</c>).
     /// Names outside this set surface as <see cref="NotSupportedException"/>
     /// in direct SQL; the BACPAC loader catches and records on
-    /// <c>BacpacLoadResult.Warnings</c>. Each entry's value is the
+    /// <c>BacpacImportResult.Warnings</c>. Each entry's value is the
     /// human-readable description that <c>sys.fn_helpcollations()</c>
     /// exposes verbatim (probe-confirmed against SQL Server 2025).
     /// </summary>

@@ -6,10 +6,10 @@ namespace SqlServerSimulator.Bacpac;
 public class BacpacBuilderTests
 {
     [TestMethod]
-    public void FromBacpac_FilePath_Overload_RoundTrips()
+    public void ImportBacpac_FilePath_Overload_RoundTrips()
     {
         // Write a synthetic bacpac to a temp file + load via the
-        // Simulation.FromBacpac(string path, …) overload.
+        // Simulation.ImportBacpac(string path, …) overload.
         using var bacpac = BacpacBuilder.Create()
             .Table("dbo", "T", t => t.Column("Id", "int").Row(1).Row(2).Row(3))
             .Build();
@@ -18,7 +18,8 @@ public class BacpacBuilderTests
         {
             using (var file = File.Create(tempPath))
                 bacpac.CopyTo(file);
-            var sim = Simulation.FromBacpac(tempPath, out var diag);
+            var sim = new Simulation();
+            sim.ImportBacpac(tempPath, out var diag);
             IsEmpty(diag.Skipped);
             AreEqual(3, sim.ExecuteScalar("SELECT COUNT(*) FROM T;"));
         }
@@ -40,7 +41,8 @@ public class BacpacBuilderTests
                 .Row(2, 25))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diagnostics);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diagnostics);
 
         AreEqual(2, sim.ExecuteScalar("select count(*) from Customer"));
         AreEqual(30, sim.ExecuteScalar("select Age from Customer where Id = 1"));

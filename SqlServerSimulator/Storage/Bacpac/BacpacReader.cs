@@ -31,14 +31,14 @@ internal static class BacpacReader
     /// same read-only buffer are race-free because each
     /// <see cref="MemoryStream"/> wrapper holds its own cursor.
     /// </summary>
-    public static void Load(Stream stream, Simulation simulation, BacpacLoadResult result)
+    public static void Load(Stream stream, Simulation simulation, Database database, int maxDegreeOfParallelism, BacpacImportResult result)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentNullException.ThrowIfNull(simulation);
+        ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(result);
 
         var buffer = DrainToByteArray(stream);
-        var database = simulation.Databases[Simulation.DefaultDatabaseName];
 
         // DDL phase: serial. Uses one transient archive over the buffer.
         using (var ms = new MemoryStream(buffer, writable: false))
@@ -47,7 +47,7 @@ internal static class BacpacReader
             var modelEntry = ddlArchive.GetEntry("model.xml")
                 ?? throw new InvalidDataException("bacpac: model.xml entry not found.");
             using var modelStream = modelEntry.Open();
-            ModelXmlReader.Apply(modelStream, simulation, result);
+            ModelXmlReader.Apply(modelStream, simulation, database, result);
         }
 
         // Build per-table work items by enumerating the archive once on the
@@ -58,14 +58,17 @@ internal static class BacpacReader
         if (workItems.Count == 0)
             return;
 
-        // Parallel data load. Worker count is bounded by both CPU count and
-        // the number of work items so we don't spin up workers that would
+        // Parallel data load. Worker count is bounded by both the caller's
+        // requested cap (-1 → Environment.ProcessorCount, matching
+        // ParallelOptions.MaxDegreeOfParallelism conventions) and the
+        // number of work items so we don't spin up workers that would
         // never dequeue anything. Workers pull from a concurrent queue, so
         // the LPT-sorted (longest-first) work-item list naturally produces
         // optimal scheduling: the heaviest table starts at t=0 and runs
         // alongside everything else.
         var queue = new ConcurrentQueue<TableWorkItem>(workItems);
-        var workerCount = Math.Min(Environment.ProcessorCount, workItems.Count);
+        var cap = maxDegreeOfParallelism > 0 ? maxDegreeOfParallelism : Environment.ProcessorCount;
+        var workerCount = Math.Min(cap, workItems.Count);
         var resultLock = new object();
         var tasks = new Task[workerCount];
         for (var w = 0; w < workerCount; w++)
@@ -126,7 +129,7 @@ internal static class BacpacReader
     /// dynamic-pull worker queue gets longest-processing-time-first
     /// scheduling for free (the heaviest table starts at t=0).
     /// </summary>
-    private static List<TableWorkItem> BuildTableWorkItems(byte[] buffer, Database database, BacpacLoadResult result)
+    private static List<TableWorkItem> BuildTableWorkItems(byte[] buffer, Database database, BacpacImportResult result)
     {
         var items = new Dictionary<string, TableWorkItem>(StringComparer.OrdinalIgnoreCase);
         using var ms = new MemoryStream(buffer, writable: false);
@@ -171,12 +174,12 @@ internal static class BacpacReader
     /// <summary>
     /// Iterates a single table's BCP shards in declared order, decoding into
     /// <see cref="TableWorkItem.Table"/>. Per-decode-failure entries land on
-    /// <see cref="BacpacLoadResult.Skipped"/> under <paramref name="resultLock"/>;
+    /// <see cref="BacpacImportResult.Skipped"/> under <paramref name="resultLock"/>;
     /// the aggregate row count for the table updates the <c>_DataRows</c>
     /// counter once at the end (one lock acquire per table instead of per
     /// entry).
     /// </summary>
-    private static void ProcessTable(ZipArchive archive, TableWorkItem work, BacpacLoadResult result, object resultLock)
+    private static void ProcessTable(ZipArchive archive, TableWorkItem work, BacpacImportResult result, object resultLock)
     {
         var tableRowCount = 0;
         foreach (var entryName in work.EntryNames)
@@ -222,7 +225,7 @@ internal static class BacpacReader
     /// inserted; the caller aggregates per-table to update the
     /// <c>_DataRows</c> counter under the result lock.
     /// </summary>
-    private static int LoadRowsFromBcp(BufferedStream bcpStream, HeapTable table, string schemaName, string tableName, BacpacLoadResult result)
+    private static int LoadRowsFromBcp(BufferedStream bcpStream, HeapTable table, string schemaName, string tableName, BacpacImportResult result)
     {
         var qualifiedKey = $"[{schemaName}].[{tableName}]";
         var columnIsAlias = result.TableColumnIsAlias.TryGetValue(qualifiedKey, out var flags)

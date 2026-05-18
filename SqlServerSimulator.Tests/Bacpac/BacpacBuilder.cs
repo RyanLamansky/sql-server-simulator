@@ -329,7 +329,7 @@ public sealed partial class BacpacBuilder
 
     /// <summary>
     /// Emits the bacpac as a <see cref="MemoryStream"/> ready to feed to
-    /// <c>Simulation.FromBacpac(Stream, out BacpacLoadResult)</c>.
+    /// <c>Simulation.ImportBacpac(Stream, out BacpacImportResult)</c>.
     /// The stream is positioned at 0 and is seekable.
     /// </summary>
     public Stream Build()

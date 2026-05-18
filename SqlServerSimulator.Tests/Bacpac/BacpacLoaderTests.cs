@@ -25,8 +25,8 @@ public class BacpacLoaderTests
             .Table("dbo", "T3", t => { _ = t.Column("Id", "int"); for (var i = 0; i < 30; i++) _ = t.Row(i); })
             .Build());
 
-        _ = Simulation.FromBacpac(new MemoryStream(bytes, writable: false), out var first);
-        _ = Simulation.FromBacpac(new MemoryStream(bytes, writable: false), out var second);
+        new Simulation().ImportBacpac(new MemoryStream(bytes, writable: false), out var first);
+        new Simulation().ImportBacpac(new MemoryStream(bytes, writable: false), out var second);
 
         AreEqual(first.ElementCounts["_DataRows"], second.ElementCounts["_DataRows"]);
         AreEqual(first.ElementCounts["_DataFile"], second.ElementCounts["_DataFile"]);
@@ -52,7 +52,8 @@ public class BacpacLoaderTests
             .Schema("Sales")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diagnostics);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diagnostics);
         IsEmpty(diagnostics.Skipped);
         AreEqual(5, diagnostics.ElementCounts["SqlSchema"]);
 
@@ -84,7 +85,8 @@ public class BacpacLoaderTests
                 .PrimaryKey("PK_Product_Id", "Id"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, diag.ElementCounts["SqlPrimaryKeyConstraint"]);
 
@@ -119,7 +121,8 @@ public class BacpacLoaderTests
                 .Default("DF_Child_Status", "Status", "'active'"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
 
         AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.key_constraints WHERE type = 'PK';"));
@@ -136,7 +139,8 @@ public class BacpacLoaderTests
             .DatabaseOption("IsReadCommittedSnapshot", "True")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, diag.ElementCounts["SqlDatabaseOptions"]);
         IsTrue((bool)sim.ExecuteScalar("SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = 'simulated';")!);
@@ -151,7 +155,8 @@ public class BacpacLoaderTests
             .Table("dbo", "T3", t => t.Column("Id", "int"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(3, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.tables;"));
         AreEqual(3, diag.ElementCounts["SqlTable"]);
@@ -173,7 +178,8 @@ public class BacpacLoaderTests
                 .Column("CategoryName", "[dbo].[Name]", nullable: true))   // explicit nullable to suppress builder default
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.types WHERE name = 'Name' AND user_type_id >= 256;"));
@@ -206,7 +212,8 @@ public class BacpacLoaderTests
                 .PrimaryKey("PK_Product", "ProductId"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
 
         using var connection = sim.CreateDbConnection();
@@ -273,7 +280,8 @@ public class BacpacLoaderTests
                 .Row(1, 9_000_000_000L, stamp, dateOnly, true, guid, "Alice", "Long notes here", "tag-1", blob, maxBlob))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, diag.ElementCounts["_DataRows"]);
@@ -317,7 +325,8 @@ public class BacpacLoaderTests
                 .Row(2, 0.66m, -360.000m, 15.000m))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
 
@@ -355,7 +364,8 @@ public class BacpacLoaderTests
                 .Row(6, null))                                       // NULL
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
 
@@ -379,7 +389,8 @@ public class BacpacLoaderTests
                 .Row(1, xmlBody))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(xmlBody, sim.ExecuteScalar("SELECT CAST(Resume AS nvarchar(MAX)) FROM JobCandidate;"));
@@ -400,7 +411,8 @@ public class BacpacLoaderTests
                 .Row(1, pointBytes))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         var wkt = (string)sim.ExecuteScalar("SELECT CAST(Loc AS nvarchar(MAX)) FROM Place;")!;
@@ -423,7 +435,8 @@ public class BacpacLoaderTests
                 .Row(2, -250.00m, -1.50m))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
 
@@ -458,7 +471,8 @@ public class BacpacLoaderTests
                 .Row(1, t0, t0, t7))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
 
@@ -489,7 +503,8 @@ public class BacpacLoaderTests
                 .Row(null, null, null, null, null))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
 
@@ -509,7 +524,8 @@ public class BacpacLoaderTests
             .View("dbo", "ActiveItem", "CREATE VIEW dbo.ActiveItem AS SELECT Id FROM dbo.Item WHERE Active = 1;")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.views WHERE name = 'ActiveItem';"));
@@ -533,7 +549,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.procedures WHERE name = 'GetBoxArea';"));
@@ -557,7 +574,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.procedures WHERE name = 'ReseedSequence';"));
@@ -575,7 +593,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.objects WHERE type = 'FN' AND name = 'Doubled';"));
@@ -603,7 +622,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.objects WHERE type = 'TF' AND name = 'Splitter';"));
@@ -633,7 +653,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.triggers WHERE name = 'trg_AuditedInsertUpdate';"));
@@ -656,7 +677,8 @@ public class BacpacLoaderTests
                 .Column("Reg", "nvarchar(20)", collation: "Latin1_General_CI_AS"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         var collationWarnings = diag.Warnings.Where(w => w.Contains("Latin1_General_CI_AS", StringComparison.Ordinal)).ToList();
@@ -679,7 +701,8 @@ public class BacpacLoaderTests
             .DatabaseOption("Collation", "Latin1_General_100_CI_AS")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar("SELECT collation_name FROM sys.databases;"));
@@ -693,7 +716,8 @@ public class BacpacLoaderTests
             .Sequence("dbo", "OrderId", "int", startValue: 100, increment: 10)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.sequences WHERE name = 'OrderId';"));
@@ -714,7 +738,8 @@ public class BacpacLoaderTests
             .Grant("ViewAnyColumnMasterKeyDefinition", "public")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(2, sim.ExecuteScalar("""
@@ -733,7 +758,8 @@ public class BacpacLoaderTests
             .Role("data_writer_role")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.database_principals WHERE name IN ('data_reader_role', 'data_writer_role');"));
@@ -753,7 +779,8 @@ public class BacpacLoaderTests
                 .Default("DF_Order_Id", "Id", "NEXT VALUE FOR dbo.OrderId"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         _ = sim.ExecuteNonQuery("INSERT INTO dbo.[Order] (Note) VALUES (N'a'), (N'b');");
@@ -778,7 +805,8 @@ public class BacpacLoaderTests
                 .Check("CK_Deals_Exactly_One_NOT_NULL_Pricing", "((case when [Discount] is not null then 1 else 0 end + case when [UnitPrice] is not null then 1 else 0 end) = (1))"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
 
@@ -809,7 +837,8 @@ public class BacpacLoaderTests
                 .Column("ValidTo", "datetime2(7)"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.tables WHERE name = 'Cities' AND temporal_type = 2;"));
@@ -826,7 +855,8 @@ public class BacpacLoaderTests
                 .PrimaryKey("PK_IdList", "Id"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.table_types WHERE name = 'IdList';"));
@@ -845,7 +875,8 @@ public class BacpacLoaderTests
                 .Row(2, 6, 7))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.columns WHERE name = 'Area' AND is_computed = 1;"));
@@ -876,7 +907,8 @@ public class BacpacLoaderTests
             .ConstraintExtendedProperty("audit", "CK_Trail_NonNegId", "MS_Description", "Id must not be negative")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(6, diag.ElementCounts["SqlExtendedProperty"]);
@@ -911,7 +943,8 @@ public class BacpacLoaderTests
             .IndexOnView("dbo", "ItemView", "IX_ItemView_Id", ["Id"])
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         AreEqual(0, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.indexes WHERE name = 'IX_ItemView_Id';"));
         var skippedIndexes = diag.Skipped.Where(s => s.ElementType == "SqlIndex").ToList();
         HasCount(1, skippedIndexes);
@@ -932,7 +965,8 @@ public class BacpacLoaderTests
                 .Index("IX_Customer_LastName", ["LastName"], includedColumns: ["Email"]))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, diag.ElementCounts["SqlIndex"]);
 
@@ -953,7 +987,8 @@ public class BacpacLoaderTests
                 .ForeignKey("FK_Child_Parent", ["ParentId"], "dbo", "Parent", ["Id"], onDelete: "CASCADE"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.foreign_keys WHERE delete_referential_action = 1;"));
     }
@@ -970,7 +1005,8 @@ public class BacpacLoaderTests
             .Filegroup("FG_Indexes")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
     }
@@ -993,7 +1029,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.triggers WHERE parent_class = 0 AND name = 'trgAuditDDL';"));
     }
@@ -1017,7 +1054,8 @@ public class BacpacLoaderTests
                 .Row(1, noon, noon, fraction, null))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         using var connection = sim.CreateDbConnection();
         connection.Open();
@@ -1045,7 +1083,8 @@ public class BacpacLoaderTests
                 .Row(1, "ABC12345", "MyObject"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         using var connection = sim.CreateDbConnection();
         connection.Open();
@@ -1067,7 +1106,7 @@ public class BacpacLoaderTests
             .Role("custom_role", ownerPrincipal: "dbo")
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
     }
 
@@ -1082,7 +1121,8 @@ public class BacpacLoaderTests
                 .Column("RowId", "uniqueidentifier", rowGuidCol: true))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         IsNotEmpty(diag.Warnings.Where(w => w.Contains("ROWGUIDCOL", StringComparison.Ordinal)).ToList());
         // Column still loads, just without the metadata annotation.
@@ -1099,7 +1139,7 @@ public class BacpacLoaderTests
             .UnknownHostExtendedProperty("SqlFilegroup", "PRIMARY", "MS_Description", "filegroup note")
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         HasCount(1, diag.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList());
         Contains("Host kind 'SqlFilegroup'", diag.Skipped[0].Reason);
     }
@@ -1118,7 +1158,7 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         // Note: simulator may still create the proc (parser stores body
         // without resolving table references); test guards the catch path
         // exists, doesn't pin failure outcome.
@@ -1130,7 +1170,7 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac2, out var diag2);
+        new Simulation().ImportBacpac(bacpac2, out var diag2);
         IsNotEmpty(diag2.Skipped
             .Where(s => s.Reason.StartsWith("CREATE ", StringComparison.Ordinal) && s.Reason.Contains(" failed:", StringComparison.Ordinal))
             .ToList());
@@ -1153,7 +1193,7 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
     }
 
@@ -1175,7 +1215,7 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
     }
 
@@ -1189,7 +1229,7 @@ public class BacpacLoaderTests
             .UnknownTopLevelElement("SqlImaginaryFeature", "[stub]")
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         IsNotEmpty(diag.Skipped.Where(s => s.ElementType == "SqlImaginaryFeature").ToList());
         Contains("not yet handled by the loader", diag.Skipped[0].Reason);
     }
@@ -1215,7 +1255,8 @@ public class BacpacLoaderTests
             .ConstraintExtendedProperty("dbo", "FK_Child3_Parent", "MS_Description", "fk to parent")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual("fk to parent", sim.ExecuteScalar("""
             SELECT CAST(ep.value AS nvarchar(MAX))
@@ -1241,7 +1282,8 @@ public class BacpacLoaderTests
                 .PrimaryKey("PK_Ordered", "Id"))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.key_constraints WHERE name = 'PK_Ordered' AND type = 'PK';"));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.key_constraints WHERE name = 'UQ_Ordered_Slug' AND type = 'UQ';"));
@@ -1265,7 +1307,8 @@ public class BacpacLoaderTests
             .IndexExtendedProperty("dbo", "WithUq", "IX_WithUq_Email", "MS_Description", "email index")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual("email index", sim.ExecuteScalar("""
             SELECT CAST(ep.value AS nvarchar(MAX))
@@ -1310,7 +1353,7 @@ public class BacpacLoaderTests
             .DatabaseOption("UnrecognizedFutureOption", "anything") // default _ => null arm
             .Build();
 
-        _ = Simulation.FromBacpac(bacpac, out var diag);
+        new Simulation().ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
     }
 
@@ -1328,7 +1371,8 @@ public class BacpacLoaderTests
             .ColumnStoreIndex("CCI_Item")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         // Table + row payload still load.
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
@@ -1350,7 +1394,8 @@ public class BacpacLoaderTests
                 .Row(1, 42, 9_000_000_000L, new DateTime(2025, 1, 1, 12, 0, 0, DateTimeKind.Unspecified)))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(42, sim.ExecuteScalar("SELECT MaybeInt FROM NullableMix;"));
     }
@@ -1368,7 +1413,8 @@ public class BacpacLoaderTests
                 .Row(1, null))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM MaybeMoney WHERE Price IS NULL;"));
     }
@@ -1396,7 +1442,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual("low", sim.ExecuteScalar("SELECT dbo.Bucket(5.00);"));
         AreEqual("mid", sim.ExecuteScalar("SELECT dbo.Bucket(50.00);"));
@@ -1423,7 +1470,8 @@ public class BacpacLoaderTests
                 """)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail(string.Join(" | ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.triggers WHERE name = 'trgNoRepl';"));
@@ -1443,7 +1491,8 @@ public class BacpacLoaderTests
             .View("dbo", "Renamed", "CREATE VIEW dbo.Renamed AS SELECT Doubled = Raw * 2 FROM dbo.Source;")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(14, sim.ExecuteScalar("SELECT Doubled FROM dbo.Renamed;"));
     }
@@ -1457,7 +1506,8 @@ public class BacpacLoaderTests
             .Sequence("dbo", "MarkerSeq", "int", startValue: 1, increment: 1)
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual("SO", sim.ExecuteScalar("SELECT type FROM sys.objects WHERE name = 'MarkerSeq';"));
         AreEqual("SEQUENCE_OBJECT", sim.ExecuteScalar("SELECT type_desc FROM sys.objects WHERE name = 'MarkerSeq';"));
@@ -1486,7 +1536,8 @@ public class BacpacLoaderTests
                 .ForeignKey("FK_Child_P2", ["P2"], "dbo", "Parent2", ["Id"]))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.foreign_keys WHERE parent_object_id = (SELECT object_id FROM sys.tables WHERE name = 'Child');"));
     }
@@ -1511,7 +1562,8 @@ public class BacpacLoaderTests
             .IndexExtendedProperty("dbo", "Multi", "IX_C", "MS_Description", "third index")
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual("third index", sim.ExecuteScalar("""
             SELECT CAST(ep.value AS nvarchar(MAX))
@@ -1542,7 +1594,8 @@ public class BacpacLoaderTests
                 .Row(1, polygon))
             .Build();
 
-        var sim = Simulation.FromBacpac(bacpac, out var diag);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         var wkt = (string)sim.ExecuteScalar("SELECT CAST(Border AS nvarchar(MAX)) FROM Region;")!;
         IsTrue(wkt.StartsWith("POLYGON ((", StringComparison.Ordinal), $"unexpected WKT '{wkt}'");

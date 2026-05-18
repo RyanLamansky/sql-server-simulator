@@ -14,8 +14,47 @@ sealed class SimulatedDbConnection : DbConnection
     {
         this.Simulation = simulation;
         this.Spid = simulation.AllocateSpid();
-        this.CurrentDatabase = simulation.Databases[Simulation.DefaultDatabaseName];
+        this.CurrentDatabase = ResolveInitialDatabase(simulation);
         simulation.RegisterConnection(this);
+    }
+
+    /// <summary>
+    /// Picks the database a fresh connection points its
+    /// <see cref="CurrentDatabase"/> at. Three-tier resolution:
+    /// <list type="number">
+    /// <item>The conventional default (<see cref="Simulation.DefaultDatabaseName"/>)
+    /// if present — preserves the all-T-SQL "fresh Simulation just works"
+    /// path.</item>
+    /// <item>When <see cref="Simulation.Databases"/> is empty, lazily seed
+    /// the default — fresh <see cref="Simulation"/>'s ctor starts empty so
+    /// no-collision <c>ImportBacpac</c> shapes work; the first connection
+    /// pays the cost of materializing the default when no import
+    /// preceded it.</item>
+    /// <item>Otherwise pick the alphabetically-first database — predictable
+    /// fallback for the multi-import scenario, matching the ordering
+    /// <c>sys.databases</c> uses. Pending real <c>USE &lt;db&gt;</c>
+    /// support, the user can still inspect any database via catalog
+    /// views regardless of which one a connection's CurrentDatabase
+    /// happens to be pointed at.</item>
+    /// </list>
+    /// </summary>
+    private static Database ResolveInitialDatabase(Simulation simulation)
+    {
+        lock (simulation.Databases)
+        {
+            if (simulation.Databases.TryGetValue(Simulation.DefaultDatabaseName, out var existing))
+                return existing;
+            if (simulation.Databases.Count == 0)
+            {
+                var seeded = new Database(Simulation.DefaultDatabaseName);
+                simulation.Databases.Add(Simulation.DefaultDatabaseName, seeded);
+                return seeded;
+            }
+            return simulation.Databases
+                .OrderBy(static kvp => kvp.Key, StringComparer.OrdinalIgnoreCase)
+                .First()
+                .Value;
+        }
     }
 
     /// <summary>

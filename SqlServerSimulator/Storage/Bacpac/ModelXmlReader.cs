@@ -19,7 +19,7 @@ namespace SqlServerSimulator.Storage.Bacpac;
 /// constraints, indexes, views, procedures, functions, triggers, permissions,
 /// and extended properties.</para>
 /// <para>Every element type not yet handled is recorded as a
-/// <see cref="BacpacSkipped"/> entry on <see cref="BacpacLoadResult.Skipped"/>
+/// <see cref="BacpacSkipped"/> entry on <see cref="BacpacImportResult.Skipped"/>
 /// so the caller has a feature-gap report.</para>
 /// </remarks>
 internal static class ModelXmlReader
@@ -27,7 +27,7 @@ internal static class ModelXmlReader
     /// <summary>DACFx serialization namespace observed in AW2025's model.xml.</summary>
     private static readonly XNamespace Ns = "http://schemas.microsoft.com/sqlserver/dac/Serialization/2012/02";
 
-    public static void Apply(Stream modelStream, Simulation simulation, BacpacLoadResult result)
+    public static void Apply(Stream modelStream, Simulation simulation, Database database, BacpacImportResult result)
     {
         var settings = new XmlReaderSettings
         {
@@ -54,8 +54,15 @@ internal static class ModelXmlReader
             result.IncrementElementCount(type);
         }
 
-        using var connection = simulation.CreateDbConnection();
+        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
         connection.Open();
+        // Route every DDL the loader synthesizes (CREATE TABLE, CREATE
+        // VIEW, ALTER DATABASE, …) to the target database. The connection
+        // is private to this load — no other session observes the
+        // assignment, and the connection is disposed at the end of the
+        // method so the override doesn't leak.
+        connection.CurrentDatabase = database;
+        var bracketedDb = BracketName(database.Name);
 
         // Pre-build a set of view qualified-names so the index emitter can
         // skip indexes on views (those require views to exist first + indexed-
@@ -87,10 +94,18 @@ internal static class ModelXmlReader
         // reported once.
         const int LastPhase = 9;
         for (var phase = 1; phase <= LastPhase; phase++)
-            RunPhase(elements, connection, result, phase, viewNames, isLastPhase: phase == LastPhase);
+            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, isLastPhase: phase == LastPhase);
     }
 
-    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacLoadResult result, int phase, HashSet<string> viewNames, bool isLastPhase)
+    /// <summary>
+    /// Renders <paramref name="name"/> as a bracketed T-SQL identifier with
+    /// embedded <c>]</c> doubled (real SQL Server's quoting rule). Centralized
+    /// so the synthesized <c>ALTER DATABASE [name] …</c> statements receive
+    /// the same escape treatment a hand-typed CREATE would.
+    /// </summary>
+    private static string BracketName(string name) => $"[{name.Replace("]", "]]", StringComparison.Ordinal)}]";
+
+    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, bool isLastPhase)
     {
         foreach (var element in elements)
         {
@@ -101,7 +116,7 @@ internal static class ModelXmlReader
             {
                 handled = (type, phase) switch
                 {
-                    ("SqlDatabaseOptions", 1) => Run(() => EmitDatabaseOptions(element, connection, result)),
+                    ("SqlDatabaseOptions", 1) => Run(() => EmitDatabaseOptions(element, connection, result, bracketedDb)),
                     ("SqlSchema", 1) => Run(() => EmitSchema(name, connection)),
                     ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
                     ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
@@ -228,7 +243,7 @@ internal static class ModelXmlReader
     /// else parse-and-discards but is emitted anyway so the loader's behavior
     /// stays a thin translator.
     /// </summary>
-    private static void EmitDatabaseOptions(XElement element, DbConnection connection, BacpacLoadResult result)
+    private static void EmitDatabaseOptions(XElement element, DbConnection connection, BacpacImportResult result, string bracketedDb)
     {
         using var command = connection.CreateCommand();
 
@@ -247,7 +262,7 @@ internal static class ModelXmlReader
             if (Collation.IsRecognized(collation))
             {
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-                command.CommandText = $"ALTER DATABASE [simulated] COLLATE {collation};";
+                command.CommandText = $"ALTER DATABASE {bracketedDb} COLLATE {collation};";
 #pragma warning restore CA2100
                 _ = command.ExecuteNonQuery();
             }
@@ -264,7 +279,7 @@ internal static class ModelXmlReader
             if (name is null || value is null)
                 continue;
 
-            var sql = TranslateDatabaseOption(name, value);
+            var sql = TranslateDatabaseOption(name, value, bracketedDb);
             if (sql is null)
                 continue;
 
@@ -277,41 +292,41 @@ internal static class ModelXmlReader
 
     /// <summary>
     /// Maps a single <c>&lt;Property Name=X Value=Y /&gt;</c> on
-    /// SqlDatabaseOptions to an <c>ALTER DATABASE [simulated] SET …</c>
+    /// SqlDatabaseOptions to an <c>ALTER DATABASE &lt;bracketed-db&gt; SET …</c>
     /// statement. Returns null when the property has no T-SQL shape that
     /// affects load behavior — e.g. <c>IsFullTextEnabled</c> which is a
     /// sproc-level toggle (sp_fulltext_database), or
     /// <c>QueryStoreIntervalLength</c> which is a sub-option of QUERY_STORE
     /// and only emits as part of a block.
     /// </summary>
-    private static string? TranslateDatabaseOption(string name, string value) => name switch
+    private static string? TranslateDatabaseOption(string name, string value, string bracketedDb) => name switch
     {
-        "IsAnsiNullsOn" => $"ALTER DATABASE [simulated] SET ANSI_NULLS {OnOff(value)};",
-        "IsAnsiWarningsOn" => $"ALTER DATABASE [simulated] SET ANSI_WARNINGS {OnOff(value)};",
-        "IsAnsiPaddingOn" => $"ALTER DATABASE [simulated] SET ANSI_PADDING {OnOff(value)};",
-        "IsArithAbortOn" => $"ALTER DATABASE [simulated] SET ARITHABORT {OnOff(value)};",
-        "IsConcatNullYieldsNullOn" => $"ALTER DATABASE [simulated] SET CONCAT_NULL_YIELDS_NULL {OnOff(value)};",
-        "IsNumericRoundAbortOn" => $"ALTER DATABASE [simulated] SET NUMERIC_ROUNDABORT {OnOff(value)};",
-        "IsQuotedIdentifierOn" => $"ALTER DATABASE [simulated] SET QUOTED_IDENTIFIER {OnOff(value)};",
-        "IsTornPageProtectionOn" => $"ALTER DATABASE [simulated] SET TORN_PAGE_DETECTION {OnOff(value)};",
-        "TemporalHistoryRetentionEnabled" => $"ALTER DATABASE [simulated] SET TEMPORAL_HISTORY_RETENTION {OnOff(value)};",
-        "IsAcceleratedDatabaseRecoveryOn" => $"ALTER DATABASE [simulated] SET ACCELERATED_DATABASE_RECOVERY = {OnOff(value)};",
-        "IsOptimizedLockingOn" => $"ALTER DATABASE [simulated] SET OPTIMIZED_LOCKING = {OnOff(value)};",
-        "IsReadCommittedSnapshot" => $"ALTER DATABASE [simulated] SET READ_COMMITTED_SNAPSHOT {OnOff(value)};",
+        "IsAnsiNullsOn" => $"ALTER DATABASE {bracketedDb} SET ANSI_NULLS {OnOff(value)};",
+        "IsAnsiWarningsOn" => $"ALTER DATABASE {bracketedDb} SET ANSI_WARNINGS {OnOff(value)};",
+        "IsAnsiPaddingOn" => $"ALTER DATABASE {bracketedDb} SET ANSI_PADDING {OnOff(value)};",
+        "IsArithAbortOn" => $"ALTER DATABASE {bracketedDb} SET ARITHABORT {OnOff(value)};",
+        "IsConcatNullYieldsNullOn" => $"ALTER DATABASE {bracketedDb} SET CONCAT_NULL_YIELDS_NULL {OnOff(value)};",
+        "IsNumericRoundAbortOn" => $"ALTER DATABASE {bracketedDb} SET NUMERIC_ROUNDABORT {OnOff(value)};",
+        "IsQuotedIdentifierOn" => $"ALTER DATABASE {bracketedDb} SET QUOTED_IDENTIFIER {OnOff(value)};",
+        "IsTornPageProtectionOn" => $"ALTER DATABASE {bracketedDb} SET TORN_PAGE_DETECTION {OnOff(value)};",
+        "TemporalHistoryRetentionEnabled" => $"ALTER DATABASE {bracketedDb} SET TEMPORAL_HISTORY_RETENTION {OnOff(value)};",
+        "IsAcceleratedDatabaseRecoveryOn" => $"ALTER DATABASE {bracketedDb} SET ACCELERATED_DATABASE_RECOVERY = {OnOff(value)};",
+        "IsOptimizedLockingOn" => $"ALTER DATABASE {bracketedDb} SET OPTIMIZED_LOCKING = {OnOff(value)};",
+        "IsReadCommittedSnapshot" => $"ALTER DATABASE {bracketedDb} SET READ_COMMITTED_SNAPSHOT {OnOff(value)};",
         // Enum-shaped options. RecoveryMode: 1=FULL, 2=BULK_LOGGED, 3=SIMPLE.
-        "RecoveryMode" => $"ALTER DATABASE [simulated] SET RECOVERY {RecoveryMode(value)};",
+        "RecoveryMode" => $"ALTER DATABASE {bracketedDb} SET RECOVERY {RecoveryMode(value)};",
         // IsCursorDefaultScopeGlobal: True → GLOBAL, False → LOCAL.
-        "IsCursorDefaultScopeGlobal" => $"ALTER DATABASE [simulated] SET CURSOR_DEFAULT {(IsTrue(value) ? "GLOBAL" : "LOCAL")};",
+        "IsCursorDefaultScopeGlobal" => $"ALTER DATABASE {bracketedDb} SET CURSOR_DEFAULT {(IsTrue(value) ? "GLOBAL" : "LOCAL")};",
         // TARGET_RECOVERY_TIME requires a unit; bacpac always stores SECONDS.
-        "TargetRecoveryTimePeriod" => $"ALTER DATABASE [simulated] SET TARGET_RECOVERY_TIME = {value} SECONDS;",
+        "TargetRecoveryTimePeriod" => $"ALTER DATABASE {bracketedDb} SET TARGET_RECOVERY_TIME = {value} SECONDS;",
         // QueryStoreDesiredState: 0=OFF, 1=READ_ONLY, 2=READ_WRITE, 3=ERROR.
         // The simulator's QUERY_STORE parser accepts ON/OFF + sub-options; emit
         // the matching toggle. Sub-options (interval length, capture mode etc.)
         // are bacpac metadata-only — the simulator doesn't act on them, so
         // they're elided.
         "QueryStoreDesiredState" => value == "0"
-            ? "ALTER DATABASE [simulated] SET QUERY_STORE = OFF;"
-            : "ALTER DATABASE [simulated] SET QUERY_STORE = ON;",
+            ? $"ALTER DATABASE {bracketedDb} SET QUERY_STORE = OFF;"
+            : $"ALTER DATABASE {bracketedDb} SET QUERY_STORE = ON;",
         // Sub-options of QUERY_STORE — already covered by the desired-state
         // emit above. The simulator doesn't enforce their values.
         "QueryStoreIntervalLength" => null,
@@ -413,7 +428,7 @@ internal static class ModelXmlReader
     /// linear-scan regardless). UNIQUE / CHECK / FK on table types aren't
     /// exercised by WWI and aren't translated here.
     /// </summary>
-    private static void EmitTableType(XElement element, string? qualifiedName, DbConnection connection, BacpacLoadResult result)
+    private static void EmitTableType(XElement element, string? qualifiedName, DbConnection connection, BacpacImportResult result)
     {
         if (string.IsNullOrEmpty(qualifiedName))
             throw new InvalidDataException("bacpac: SqlTableType element missing Name attribute.");
@@ -570,13 +585,13 @@ internal static class ModelXmlReader
     /// Emits <c>CREATE TABLE [schema].[name] (col1 TYPE [IDENTITY] [ROWGUIDCOL] [NULL|NOT NULL], …)</c>
     /// for a <c>SqlTable</c> element. Only <c>SqlSimpleColumn</c> entries are
     /// translated in this phase; <c>SqlComputedColumn</c> entries land on
-    /// <see cref="BacpacLoadResult.Skipped"/> (a follow-up phase ties them
+    /// <see cref="BacpacImportResult.Skipped"/> (a follow-up phase ties them
     /// into the same CREATE TABLE via the simulator's <c>AS &lt;expr&gt; [PERSISTED]</c>
     /// computed-column grammar). Constraints (PK / UQ / FK / CHECK / DEFAULT)
     /// arrive as separate top-level Elements; they layer onto the table later
     /// via <c>ALTER TABLE … ADD CONSTRAINT</c>.
     /// </summary>
-    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacLoadResult result)
+    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacImportResult result)
     {
         if (string.IsNullOrEmpty(qualifiedName))
             throw new InvalidDataException("bacpac: SqlTable element missing Name attribute.");
@@ -670,7 +685,7 @@ internal static class ModelXmlReader
     /// <c>[dbo].[Flag]</c>) rather than a built-in (<c>[int]</c> with
     /// <c>ExternalSource="BuiltIns"</c>). UDDT-aliased columns use a
     /// 1-byte-prefix wire format in BCP regardless of nullability — see
-    /// <see cref="BacpacLoadResult.TableColumnIsAlias"/>.
+    /// <see cref="BacpacImportResult.TableColumnIsAlias"/>.
     /// </summary>
     private static bool IsAliasTypedColumn(XElement columnElement)
     {
@@ -692,7 +707,7 @@ internal static class ModelXmlReader
     /// <c>IsRowGuidColumn=True</c>; the explicit NULL/NOT NULL marker comes
     /// from <c>IsNullable</c> (default True per probe).
     /// </summary>
-    private static string TranslateSimpleColumn(XElement columnElement, string? qualifiedColumnName, BacpacLoadResult result)
+    private static string TranslateSimpleColumn(XElement columnElement, string? qualifiedColumnName, BacpacImportResult result)
     {
         if (string.IsNullOrEmpty(qualifiedColumnName))
             throw new InvalidDataException("bacpac: SqlSimpleColumn missing Name attribute.");
@@ -1033,7 +1048,7 @@ internal static class ModelXmlReader
         _ = command.ExecuteNonQuery();
     }
 
-    private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacLoadResult result)
+    private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacImportResult result)
     {
         var tableName = tableElement.Attribute("Name")?.Value;
         if (string.IsNullOrEmpty(tableName))
@@ -1096,7 +1111,7 @@ internal static class ModelXmlReader
     /// segment. SqlTableBase resolves to TABLE or VIEW depending on whether
     /// the host name appears in <paramref name="viewNames"/>.
     /// </summary>
-    private static void EmitExtendedProperty(XElement element, string? elementName, DbConnection connection, HashSet<string> viewNames, BacpacLoadResult result)
+    private static void EmitExtendedProperty(XElement element, string? elementName, DbConnection connection, HashSet<string> viewNames, BacpacImportResult result)
     {
         if (string.IsNullOrEmpty(elementName))
             throw new InvalidDataException("bacpac: SqlExtendedProperty missing Name attribute.");
@@ -1333,7 +1348,7 @@ internal static class ModelXmlReader
     /// FunctionBody relationship. The emitter concatenates HeaderContents +
     /// body verbatim and runs the result through the simulator's parser.
     /// </summary>
-    private static void EmitProgrammableObject(XElement element, string? name, DbConnection connection, BacpacLoadResult result, string objectType, string bodyPropertyName)
+    private static void EmitProgrammableObject(XElement element, string? name, DbConnection connection, BacpacImportResult result, string objectType, string bodyPropertyName)
     {
         if (string.IsNullOrEmpty(name))
             throw new InvalidDataException($"bacpac: {objectType} missing Name attribute.");
@@ -1390,7 +1405,7 @@ internal static class ModelXmlReader
     /// Skipped — indexed views need view support + SCHEMABINDING machinery
     /// the simulator doesn't model.
     /// </summary>
-    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, HashSet<string> viewNames, BacpacLoadResult result)
+    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, HashSet<string> viewNames, BacpacImportResult result)
     {
         if (string.IsNullOrEmpty(indexName))
             throw new InvalidDataException("bacpac: SqlIndex missing Name attribute.");

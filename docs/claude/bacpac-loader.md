@@ -1,20 +1,30 @@
 # BACPAC loader
 
-`Simulation.FromBacpac(string path, out BacpacLoadResult diagnostics)` + Stream overload load a `.bacpac` end-to-end. The implementation is a **translator**, not a second object-construction pipeline: emit T-SQL `CREATE …` from `model.xml`, feed it through the existing parser, then load BCP data files into the resulting tables.
+`Simulation.ImportBacpac` loads a `.bacpac` end-to-end. The implementation is a **translator**, not a second object-construction pipeline: emit T-SQL `CREATE …` from `model.xml`, feed it through the existing parser, then load BCP data files into the resulting tables.
 
 ## Public surface
 
 ```csharp
-public static Simulation FromBacpac(string path, out BacpacLoadResult diagnostics);
-public static Simulation FromBacpac(Stream stream, out BacpacLoadResult diagnostics);
+// Add a new Database to a Simulation. Default target name:
+// Path.GetFileNameWithoutExtension(path) for the file overload, "simulated"
+// for the stream overload. Throws InvalidOperationException if a database
+// of that name already exists (DACFx-style create-only).
+public void ImportBacpac(string path, out BacpacImportResult result, BacpacImportOptions? options = null);
+public void ImportBacpac(Stream stream, out BacpacImportResult result, BacpacImportOptions? options = null);
 ```
 
-`BacpacLoadResult` is public; `BacpacSkipped` is public:
+`BacpacImportOptions` carries `string? DatabaseName` (null → derive default per overload) and `int MaxDegreeOfParallelism = -1` (`-1` = `Environment.ProcessorCount`, matching `ParallelOptions`). It's a sealed `record class` so callers can `options with { … }`; passing the whole `options` argument as `null` is equivalent to passing `new BacpacImportOptions()`.
+
+`BacpacImportResult` is public; `BacpacSkipped` is public:
 - `IReadOnlyList<BacpacSkipped> Skipped` — per-element load failures + intentional non-fatal skips
 - `IReadOnlyList<string> Warnings` — degradation notices (e.g. unrecognized collation falls back to default)
 - `IReadOnlyDictionary<string, int> ElementCounts` — model.xml census, useful for cross-checking against the source bacpac
 - Internal mutators (`AddSkipped` / `AddWarning` / `IncrementElementCount` / `AddToElementCount`) are loader-only.
 - `TableColumnIsAlias` stays internal.
+
+### Default-database & connection routing
+
+`Simulation`'s ctor leaves `Databases` empty. `SimulatedDbConnection`'s ctor resolves `CurrentDatabase` in three tiers: (1) `"simulated"` if present; (2) lazy-create `"simulated"` when `Databases` is empty (so `new Simulation().ExecuteScalar(...)` still just works); (3) the alphabetically-first existing database otherwise. The lazy-create makes `new Simulation().ImportBacpac(stream, out _)` succeed against a fresh simulation — the stream-default `"simulated"` name has nothing to collide with until the first connection materializes the seed. Once a connection has opened (or an `ImportBacpac` has landed a database named `"simulated"`), a subsequent default-name stream import collides and throws — correct create-only behavior. `sys.databases` iterates every hosted database regardless of which one a given connection points at; `USE <db>` isn't wired up yet, so cross-database querying through a single connection isn't possible beyond catalog-view inspection.
 
 ## Resilient-loader contract
 
@@ -25,7 +35,8 @@ Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and 
 - **`BacpacReader.cs`** — OPC zip walker, dispatches to model + data readers
 - **`ModelXmlReader.cs`** — `model.xml` → DDL emitter (the 9-phase dispatcher)
 - **`BcpRowReader.cs`** — `*.BCP` → row decoder (the wire-format matrix below)
-- **`BacpacLoadResult.cs`** — diagnostics carrier
+- **`BacpacImportResult.cs`** — diagnostics carrier
+- **`BacpacImportOptions.cs`** — target-database-name + parallelism options
 - **`HierarchyIdWireDecoder.cs`** — see [`hierarchyid.md`](hierarchyid.md)
 - **`SpatialWkbDecoder.cs`** — see [`spatial.md`](spatial.md)
 
