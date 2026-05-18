@@ -29,12 +29,11 @@ namespace SqlServerSimulator;
 ///     <c>starea</c> all raise method-not-found errors on real SQL Server.
 ///   </item>
 /// </list>
-/// Tests use bracket-delimited identifiers (<c>[ｓys]</c>) or string
-/// literals (<c>'Ｕ'</c>) to feed fullwidth-Latin input through the
-/// tokenizer; the simulator's tokenizer entry-point char class is
-/// ASCII-only for bare identifiers (separate gap — see the matching
-/// follow-up task), so bare-fullwidth-identifier shapes can't be
-/// exercised yet.
+/// Tests exercise bare-identifier fullwidth Latin where the regime is
+/// identifier resolution, and string-literal fullwidth where the input is
+/// a quoted argument value. Supplementary-plane characters (surrogate
+/// pairs) are rejected at the tokenizer entry in both real SQL Server
+/// (Msg 102 near <c>0xd835</c>) and the simulator — by design.
 /// </summary>
 [TestClass]
 public sealed class NameComparisonRegimeTests
@@ -42,19 +41,19 @@ public sealed class NameComparisonRegimeTests
     // ===== Regime 1: identifier resolution — fullwidth ACCEPTED =====
 
     [TestMethod]
-    public void Regime1_CatalogView_BracketedFullwidthSchema_Resolves()
+    public void Regime1_CatalogView_FullwidthSchema_Resolves()
         => IsGreaterThanOrEqualTo(0, (int)new Simulation().ExecuteScalar(
-            "select count(*) from [ｓys].tables")!);
+            "select count(*) from ｓys.tables")!);
 
     [TestMethod]
-    public void Regime1_CatalogView_BracketedFullwidthObject_Resolves()
+    public void Regime1_CatalogView_FullwidthObject_Resolves()
         => IsGreaterThanOrEqualTo(0, (int)new Simulation().ExecuteScalar(
-            "select count(*) from sys.[ｔables]")!);
+            "select count(*) from sys.ｔables")!);
 
     [TestMethod]
-    public void Regime1_InformationSchema_BracketedFullwidthSchema_Resolves()
+    public void Regime1_InformationSchema_FullwidthSchema_Resolves()
         => IsGreaterThanOrEqualTo(0, (int)new Simulation().ExecuteScalar(
-            "select count(*) from [ｉnformation_schema].tables")!);
+            "select count(*) from ｉnformation_schema.tables")!);
 
     [TestMethod]
     public void Regime1_ObjectIdTypeFilter_FullwidthU_Resolves()
@@ -75,17 +74,17 @@ public sealed class NameComparisonRegimeTests
     }
 
     [TestMethod]
-    public void Regime1_ReservedSchemaName_BracketedFullwidthSys_RejectedAsReserved()
-        => new Simulation().AssertSqlError("create schema [ｓys]", 2760);
+    public void Regime1_ReservedSchemaName_FullwidthSys_RejectedAsReserved()
+        => new Simulation().AssertSqlError("create schema ｓys", 2760);
 
     [TestMethod]
-    public void Regime1_TriggerBody_BracketedFullwidthInsertedReference_Resolves()
+    public void Regime1_TriggerBody_FullwidthInsertedReference_Resolves()
     {
         var sim = new Simulation();
         sim.ExecuteBatches(
             "create table dbo.regime1_t (id int)",
             "create trigger dbo.regime1_tr on dbo.regime1_t after insert as " +
-            "insert into dbo.regime1_t (id) select id + 1000 from [ｉnserted]");
+            "insert into dbo.regime1_t (id) select id + 1000 from ｉnserted");
         _ = sim.ExecuteNonQuery("insert dbo.regime1_t values (1)");
         AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.regime1_t"));
         AreEqual(1001, sim.ExecuteScalar("select id from dbo.regime1_t where id >= 1000"));
@@ -103,31 +102,26 @@ public sealed class NameComparisonRegimeTests
     }
 
     [TestMethod]
-    public void Regime1_SystemProcName_BracketedFullwidthSpAddextendedproperty_Dispatches()
+    public void Regime1_SystemProcName_FullwidthSpAddextendedproperty_Dispatches()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(
-            "exec [ｓp_addextendedproperty] @name=N'p2', @value=N'v2', " +
+            "exec ｓp_addextendedproperty @name=N'p2', @value=N'v2', " +
             "@level0type=N'SCHEMA', @level0name=N'dbo'");
         AreEqual("v2", sim.ExecuteScalar(
             "select cast(value as nvarchar(100)) from sys.extended_properties where name='p2'"));
     }
 
     [TestMethod]
-    public void Regime1_OutputClause_BracketedFullwidthInsertedQualifier_Resolves()
+    public void Regime1_OutputClause_FullwidthInsertedQualifier_Resolves()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.regime1_o (id int, v int)");
         AreEqual(42, sim.ExecuteScalar(
-            "insert dbo.regime1_o output [ｉnserted].v values (1, 42)"));
+            "insert dbo.regime1_o output ｉnserted.v values (1, 42)"));
     }
 
     // ===== Regime 2: parser grammar tokens — fullwidth REJECTED =====
-    //
-    // These tests use ASCII-only inputs that the simulator already rejects
-    // correctly; they're regression markers asserting the OrdinalIgnoreCase
-    // dispatch keeps narrow-keyword semantics. Fullwidth-input variants are
-    // blocked by the same tokenizer gap (parser keywords aren't bracketed).
 
     [TestMethod]
     public void Regime2_TableHint_UnknownName_UnrecognizedHint()
@@ -135,8 +129,17 @@ public sealed class NameComparisonRegimeTests
             "select * from sys.tables with (BOGUS)", 321);
 
     [TestMethod]
+    public void Regime2_TableHint_FullwidthNolock_UnrecognizedHint()
+        => new Simulation().AssertSqlError(
+            "select * from sys.tables with (Ｎolock)", 321);
+
+    [TestMethod]
     public void Regime2_SetLockTimeout_UnknownOption_UnrecognizedSetOption()
         => new Simulation().AssertSqlError("set BOGUS_OPTION 1000", 195);
+
+    [TestMethod]
+    public void Regime2_SetLockTimeout_FullwidthOption_UnrecognizedSetOption()
+        => new Simulation().AssertSqlError("set ｌock_timeout 1000", 195);
 
     // ===== Regime 3: CLR reflection — case-SENSITIVE =====
 
@@ -170,10 +173,6 @@ public sealed class NameComparisonRegimeTests
         => _ = Throws<Exception>(() => new Simulation().ExecuteScalar(
             "select geography::Point(0, 0, 4326).tostring()"));
 
-    /// <summary>
-    /// After Ordinal: lowercase "point" doesn't match canonical "Point".
-    /// Today (OrdinalIgnoreCase): accepted, runs, returns a value.
-    /// </summary>
     [TestMethod]
     public void Regime3_SpatialStatic_LowercasePoint_NotResolved()
         => _ = Throws<Exception>(() => new Simulation().ExecuteScalar(

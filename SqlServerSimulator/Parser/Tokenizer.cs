@@ -49,6 +49,8 @@ static class Tokenizer
             '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or ':' or '=' or '&' or '|' or '^' or '>' or '<' or '!' => new Operator(command, index++),
             '$' when IsDollarAction(command, index) => ParseDollarAction(command, ref index),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
+            // Non-ASCII BMP letters (fullwidth, accented, Greek, CJK, ...) start identifiers on real SQL Server — probe-confirmed against SQL Server 2025.
+            var c when char.IsLetter(c) => ParseUnquotedStringOrReservedKeyword(command, ref index),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
