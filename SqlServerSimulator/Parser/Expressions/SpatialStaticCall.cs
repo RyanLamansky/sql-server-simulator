@@ -81,8 +81,8 @@ internal sealed class SpatialStaticCall : Expression
             var b = this.arguments[1].Run(runtime);
             if (a.IsNull || b.IsNull)
                 return SqlValue.Null(this.type);
-            var x = a.Type == SqlType.Float ? a.AsDouble : (double)a.AsDecimal;
-            var y = b.Type == SqlType.Float ? b.AsDouble : (double)b.AsDecimal;
+            var x = a.CoerceTo(SqlType.Float).AsDouble;
+            var y = b.CoerceTo(SqlType.Float).AsDouble;
             var wkt = $"POINT ({x} {y})";
             return this.type == SqlType.Geography ? SqlValue.FromGeography(wkt) : SqlValue.FromGeometry(wkt);
         }

@@ -1003,6 +1003,11 @@ internal sealed partial class Selection
                     for (var ci = 0; ci < catalogColumnNames.Length; ci++)
                         catalogColumnNames[ci] = catalogView.Columns[ci].Name;
                     var catalogAlias = ConsumeOptionalAlias(context);
+                    // Catalog views are read-only metadata so the hints have no
+                    // semantic effect, but the name-validation gate must still
+                    // run (probe-confirmed against SQL Server 2025: Msg 321 on
+                    // an unrecognized hint name applies to sys.* targets too).
+                    _ = ParseOptionalTableHints(context);
                     return new FromSource(
                         qualifier: catalogAlias ?? catalogView.Name,
                         columnNames: catalogColumnNames,

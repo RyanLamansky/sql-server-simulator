@@ -37,7 +37,7 @@ namespace SqlServerSimulator;
 /// exercised yet.
 /// </summary>
 [TestClass]
-public sealed class CollationDispatchTests
+public sealed class NameComparisonRegimeTests
 {
     // ===== Regime 1: identifier resolution — fullwidth ACCEPTED =====
 
@@ -132,7 +132,7 @@ public sealed class CollationDispatchTests
     [TestMethod]
     public void Regime2_TableHint_UnknownName_UnrecognizedHint()
         => new Simulation().AssertSqlError(
-            "create table dbo.regime2_h (id int); select * from dbo.regime2_h with (BOGUS)", 321);
+            "select * from sys.tables with (BOGUS)", 321);
 
     [TestMethod]
     public void Regime2_SetLockTimeout_UnknownOption_UnrecognizedSetOption()
@@ -163,12 +163,12 @@ public sealed class CollationDispatchTests
     [TestMethod]
     public void Regime3_SpatialMethod_CanonicalToString_Resolves()
         => AreEqual("POINT (0 0)", new Simulation().ExecuteScalar(
-            "select geography::Point(0.0, 0.0, 4326).ToString()"));
+            "select geography::Point(0, 0, 4326).ToString()"));
 
     [TestMethod]
     public void Regime3_SpatialMethod_LowercaseTostring_NotResolved()
         => _ = Throws<Exception>(() => new Simulation().ExecuteScalar(
-            "select geography::Point(0.0, 0.0, 4326).tostring()"));
+            "select geography::Point(0, 0, 4326).tostring()"));
 
     /// <summary>
     /// After Ordinal: lowercase "point" doesn't match canonical "Point".
@@ -177,5 +177,5 @@ public sealed class CollationDispatchTests
     [TestMethod]
     public void Regime3_SpatialStatic_LowercasePoint_NotResolved()
         => _ = Throws<Exception>(() => new Simulation().ExecuteScalar(
-            "select cast(geography::point(0.0, 0.0, 4326) as varchar(50))"));
+            "select cast(geography::point(0, 0, 4326) as varchar(50))"));
 }
