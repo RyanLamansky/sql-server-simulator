@@ -83,6 +83,11 @@ public class BacpacImportTests
         IsTrue(SimulationHasDatabase(sim, "ops"));
         IsFalse(SimulationHasDatabase(sim, "simulated"));
         AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.databases"));
+        // Both imported databases are queryable via cross-database 3-part
+        // names (CrossDatabaseTests covers USE + joins + DML rejection in
+        // depth; here we just confirm the per-database row count surfaces).
+        AreEqual(3, sim.ExecuteScalar("SELECT COUNT(*) FROM sales.dbo.Customer"));
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM ops.dbo.Order_"));
     }
 
     [TestMethod]

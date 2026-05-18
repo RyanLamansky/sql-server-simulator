@@ -30,6 +30,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        context.Batch.RejectCrossDatabaseMutation(leadingIdent);
 
         View? leadingView = null;
         HeapTable? leadingTable;

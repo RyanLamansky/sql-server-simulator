@@ -18,6 +18,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        context.Batch.RejectCrossDatabaseMutation(destinationName);
 
         // Advance past the target name so the optional WITH (hint …) clause
         // has a token to peek at. INSERT accepts the WITH form only — the

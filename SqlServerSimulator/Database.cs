@@ -46,9 +46,9 @@ internal sealed class Database
     public Database(string name)
     {
         this.Name = name;
-        this.Schemas[DefaultSchemaName] = new Schema(DefaultSchemaName, DboSchemaId);
-        this.Schemas["INFORMATION_SCHEMA"] = new Schema("INFORMATION_SCHEMA", InformationSchemaId);
-        this.Schemas["sys"] = new Schema("sys", SysSchemaId);
+        this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
+        this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId);
+        this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId);
         // Pre-seed the fixed database principals so AW's GRANT … TO public
         // resolves at parse time without a CREATE USER / CREATE ROLE
         // prologue. Principal ids match real SQL Server's convention

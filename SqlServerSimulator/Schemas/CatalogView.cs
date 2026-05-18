@@ -27,11 +27,22 @@ namespace SqlServerSimulator.Schemas;
 /// metadata without bookkeeping.
 /// </para>
 /// </remarks>
-internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchContext, IEnumerable<SqlValue[]>> rowGenerator)
+internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchContext, Database, IEnumerable<SqlValue[]>> rowGenerator)
 {
     public readonly string Name = name;
 
     public readonly HeapColumn[] Columns = columns;
 
-    public readonly Func<BatchContext, IEnumerable<SqlValue[]>> RowGenerator = rowGenerator;
+    /// <summary>
+    /// Row generator. The <see cref="Database"/> parameter is the database
+    /// the view was scoped to — for an unqualified or 2-part reference
+    /// (<c>sys.tables</c>) it's the connection's
+    /// <see cref="SimulatedDbConnection.CurrentDatabase"/>; for a 3-part
+    /// reference (<c>WideWorldImporters.sys.tables</c>) it's whichever
+    /// <see cref="Database"/> the qualifier resolved to in
+    /// <see cref="Simulation.Databases"/>. Enumerators must read from this
+    /// parameter rather than <c>batch.CurrentDatabase</c> so cross-database
+    /// catalog inspection lands correctly.
+    /// </summary>
+    public readonly Func<BatchContext, Database, IEnumerable<SqlValue[]>> RowGenerator = rowGenerator;
 }

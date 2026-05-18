@@ -28,6 +28,16 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 
     /// <summary>
+    /// Mimics SQL Server error 911: <c>USE &lt;db&gt;</c> targets a database
+    /// that doesn't exist in this <see cref="Simulation"/>. Wording
+    /// probe-confirmed against SQL Server 2025: literal database name in
+    /// single quotes, full sentence with the "Make sure that the name is
+    /// entered correctly." suffix. Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException DatabaseDoesNotExist(string databaseName) =>
+        new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2760: a statement referenced a schema that
     /// doesn't exist (or whose principal the caller can't access). Probe-
     /// confirmed wording — real SQL Server uses the same Msg / wording for

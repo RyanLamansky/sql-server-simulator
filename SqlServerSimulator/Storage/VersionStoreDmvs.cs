@@ -26,14 +26,15 @@ internal static class VersionStoreDmvs
     /// observable behavior — same tx → contiguous numbering — without
     /// adding per-HV storage.
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmTranVersionStore(BatchContext batch)
+    internal static IEnumerable<SqlValue[]> EnumerateDmTranVersionStore(BatchContext batch, Database database)
     {
+        _ = batch;
         var dbId = SqlValue.FromInt16(1);
         var zeroByte = SqlValue.FromByte(0);
         var zeroSmallInt = SqlValue.FromInt16(0);
         var nullVarbinary = SqlValue.Null(VarbinarySqlType.MaxForm);
         var perTxCounter = new Dictionary<long, int>();
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -80,9 +81,9 @@ internal static class VersionStoreDmvs
     /// chains yield a zero row so the DMV is never row-empty for a
     /// versioning-enabled database — matching real SQL Server's posture.
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmTranVersionStoreSpaceUsage(BatchContext batch)
+    internal static IEnumerable<SqlValue[]> EnumerateDmTranVersionStoreSpaceUsage(BatchContext batch, Database database)
     {
-        var database = batch.CurrentDatabase;
+        _ = batch;
         long totalBytes = 0;
         foreach (var schema in database.Schemas.Values)
         {
@@ -121,14 +122,15 @@ internal static class VersionStoreDmvs
     /// / <c>elapsed_time_seconds</c> are zero since the simulator doesn't
     /// instrument those metrics.
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmTranActiveSnapshotDatabaseTransactions(BatchContext batch)
+    internal static IEnumerable<SqlValue[]> EnumerateDmTranActiveSnapshotDatabaseTransactions(BatchContext batch, Database database)
     {
+        _ = batch;
         var trueBit = SqlValue.FromBoolean(true);
         var nullBigInt = SqlValue.Null(SqlType.BigInt);
         var zeroInt = SqlValue.FromInt32(0);
         var zeroBig = SqlValue.FromInt64(0);
         var zeroFloat = SqlValue.FromDouble(0);
-        foreach (var kv in batch.CurrentDatabase.ActiveSnapshotTxs)
+        foreach (var kv in database.ActiveSnapshotTxs)
         {
             var tx = kv.Key;
             if (tx.SnapshotXid is not { } xid)

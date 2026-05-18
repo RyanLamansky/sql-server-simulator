@@ -125,8 +125,8 @@ internal static class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
         };
-        var schemasView = new CatalogView("schemas", schemasColumns, batch =>
-            batch.CurrentDatabase.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
+        var schemasView = new CatalogView("schemas", schemasColumns, (batch, database) =>
+            database.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
             {
                 SqlValue.FromSystemName(s.Name),
                 SqlValue.FromInt32(s.SchemaId),
@@ -165,8 +165,8 @@ internal static class BuiltInResources
             new("temporal_type_desc", SqlType.NVarchar, 60, true),
             new("history_table_id", SqlType.Int32, null, true),
         };
-        var tablesView = new CatalogView("tables", tablesColumns, batch =>
-            batch.CurrentDatabase.Schemas.Values
+        var tablesView = new CatalogView("tables", tablesColumns, (batch, database) =>
+            database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
                 .OrderBy(t => t.ObjectId)
                 .Select(t =>
@@ -221,8 +221,8 @@ internal static class BuiltInResources
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
         };
-        var objectsView = new CatalogView("objects", objectsColumns, batch =>
-            EnumerateObjects(batch, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
+        var objectsView = new CatalogView("objects", objectsColumns, (batch, database) =>
+            EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -249,8 +249,8 @@ internal static class BuiltInResources
             new("is_computed", SqlType.Bit, null, false),
             new("collation_name", SqlType.SystemName, 128, true),
         };
-        var columnsView = new CatalogView("columns", columnsColumns, batch =>
-            EnumerateColumns(batch, defaultCollation, nullCollation));
+        var columnsView = new CatalogView("columns", columnsColumns, (batch, database) =>
+            EnumerateColumns(batch, database, defaultCollation, nullCollation));
 
         // INFORMATION_SCHEMA.TABLES: ISO-standard 4-column shape. TABLE_TYPE
         // is 'BASE TABLE' for every user table; 'VIEW' (not modeled) would be
@@ -264,8 +264,8 @@ internal static class BuiltInResources
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("TABLE_TYPE", SqlType.Varchar, 10, true),
         };
-        var isTablesView = new CatalogView("TABLES", isTablesColumns, batch =>
-            EnumerateInformationSchemaTables(batch, baseTable, viewTableType));
+        var isTablesView = new CatalogView("TABLES", isTablesColumns, (batch, database) =>
+            EnumerateInformationSchemaTables(batch, database, baseTable, viewTableType));
 
         // INFORMATION_SCHEMA.COLUMNS: ISO-standard 23-column shape. Tooling
         // does SELECT * here so the full column set ships even though many
@@ -302,8 +302,8 @@ internal static class BuiltInResources
             new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
             new("DOMAIN_NAME", SqlType.SystemName, 128, true),
         };
-        var isColumnsView = new CatalogView("COLUMNS", isColumnsColumns, batch =>
-            EnumerateInformationSchemaColumns(batch, defaultCollation, unicodeCs, isoCs, radix10, radix2));
+        var isColumnsView = new CatalogView("COLUMNS", isColumnsColumns, (batch, database) =>
+            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2));
 
         // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Lists
         // only the schemas the simulator actually models — no padding for
@@ -322,10 +322,10 @@ internal static class BuiltInResources
             new("DEFAULT_CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
         };
-        var isSchemataView = new CatalogView("SCHEMATA", isSchemataColumns, batch =>
-            batch.CurrentDatabase.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
+        var isSchemataView = new CatalogView("SCHEMATA", isSchemataColumns, (batch, database) =>
+            database.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
             {
-                SqlValue.FromSystemName(batch.CurrentDatabase.Name),
+                SqlValue.FromSystemName(database.Name),
                 SqlValue.FromSystemName(s.Name),
                 SqlValue.FromSystemName(s.Name),
                 nullSysName,
@@ -386,8 +386,8 @@ internal static class BuiltInResources
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
         };
-        var proceduresView = new CatalogView("procedures", proceduresColumns, batch =>
-            EnumerateProcedures(batch, charTwo, notMsShipped));
+        var proceduresView = new CatalogView("procedures", proceduresColumns, (batch, database) =>
+            EnumerateProcedures(batch, database, charTwo, notMsShipped));
 
         // INFORMATION_SCHEMA.ROUTINES: ISO-shape view listing both procedures
         // and functions. The simulator ships the load-bearing column subset:
@@ -408,8 +408,8 @@ internal static class BuiltInResources
             new("ROUTINE_TYPE", SqlType.Varchar, 9, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
         };
-        var isRoutinesView = new CatalogView("ROUTINES", isRoutinesColumns, batch =>
-            EnumerateInformationSchemaRoutines(batch, procedureRoutineType, functionRoutineType, tableDataType));
+        var isRoutinesView = new CatalogView("ROUTINES", isRoutinesColumns, (batch, database) =>
+            EnumerateInformationSchemaRoutines(batch, database, procedureRoutineType, functionRoutineType, tableDataType));
 
         // INFORMATION_SCHEMA.PARAMETERS: ISO-shape view listing parameters
         // for procedures and functions. PARAMETER_MODE is 'IN' / 'OUT' /
@@ -430,8 +430,8 @@ internal static class BuiltInResources
             new("DATA_TYPE", SqlType.SystemName, 128, true),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
         };
-        var isParametersView = new CatalogView("PARAMETERS", isParametersColumns, batch =>
-            EnumerateInformationSchemaParameters(batch, modeIn, modeInOut));
+        var isParametersView = new CatalogView("PARAMETERS", isParametersColumns, (batch, database) =>
+            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut));
 
         // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
         // confirmed: VIEW_DEFINITION is NULL only for WITH ENCRYPTION views
@@ -451,8 +451,8 @@ internal static class BuiltInResources
             new("CHECK_OPTION", SqlType.Varchar, 7, true),
             new("IS_UPDATABLE", SqlType.Varchar, 2, true),
         };
-        var isViewsView = new CatalogView("VIEWS", isViewsColumns, batch =>
-            EnumerateInformationSchemaViews(batch, checkOptionNone, checkOptionCascade, isUpdatableNo));
+        var isViewsView = new CatalogView("VIEWS", isViewsColumns, (batch, database) =>
+            EnumerateInformationSchemaViews(batch, database, checkOptionNone, checkOptionCascade, isUpdatableNo));
 
         // sys.types: per-database list of system + user-defined types. Probe-
         // confirmed shipped subset: name / system_type_id / user_type_id /
@@ -541,8 +541,8 @@ internal static class BuiltInResources
             new("is_instead_of_trigger", SqlType.Bit, null, false),
             new("is_not_for_replication", SqlType.Bit, null, false),
         };
-        var triggersView = new CatalogView("triggers", triggersColumns, batch =>
-            EnumerateSysTriggers(batch, charTwo, parentClassObjectColumn, parentClassObjectColumnDesc));
+        var triggersView = new CatalogView("triggers", triggersColumns, (batch, database) =>
+            EnumerateSysTriggers(batch, database, charTwo, parentClassObjectColumn, parentClassObjectColumnDesc));
 
         // sys.foreign_keys: probe-confirmed 21-column shape against SQL
         // Server 2025 (2026-05-13). EF Core reads name / parent_object_id /
@@ -603,8 +603,8 @@ internal static class BuiltInResources
             new("DATA_TYPE", SqlType.NVarchar, 128, true),
         };
         var tableTypeDataType = SqlValue.FromNVarchar("table type");
-        var isDomainsView = new CatalogView("DOMAINS", isDomainsColumns, batch =>
-            EnumerateInformationSchemaDomains(batch, tableTypeDataType));
+        var isDomainsView = new CatalogView("DOMAINS", isDomainsColumns, (batch, database) =>
+            EnumerateInformationSchemaDomains(batch, database, tableTypeDataType));
 
         // sys.check_constraints: probe-confirmed 13-column shape (a subset
         // of sys.objects + the check-specific columns). Used by EF Migrations'
@@ -1134,7 +1134,7 @@ internal static class BuiltInResources
     /// <c>is_user_defined = 1</c>, <c>is_table_type = 1</c>,
     /// <c>is_nullable = 0</c>.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysTypes(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysTypes(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -1159,7 +1159,7 @@ internal static class BuiltInResources
             ];
         }
         // User-defined table types: probe-confirmed system_type_id 243.
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
@@ -1180,7 +1180,7 @@ internal static class BuiltInResources
         // an alias of int, 231 for an alias of nvarchar), `is_user_defined`
         // is true, `is_table_type` is false, and `is_nullable` reflects the
         // alias-defined NULL/NOT NULL marker from CREATE TYPE.
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
@@ -1210,9 +1210,9 @@ internal static class BuiltInResources
     /// <c>sql_variant</c>; for AW's all-nvarchar workload, this is a
     /// lossless surfacing.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysExtendedProperties(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysExtendedProperties(Parser.BatchContext batch, Database database)
     {
-        foreach (var kvp in batch.CurrentDatabase.ExtendedProperties)
+        foreach (var kvp in database.ExtendedProperties)
         {
             var key = kvp.Key;
             var classDesc = key.Class switch
@@ -1234,10 +1234,10 @@ internal static class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateSysTableTypes(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysTableTypes(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
@@ -1276,7 +1276,7 @@ internal static class BuiltInResources
     /// <c>delete_referential_action</c> / <c>update_referential_action</c>
     /// use the integer codes 0=NO_ACTION, 1=CASCADE, 2=SET_NULL, 3=SET_DEFAULT.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysForeignKeys(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysForeignKeys(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -1288,7 +1288,7 @@ internal static class BuiltInResources
         // referenced PK / UQ ordinal in real SQL Server typically lands at 1
         // because PK gets a clustered index id of 1).
         var keyIndexId = SqlValue.FromInt32(1);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in schema.HeapTables.Values)
@@ -1330,9 +1330,9 @@ internal static class BuiltInResources
     /// <c>parent_column_id</c> and <c>referenced_column_id</c> are 1-based
     /// (probe-confirmed) — matches the <c>sys.columns.column_id</c> convention.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysForeignKeyColumns(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysForeignKeyColumns(Parser.BatchContext batch, Database database)
     {
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -1370,7 +1370,7 @@ internal static class BuiltInResources
     /// table-level. <c>definition</c> is currently null — the simulator
     /// stores the parsed predicate tree, not source text (documented quirk).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysCheckConstraints(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysCheckConstraints(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -1378,7 +1378,7 @@ internal static class BuiltInResources
         var ckType = SqlValue.FromChar(CharSqlType.Get(2), "C ");
         var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var falseDbCollation = SqlValue.FromBoolean(false);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in schema.HeapTables.Values)
@@ -1429,7 +1429,7 @@ internal static class BuiltInResources
     /// every table. <c>type</c> = <c>PK</c> / <c>UQ</c>;
     /// <c>type_desc</c> = <c>PRIMARY_KEY_CONSTRAINT</c> / <c>UNIQUE_CONSTRAINT</c>.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysKeyConstraints(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysKeyConstraints(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -1439,7 +1439,7 @@ internal static class BuiltInResources
         var uqType = SqlValue.FromChar(charTwo, "UQ");
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
         var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in schema.HeapTables.Values)
@@ -1482,14 +1482,14 @@ internal static class BuiltInResources
     /// both populate; inline-without-CONSTRAINT-name auto-generates with
     /// <see cref="DefaultConstraint.IsSystemNamed"/> = true.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysDefaultConstraints(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysDefaultConstraints(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var dfType = SqlValue.FromChar(CharSqlType.Get(2), "D ");
         var dfTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in schema.HeapTables.Values)
@@ -1532,7 +1532,7 @@ internal static class BuiltInResources
     /// (the simulator allocates object ids monotonically, so this matches
     /// declaration order).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysIndexes(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysIndexes(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -1544,7 +1544,7 @@ internal static class BuiltInResources
         var clusteredDesc = SqlValue.FromNVarchar("CLUSTERED");
         var nonClusteredDesc = SqlValue.FromNVarchar("NONCLUSTERED");
         var primaryDataSpace = SqlValue.FromInt32(1);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -1663,13 +1663,13 @@ internal static class BuiltInResources
     /// the key column count. HEAP rows (index_id = 0) don't appear here —
     /// real SQL Server's catalog omits them and the simulator matches.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysIndexColumns(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysIndexColumns(Parser.BatchContext batch, Database database)
     {
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var zeroByte = SqlValue.FromByte(0);
         var nullByte = SqlValue.Null(SqlType.TinyInt);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -1794,10 +1794,12 @@ internal static class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
         Parser.BatchContext batch,
+        Database database,
         SqlType charTwo,
         SqlValue parentClassObjectColumn,
         SqlValue parentClassObjectColumnDesc)
     {
+        _ = batch;
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         // 'TR' / 'SQL_TRIGGER' — matches Trigger.ObjectTypeCode /
@@ -1808,7 +1810,7 @@ internal static class BuiltInResources
         var parentClassDatabase = SqlValue.FromByte(0);
         var parentClassDatabaseDesc = SqlValue.FromNVarchar("DATABASE");
         var parentIdZero = SqlValue.FromInt32(0);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
             {
@@ -1833,7 +1835,7 @@ internal static class BuiltInResources
         // (DATABASE), parent_class_desc='DATABASE', parent_id=0 — probe-
         // confirmed against SQL Server 2025's sys.triggers for AW's
         // [ddlDatabaseTriggerLog].
-        foreach (var ddl in batch.CurrentDatabase.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+        foreach (var ddl in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
         {
             var createDate = SqlValue.FromDateTime(ddl.CreateDate);
             yield return [
@@ -1853,7 +1855,7 @@ internal static class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateSysDatabasePrincipals(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabasePrincipals(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -1865,7 +1867,7 @@ internal static class BuiltInResources
         // 4-letter padding to fit char(2) — the type column is 2 bytes in
         // real SQL Server's catalog. SqlValue.FromChar pads to declared length.
         var charTwo = SqlType.GetChar(2);
-        foreach (var p in batch.CurrentDatabase.Principals.Values.OrderBy(p => p.PrincipalId))
+        foreach (var p in database.Principals.Values.OrderBy(p => p.PrincipalId))
         {
             var createDate = SqlValue.FromDateTime(p.CreateDate);
             yield return [
@@ -1885,11 +1887,11 @@ internal static class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateSysDatabasePermissions(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabasePermissions(Parser.BatchContext batch, Database database)
     {
         var charTwo = SqlType.GetChar(2);
         var charOne = SqlType.GetChar(1);
-        foreach (var perm in batch.CurrentDatabase.Permissions)
+        foreach (var perm in database.Permissions)
         {
             var classDesc = perm.Class switch
             {
@@ -1922,9 +1924,9 @@ internal static class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateSysDatabaseRoleMembers(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabaseRoleMembers(Parser.BatchContext batch, Database database)
     {
-        foreach (var (roleId, memberId) in batch.CurrentDatabase.RoleMembers)
+        foreach (var (roleId, memberId) in database.RoleMembers)
         {
             yield return [
                 SqlValue.FromInt32(roleId),
@@ -1941,14 +1943,14 @@ internal static class BuiltInResources
     /// storage. <c>is_importing</c> is always false (no concurrent bacpac
     /// import to observe).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysFullTextCatalogs(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysFullTextCatalogs(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPath = SqlValue.Null(SqlType.NVarchar);
         var nullDataSpaceId = SqlValue.Null(SqlType.Int32);
         var nullFileId = SqlValue.Null(SqlType.Int32);
-        foreach (var cat in batch.CurrentDatabase.FullTextCatalogs.Values.OrderBy(c => c.Id))
+        foreach (var cat in database.FullTextCatalogs.Values.OrderBy(c => c.Id))
         {
             yield return [
                 SqlValue.FromInt32(cat.Id),
@@ -1972,7 +1974,7 @@ internal static class BuiltInResources
     /// <c>change_tracking_state</c> = 'A' (AUTO) / 'AUTO';
     /// <c>crawl_type</c> = 'F' (FULL) / 'FULL'.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch, Database database)
     {
         var charOneType = CharSqlType.Get(1);
         var trueBit = SqlValue.FromBoolean(true);
@@ -1982,7 +1984,7 @@ internal static class BuiltInResources
         var fullDesc = SqlValue.FromNVarchar("FULL");
         var nullDate = SqlValue.Null(SqlType.DateTime);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -2015,10 +2017,10 @@ internal static class BuiltInResources
     /// expose the WITH STATISTICAL_SEMANTICS option at the column level
     /// since the index parser parse-and-discards it).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexColumns(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexColumns(Parser.BatchContext batch, Database database)
     {
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -2045,9 +2047,9 @@ internal static class BuiltInResources
     /// COLLECTION grammar doesn't support an AUTHORIZATION clause and
     /// every collection's principal_id field is left null at construction.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysXmlSchemaCollections(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysXmlSchemaCollections(Parser.BatchContext batch, Database database)
     {
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var coll in schema.XmlSchemaCollections.Values.OrderBy(c => c.Id))
             {
@@ -2070,7 +2072,7 @@ internal static class BuiltInResources
     /// is_primary_key column surfaces always false — primary xml indexes
     /// aren't xml-typed PKs.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysXmlIndexes(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysXmlIndexes(Parser.BatchContext batch, Database database)
     {
         var charOneType = CharSqlType.Get(1);
         var typeCode = SqlValue.FromByte(3);
@@ -2085,7 +2087,7 @@ internal static class BuiltInResources
         var nullChar = SqlValue.Null(charOneType);
         var nullDesc = SqlValue.Null(SqlType.NVarchar);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -2138,7 +2140,7 @@ internal static class BuiltInResources
     /// defaults so applications reading the column shape don't see NULL where
     /// they expect a bool.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysSpatialIndexes(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysSpatialIndexes(Parser.BatchContext batch, Database database)
     {
         var typeCode = SqlValue.FromByte(4);
         var typeDesc = SqlValue.FromNVarchar("SPATIAL");
@@ -2149,7 +2151,7 @@ internal static class BuiltInResources
         var nullDesc = SqlValue.Null(NVarcharSqlType.MaxForm);
         var geometryTypeDesc = SqlValue.FromNVarchar("GEOMETRY");
         var geographyTypeDesc = SqlValue.FromNVarchar("GEOGRAPHY");
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -2194,13 +2196,13 @@ internal static class BuiltInResources
     /// in the DDL surface as NULL. The level_*_grid_desc columns mirror
     /// SQL Server's enumeration ('LOW' / 'MEDIUM' / 'HIGH' for codes 1/2/3).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysSpatialIndexTessellations(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysSpatialIndexTessellations(Parser.BatchContext batch, Database database)
     {
         var nullDouble = SqlValue.Null(SqlType.Float);
         var nullShort = SqlValue.Null(SqlType.SmallInt);
         var nullDesc = SqlValue.Null(SqlType.NVarchar);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
             {
@@ -2246,7 +2248,7 @@ internal static class BuiltInResources
     /// surfaces an empty view (no rows yielded) so the column shape is
     /// reachable but the WKT-laden seed payload doesn't ship.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysSpatialReferenceSystems(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysSpatialReferenceSystems(Parser.BatchContext batch, Database database)
     {
         _ = batch;
         yield break;
@@ -2260,7 +2262,7 @@ internal static class BuiltInResources
     /// <see cref="Database"/>'s live <c>AllowSnapshotIsolation</c> /
     /// <c>ReadCommittedSnapshot</c> flags.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch, Database database)
     {
         // Stable ordering: by name. Real SQL Server orders sys.databases by
         // database_id; the simulator doesn't allocate per-database ids yet,
@@ -2293,19 +2295,19 @@ internal static class BuiltInResources
     /// collation names round-trip through <see cref="Database.CollationName"/>
     /// / <see cref="HeapColumn.Collation"/>.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateFnHelpCollations(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateFnHelpCollations(Parser.BatchContext batch, Database database)
     {
         _ = batch;
         foreach (var entry in Collation.Recognized.OrderBy(e => e.Key, StringComparer.Ordinal))
             yield return [SqlValue.FromSystemName(entry.Key), SqlValue.FromNVarchar(entry.Value)];
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch, Database database)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var seq in schema.Sequences.Values.OrderBy(s => s.ObjectId))
@@ -2348,10 +2350,11 @@ internal static class BuiltInResources
         _ => (0, 0),
     };
 
-    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, SqlValue tableTypeDataType)
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, Database database, SqlValue tableTypeDataType)
     {
-        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
@@ -2377,15 +2380,17 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateProcedures(
         Parser.BatchContext batch,
+        Database database,
         SqlType charTwo,
         SqlValue notMsShipped)
     {
+        _ = batch;
         // 'P ' / 'SQL_STORED_PROCEDURE' — matches Procedure.ObjectTypeCode /
         // Procedure.ObjectTypeDescription, kept as local constants here to
         // avoid one SqlValue allocation per row.
         var procType = SqlValue.FromChar(charTwo, "P ");
         var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
             {
@@ -2412,13 +2417,15 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaRoutines(
         Parser.BatchContext batch,
+        Database database,
         SqlValue procedureRoutineType,
         SqlValue functionRoutineType,
         SqlValue tableDataType)
     {
-        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
         var nullDataType = SqlValue.Null(SqlType.SystemName);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -2457,12 +2464,14 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaParameters(
         Parser.BatchContext batch,
+        Database database,
         SqlValue modeIn,
         SqlValue modeInOut)
     {
-        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -2509,10 +2518,10 @@ internal static class BuiltInResources
     /// schema. <c>is_date_correlation_view</c> is always False (the feature
     /// isn't modeled).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateViews(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateViews(Parser.BatchContext batch, Database database)
     {
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
             {
@@ -2538,12 +2547,14 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaViews(
         Parser.BatchContext batch,
+        Database database,
         SqlValue checkOptionNone,
         SqlValue checkOptionCascade,
         SqlValue isUpdatableNo)
     {
-        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
@@ -2569,13 +2580,13 @@ internal static class BuiltInResources
     /// (the columns surface in <c>sys.columns</c> instead). Probe-confirmed
     /// against SQL Server 2025.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch)
+    private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch, Database database)
     {
         var emptyName = SqlValue.FromSystemName("");
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
             {
@@ -2649,21 +2660,23 @@ internal static class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateColumns(
         Parser.BatchContext batch,
+        Database database,
         SqlValue defaultCollation,
         SqlValue nullCollation)
     {
+        _ = batch;
         var falseBit = SqlValue.FromBoolean(false);
         // The per-database default collation flows from CurrentDatabase.
         // The captured defaultCollation arg is a legacy fallback; today the
         // active database's CollationName drives the value, with per-column
         // overrides taking precedence when present.
-        var dbDefaultCollation = SqlValue.FromSystemName(batch.CurrentDatabase.CollationName);
+        var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
         _ = defaultCollation;
         SqlValue CollationFor(HeapColumn c) =>
             c.Type.Category != SqlTypeCategory.String ? nullCollation
             : c.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
             : dbDefaultCollation;
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
             {
@@ -2769,10 +2782,11 @@ internal static class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaTables(Parser.BatchContext batch, SqlValue baseTable, SqlValue viewTableType)
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaTables(Parser.BatchContext batch, Database database, SqlValue baseTable, SqlValue viewTableType)
     {
-        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
@@ -2798,13 +2812,15 @@ internal static class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaColumns(
         Parser.BatchContext batch,
+        Database database,
         SqlValue defaultCollation,
         SqlValue unicodeCs,
         SqlValue isoCs,
         SqlValue radix10,
         SqlValue radix2)
     {
-        var catalog = SqlValue.FromSystemName(batch.CurrentDatabase.Name);
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
         var nullString = SqlValue.Null(SqlType.NVarchar);
         var nullInt32 = SqlValue.Null(SqlType.Int32);
         var nullInt16 = SqlValue.Null(SqlType.SmallInt);
@@ -2812,9 +2828,9 @@ internal static class BuiltInResources
         var nullSysName = SqlValue.Null(SqlType.SystemName);
         var yesNullable = SqlValue.FromVarchar("YES");
         var noNullable = SqlValue.FromVarchar("NO");
-        var dbDefaultCollation = SqlValue.FromSystemName(batch.CurrentDatabase.CollationName);
+        var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
         _ = defaultCollation;
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
@@ -2992,13 +3008,15 @@ internal static class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateObjects(
         Parser.BatchContext batch,
+        Database database,
         SqlType charTwo,
         SqlValue pkType, SqlValue pkTypeDesc,
         SqlValue uqType, SqlValue uqTypeDesc,
         SqlValue checkType, SqlValue checkTypeDesc,
         SqlValue zeroParent, SqlValue notMsShipped)
     {
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        _ = batch;
+        foreach (var schema in database.Schemas.Values)
         {
             // Schema-resident objects in ObjectId order. SchemaObject's
             // ObjectTypeCode / ObjectTypeDescription supply the discriminators,

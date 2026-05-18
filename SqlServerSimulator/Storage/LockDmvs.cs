@@ -43,7 +43,7 @@ internal static class LockDmvs
     /// <see cref="SimulatedDbConnection.WaitingOnResource"/>) appends a
     /// <c>WAIT</c> row.
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmTranLocks(BatchContext batch)
+    internal static IEnumerable<SqlValue[]> EnumerateDmTranLocks(BatchContext batch, Database database)
     {
         var sim = batch.Connection.Simulation;
         var dbId = SqlValue.FromInt32(1);
@@ -54,7 +54,7 @@ internal static class LockDmvs
 
         var waitsByResource = SnapshotWaiters(sim);
 
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
             foreach (var t in schema.HeapTables.Values)
             {
@@ -110,8 +110,9 @@ internal static class LockDmvs
     /// <c>wait_type</c> is <c>LCK_M_&lt;mode&gt;</c> matching SQL Server's
     /// convention.
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmOsWaitingTasks(BatchContext batch)
+    internal static IEnumerable<SqlValue[]> EnumerateDmOsWaitingTasks(BatchContext batch, Database database)
     {
+        _ = database;
         var sim = batch.Connection.Simulation;
         foreach (var conn in sim.SnapshotConnections())
         {

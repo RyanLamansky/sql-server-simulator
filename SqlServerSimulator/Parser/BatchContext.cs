@@ -1237,14 +1237,41 @@ internal sealed class BatchContext
 
     /// <summary>
     /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
-    /// DROP / TRUNCATE / SELECT-INTO target lives in. Returns false when the
-    /// schema (the segment to the left of the leaf) doesn't exist, when a
-    /// 3-part name's db segment doesn't match <see cref="CurrentDatabase"/>,
-    /// or when the name is 4-part (linked-server names aren't modeled — the
+    /// DROP / TRUNCATE / SELECT-INTO / FROM target lives in. Returns false
+    /// when the schema doesn't exist, when a 3-part name's db segment
+    /// doesn't match any database in <see cref="Simulation.Databases"/>, or
+    /// when the name is 4-part (linked-server names aren't modeled — the
     /// simulator returns false rather than silently ignoring the server
-    /// segment). A 1-part name resolves to <see cref="Database.DefaultSchemaName"/>
-    /// (always present, so this branch never returns false).
+    /// segment). 3-part names route to the named database, enabling
+    /// cross-database SELECT / JOIN / catalog-view inspection; the
+    /// returned <see cref="Schema"/> carries its owning <see cref="Database"/>
+    /// via <see cref="Schema.Database"/> so callers (catalog-view enumerators,
+    /// constraint-violation error messages, etc.) can scope correctly.
+    /// A 1-part name resolves to the connection's <see cref="CurrentDatabase"/>
+    /// + <see cref="Database.DefaultSchemaName"/> (always present, so the
+    /// 1-part branch never returns false).
     /// </summary>
+    /// <summary>
+    /// Throws <see cref="NotSupportedException"/> when <paramref name="name"/>
+    /// is a 3-part name targeting a database other than the connection's
+    /// <see cref="CurrentDatabase"/>. Called from DML / DDL parsers that
+    /// mutate state: the simulator routes 3-part-name SELECT / JOIN /
+    /// catalog reads across databases but defers writes — trigger scoping
+    /// (a trigger fires in its owning database's name-resolution scope),
+    /// identity allocation routing, undo-log scoping, and FK validation
+    /// across DB boundaries aren't modeled yet. Callers should issue
+    /// <c>USE &lt;db&gt;</c> from the same connection and use a 1- or 2-part
+    /// name to mutate a different database.
+    /// </summary>
+    public void RejectCrossDatabaseMutation(MultiPartName name)
+    {
+        if (name.Count == 3 && !Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
+        {
+            throw new NotSupportedException(
+                $"Cross-database write to '{name}' isn't modeled. The simulator routes 3-part-name reads (SELECT / JOIN / catalog views) across databases but defers cross-database INSERT / UPDATE / DELETE / MERGE / TRUNCATE / DDL — trigger scope swapping, identity allocation routing, and FK validation across DB boundaries are pending. Issue USE [{name[0]}] from this connection and reference the target with a 1- or 2-part name.");
+        }
+    }
+
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)
@@ -1252,13 +1279,21 @@ internal sealed class BatchContext
             schema = null;
             return false;
         }
-        if (name.Count == 3 && !Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
+        var database = this.CurrentDatabase;
+        if (name.Count == 3)
         {
-            schema = null;
-            return false;
+            // 3-part name: route to the named database (which may be the
+            // current one or any other instance-hosted database). Missing
+            // database returns false — the caller surfaces Msg 208 the same
+            // way a missing table does, matching real SQL Server.
+            if (!this.Connection.Simulation.Databases.TryGetValue(name[0], out database))
+            {
+                schema = null;
+                return false;
+            }
         }
         var schemaName = name.Count >= 2 ? name.ImmediateQualifier! : Database.DefaultSchemaName;
-        return this.CurrentDatabase.Schemas.TryGetValue(schemaName, out schema);
+        return database.Schemas.TryGetValue(schemaName, out schema);
     }
 
     /// <summary>
@@ -1386,7 +1421,14 @@ internal sealed class BatchContext
     /// either the <c>sys</c> or <c>INFORMATION_SCHEMA</c> schema. Returns
     /// true for 2-part names <c>{sys|INFORMATION_SCHEMA}.&lt;view&gt;</c>
     /// (case-insensitive) whose leaf matches a registered view, or for
-    /// 3-part names whose db segment matches <see cref="CurrentDatabase"/>.
+    /// 3-part names whose db segment names a database in
+    /// <see cref="Simulation.Databases"/>. <paramref name="targetDatabase"/>
+    /// receives the database the view is scoped to — the connection's
+    /// <see cref="CurrentDatabase"/> for 2-part references, the resolved
+    /// instance-hosted database for 3-part references. The catalog-view row
+    /// generator reads from this rather than <c>batch.CurrentDatabase</c>
+    /// so <c>WideWorldImporters.sys.tables</c> projects WWI's tables even
+    /// when the connection is pointed at a different DB.
     /// Used by the FROM parser to route catalog-view references to virtual
     /// projections before falling through to the regular
     /// <see cref="TryResolveTable"/> path. The registry is keyed by the
@@ -1394,12 +1436,17 @@ internal sealed class BatchContext
     /// <c>"INFORMATION_SCHEMA.COLUMNS"</c>) so one resolver can serve both
     /// schemas without per-namespace dispatch.
     /// </summary>
-    public bool TryResolveCatalogView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? view)
+    public bool TryResolveCatalogView(
+        MultiPartName name,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? view,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Database? targetDatabase)
     {
         view = null;
+        targetDatabase = null;
         if (name.Count is not (2 or 3))
             return false;
-        if (name.Count == 3 && !Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
+        targetDatabase = this.CurrentDatabase;
+        if (name.Count == 3 && !this.Connection.Simulation.Databases.TryGetValue(name[0], out targetDatabase))
             return false;
         var key = $"{name.ImmediateQualifier}.{name.Leaf}";
         return Simulation.CatalogViews.TryGetValue(key, out view);
@@ -1409,9 +1456,12 @@ internal sealed class BatchContext
     /// Parses an object name (1–4 dotted segments) at the current token,
     /// leaving the cursor on the <em>last</em> consumed name segment (matching
     /// the standard parser-context contract that every parser leaves Token on
-    /// its last consumed token). Empty segments (<c>tempdb..#foo</c>, db with
-    /// omitted schema) are tolerated — they're silently compressed out, so
-    /// <c>tempdb..#foo</c> returns a 2-part name (<c>tempdb</c> + <c>#foo</c>).
+    /// its last consumed token). An empty middle segment (<c>db..table</c>,
+    /// <c>tempdb..#foo</c>) substitutes <see cref="Database.DefaultSchemaName"/>
+    /// so <c>db..table</c> resolves identically to <c>db.dbo.table</c> —
+    /// real SQL Server uses the login's default schema (probe-confirmed); the
+    /// simulator has no per-login schema and routes everything through
+    /// <c>dbo</c>, so the substitution is exact for the modeled case.
     /// Used everywhere a table-shaped name appears (CREATE / DROP / TRUNCATE
     /// / SELECT-FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT)
     /// so the multi-part-name grammar lives in one place. The 5th segment
@@ -1466,7 +1516,15 @@ internal sealed class BatchContext
             }
             if (context.Token is Operator { Character: '.' } && context.MoveNext() && context.Token is Name afterEmpty)
             {
-                name = name.WithAddedPart(afterEmpty.Value);
+                // Empty middle segment (`db..table`). Substitute the default
+                // schema name so the resolver sees `db.dbo.table` — real
+                // SQL Server uses the login's default schema; the simulator
+                // has no per-login schema and routes everything through dbo.
+                // The pattern is required for cross-database short-form
+                // queries to land in the correct database (the leading
+                // segment routes to that DB rather than being interpreted
+                // as a schema in the current DB).
+                name = name.WithAddedPart(Database.DefaultSchemaName).WithAddedPart(afterEmpty.Value);
                 continue;
             }
             throw SimulatedSqlException.SyntaxErrorNear(context);

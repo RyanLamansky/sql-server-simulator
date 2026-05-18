@@ -15,8 +15,19 @@ namespace SqlServerSimulator;
 /// shape is in place so they can graft on without touching the resolution
 /// rule again.
 /// </summary>
-internal sealed class Schema(string name, int schemaId)
+internal sealed class Schema(Database database, string name, int schemaId)
 {
+    /// <summary>
+    /// Owning <see cref="Database"/>. Back-pointer threaded through resolvers
+    /// so a caller holding a <see cref="Schema"/> reference can tell which
+    /// database it belongs to without keeping the database alongside —
+    /// required for cross-database name resolution (3-part names route to a
+    /// different <see cref="Database"/>) and for catalog-view enumerators
+    /// that scope their output to the resolved database, not the connection's
+    /// <see cref="SimulatedDbConnection.CurrentDatabase"/>.
+    /// </summary>
+    public readonly Database Database = database;
+
     public readonly string Name = name;
 
     /// <summary>

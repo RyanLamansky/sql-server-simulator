@@ -46,6 +46,7 @@ partial class Simulation
     {
         context.MoveNextRequired();
         var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        context.Batch.RejectCrossDatabaseMutation(leadingIdent);
 
         // View target: route to base table with view-aware column lookups,
         // visibility filtering, and (optional) WITH CHECK OPTION enforcement.

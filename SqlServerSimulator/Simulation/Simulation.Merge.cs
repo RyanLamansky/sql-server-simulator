@@ -45,6 +45,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        context.Batch.RejectCrossDatabaseMutation(destinationName);
         var destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
             ? table
             : throw (BatchContext.IsTableVariableName(destinationName.Leaf)

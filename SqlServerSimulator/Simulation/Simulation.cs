@@ -657,6 +657,12 @@ public sealed partial class Simulation
                     connection.LastStatementRowCount = 0;
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.Use }:
+                ParseUseStatement(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Begin }:
                 // Peek the token after BEGIN to disambiguate transaction-start
                 // (BEGIN TRAN / BEGIN TRANSACTION / BEGIN DISTRIBUTED TRAN) from
@@ -759,7 +765,7 @@ public sealed partial class Simulation
                 or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
                 or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
                 or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
-                or Keyword.Truncate or Keyword.Grant or Keyword.Revoke or Keyword.Deny
+                or Keyword.Truncate or Keyword.Use or Keyword.Grant or Keyword.Revoke or Keyword.Deny
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.

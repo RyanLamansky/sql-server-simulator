@@ -158,7 +158,7 @@ internal sealed partial class Selection
     /// in the same batch (CREATE TABLE, CREATE SCHEMA, DROP TABLE) appear
     /// immediately.
     /// </summary>
-    internal static Selection ForCatalogView(CatalogView view)
+    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase)
     {
         var schema = new SqlType[view.Columns.Length];
         var columnNames = new string[view.Columns.Length];
@@ -172,7 +172,7 @@ internal sealed partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, _) => view.RowGenerator(batch).Select(values => RowEncoder.EncodeRow(view.Columns, values)));
+            rowSource: (batch, _) => view.RowGenerator(batch, targetDatabase).Select(values => RowEncoder.EncodeRow(view.Columns, values)));
     }
 
     /// <summary>
@@ -997,7 +997,7 @@ internal sealed partial class Selection
                 // metadata at execution time — wrapped as a LateralPlan so
                 // each Execute re-runs the generator and picks up CREATE /
                 // DROP changes from earlier in the same batch.
-                if (context.Batch.TryResolveCatalogView(objectName, out var catalogView))
+                if (context.Batch.TryResolveCatalogView(objectName, out var catalogView, out var catalogTargetDb))
                 {
                     var catalogColumnNames = new string[catalogView.Columns.Length];
                     for (var ci = 0; ci < catalogColumnNames.Length; ci++)
@@ -1011,7 +1011,7 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForCatalogView(catalogView));
+                        lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb));
                 }
 
                 // View resolution: `FROM schema.view [alias]` or
