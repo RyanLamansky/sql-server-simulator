@@ -413,21 +413,29 @@ public sealed class AggregateTests
             "Operand data type bit is invalid for max operator.");
 
     /// <summary>
-    /// Real SQL Server's Windows-100 CI_AS treats apostrophe as primary-
-    /// weight zero; "'Aiea" sorts among "A…" entries, so MIN of
-    /// ('Aaronsburg', "'Aiea") is "Aaronsburg" — apostrophe is ignored
-    /// for ordering. Probe-confirmed against WideWorldImporters'
-    /// Application.Cities table (collation Latin1_General_100_CI_AS).
+    /// Under <c>SQL_Latin1_General_CP1_CI_AS</c> (the simulator's default),
+    /// apostrophe is meaningful in sort — its CP1252 code point 0x27 sorts
+    /// before all letters, so MIN of ('Aaronsburg', "'Aiea") is "'Aiea".
+    /// The Windows-style primary-weight-zero treatment that would push
+    /// "'Aiea" alongside "A…" entries is exclusive to
+    /// <c>Latin1_General_100_CI_AS</c> / <c>Latin1_General_CI_AS</c> — see
+    /// <c>SqlServerSimulator.Tests.Internal/CollationTests.cs</c> for the
+    /// direct exercise of that algorithm. Data routing still goes through
+    /// the database default regardless of declared column collation (see
+    /// <c>docs/claude/database-options.md</c>).
     /// </summary>
     [TestMethod]
-    public void Min_String_IgnoresLeadingApostrophe_InSortOrder()
-        => AreEqual("Aaronsburg", new Simulation().ExecuteScalar(
+    public void Min_String_SqlCollation_ApostropheSortsBeforeLetters()
+        => AreEqual("'Aiea", new Simulation().ExecuteScalar(
             "create table t (s nvarchar(40) not null); insert t values (N'Aaronsburg'), (N'''Aiea'); select min(s) from t"));
 
     /// <summary>
-    /// Equality (=) IS strict about apostrophe even in Windows-100 CI_AS
-    /// — the primary-weight-zero treatment only applies to sort/MIN/MAX.
-    /// 'OBrien' = 'O''Brien' returns 0.
+    /// Equality (=) on the default <c>SQL_Latin1_General_CP1_CI_AS</c> is
+    /// strict about apostrophe — the leading 0x27 distinguishes 'O''Brien'
+    /// from 'OBrien'. Real SQL Server's Windows-style CI_AS family also
+    /// keeps equality strict about symbols (the primary-weight-zero rule
+    /// is sort-only); the direct probe of that asymmetry lives in
+    /// <c>SqlServerSimulator.Tests.Internal/CollationTests.cs</c>.
     /// </summary>
     [TestMethod]
     public void Equality_String_DistinguishesApostrophe()
