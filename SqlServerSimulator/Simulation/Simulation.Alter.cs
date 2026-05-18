@@ -260,7 +260,7 @@ partial class Simulation
     {
         // CLEAR / CLEAR ALL — no `=`.
         var next = context.GetNextRequired();
-        if (next is UnquotedString clearToken && Collation.Default.Equals(clearToken.Value, "CLEAR"))
+        if (next is UnquotedString clearToken && clearToken.Value.Equals("CLEAR", StringComparison.OrdinalIgnoreCase))
         {
             // Optional trailing ALL.
             var checkpoint = context.SaveCheckpoint();

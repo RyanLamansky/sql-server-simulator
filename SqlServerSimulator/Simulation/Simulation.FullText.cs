@@ -25,7 +25,7 @@ partial class Simulation
         context.MoveNextRequired();
         return context.Token switch
         {
-            UnquotedString { Value: var w } when Collation.Default.Equals(w, "CATALOG")
+            UnquotedString { Value: var w } when w.Equals("CATALOG", StringComparison.OrdinalIgnoreCase)
                 => ParseCreateFullTextCatalog(context),
             ReservedKeyword { Keyword: Keyword.Index }
                 => ParseCreateFullTextIndex(context),
@@ -42,7 +42,7 @@ partial class Simulation
         context.MoveNextRequired();
         return context.Token switch
         {
-            UnquotedString { Value: var w } when Collation.Default.Equals(w, "CATALOG")
+            UnquotedString { Value: var w } when w.Equals("CATALOG", StringComparison.OrdinalIgnoreCase)
                 => ParseDropFullTextCatalog(context),
             ReservedKeyword { Keyword: Keyword.Index }
                 => ParseDropFullTextIndex(context),
@@ -88,7 +88,7 @@ partial class Simulation
                     // WITH ACCENT_SENSITIVITY = ON | OFF
                     context.MoveNextRequired();
                     if (context.Token is not UnquotedString { Value: var optName }
-                        || !Collation.Default.Equals(optName, "ACCENT_SENSITIVITY"))
+                        || !optName.Equals("ACCENT_SENSITIVITY", StringComparison.OrdinalIgnoreCase))
                     {
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
@@ -109,7 +109,7 @@ partial class Simulation
                     // statement boundary trailer or break out.
                     context.MoveNextRequired();
                     if (context.Token is UnquotedString { Value: var clause }
-                        && Collation.Default.Equals(clause, "FILEGROUP"))
+                        && clause.Equals("FILEGROUP", StringComparison.OrdinalIgnoreCase))
                     {
                         context.MoveNextRequired();
                         if (context.Token is not Name)
@@ -118,11 +118,11 @@ partial class Simulation
                         continue;
                     }
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                case UnquotedString { Value: var maybeIn } when Collation.Default.Equals(maybeIn, "IN"):
+                case UnquotedString { Value: var maybeIn } when maybeIn.Equals("IN", StringComparison.OrdinalIgnoreCase):
                     // IN PATH '…' — legacy. Skip the path literal too.
                     context.MoveNextRequired();
                     if (context.Token is UnquotedString { Value: var path }
-                        && Collation.Default.Equals(path, "PATH"))
+                        && path.Equals("PATH", StringComparison.OrdinalIgnoreCase))
                     {
                         context.MoveNextRequired();
                         if (context.Token is not Literal)
@@ -194,7 +194,7 @@ partial class Simulation
 
             // Optional TYPE COLUMN typeCol
             if (context.Token is UnquotedString { Value: var typeWord }
-                && Collation.Default.Equals(typeWord, "TYPE"))
+                && typeWord.Equals("TYPE", StringComparison.OrdinalIgnoreCase))
             {
                 context.MoveNextRequired();
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Column })
@@ -208,7 +208,7 @@ partial class Simulation
 
             // Optional LANGUAGE <lcid or name>
             if (context.Token is UnquotedString { Value: var langWord }
-                && Collation.Default.Equals(langWord, "LANGUAGE"))
+                && langWord.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase))
             {
                 context.MoveNextRequired();
                 switch (context.Token)
@@ -229,7 +229,7 @@ partial class Simulation
 
             // Optional STATISTICAL_SEMANTICS (parse-and-discard).
             if (context.Token is UnquotedString { Value: var statWord }
-                && Collation.Default.Equals(statWord, "STATISTICAL_SEMANTICS"))
+                && statWord.Equals("STATISTICAL_SEMANTICS", StringComparison.OrdinalIgnoreCase))
             {
                 context.MoveNextRequired();
             }
@@ -281,7 +281,7 @@ partial class Simulation
                     // Parse-and-discard FILEGROUP fg trailer.
                     context.MoveNextRequired();
                     if (context.Token is UnquotedString { Value: var fgWord }
-                        && Collation.Default.Equals(fgWord, "FILEGROUP"))
+                        && fgWord.Equals("FILEGROUP", StringComparison.OrdinalIgnoreCase))
                     {
                         context.MoveNextRequired();
                         if (context.Token is not Name)

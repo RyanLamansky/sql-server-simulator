@@ -47,7 +47,7 @@ partial class Simulation
 
         // Optional CONTENT / DOCUMENT discriminator.
         if (context.Token is UnquotedString { Value: var maybeKind }
-            && (Collation.Default.Equals(maybeKind, "CONTENT") || Collation.Default.Equals(maybeKind, "DOCUMENT")))
+            && (maybeKind.Equals("CONTENT", StringComparison.OrdinalIgnoreCase) || maybeKind.Equals("DOCUMENT", StringComparison.OrdinalIgnoreCase)))
         {
             context.MoveNextRequired();
         }
@@ -128,7 +128,7 @@ partial class Simulation
         // Cursor on SCHEMA reserved keyword; expect COLLECTION next. COLLECTION
         // is a bare identifier (not in the reserved list).
         context.MoveNextRequired();
-        if (context.Token is not Name { Value: var c } || !Collation.Default.Equals(c, "COLLECTION"))
+        if (context.Token is not Name { Value: var c } || !c.Equals("COLLECTION", StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
@@ -210,7 +210,7 @@ partial class Simulation
         if (!isPrimary)
         {
             // USING XML INDEX primary_name FOR {PATH | VALUE | PROPERTY}
-            if (context.Token is not UnquotedString { Value: var usingKw } || !Collation.Default.Equals(usingKw, "USING"))
+            if (context.Token is not UnquotedString { Value: var usingKw } || !usingKw.Equals("USING", StringComparison.OrdinalIgnoreCase))
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
             if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Xml })
@@ -296,7 +296,7 @@ partial class Simulation
     {
         // Cursor on SCHEMA. Advance to COLLECTION (bare identifier).
         context.MoveNextRequired();
-        if (context.Token is not Name { Value: var c } || !Collation.Default.Equals(c, "COLLECTION"))
+        if (context.Token is not Name { Value: var c } || !c.Equals("COLLECTION", StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 

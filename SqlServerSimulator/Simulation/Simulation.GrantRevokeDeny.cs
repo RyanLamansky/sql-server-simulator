@@ -156,7 +156,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
         if (kind == PermissionStatementKind.Revoke && context.Token is UnquotedString { Value: var revokeTrailer }
-            && Collation.Default.Equals(revokeTrailer, "CASCADE"))
+            && revokeTrailer.Equals("CASCADE", StringComparison.OrdinalIgnoreCase))
         {
             context.MoveNextOptional();
         }

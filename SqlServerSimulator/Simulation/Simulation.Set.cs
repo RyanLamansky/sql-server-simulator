@@ -87,7 +87,7 @@ partial class Simulation
         // Identifier / Binary option parses-and-discards (the simulator
         // doesn't model the underlying behavior). Probe-confirmed default
         // is -1 (wait forever); positive N = wait up to N ms; 0 = fail-fast.
-        if (Collation.Default.Equals(firstName, "LOCK_TIMEOUT") && !context.Batch.IsSkipping)
+        if (firstName.Equals("LOCK_TIMEOUT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
         {
             if (context.Token is Numeric { Value: { IsNull: false, Type: var t } literal } && t == SqlType.Int32)
                 context.Connection.LockTimeoutMillis = literal.AsInt32;
@@ -130,12 +130,12 @@ partial class Simulation
     private static bool TryParseSetTransactionIsolationLevel(ParserContext context)
     {
         if (context.GetNextRequired() is not UnquotedString isolation
-            || !Collation.Default.Equals(isolation.Value, "ISOLATION"))
+            || !isolation.Value.Equals("ISOLATION", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
         if (context.GetNextRequired() is not UnquotedString level
-            || !Collation.Default.Equals(level.Value, "LEVEL"))
+            || !level.Value.Equals("LEVEL", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -146,11 +146,11 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Read } =>
                 ResolveReadIsolationLevel(context),
-            UnquotedString { Value: var name } when Collation.Default.Equals(name, "REPEATABLE") =>
+            UnquotedString { Value: var name } when name.Equals("REPEATABLE", StringComparison.OrdinalIgnoreCase) =>
                 (System.Data.IsolationLevel.RepeatableRead, true),
-            UnquotedString { Value: var name } when Collation.Default.Equals(name, "SNAPSHOT") =>
+            UnquotedString { Value: var name } when name.Equals("SNAPSHOT", StringComparison.OrdinalIgnoreCase) =>
                 (System.Data.IsolationLevel.Snapshot, false),
-            UnquotedString { Value: var name } when Collation.Default.Equals(name, "SERIALIZABLE") =>
+            UnquotedString { Value: var name } when name.Equals("SERIALIZABLE", StringComparison.OrdinalIgnoreCase) =>
                 (System.Data.IsolationLevel.Serializable, false),
             _ => (System.Data.IsolationLevel.Unspecified, false),
         };
@@ -173,12 +173,12 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is UnquotedString { Value: var name })
         {
-            if (Collation.Default.Equals(name, "UNCOMMITTED"))
+            if (name.Equals("UNCOMMITTED", StringComparison.OrdinalIgnoreCase))
             {
                 context.RestoreCheckpoint(checkpoint);
                 return (System.Data.IsolationLevel.ReadUncommitted, true);
             }
-            if (Collation.Default.Equals(name, "COMMITTED"))
+            if (name.Equals("COMMITTED", StringComparison.OrdinalIgnoreCase))
             {
                 context.RestoreCheckpoint(checkpoint);
                 return (System.Data.IsolationLevel.ReadCommitted, true);

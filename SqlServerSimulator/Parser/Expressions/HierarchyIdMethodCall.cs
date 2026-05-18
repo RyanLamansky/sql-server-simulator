@@ -32,20 +32,23 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     /// <summary>
     /// Returns true if <paramref name="name"/> matches one of the modeled
-    /// hierarchyid instance method names (case-insensitive). Used by the
-    /// expression parser to decide whether to take the special method-call
-    /// path or fall through to multipart-reference handling.
+    /// hierarchyid instance method names. Comparison is ordinal
+    /// case-SENSITIVE (probe-confirmed against SQL Server 2025: hierarchyid
+    /// methods go through CLR reflection — <c>.getlevel()</c> raises
+    /// Msg 6506 even though identifier resolution elsewhere is CI). Used
+    /// by the expression parser to decide whether to take the special
+    /// method-call path or fall through to multipart-reference handling.
     /// </summary>
     public static bool IsKnownMethodName(string name) =>
         TryGetMethod(name, out _);
 
     private static bool TryGetMethod(string name, out HierarchyIdMethod method)
     {
-        if (Collation.Default.Equals(name, "GetLevel")) { method = HierarchyIdMethod.GetLevel; return true; }
-        if (Collation.Default.Equals(name, "GetAncestor")) { method = HierarchyIdMethod.GetAncestor; return true; }
-        if (Collation.Default.Equals(name, "GetDescendant")) { method = HierarchyIdMethod.GetDescendant; return true; }
-        if (Collation.Default.Equals(name, "IsDescendantOf")) { method = HierarchyIdMethod.IsDescendantOf; return true; }
-        if (Collation.Default.Equals(name, "ToString")) { method = HierarchyIdMethod.ToStringMethod; return true; }
+        if (name.Equals("GetLevel", StringComparison.Ordinal)) { method = HierarchyIdMethod.GetLevel; return true; }
+        if (name.Equals("GetAncestor", StringComparison.Ordinal)) { method = HierarchyIdMethod.GetAncestor; return true; }
+        if (name.Equals("GetDescendant", StringComparison.Ordinal)) { method = HierarchyIdMethod.GetDescendant; return true; }
+        if (name.Equals("IsDescendantOf", StringComparison.Ordinal)) { method = HierarchyIdMethod.IsDescendantOf; return true; }
+        if (name.Equals("ToString", StringComparison.Ordinal)) { method = HierarchyIdMethod.ToStringMethod; return true; }
         method = default;
         return false;
     }

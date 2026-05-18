@@ -43,11 +43,11 @@ internal sealed class HierarchyIdStaticCall : Expression
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        return Collation.Default.Equals(methodName, "Parse")
+        return methodName.Equals("Parse", StringComparison.Ordinal)
             ? arg is null
                 ? throw SimulatedSqlException.SyntaxErrorNear(context)
                 : new HierarchyIdStaticCall("Parse", arg)
-            : Collation.Default.Equals(methodName, "GetRoot")
+            : methodName.Equals("GetRoot", StringComparison.Ordinal)
                 ? arg is not null
                     ? throw SimulatedSqlException.SyntaxErrorNear(context)
                     : new HierarchyIdStaticCall("GetRoot", null)

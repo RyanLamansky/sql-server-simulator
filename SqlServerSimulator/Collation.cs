@@ -146,9 +146,11 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// weight-zero in sort. Modeled with the invariant culture's
     /// <see cref="CompareInfo"/> + <see cref="CompareOptions.IgnoreCase"/>
     /// for both <see cref="Compare"/> and <see cref="Equals"/>; this
-    /// gives full Latin-1 case folding (e.g. <c>é = É</c>) that the prior
-    /// <see cref="StringComparer.OrdinalIgnoreCase"/>-backed implementation
-    /// missed.
+    /// adds the linguistic-comparison fidelity (Unicode-normalization
+    /// equivalence between NFD and NFC forms, halfwidth/fullwidth
+    /// equivalence) that <see cref="StringComparer.OrdinalIgnoreCase"/>
+    /// lacks — both fold precomposed Latin-1 accented letters
+    /// (<c>é = É</c>) identically.
     /// </summary>
     internal sealed class SQL_Latin1_General_CP1_CI_AS : Collation
     {

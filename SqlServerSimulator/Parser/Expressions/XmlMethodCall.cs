@@ -35,11 +35,11 @@ internal sealed class XmlMethodCall : Expression
     /// throws-at-execute path instead of multipart-reference dispatch.
     /// </summary>
     public static bool IsKnownMethodName(string name) =>
-        Collation.Default.Equals(name, "value")
-        || Collation.Default.Equals(name, "nodes")
-        || Collation.Default.Equals(name, "query")
-        || Collation.Default.Equals(name, "exist")
-        || Collation.Default.Equals(name, "modify");
+        name.Equals("value", StringComparison.Ordinal)
+        || name.Equals("nodes", StringComparison.Ordinal)
+        || name.Equals("query", StringComparison.Ordinal)
+        || name.Equals("exist", StringComparison.Ordinal)
+        || name.Equals("modify", StringComparison.Ordinal);
 
     /// <summary>
     /// Parses <c>expr.MethodName(args)</c>. Cursor enters on <c>(</c>; on
@@ -79,9 +79,9 @@ internal sealed class XmlMethodCall : Expression
     /// reached at execute anyway.
     /// </summary>
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        Collation.Default.Equals(this.methodName, "exist")
+        this.methodName.Equals("exist", StringComparison.Ordinal)
             ? SqlType.Bit
-            : Collation.Default.Equals(this.methodName, "value")
+            : this.methodName.Equals("value", StringComparison.Ordinal)
                 ? NVarcharSqlType.MaxForm
                 : SqlType.Xml;
 

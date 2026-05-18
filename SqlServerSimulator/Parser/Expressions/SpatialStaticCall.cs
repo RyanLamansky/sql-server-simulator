@@ -62,8 +62,8 @@ internal sealed class SpatialStaticCall : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        if (Collation.Default.Equals(this.method, "Parse")
-            || Collation.Default.Equals(this.method, "STGeomFromText"))
+        if (this.method.Equals("Parse", StringComparison.Ordinal)
+            || this.method.Equals("STGeomFromText", StringComparison.Ordinal))
         {
             if (this.arguments.Length == 0)
                 throw new NotSupportedException($"{this.type}::{this.method} requires at least one argument.");
@@ -75,7 +75,7 @@ internal sealed class SpatialStaticCall : Expression
                 : throw new NotSupportedException($"{this.type}::{this.method} expects a string argument; got {wktValue.Type}.");
             return this.type == SqlType.Geography ? SqlValue.FromGeography(wkt) : SqlValue.FromGeometry(wkt);
         }
-        if (Collation.Default.Equals(this.method, "Point") && this.arguments.Length == 3)
+        if (this.method.Equals("Point", StringComparison.Ordinal) && this.arguments.Length == 3)
         {
             var a = this.arguments[0].Run(runtime);
             var b = this.arguments[1].Run(runtime);

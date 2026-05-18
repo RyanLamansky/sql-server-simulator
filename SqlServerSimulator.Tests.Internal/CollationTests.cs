@@ -74,7 +74,9 @@ public sealed class CollationTests
     [TestMethod]
     public void Sql_LatinOneCaseFolding_FoldsAccentedLetters()
     {
-        // OrdinalIgnoreCase couldn't do this — CompareInfo with IgnoreCase can.
+        // OrdinalIgnoreCase folds these too — what CompareInfo with
+        // IgnoreCase adds over Ordinal is NFD/NFC equivalence and
+        // halfwidth/fullwidth folding, not Latin-1 case folding.
         IsTrue(Collation.Default.Equals("é", "É"));
         IsTrue(Collation.Default.Equals("àÀáÁ", "ÀàÁá"));
         AreEqual(0, Collation.Default.Compare("café", "CAFÉ"));

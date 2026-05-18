@@ -337,49 +337,48 @@ internal sealed partial class Selection
         // a write (row-X tx-scoped). TABLOCK / TABLOCKX escalates to table
         // granularity. READPAST skips blocked rows instead of waiting.
         // Everything else parses-and-discards.
-        var nameText = sourceSpan.ToString();
-        if (Collation.Default.Equals(nameText, "NOLOCK") || Collation.Default.Equals(nameText, "READUNCOMMITTED"))
+        if (sourceSpan.Equals("NOLOCK", StringComparison.OrdinalIgnoreCase) || sourceSpan.Equals("READUNCOMMITTED", StringComparison.OrdinalIgnoreCase))
         {
             info.NoLock = true;
         }
-        else if (Collation.Default.Equals(nameText, "HOLDLOCK")
-            || Collation.Default.Equals(nameText, "SERIALIZABLE"))
+        else if (sourceSpan.Equals("HOLDLOCK", StringComparison.OrdinalIgnoreCase)
+            || sourceSpan.Equals("SERIALIZABLE", StringComparison.OrdinalIgnoreCase))
         {
             info.Serializable = true;
         }
-        else if (Collation.Default.Equals(nameText, "REPEATABLEREAD"))
+        else if (sourceSpan.Equals("REPEATABLEREAD", StringComparison.OrdinalIgnoreCase))
         {
             info.Repeatable = true;
         }
-        else if (Collation.Default.Equals(nameText, "UPDLOCK"))
+        else if (sourceSpan.Equals("UPDLOCK", StringComparison.OrdinalIgnoreCase))
         {
             info.UpdLock = true;
         }
-        else if (Collation.Default.Equals(nameText, "XLOCK"))
+        else if (sourceSpan.Equals("XLOCK", StringComparison.OrdinalIgnoreCase))
         {
             info.XLock = true;
         }
-        else if (Collation.Default.Equals(nameText, "READPAST"))
+        else if (sourceSpan.Equals("READPAST", StringComparison.OrdinalIgnoreCase))
         {
             info.ReadPast = true;
         }
-        else if (Collation.Default.Equals(nameText, "TABLOCK"))
+        else if (sourceSpan.Equals("TABLOCK", StringComparison.OrdinalIgnoreCase))
         {
             info.TabLock = true;
         }
-        else if (Collation.Default.Equals(nameText, "TABLOCKX"))
+        else if (sourceSpan.Equals("TABLOCKX", StringComparison.OrdinalIgnoreCase))
         {
             info.TabLockX = true;
         }
-        else if (Collation.Default.Equals(nameText, "INDEX"))
+        else if (sourceSpan.Equals("INDEX", StringComparison.OrdinalIgnoreCase))
         {
             info.IndexHint = true;
             context.MoveNextRequired();
             ConsumeIndexHintArguments(context, ref info);
             return;
         }
-        else if (Collation.Default.Equals(nameText, "FORCESEEK")
-            || Collation.Default.Equals(nameText, "FORCESCAN"))
+        else if (sourceSpan.Equals("FORCESEEK", StringComparison.OrdinalIgnoreCase)
+            || sourceSpan.Equals("FORCESCAN", StringComparison.OrdinalIgnoreCase))
         {
             info.IndexHint = true;
         }

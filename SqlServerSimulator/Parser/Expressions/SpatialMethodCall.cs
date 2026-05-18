@@ -27,7 +27,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class SpatialMethodCall : Expression
 {
-    private static readonly HashSet<string> KnownMethodNames = new(Collation.Default)
+    private static readonly HashSet<string> KnownMethodNames = new(StringComparer.Ordinal)
     {
         "ToString",
         "STAsText",
@@ -142,7 +142,7 @@ internal sealed class SpatialMethodCall : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        if (Collation.Default.Equals(this.methodName, "ToString"))
+        if (this.methodName.Equals("ToString", StringComparison.Ordinal))
         {
             var value = this.target.Run(runtime);
             return value.IsNull
@@ -173,55 +173,55 @@ internal sealed class SpatialMethodCall : Expression
     }
 
     private static bool IsStringResult(string name) =>
-        Collation.Default.Equals(name, "ToString")
-        || Collation.Default.Equals(name, "STAsText")
-        || Collation.Default.Equals(name, "STGeometryType")
-        || Collation.Default.Equals(name, "AsGml")
-        || Collation.Default.Equals(name, "AsTextZM");
+        name.Equals("ToString", StringComparison.Ordinal)
+        || name.Equals("STAsText", StringComparison.Ordinal)
+        || name.Equals("STGeometryType", StringComparison.Ordinal)
+        || name.Equals("AsGml", StringComparison.Ordinal)
+        || name.Equals("AsTextZM", StringComparison.Ordinal);
 
     private static bool IsBinaryResult(string name) =>
-        Collation.Default.Equals(name, "STAsBinary")
-        || Collation.Default.Equals(name, "AsBinaryZM");
+        name.Equals("STAsBinary", StringComparison.Ordinal)
+        || name.Equals("AsBinaryZM", StringComparison.Ordinal);
 
     private static bool IsBooleanResult(string name) =>
-        Collation.Default.Equals(name, "STContains")
-        || Collation.Default.Equals(name, "STCrosses")
-        || Collation.Default.Equals(name, "STDisjoint")
-        || Collation.Default.Equals(name, "STEquals")
-        || Collation.Default.Equals(name, "STIntersects")
-        || Collation.Default.Equals(name, "STIsClosed")
-        || Collation.Default.Equals(name, "STIsEmpty")
-        || Collation.Default.Equals(name, "STIsRing")
-        || Collation.Default.Equals(name, "STIsSimple")
-        || Collation.Default.Equals(name, "STIsValid")
-        || Collation.Default.Equals(name, "STOverlaps")
-        || Collation.Default.Equals(name, "STTouches")
-        || Collation.Default.Equals(name, "STWithin")
-        || Collation.Default.Equals(name, "STRelate")
-        || Collation.Default.Equals(name, "HasZ")
-        || Collation.Default.Equals(name, "HasM")
-        || Collation.Default.Equals(name, "InstanceOf");
+        name.Equals("STContains", StringComparison.Ordinal)
+        || name.Equals("STCrosses", StringComparison.Ordinal)
+        || name.Equals("STDisjoint", StringComparison.Ordinal)
+        || name.Equals("STEquals", StringComparison.Ordinal)
+        || name.Equals("STIntersects", StringComparison.Ordinal)
+        || name.Equals("STIsClosed", StringComparison.Ordinal)
+        || name.Equals("STIsEmpty", StringComparison.Ordinal)
+        || name.Equals("STIsRing", StringComparison.Ordinal)
+        || name.Equals("STIsSimple", StringComparison.Ordinal)
+        || name.Equals("STIsValid", StringComparison.Ordinal)
+        || name.Equals("STOverlaps", StringComparison.Ordinal)
+        || name.Equals("STTouches", StringComparison.Ordinal)
+        || name.Equals("STWithin", StringComparison.Ordinal)
+        || name.Equals("STRelate", StringComparison.Ordinal)
+        || name.Equals("HasZ", StringComparison.Ordinal)
+        || name.Equals("HasM", StringComparison.Ordinal)
+        || name.Equals("InstanceOf", StringComparison.Ordinal);
 
     private static bool IsNumericResult(string name) =>
-        Collation.Default.Equals(name, "STArea")
-        || Collation.Default.Equals(name, "STDistance")
-        || Collation.Default.Equals(name, "STLength")
-        || Collation.Default.Equals(name, "STX")
-        || Collation.Default.Equals(name, "STY")
-        || Collation.Default.Equals(name, "STZ")
-        || Collation.Default.Equals(name, "STM")
-        || Collation.Default.Equals(name, "Lat")
-        || Collation.Default.Equals(name, "Long")
-        || Collation.Default.Equals(name, "EnvelopeAngle");
+        name.Equals("STArea", StringComparison.Ordinal)
+        || name.Equals("STDistance", StringComparison.Ordinal)
+        || name.Equals("STLength", StringComparison.Ordinal)
+        || name.Equals("STX", StringComparison.Ordinal)
+        || name.Equals("STY", StringComparison.Ordinal)
+        || name.Equals("STZ", StringComparison.Ordinal)
+        || name.Equals("STM", StringComparison.Ordinal)
+        || name.Equals("Lat", StringComparison.Ordinal)
+        || name.Equals("Long", StringComparison.Ordinal)
+        || name.Equals("EnvelopeAngle", StringComparison.Ordinal);
 
     private static bool IsIntegerResult(string name) =>
-        Collation.Default.Equals(name, "STDimension")
-        || Collation.Default.Equals(name, "STSrid")
-        || Collation.Default.Equals(name, "STNumGeometries")
-        || Collation.Default.Equals(name, "STNumInteriorRing")
-        || Collation.Default.Equals(name, "STNumPoints")
-        || Collation.Default.Equals(name, "NumRings")
-        || Collation.Default.Equals(name, "MinDbCompatibilityLevel");
+        name.Equals("STDimension", StringComparison.Ordinal)
+        || name.Equals("STSrid", StringComparison.Ordinal)
+        || name.Equals("STNumGeometries", StringComparison.Ordinal)
+        || name.Equals("STNumInteriorRing", StringComparison.Ordinal)
+        || name.Equals("STNumPoints", StringComparison.Ordinal)
+        || name.Equals("NumRings", StringComparison.Ordinal)
+        || name.Equals("MinDbCompatibilityLevel", StringComparison.Ordinal);
 
     internal override string DebugDisplay() => $"({this.target.DebugDisplay()}).{this.methodName}(…)";
 }

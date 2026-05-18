@@ -142,7 +142,7 @@ partial class Simulation
                 : context.Token is UnquotedString us ? us.ToString()
                 : throw SimulatedSqlException.SyntaxErrorNear(context);
 
-            if (Collation.Default.Equals(optionName, "BOUNDING_BOX"))
+            if (optionName.Equals("BOUNDING_BOX", StringComparison.OrdinalIgnoreCase))
             {
                 ConsumeEqualsThen(context, '(');
                 bboxXmin = ConsumeSignedDoubleValue(context);
@@ -154,7 +154,7 @@ partial class Simulation
                 bboxYmax = ConsumeSignedDoubleValue(context);
                 ConsumeChar(context, ')');
             }
-            else if (Collation.Default.Equals(optionName, "GRIDS"))
+            else if (optionName.Equals("GRIDS", StringComparison.OrdinalIgnoreCase))
             {
                 ConsumeEqualsThen(context, '(');
                 level1 = ConsumeGridLevel(context);
@@ -175,7 +175,7 @@ partial class Simulation
                 }
                 ConsumeChar(context, ')');
             }
-            else if (Collation.Default.Equals(optionName, "CELLS_PER_OBJECT"))
+            else if (optionName.Equals("CELLS_PER_OBJECT", StringComparison.OrdinalIgnoreCase))
             {
                 if (context.GetNextRequired() is not Operator { Character: '=' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -265,9 +265,9 @@ partial class Simulation
         context.GetNextRequired() switch
         {
             Numeric numeric => (short)numeric.Value.AsInt32,
-            Name name when Collation.Default.Equals(name.Value, "LOW") => 1,
-            Name name when Collation.Default.Equals(name.Value, "MEDIUM") => 2,
-            Name name when Collation.Default.Equals(name.Value, "HIGH") => 3,
+            Name name when name.Value.Equals("LOW", StringComparison.OrdinalIgnoreCase) => 1,
+            Name name when name.Value.Equals("MEDIUM", StringComparison.OrdinalIgnoreCase) => 2,
+            Name name when name.Value.Equals("HIGH", StringComparison.OrdinalIgnoreCase) => 3,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
 }

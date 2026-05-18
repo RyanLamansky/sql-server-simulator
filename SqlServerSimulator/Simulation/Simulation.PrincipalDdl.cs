@@ -82,7 +82,7 @@ partial class Simulation
             var isAdd = addOrDrop.Keyword == Keyword.Add;
             context.MoveNextRequired();
             if (context.Token is not UnquotedString { Value: var memberWord }
-                || !Collation.Default.Equals(memberWord, "MEMBER"))
+                || !memberWord.Equals("MEMBER", StringComparison.OrdinalIgnoreCase))
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }
