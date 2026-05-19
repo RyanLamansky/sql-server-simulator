@@ -37,25 +37,36 @@ NOT swallowed: Msg 529 (explicit-cast disallowed pair like `int → date`), Msg 
 String-source truncation isn't a "conversion failure" path either way — `TRY_CAST('hello' AS varchar(3))` → `'hel'`. EF doesn't emit TRY_CAST/TRY_CONVERT from idiomatic LINQ (raw SQL only).
 
 ## `CONVERT` style codes
-Three category-specific style families dispatch from `ConvertExpression.Run`'s style-code branch:
+Five category-specific style families dispatch from `ConvertExpression.Run`'s style-code branch:
 
-**Date-like → string** (`SqlValue.CoerceDateTimeToStringWithStyle`):
+**Date-like → string** (`SqlValue.CoerceDateTimeToStringWithStyle`): full coverage of SQL Server's published style table — every shipping style code is implemented across all six source types (`date` / `datetime` / `smalldatetime` / `datetime2(N)` / `time(N)` / `datetimeoffset(N)`).
 
-| Style | Format | Notes |
+| Style group | Pattern | Notes |
 | --- | --- | --- |
-| 0 | per-type default | `datetime`/`smalldatetime` use legacy `"Mon dd yyyy hh:miAM"`; date-with-time types use `"yyyy-MM-dd HH:mm:ss"` |
-| 1 / 101 | `mm/dd/yy` / `mm/dd/yyyy` | US |
-| 10 / 110 | `mm-dd-yy` / `mm-dd-yyyy` | USA |
-| 12 / 112 | `yymmdd` / `yyyymmdd` | ISO compact |
-| 102 | `yyyy.mm.dd` | ANSI |
-| 103 | `dd/mm/yyyy` | UK / French |
-| 23 | `yyyy-mm-dd` | date-only ISO; date-only-emit even for datetime sources |
-| 120 / 121 | `yyyy-mm-dd HH:mm:ss` / `…HH:mm:ss.fff` (or full precision) | ODBC canonical |
-| 126 / 127 | `yyyy-mm-ddTHH:mm:ss.fff…` (full source precision) | ISO 8601 with `T` separator; for `datetimeoffset`, 126 keeps the offset, 127 converts to UTC with `Z` suffix |
+| 0 / 100 | `Mmm d yyyy h:miAM/PM` | legacy default; day right-aligned in 2 chars, hour right-aligned in 2 chars |
+| 1/101 · 2/102 · 3/103 · 4/104 · 5/105 · 6/106 · 7/107 · 10/110 · 11/111 · 12/112 | date-only forms across US / ANSI / British / German / Italian / `dd Mon yy` / `Mon dd, yy` / USA / JAPAN / ISO compact | 2-digit and 4-digit-year pair per locale |
+| 8 / 24 / 108 | `HH:mm:ss` | time-of-day, no fractional |
+| 9 / 109 | `Mmm d yyyy h:mi:ss[sep]frac AM/PM` | legacy default + ms; `sep` is `:` for legacy datetime / smalldatetime, `.` for `datetime2(N)` / `datetimeoffset(N)` / `time(N)` |
+| 13 / 113 | `d Mmm yyyy HH:mm:ss[sep]frac` | Europe default + ms |
+| 14 / 114 | `HH:mm:ss[sep]frac` | time-of-day with fractional |
+| 20 / 120 | `yyyy-MM-dd HH:mm:ss` | ODBC canonical |
+| 21 / 25 / 121 | `yyyy-MM-dd HH:mm:ss.fff…` (period sep) | ODBC canonical + ms; modern types use source precision (datetime2(0) suppresses fractional entirely) |
+| 22 | `MM/dd/yy h:mm:ss AM/PM` | single space between date and AM/PM-time, single space before `AM`/`PM` |
+| 23 | `yyyy-MM-dd` | date-only ISO |
+| 126 / 127 | `yyyy-MM-ddTHH:mm:ss.fff…` | ISO 8601 with `T` separator; `datetimeoffset` style 126 keeps the offset, 127 projects to UTC with `Z` suffix |
+| 130 / 131 | Hijri (Kuwaiti/tabular) date + AM/PM time | 130 emits Arabic month name (e.g. `ذو القعدة`); 131 emits zero-padded numeric month with `/` separators. SQL Server uses .NET's `HijriCalendar` (default `HijriAdjustment = 0`), NOT `UmAlQuraCalendar` — the two differ by ±1 day in some months |
 
-Date-only styles (1/10/12/23/101/102/103/110/112) emit just the calendar portion regardless of source — `CONVERT(varchar, dt_datetime, 112)` returns `'20260513'`, not `'20260513 14:25:36'`. `time` only supports styles 0/120/121 (no calendar portion); other styles raise Msg 281. Unknown styles raise Msg 281 with the source-family name in the wording.
+Fractional-second separator follows the **source family**: legacy `datetime` / `smalldatetime` use COLON in 9/13/14/109/113/114/130/131 (e.g. `14:25:36:123`) and PERIOD in 21/25/121/126/127; `datetime2(N)` / `datetimeoffset(N)` / `time(N)` always use PERIOD with source-precision digits. Precision 0 omits the fractional portion entirely.
 
-**String → date-like** (`SqlValue.CoerceStringToDateLikeWithStyle`): each style hosts a list of `DateTime.TryParseExact` format strings. On parse success, re-encodes through `datetime2(7)` and narrows to the target. On parse failure: if the same input parses under the default style-less parser, raises Msg 9807 (`"The input character string does not follow style N, …"`); otherwise raises Msg 241 (`"Conversion failed when converting date and/or time from character string."`). `TRY_CONVERT` swallows both. Styles supported: same 1/10/12/23/101/102/103/110/112/126/127 set as the inverse direction. Each style accepts an optional trailing time component (so `CONVERT(date, '20260513 14:25:36', 112)` works).
+**Date-only source rejections** (probe-confirmed split):
+- Styles 8/24/108 raise **Msg 8114** ("Error converting data type date to varchar") — valid time-of-day styles, but the source has no time portion.
+- Styles 14/114 raise **Msg 281** — these are explicitly "not valid styles" for a date source per SQL Server's grammar.
+
+**Time-only source rejections**: every date-bearing style (1/2/3/4/5/6/7/10/11/12/23/101/102/103/104/105/106/107/110/111/112) raises **Msg 8114**. Unknown styles (anything not in the published table) raise **Msg 281** with the source family in the wording.
+
+**Time-only source hour-padding quirk**: styles 0/9/100/109 emit single-digit hour WITHOUT leading-space padding (`2:25PM`), but styles 22/130/131 DO pad (` 2:25:36 PM`) — verified against SQL Server 2025. The rationale isn't documented; the simulator mirrors it.
+
+**String → date-like** (`SqlValue.CoerceStringToDateLikeWithStyle`): style-aware parser hosts a list of `DateTime.TryParseExact` format strings per style. On parse success, re-encodes through `datetime2(7)` and narrows to the target. On parse failure: if the same input parses under the default style-less parser, raises **Msg 9807** (`"The input character string does not follow style N, …"`); otherwise raises **Msg 241** (`"Conversion failed when converting date and/or time from character string."`). `TRY_CONVERT` swallows both. Currently supports the same 1/10/12/23/101/102/103/110/112/126/127 input forms as the inverse direction; the wider style table from the output direction (styles 2/3/4/5/6/7/11/etc.) doesn't have input-direction parsers and falls through to default parsing — `CONVERT(date, '13.05.2024', 104)` parses via the default ISO parser instead of the German-style format. Minor pre-existing gap; expand on demand.
 
 **Money → string** (`SqlValue.CoerceMoneyToStringWithStyle`):
 
@@ -66,3 +77,25 @@ Date-only styles (1/10/12/23/101/102/103/110/112) emit just the calendar portion
 | 2 | no thousands separator, 4 decimal places | `1234567.8910` |
 
 Negative values use a leading `-` sign (no parens). `smallmoney` uses the same formatter as `money`. Unknown styles raise Msg 281 with `"money"` as the source-family wording.
+
+**Float/real → string** (`SqlValue.CoerceFloatToStringWithStyle`):
+
+| Style | Significant digits | Form | Notes |
+| --- | --- | --- | --- |
+| 0 | 6 | fixed-point in `[1e-4, 1e6)`, else scientific | trailing zeros stripped; scientific exponent is 3-digit `e±NNN` |
+| 1 | 8 | always scientific | `1.2345679e+006` |
+| 2 | 16 | always scientific | for `real`, value is promoted to float precision first (showing precision artifacts like `1.234567875000000e+006`) |
+| 3 | 17 | always scientific | SQL 2016+ round-trippable form |
+| 126 | source precision (16 for float, 8 for real) | always scientific | distinct from style 2: doesn't promote real to float — keeps source-precision digits |
+
+Exponent is always 3 digits with explicit sign and lowercase `e`. `-0` preserves the negative sign. Unknown styles raise Msg 281 with `"float"` or `"real"` in the wording.
+
+**Varbinary ↔ string** (`SqlValue.CoerceBinaryToStringWithStyle` / `CoerceStringToBinaryWithStyle`):
+
+| Style | Output direction | Input direction |
+| --- | --- | --- |
+| 0 | bytes reinterpreted as characters: CP1252 for `varchar`, UTF-16 LE for `nvarchar` | string bytes copied verbatim: CP1252 for varchar-family source, UTF-16 LE for nvarchar-family |
+| 1 | `"0xHHHH…"` uppercase hex with `0x` prefix | parses hex with required `0x` prefix (missing → Msg 8114) |
+| 2 | bare `"HHHH…"` uppercase hex | parses hex with prefix explicitly disallowed (presence → Msg 8114) |
+
+Style 1 and 2 hex parsing requires an even number of digits and rejects any non-hex character; both failure paths raise **Msg 8114**, swallowed by `TRY_CONVERT` to NULL. Empty source / empty payload round-trip cleanly. Unknown styles raise Msg 281 with `"varbinary"` (output direction) or `"varchar"`/`"nvarchar"` (input direction).

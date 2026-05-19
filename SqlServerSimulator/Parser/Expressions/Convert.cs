@@ -12,12 +12,19 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// — for <c>TRY_CONVERT</c> — the conversion-failure → NULL behavior.
 /// </summary>
 /// <remarks>
-/// Style-code support is intentionally narrow: only <c>0</c>, <c>120</c>,
-/// and <c>121</c> are implemented for date-like sources targeting a
-/// character string (the EF Core code-generation defaults). Other style
-/// numbers raise Msg 281; styles passed on non-date sources are silently
-/// ignored to mirror SQL Server. Style is evaluated at run time so a
-/// <c>NULL</c> style propagates the entire result to <c>NULL</c>.
+/// Style routing fans out to per-family handlers:
+/// <list type="bullet">
+/// <item>date-like → string and string → date-like — full Microsoft
+/// published style table (0/1/2/3/4/5/6/7/8/9/10/11/12/13/14/20/21/22/23/24/25/100..114/120/121/126/127/130/131,
+/// see <see cref="SqlValue.CoerceDateTimeToStringWithStyle"/>);</item>
+/// <item>money / smallmoney → string — styles 0/1/2;</item>
+/// <item>float / real → string — styles 0/1/2/3/126;</item>
+/// <item>varbinary / binary / image ↔ string — styles 0/1/2 in both
+/// directions.</item>
+/// </list>
+/// Styles passed on every other source-target pair are silently ignored
+/// to mirror SQL Server. Style is evaluated at run time so a <c>NULL</c>
+/// style propagates the entire result to <c>NULL</c>.
 /// Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql
 /// </remarks>
 internal sealed class ConvertExpression : Expression
@@ -85,29 +92,28 @@ internal sealed class ConvertExpression : Expression
 
         try
         {
-            // Style is meaningful for: date-like → string (formatted output),
-            // string → date-like (style-aware input parser), and money →
-            // string (currency formatting). Everywhere else SQL Server
-            // silently ignores it.
-            if (styleCode is int sc)
-            {
-                if (sourceValue.Type.Category == SqlTypeCategory.DateTime
-                    && this.targetType.Category == SqlTypeCategory.String)
+            // Style is meaningful only for the six (source-family, target-
+            // family) pairs listed below; the default arm and the no-style
+            // branch both fall through to the styleless coercion, matching
+            // SQL Server's "silently ignore unused style" behavior.
+            return styleCode is int sc
+                ? (sourceValue.Type, this.targetType) switch
                 {
-                    return sourceValue.CoerceDateTimeToStringWithStyle(this.targetType, sc);
+                    ({ Category: SqlTypeCategory.DateTime }, { Category: SqlTypeCategory.String })
+                        => sourceValue.CoerceDateTimeToStringWithStyle(this.targetType, sc),
+                    ({ Category: SqlTypeCategory.String }, { Category: SqlTypeCategory.DateTime })
+                        => sourceValue.CoerceStringToDateLikeWithStyle(this.targetType, sc),
+                    ({ Category: SqlTypeCategory.Money }, { Category: SqlTypeCategory.String })
+                        => sourceValue.CoerceMoneyToStringWithStyle(this.targetType, sc),
+                    ({ Category: SqlTypeCategory.Approximate }, { Category: SqlTypeCategory.String })
+                        => sourceValue.CoerceFloatToStringWithStyle(this.targetType, sc),
+                    (VarbinarySqlType or BinarySqlType or ImageSqlType, { Category: SqlTypeCategory.String })
+                        => sourceValue.CoerceBinaryToStringWithStyle(this.targetType, sc),
+                    ({ Category: SqlTypeCategory.String }, VarbinarySqlType or BinarySqlType)
+                        => sourceValue.CoerceStringToBinaryWithStyle(this.targetType, sc),
+                    _ => Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength),
                 }
-                if (sourceValue.Type.Category == SqlTypeCategory.String
-                    && this.targetType.Category == SqlTypeCategory.DateTime)
-                {
-                    return sourceValue.CoerceStringToDateLikeWithStyle(this.targetType, sc);
-                }
-                if (sourceValue.Type.Category == SqlTypeCategory.Money
-                    && this.targetType.Category == SqlTypeCategory.String)
-                {
-                    return sourceValue.CoerceMoneyToStringWithStyle(this.targetType, sc);
-                }
-            }
-            return Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
+                : Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
         }
         catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
         {

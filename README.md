@@ -101,7 +101,7 @@ The simulator raises `NotSupportedException` (naming the missing feature) for kn
 - `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `GOTO`/labels.
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset windows (`ROWS` numeric-offset ships).
 - CLR functions, logon triggers, natively-compiled procedures beyond parser fidelity.
-- `LIKE COLLATE` override, `CONVERT` styles outside the shipped set.
+- `LIKE COLLATE` override.
 - A few `ALTER TABLE` shapes: `DROP PERIOD FOR SYSTEM_TIME`, `REBUILD`, `SWITCH PARTITION`, identity-type changes.
 - Byte-identical CAST encoding for `hierarchyid` / `geography` / `geometry` - simulator-native encoding is used internally; cross-engine byte transfer is deferred.
 

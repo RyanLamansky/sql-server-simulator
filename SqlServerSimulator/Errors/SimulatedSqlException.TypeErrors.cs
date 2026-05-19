@@ -204,7 +204,17 @@ partial class SimulatedSqlException
     /// against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ConvertingDataTypeError(SqlType source, string targetWord) =>
-        new($"Error converting data type {source} to {targetWord}.", 8114, 16, 5);
+        new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, 5);
+
+    /// <summary>
+    /// Variant of <see cref="ConvertingDataTypeError(SqlType, string)"/>
+    /// taking the source-family wording directly — for callers that don't
+    /// have a <see cref="SqlType"/> instance handy (e.g. the time-source
+    /// arm of CONVERT-style dispatch where no <c>time</c> singleton exists
+    /// because the type carries precision).
+    /// </summary>
+    internal static SimulatedSqlException ConvertingDataTypeError(string sourceFamilyName, string targetWord) =>
+        new($"Error converting data type {sourceFamilyName} to {targetWord}.", 8114, 16, 5);
 
     /// <summary>
     /// Mimics SQL Server error 8115 in its decimal/numeric variant: scale-
