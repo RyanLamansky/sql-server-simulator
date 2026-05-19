@@ -435,6 +435,38 @@ partial class SimulatedSqlException
         new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": Microsoft.SqlServer.Types.HierarchyIdException: 24001: SqlHierarchyId operation failed because input '{detail}' was not valid.", 6522, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 447: an explicit <c>COLLATE</c> clause was
+    /// attached to a non-string expression (probe-confirmed wording:
+    /// <c>"Expression type int is invalid for COLLATE clause."</c>).
+    /// Real SQL Server raises this at bind time; the simulator raises at
+    /// runtime because <see cref="Storage.SqlType"/> isn't fully bound
+    /// during the parse pass (column refs without a resolver are typed
+    /// lazily). Same Msg + same wording; only the firing point differs.
+    /// </summary>
+    internal static SimulatedSqlException CollateClauseRequiresString(SqlType operandType) =>
+        new($"Expression type {operandType} is invalid for COLLATE clause.", 447, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 448: an explicit <c>COLLATE</c> clause names
+    /// a collation the engine doesn't know about. Probe-confirmed against
+    /// SQL Server 2025: Class 16 State 1, verbatim wording
+    /// <c>"Invalid collation '{name}'."</c>.
+    /// </summary>
+    internal static SimulatedSqlException InvalidCollation(string name) =>
+        new($"Invalid collation '{name}'.", 448, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 468: both operands of an operator (currently
+    /// <c>LIKE</c>) carry explicit <c>COLLATE</c> postfixes that don't agree.
+    /// Probe-confirmed against SQL Server 2025: Class 16 State 9, with the
+    /// operand collation names quoted by <c>"</c> and the operator name
+    /// lower-cased. The simulator surfaces the same shape for the LIKE
+    /// site; other comparison operators don't honor the override yet.
+    /// </summary>
+    internal static SimulatedSqlException CollationConflict(string leftCollation, string rightCollation, string operatorName) =>
+        new($"Cannot resolve the collation conflict between \"{leftCollation}\" and \"{rightCollation}\" in the {operatorName} operation.", 468, 16, 9);
+
+    /// <summary>
     /// Returns the type name SQL Server uses in Msg 402 / 206 / 529 for a
     /// date/time type: the family root (e.g. <c>datetime2</c>,
     /// <c>datetimeoffset</c>) without a precision suffix, matching

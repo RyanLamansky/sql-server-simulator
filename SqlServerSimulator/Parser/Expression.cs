@@ -292,6 +292,18 @@ internal abstract class Expression
                         expression = AtTimeZone.ParsePostfix(expression, context);
                         continue;
                     }
+                // expr COLLATE collation_name postfix. Binds tighter than
+                // binary operators (so 'a' + 'b' COLLATE X parses as
+                // 'a' + ('b' COLLATE X)); the wrapper passes through Run /
+                // GetSqlType and exposes the resolved collation to LIKE for
+                // case-sensitivity-aware regex generation. Other consumers
+                // (equality, ORDER BY, …) currently ignore the override; see
+                // docs/claude/database-options.md.
+                case ReservedKeyword { Keyword: Keyword.Collate }:
+                    {
+                        expression = CollateExpression.ParsePostfix(expression, context);
+                        continue;
+                    }
             }
 
             return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;

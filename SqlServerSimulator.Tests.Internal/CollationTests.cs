@@ -3,111 +3,40 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Direct exercises of the three concrete <see cref="Collation"/>
-/// implementations — case folding, accent-sensitivity, the
-/// sort-vs-equality asymmetry on primary-weight-zero symbols, and the
-/// name-keyed lookup surfaces (<see cref="Collation.Recognized"/> /
-/// <see cref="Collation.ByName"/>). Lives under the internal-tests
-/// project because the <see cref="Collation"/> class is internal and
-/// the algorithm contracts are an implementation concern that doesn't
-/// thread through public SQL (data still routes through
-/// <see cref="Collation.Default"/> regardless of declared column /
-/// database collation — see <c>docs/claude/database-options.md</c>).
+/// Algorithm-contract tests for the <see cref="Collation"/> implementations
+/// that aren't routed through public SQL today. The default collation's
+/// behavior (<see cref="Collation.Default"/>) and the recognized-name
+/// surface (<see cref="Collation.Recognized"/> /
+/// <see cref="Collation.ByName"/>) are exercised in the public
+/// <c>CollationBehaviorTests</c> / <c>CollationMetadataTests</c> /
+/// <c>LikeTests</c>; this file keeps only the dormant comparers
+/// (<see cref="Collation.Latin1General100CiAs"/>,
+/// <see cref="Collation.Latin1GeneralCiAs"/>,
+/// <see cref="Collation.Latin1GeneralCsAs"/>,
+/// <see cref="Collation.Latin1GeneralBin"/>) and the internal-only null
+/// handling of <see cref="Collation.Default"/>'s
+/// <see cref="IComparer{T}"/> / <see cref="IEqualityComparer{T}"/>
+/// contracts. The dormant algorithms exist in the code but aren't called
+/// from any public SQL site (every string op outside the LIKE
+/// case-sensitivity flag still goes through <see cref="Collation.Default"/>
+/// — see <c>docs/claude/database-options.md</c>); the tests pin the
+/// dormant contract so the algorithms behave correctly once routing
+/// lands.
 /// </summary>
 [TestClass]
 public sealed class CollationTests
 {
-    [TestMethod]
-    public void Default_IsSqlLatin1()
-        => AreEqual("SQL_Latin1_General_CP1_CI_AS", Collation.Default.Name);
+    // ---- SQL_Latin1_General_CP1_CI_AS — internal-only contracts ----
 
-    [TestMethod]
-    public void Names_RoundTripVerbatim()
-    {
-        AreEqual("SQL_Latin1_General_CP1_CI_AS", Collation.Default.Name);
-        AreEqual("Latin1_General_100_CI_AS", Collation.Latin1General100CiAs.Name);
-        AreEqual("Latin1_General_CI_AS", Collation.Latin1GeneralCiAs.Name);
-    }
-
-    [TestMethod]
-    public void Recognized_ListsExactlyThree()
-        => HasCount(3, Collation.Recognized);
-
-    [TestMethod]
-    public void IsRecognized_KnownNames_ReturnTrue()
-    {
-        IsTrue(Collation.IsRecognized("SQL_Latin1_General_CP1_CI_AS"));
-        IsTrue(Collation.IsRecognized("Latin1_General_100_CI_AS"));
-        IsTrue(Collation.IsRecognized("Latin1_General_CI_AS"));
-    }
-
-    [TestMethod]
-    public void IsRecognized_CaseInsensitive()
-        => IsTrue(Collation.IsRecognized("sql_latin1_general_cp1_ci_as"));
-
-    [TestMethod]
-    public void IsRecognized_UnknownName_ReturnsFalse()
-        => IsFalse(Collation.IsRecognized("Japanese_CI_AS"));
-
-    [TestMethod]
-    public void ByName_ResolvesEachInstance()
-    {
-        AreSame(Collation.Default, Collation.ByName["SQL_Latin1_General_CP1_CI_AS"]);
-        AreSame(Collation.Latin1General100CiAs, Collation.ByName["Latin1_General_100_CI_AS"]);
-        AreSame(Collation.Latin1GeneralCiAs, Collation.ByName["Latin1_General_CI_AS"]);
-    }
-
-    [TestMethod]
-    public void ByName_CaseInsensitive()
-        => AreSame(Collation.Default, Collation.ByName["sql_LATIN1_general_cp1_ci_AS"]);
-
-    // ---- SQL_Latin1_General_CP1_CI_AS ----
-
-    [TestMethod]
-    public void Sql_AsciiCaseFolding_EqualAndOrderedSame()
-    {
-        IsTrue(Collation.Default.Equals("abc", "ABC"));
-        AreEqual(0, Collation.Default.Compare("abc", "ABC"));
-        AreEqual(Collation.Default.GetHashCode("abc"), Collation.Default.GetHashCode("ABC"));
-    }
-
-    [TestMethod]
-    public void Sql_LatinOneCaseFolding_FoldsAccentedLetters()
-    {
-        // OrdinalIgnoreCase folds these too — what CompareInfo with
-        // IgnoreCase adds over Ordinal is NFD/NFC equivalence and
-        // halfwidth/fullwidth folding, not Latin-1 case folding.
-        IsTrue(Collation.Default.Equals("é", "É"));
-        IsTrue(Collation.Default.Equals("àÀáÁ", "ÀàÁá"));
-        AreEqual(0, Collation.Default.Compare("café", "CAFÉ"));
-    }
-
-    [TestMethod]
-    public void Sql_AccentSensitive_DistinguishesBaseAndAccent()
-    {
-        IsFalse(Collation.Default.Equals("e", "é"));
-        IsFalse(Collation.Default.Equals("a", "ä"));
-        AreNotEqual(0, Collation.Default.Compare("e", "é"));
-    }
-
-    [TestMethod]
-    public void Sql_ApostropheIsNotSortIgnorable_DiffersFromWindowsCiAs()
-    {
-        // Real SQL_Latin1_General_CP1_CI_AS keeps apostrophe meaningful for
-        // both sort and equality — this is the behavior the pre-existing
-        // StripSortIgnorable hack got wrong.
-        IsLessThan(0, Collation.Default.Compare("'Aiea", "Aaronsburg"));
-        AreNotEqual(0, Collation.Default.Compare("'A", "A"));
-        IsFalse(Collation.Default.Equals("'A", "A"));
-    }
-
-    [TestMethod]
-    public void Sql_HyphenIsNotSortIgnorable()
-    {
-        AreNotEqual(0, Collation.Default.Compare("co-op", "coop"));
-        IsFalse(Collation.Default.Equals("co-op", "coop"));
-    }
-
+    /// <summary>
+    /// Three-valued NULL comparison is handled at the operator layer
+    /// (<c>=</c> on a NULL operand returns UNKNOWN before reaching the
+    /// comparer), so the comparer's null arms aren't reachable through
+    /// public SQL. Pin them anyway — <see cref="IEqualityComparer{T}"/>
+    /// / <see cref="IComparer{T}"/> nominally accept null and the
+    /// simulator's identifier-resolution sites pass strings that could
+    /// in principle be null.
+    /// </summary>
     [TestMethod]
     public void Sql_NullHandling()
     {
@@ -117,22 +46,6 @@ public sealed class CollationTests
         AreEqual(0, Collation.Default.Compare(null, null));
         IsLessThan(0, Collation.Default.Compare(null, "x"));
         IsGreaterThan(0, Collation.Default.Compare("x", null));
-    }
-
-    [TestMethod]
-    public void Sql_OrdersAsciiLowerVsUpperCaseInsensitively()
-    {
-        // 'a' < 'B' because case folds 'a' → 'A' and 'A' < 'B'.
-        IsLessThan(0, Collation.Default.Compare("a", "B"));
-        IsGreaterThan(0, Collation.Default.Compare("B", "a"));
-    }
-
-    [TestMethod]
-    public void Sql_HashCode_AgreesWithEquals()
-    {
-        // Hash contract: Equals(a,b) → GetHashCode(a) == GetHashCode(b).
-        AreEqual(Collation.Default.GetHashCode("AbC"), Collation.Default.GetHashCode("abc"));
-        AreEqual(Collation.Default.GetHashCode("café"), Collation.Default.GetHashCode("CAFÉ"));
     }
 
     // ---- Latin1_General_100_CI_AS (Windows-style v100) ----
@@ -218,4 +131,24 @@ public sealed class CollationTests
     [TestMethod]
     public void Win80_HashCode_AgreesWithEquals()
         => AreEqual(Collation.Latin1GeneralCiAs.GetHashCode("AbC"), Collation.Latin1GeneralCiAs.GetHashCode("abc"));
+
+    // ---- Latin1_General_CS_AS ----
+
+    [TestMethod]
+    public void CsAs_AccentSensitive()
+        => IsFalse(Collation.Latin1GeneralCsAs.Equals("e", "é"));
+
+    // ---- Latin1_General_BIN ----
+
+    [TestMethod]
+    public void Bin_StrictCodepoint_DistinguishesNfdAndNfc()
+    {
+        // NFC = single precomposed U+00E9; NFD = base 'e' + combining
+        // U+0301. Ordinal compare treats them as distinct byte sequences;
+        // CompareInfo-based comparers (Sql, Win100, CsAs) fold them.
+        const string nfc = "é";
+        const string nfd = "é";
+        IsFalse(Collation.Latin1GeneralBin.Equals(nfc, nfd));
+        IsTrue(Collation.Default.Equals(nfc, nfd));
+    }
 }

@@ -173,6 +173,90 @@ public class LikeTests
         Assert.IsFalse(reader.Read());
     }
 
+    /// <summary>
+    /// Postfix <c>COLLATE</c> on either operand of LIKE flips the regex's
+    /// case-folding flag. <c>_CS_</c> and <c>_BIN</c> are case-sensitive;
+    /// <c>_CI_</c> stays case-insensitive (matches the default). Probe-
+    /// confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("'A' like 'a' collate Latin1_General_CS_AS", 0)]
+    [DataRow("'A' like 'A' collate Latin1_General_CS_AS", 1)]
+    [DataRow("'a' like 'a' collate Latin1_General_CS_AS", 1)]
+    [DataRow("'A' like 'a' collate Latin1_General_CI_AS", 1)]
+    [DataRow("'A' like 'a' collate Latin1_General_BIN", 0)]
+    [DataRow("'A' like 'A' collate Latin1_General_BIN", 1)]
+    [DataRow("'A' like 'a' collate Latin1_General_BIN2", 0)]
+    [DataRow("'A' like 'A' collate Latin1_General_BIN2", 1)]
+    [DataRow("'A' collate Latin1_General_CS_AS like 'a'", 0)]
+    [DataRow("'A' collate Latin1_General_CS_AS like 'A'", 1)]
+    [DataRow("'A' collate Latin1_General_CS_AS like 'A' collate Latin1_General_CS_AS", 1)]
+    [DataRow("'abc ' like 'abc' collate Latin1_General_CS_AS", 1)]               // trailing-space slack survives CS
+    [DataRow("'A' like '[a-z]' collate Latin1_General_CS_AS", 0)]                // character class honors case
+    [DataRow("'A' like '[A-Z]' collate Latin1_General_CS_AS", 1)]
+    [DataRow("'a%b' like 'a!%b' collate Latin1_General_CS_AS escape '!'", 1)]    // ESCAPE + COLLATE compose either order
+    [DataRow("'a%b' like 'a!%b' escape '!' collate Latin1_General_CS_AS", 1)]
+    public void Collate(string condition, int expectedRows) => AssertRowCount(condition, expectedRows);
+
+    [TestMethod]
+    [DataRow("null like 'a' collate Latin1_General_CS_AS", 0)]
+    [DataRow("'A' collate Latin1_General_CS_AS like null", 0)]
+    public void Collate_NullOperand_IsUnknown(string condition, int expectedRows) => AssertRowCount(condition, expectedRows);
+
+    [TestMethod]
+    public void Collate_UnknownCollationName_RaisesMsg448()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 where 'A' like 'a' collate Made_Up_Foo", 448);
+        Assert.Contains("Invalid collation 'Made_Up_Foo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void Collate_ChainedCollate_RaisesMsg156()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "select 1 where 'A' like 'a' collate Latin1_General_CI_AS collate Latin1_General_CS_AS",
+            156);
+        Assert.Contains("collate", ex.Message);
+    }
+
+    [TestMethod]
+    public void Collate_BothSidesDifferentCollation_RaisesMsg468()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "select 1 where 'A' collate Latin1_General_CS_AS like 'a' collate Latin1_General_CI_AS",
+            468);
+        Assert.Contains("collation conflict", ex.Message);
+        Assert.Contains("\"Latin1_General_CS_AS\"", ex.Message);
+        Assert.Contains("\"Latin1_General_CI_AS\"", ex.Message);
+        Assert.Contains("like", ex.Message);
+    }
+
+    [TestMethod]
+    public void Collate_NonStringExpression_RaisesMsg447()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 collate Latin1_General_CS_AS", 447);
+        Assert.Contains("invalid for COLLATE clause", ex.Message);
+    }
+
+    [TestMethod]
+    public void Collate_AgainstColumn_FiltersRows()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t ( id int, name nvarchar(40) );
+            insert t values (1, 'Apple'), (2, 'apricot'), (3, 'BANANA')
+            """);
+
+        using var reader = simulation.CreateCommand(
+            "select id from t where name like 'a%' collate Latin1_General_CS_AS order by id")
+            .ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // Only 'apricot' starts with a lowercase 'a' under CS_AS; 'Apple' / 'BANANA' don't.
+        CollectionAssert.AreEqual(new[] { 2 }, ids);
+    }
+
     private static void AssertRowCount(string condition, int expectedRows) =>
         Assert.AreEqual(
             expectedRows,

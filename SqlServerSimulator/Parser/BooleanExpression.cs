@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -974,9 +975,37 @@ internal abstract class BooleanExpression
                 escapeChar = s[0];
             }
 
-            var matched = LikePatternBuilder.BuildAnchored(r.AsString, escapeChar).IsMatch(l.AsString);
+            // Resolve the effective collation. Explicit COLLATE postfix on
+            // either operand wins; both with different names raises Msg 468
+            // (probe-confirmed verbatim wording). Otherwise the default
+            // collation governs. Only LIKE consults the override today —
+            // equality / ORDER BY still route through Collation.Default.
+            var leftCollation = PeelExplicitCollation(left);
+            var rightCollation = PeelExplicitCollation(right);
+            if (leftCollation is not null && rightCollation is not null
+                && !StringComparer.OrdinalIgnoreCase.Equals(leftCollation.Name, rightCollation.Name))
+            {
+                throw SimulatedSqlException.CollationConflict(leftCollation.Name, rightCollation.Name, "like");
+            }
+            var collation = leftCollation ?? rightCollation ?? Collation.Default;
+
+            var matched = LikePatternBuilder.BuildAnchored(r.AsString, escapeChar, collation.CaseSensitive).IsMatch(l.AsString);
             return matched ^ this.negated;
         }
+
+        /// <summary>
+        /// Walks through <see cref="Parenthesized"/> wrappers to find an
+        /// outermost <see cref="CollateExpression"/> on <paramref name="expression"/>.
+        /// Returns <see langword="null"/> when there's no explicit COLLATE
+        /// postfix at the operand's outer level — internal COLLATE buried
+        /// inside arithmetic or function calls doesn't bubble up.
+        /// </summary>
+        private static Collation? PeelExplicitCollation(Expression expression) => expression switch
+        {
+            CollateExpression c => c.ResolvedCollation,
+            Parenthesized p => PeelExplicitCollation(p.Wrapped),
+            _ => null,
+        };
 
         internal override string DebugDisplay() => this.escape is null
             ? $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()}"

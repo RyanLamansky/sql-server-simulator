@@ -14,7 +14,7 @@ namespace SqlServerSimulator.Parser;
 /// </summary>
 internal static class LikePatternBuilder
 {
-    private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline;
+    private const RegexOptions BaseOptions = RegexOptions.CultureInvariant | RegexOptions.Singleline;
 
     /// <summary>
     /// Builds the fully-anchored regex used by <c>LIKE</c>: <c>^body[ ]*\z</c>.
@@ -22,15 +22,18 @@ internal static class LikePatternBuilder
     /// behavior where the subject's leftover U+0020 spaces are accepted even
     /// when the pattern doesn't end with <c>%</c>. <c>\z</c> rather than
     /// <c>$</c> so a final <c>\n</c> in the subject isn't silently allowed
-    /// outside Multiline mode.
+    /// outside Multiline mode. <paramref name="caseSensitive"/> is sourced
+    /// from the resolved <see cref="Collation"/> (default + every <c>_CI_</c>
+    /// entry on <see cref="Collation.Recognized"/> is case-insensitive;
+    /// <c>_CS_</c> and <c>_BIN</c> are case-sensitive).
     /// </summary>
-    public static Regex BuildAnchored(string pattern, char? escapeChar)
+    public static Regex BuildAnchored(string pattern, char? escapeChar, bool caseSensitive)
     {
         var sb = new StringBuilder(pattern.Length + 8);
         _ = sb.Append('^');
         AppendPatternBody(pattern, escapeChar, sb);
         _ = sb.Append("[ ]*\\z");
-        return new Regex(sb.ToString(), Options);
+        return new Regex(sb.ToString(), caseSensitive ? BaseOptions : BaseOptions | RegexOptions.IgnoreCase);
     }
 
     /// <summary>
@@ -74,7 +77,7 @@ internal static class LikePatternBuilder
         AppendPatternBody(body, escapeChar, sb);
         if (!endsWithPercent)
             _ = sb.Append("\\z");
-        return new Regex(sb.ToString(), Options);
+        return new Regex(sb.ToString(), BaseOptions | RegexOptions.IgnoreCase);
     }
 
     /// <summary>

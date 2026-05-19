@@ -180,7 +180,6 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **`ALTER DATABASE … SET` / `COLLATE` surface** — see [`database-options.md`](docs/claude/database-options.md). Most options parse-and-discard; `COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT` are load-bearing.
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset — Msg 4194, matching real SQL Server's licensed-feature rejection. `ROWS` numeric-offset ships. Default frame with ORDER BY is `RANGE UNBOUNDED PRECEDING TO CURRENT ROW`; without it, whole partition. LAST_VALUE matches real SQL Server's default-frame semantic.
 - Recursive-part feature restrictions (Msg 460 / 461 / 462 / 467 / 465) — silently accepted with possibly-incorrect semantics. Apps that exercise these hit rejection on real SQL Server too.
-- `LIKE COLLATE` override (default collation only).
 - `LEN(ntext)` raising Msg 8116; legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
 - **MERGE gaps**: source as a CTE-headed SELECT (`USING (WITH cte AS …)`), MERGE inside a CTE body, multi-statement WHEN-clause bodies, `MERGE INTO <view>`.
 - `UNIQUE` on a *non-persisted* computed column (PK/UNIQUE on `PERSISTED` ships). Msg 4936 determinism gate for PERSISTED computed columns also not enforced.
