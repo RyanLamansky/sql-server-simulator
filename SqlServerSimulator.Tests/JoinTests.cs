@@ -7,7 +7,9 @@ namespace SqlServerSimulator;
 /// Behavioral tests for SQL Server's JOIN forms: INNER / bare JOIN / LEFT [OUTER] /
 /// RIGHT [OUTER] / FULL [OUTER] / CROSS, multi-table chains, self-joins via alias.
 /// Shared rules: qualifier-aware resolution (Msg 209 on ambiguity), ON-predicate 3VL
-/// semantics, parser rejections. RIGHT / FULL reject a derived-table right side.
+/// semantics, parser rejections. RIGHT / FULL accept a non-correlated or
+/// outer-correlated derived-table right side; lateral correlation to the left side
+/// is rejected (Msg 207 at parse time, vs real SQL Server's Msg 4104).
 /// </summary>
 [TestClass]
 public sealed class JoinTests
@@ -342,18 +344,80 @@ public sealed class JoinTests
     }
 
     [TestMethod]
-    public void RightJoin_DerivedTableRightSide_NotSupported()
-        => _ = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar("""
-            create table a (id int);
-            create table b (id int);
-            select 1 from a right join (select id from b) bx on a.id = bx.id
-            """));
+    public void RightJoin_NonCorrelatedDerivedTableRight_EmitsUnmatched()
+    {
+        using var connection = SeededXY();
+        // Derived right side: SELECT x_id FROM y. Probe-confirmed against real SQL Server.
+        var rows = ReadIntPairs(connection.CreateCommand(
+            "select x.id, bx.x_id from x right join (select x_id from y) bx on x.id = bx.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (-1, 4) }, rows);
+    }
 
     [TestMethod]
-    public void FullJoin_DerivedTableRightSide_NotSupported()
-        => _ = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar("""
+    public void FullJoin_NonCorrelatedDerivedTableRight_EmitsBothUnmatched()
+    {
+        using var connection = SeededXY();
+        var rows = ReadIntPairs(connection.CreateCommand(
+            "select x.id, bx.x_id from x full outer join (select x_id from y) bx on x.id = bx.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (3, -1), (-1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void RightJoin_DerivedTableRightWithInnerWhere_FiltersBeforeJoin()
+    {
+        using var connection = SeededXY();
+        // Inner WHERE prunes y to {2, 4}; unmatched right row 4 still emits with NULL left.
+        var rows = ReadIntPairs(connection.CreateCommand(
+            "select x.id, bx.x_id from x right join (select x_id from y where x_id > 1) bx on x.id = bx.x_id"));
+        CollectionAssert.AreEquivalent(new[] { (2, 2), (-1, 4) }, rows);
+    }
+
+    [TestMethod]
+    public void RightJoin_DerivedTableRight_OuterCorrelated_ReExecutesPerOuterRow()
+    {
+        // Probed against real SQL Server: derived-table right of RIGHT JOIN may correlate
+        // to enclosing scope (here, the outer EXISTS host's `o.id`); the simulator's
+        // LateralPlan re-executes per outer row via the outer resolver passed through
+        // EnumerateJoinedRows.
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table o (id int);
+            create table a (id int);
+            create table b (id int, ref_id int);
+            insert o values (10), (40);
+            insert a values (1), (2);
+            insert b values (1, 10), (2, 20), (3, 30)
+            """).ExecuteNonQuery();
+
+        // For o.id=10: derived (select id from b where ref_id=10) = {1}; RIGHT JOIN a on a.id=bx.id → matched (1,1).
+        // For o.id=40: derived = {}; RIGHT JOIN over empty right yields nothing → EXISTS false.
+        var matched = new List<int>();
+        using var reader = connection.CreateCommand("""
+            select o.id from o where exists (
+                select 1 from a right join (select id from b where b.ref_id = o.id) bx
+                on a.id = bx.id
+            )
+            """).ExecuteReader();
+        while (reader.Read())
+            matched.Add(reader.GetInt32(0));
+        CollectionAssert.AreEquivalent(new[] { 10 }, matched);
+    }
+
+    [TestMethod]
+    public void RightJoin_DerivedTableRight_LateralCorrelationToLeft_Rejected()
+    {
+        // Real SQL Server raises Msg 4104 ("multi-part identifier could not be bound")
+        // at bind-time; the simulator raises Msg 207 ("Invalid column name 'a.id'") at
+        // runtime because Reference.Run is the resolution point — the derived-table
+        // parse doesn't see the left-side snapshot resolver, so resolution falls through
+        // to the (null at top-level) outer resolver and fails on the first inner row.
+        // Different code + bind-vs-runtime timing, same end state (rejection).
+        _ = new Simulation().AssertSqlError("""
             create table a (id int);
             create table b (id int);
-            select 1 from a full join (select id from b) bx on a.id = bx.id
-            """));
+            insert a values (1), (2);
+            insert b values (1), (2), (3);
+            select a.id, bx.id from a right join (select id from b where b.id = a.id) bx on a.id = bx.id
+            """, 207);
+    }
 }

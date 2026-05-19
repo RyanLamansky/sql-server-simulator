@@ -110,18 +110,19 @@ internal enum JoinKind
     /// <c>RIGHT [OUTER] JOIN</c>: right rows missing a left match emit
     /// with the left side null-filled; left rows missing a right match
     /// are dropped. Executed by materializing the right source and
-    /// tracking a matched bitmap across the entire left iteration —
-    /// requires a non-lateral right side (probe-confirmed: real SQL
-    /// Server rejects correlated derived tables on the right of
-    /// RIGHT / FULL with Msg 4104).
+    /// tracking a matched bitmap across the entire left iteration. A
+    /// derived-table right side is materialized once via the enclosing
+    /// scope's outer resolver — outer-correlated subqueries work, but
+    /// lateral correlation to the left side raises Msg 207 at runtime
+    /// (real SQL Server raises Msg 4104 at bind time for the same shape).
     /// </summary>
     Right,
 
     /// <summary>
     /// <c>FULL [OUTER] JOIN</c>: matched pairs emit normally; unmatched
     /// left rows emit with the right side null-filled; unmatched right
-    /// rows emit with the left side null-filled. Same lateral-right
-    /// restriction as <see cref="Right"/>.
+    /// rows emit with the left side null-filled. Same derived-table
+    /// rules as <see cref="Right"/>.
     /// </summary>
     Full,
     Cross,

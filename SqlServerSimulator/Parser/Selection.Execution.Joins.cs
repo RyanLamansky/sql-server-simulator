@@ -7,7 +7,10 @@ namespace SqlServerSimulator.Parser;
 /// per-row column resolver. INNER / LEFT / CROSS / CROSS APPLY / OUTER
 /// APPLY stream through the same operator pipeline; RIGHT / FULL
 /// materialize the right source and track a matched bitmap to emit
-/// unmatched-right rows after upstream is exhausted.
+/// unmatched-right rows after upstream is exhausted. A derived-table
+/// right side for RIGHT / FULL executes once against the enclosing-scope
+/// resolver (not the joined-tuple resolver), so outer correlation works
+/// but lateral correlation to the left side fails at parse time.
 /// </summary>
 internal sealed partial class Selection
 {
@@ -56,9 +59,12 @@ internal sealed partial class Selection
     /// join wraps the rowset in an operator that fills its slot per
     /// upstream tuple. INNER / LEFT / CROSS / CROSS APPLY / OUTER APPLY
     /// stream one upstream tuple at a time; RIGHT / FULL materialize
-    /// <c>sources[level].Rows</c> and track a matched bitmap across the
-    /// entire upstream iteration so unmatched right rows can be emitted
-    /// (with NULL-filled left slots) after upstream is exhausted.
+    /// <c>sources[level].Rows</c> (or, for a derived-table right side,
+    /// the lateral plan executed once with the enclosing-scope
+    /// <paramref name="outerResolver"/>) and track a matched bitmap
+    /// across the entire upstream iteration so unmatched right rows can
+    /// be emitted (with NULL-filled left slots) after upstream is
+    /// exhausted.
     /// </remarks>
     internal static IEnumerable<byte[]?[]> EnumerateJoinedRows(
         FromSource[] sources,
@@ -74,7 +80,7 @@ internal sealed partial class Selection
         var rowset = EnumerateLeftmost(sources[0], tuple, batch, outerResolver);
         for (var level = 1; level < sources.Length; level++)
         {
-            rowset = ApplyJoin(rowset, sources[level], joins[level - 1], tuple, level, batch, Resolve);
+            rowset = ApplyJoin(rowset, sources[level], joins[level - 1], tuple, level, batch, Resolve, outerResolver);
         }
         return rowset;
     }
@@ -110,16 +116,17 @@ internal sealed partial class Selection
         byte[]?[] tuple,
         int level,
         BatchContext batch,
-        Func<MultiPartName, SqlValue> resolve) => join.Kind switch
+        Func<MultiPartName, SqlValue> resolve,
+        Func<MultiPartName, SqlValue>? outerResolver) => join.Kind switch
         {
             JoinKind.Inner or JoinKind.Cross or JoinKind.CrossApply
                 => InnerOrCross(left, right, join, tuple, level, batch, resolve),
             JoinKind.Left or JoinKind.OuterApply
                 => LeftOrOuterApply(left, right, join, tuple, level, batch, resolve),
             JoinKind.Right
-                => RightOuterJoin(left, right, join, tuple, level, batch, resolve),
+                => RightOuterJoin(left, right, join, tuple, level, batch, resolve, outerResolver),
             JoinKind.Full
-                => FullOuterJoin(left, right, join, tuple, level, batch, resolve),
+                => FullOuterJoin(left, right, join, tuple, level, batch, resolve, outerResolver),
             _ => throw new NotSupportedException($"Unknown JoinKind {join.Kind}"),
         };
 
@@ -197,12 +204,16 @@ internal sealed partial class Selection
     /// yields matched pairs (upstream tuples without any matching right
     /// are silently dropped — that's the asymmetric flip of LEFT JOIN).
     /// After upstream is exhausted, walks the bitmap and emits each
-    /// unmatched right row with all left-side slots NULL-filled. The
-    /// lateral / derived-table right side is rejected — real SQL Server
-    /// raises Msg 4104 on correlated subqueries to the right of
-    /// RIGHT / FULL, and the simulator defers every derived table
-    /// regardless of actual correlation, so the safe rule is to reject
-    /// every <see cref="FromSource.LateralPlan"/>-bearing right.
+    /// unmatched right row with all left-side slots NULL-filled. A
+    /// derived-table right side (<see cref="FromSource.LateralPlan"/>)
+    /// is executed once with the enclosing-scope
+    /// <paramref name="outerResolver"/> — never with the joined-tuple
+    /// resolver — so the inner plan can correlate to outer scope but
+    /// not to the left side of the join. Real SQL Server rejects
+    /// lateral correlation to the left of RIGHT/FULL with Msg 4104; the
+    /// simulator's parser raises Msg 207 at parse time for the same
+    /// shape because the derived-table parser doesn't see the
+    /// left-source snapshot.
     /// </summary>
     private static IEnumerable<byte[]?[]> RightOuterJoin(
         IEnumerable<byte[]?[]> left,
@@ -211,12 +222,12 @@ internal sealed partial class Selection
         byte[]?[] tuple,
         int level,
         BatchContext batch,
-        Func<MultiPartName, SqlValue> resolve)
+        Func<MultiPartName, SqlValue> resolve,
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
-        if (right.LateralPlan is not null)
-            throw new NotSupportedException("RIGHT JOIN with a derived-table right side isn't modeled.");
-
-        var rightRows = right.Rows.ToList();
+        List<byte[]> rightRows = right.LateralPlan is { } plan
+            ? [.. plan.Execute(batch, outerResolver).RowBytes]
+            : [.. right.Rows];
         var matched = new bool[rightRows.Count];
 
         foreach (var _ in left)
@@ -249,8 +260,10 @@ internal sealed partial class Selection
     /// FULL [OUTER] JOIN: matched pairs emit normally; unmatched upstream
     /// tuples emit with the level slot NULL-filled; unmatched right rows
     /// (tracked across the whole upstream iteration) emit at the end with
-    /// all left-side slots NULL-filled. Same lateral-right restriction as
-    /// <see cref="RightOuterJoin"/>.
+    /// all left-side slots NULL-filled. A derived-table right side is
+    /// executed once with <paramref name="outerResolver"/>; see
+    /// <see cref="RightOuterJoin"/> for the parse-time / runtime split on
+    /// lateral correlation.
     /// </summary>
     private static IEnumerable<byte[]?[]> FullOuterJoin(
         IEnumerable<byte[]?[]> left,
@@ -259,12 +272,12 @@ internal sealed partial class Selection
         byte[]?[] tuple,
         int level,
         BatchContext batch,
-        Func<MultiPartName, SqlValue> resolve)
+        Func<MultiPartName, SqlValue> resolve,
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
-        if (right.LateralPlan is not null)
-            throw new NotSupportedException("FULL OUTER JOIN with a derived-table right side isn't modeled.");
-
-        var rightRows = right.Rows.ToList();
+        List<byte[]> rightRows = right.LateralPlan is { } plan
+            ? [.. plan.Execute(batch, outerResolver).RowBytes]
+            : [.. right.Rows];
         var matched = new bool[rightRows.Count];
 
         foreach (var _ in left)
