@@ -2,6 +2,7 @@
 using SqlServerSimulator;
 
 var simulation = new Simulation();
+// If you have a bacpac file, you can import it with smulation.ImportBacpac.
 
 // Commands can be run directly against the simulation, used here to create a table.
 using (var connection = simulation.CreateDbConnection())
@@ -14,7 +15,6 @@ using (var command = connection.CreateCommand())
 }
 
 // Entity Framework thinks it's talking to a real SQL Server.
-// (At least until you try something not yet supported by the simulation.)
 using (var context = new SimulatedContext(simulation))
 {
     _ = context.ExampleRecord.Add(new() { Id = 1 });
