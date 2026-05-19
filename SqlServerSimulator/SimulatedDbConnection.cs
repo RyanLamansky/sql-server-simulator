@@ -334,6 +334,20 @@ sealed class SimulatedDbConnection : DbConnection
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
             this.TempTables.Clear();
+            // Global temp tables: drop every ##foo owned by this connection.
+            // Probe-confirmed against SQL Server 2025 (pooling disabled) that
+            // owner-disconnect drops ##foo unconditionally, regardless of
+            // other sessions' prior or in-flight references. Walk a snapshot
+            // of the keys so concurrent reads / drops by other connections
+            // don't trip dictionary mutation.
+            foreach (var name in this.Simulation.GlobalTempTables.Keys)
+            {
+                if (this.Simulation.GlobalTempTables.TryGetValue(name, out var table)
+                    && ReferenceEquals(table.OwnerConnection, this))
+                {
+                    _ = this.Simulation.GlobalTempTables.TryRemove(name, out _);
+                }
+            }
             this.Simulation.UnregisterConnection(this);
         }
         base.Dispose(disposing);

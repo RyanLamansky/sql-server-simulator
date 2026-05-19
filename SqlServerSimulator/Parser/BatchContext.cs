@@ -1114,12 +1114,21 @@ internal sealed class BatchContext
 
     /// <summary>
     /// Recognizes a local temp-table name (<c>#foo</c>, including bare
-    /// <c>#</c>). Global temps (<c>##foo</c>) aren't modeled and return
-    /// false. The rule: leading <c>#</c>, second char is not <c>#</c> (so
-    /// <c>##</c>-prefixed names fall out as not-local).
+    /// <c>#</c>). Global temps (<c>##foo</c>) are recognized by
+    /// <see cref="IsGlobalTempName(string)"/> instead. The rule: leading
+    /// <c>#</c>, second char is not <c>#</c>.
     /// </summary>
     public static bool IsLocalTempName(string name) =>
         name.Length >= 1 && name[0] == '#' && (name.Length == 1 || name[1] != '#');
+
+    /// <summary>
+    /// Recognizes a global temp-table name (<c>##foo</c>, including bare
+    /// <c>##</c> — probe-confirmed against SQL Server 2025 that two-char
+    /// <c>##</c> is a valid table name). Rule: at least two characters,
+    /// both <c>#</c>.
+    /// </summary>
+    public static bool IsGlobalTempName(string name) =>
+        name.Length >= 2 && name[0] == '#' && name[1] == '#';
 
     /// <summary>
     /// Recognizes a table-variable name (<c>@foo</c>). Used by DML / FROM
@@ -1189,6 +1198,17 @@ internal sealed class BatchContext
             // them, so Sch-S acquisition is unnecessary (and would be a
             // self-conflict-free no-op anyway).
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
+        }
+
+        if (IsGlobalTempName(name.Leaf))
+        {
+            // Global temp tables live on the simulation; the qualifier is
+            // cosmetic and ignored (probe-confirmed `tempdb..##q` works the
+            // same as `##q`). Sch-S acquisition is skipped — the connection-
+            // dispose cleanup is the only DDL that races with reads, and it
+            // walks the dict under TryRemove which is atomic against
+            // resolution lookups.
+            return this.Connection.Simulation.GlobalTempTables.TryGetValue(name.Leaf, out table);
         }
 
         // Table-variable routing: @-prefixed leaves are per-batch, 1-part-only

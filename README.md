@@ -99,7 +99,7 @@ The simulator raises `NotSupportedException` (naming the missing feature) for kn
 
 - Cross-database DML - writes through a 3-part name targeting a different database. Cross-database reads work; issue `USE <db>` to switch first for writes.
 - `RIGHT JOIN` / `FULL OUTER JOIN` with a derived-table or lateral right side.
-- `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, global temp tables (`##foo`), comma-separated FROM (ANSI-89 join syntax), `GOTO`/labels.
+- `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, comma-separated FROM (ANSI-89 join syntax), `GOTO`/labels.
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset windows (`ROWS` numeric-offset ships).
 - CLR functions, logon triggers, natively-compiled procedures beyond parser fidelity.
 - `LIKE COLLATE` override, `CONVERT` styles outside the shipped set.

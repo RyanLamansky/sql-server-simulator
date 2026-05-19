@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -63,6 +64,26 @@ public sealed partial class Simulation
     /// immutable.
     /// </summary>
     internal static Dictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
+
+    /// <summary>
+    /// Global temp tables (<c>##foo</c>) — instance-wide, visible to every
+    /// connection on this <see cref="Simulation"/>. Created by any session via
+    /// <c>CREATE TABLE ##foo</c>; the creating connection is stamped on
+    /// <see cref="HeapTable.OwnerConnection"/> and used by
+    /// <see cref="SimulatedDbConnection.Dispose"/> to auto-drop the entry at
+    /// session close. Any session can DROP / TRUNCATE / SELECT / DML a
+    /// <c>##foo</c> regardless of ownership — probe-confirmed against SQL
+    /// Server 2025 (any session can drop another's global temp).
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025 (pooling disabled) that the
+    /// auto-drop fires unconditionally on owner-disconnect — Microsoft Learn's
+    /// "dropped when all tasks have stopped referencing" wording is misleading.
+    /// A non-owner session mid-statement at the moment of owner-disconnect
+    /// observes Msg 208 on its next reference to the table. No reference
+    /// counting needed.
+    /// </remarks>
+    internal readonly ConcurrentDictionary<string, HeapTable> GlobalTempTables = new(Collation.Default);
 
     /// <summary>
     /// Virtual <c>sys.&lt;view&gt;</c> catalog views (<c>sys.schemas</c>,

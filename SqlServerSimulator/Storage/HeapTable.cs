@@ -223,6 +223,17 @@ internal sealed class HeapTable : SchemaObject
     public bool IsHistoryTable;
 
     /// <summary>
+    /// Non-null on global temp tables (<c>##foo</c>): the connection that ran
+    /// the <c>CREATE TABLE</c>. Used by <see cref="SimulatedDbConnection.Dispose"/>
+    /// to auto-drop the owner's <c>##</c> tables at session close — probe-
+    /// confirmed against SQL Server 2025 (with pooling disabled) that the drop
+    /// fires unconditionally on owner-disconnect, regardless of other sessions
+    /// having referenced or currently referencing the table. Always null for
+    /// local temps, table variables, and regular tables.
+    /// </summary>
+    public SimulatedDbConnection? OwnerConnection;
+
+    /// <summary>
     /// FOREIGN KEY constraints declared on this table (the referring side).
     /// Each entry's <see cref="ForeignKey.ReferencedTable"/> points at the
     /// parent table whose PK/UNIQUE the FK targets. Populated post-construction

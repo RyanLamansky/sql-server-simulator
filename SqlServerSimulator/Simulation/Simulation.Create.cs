@@ -183,12 +183,6 @@ partial class Simulation
                 }));
         }
 
-        // #foo lives in the per-connection TempTables dict so it's isolated
-        // from regular user tables and auto-drops at connection close.
-        // ##foo (global temps) aren't modeled yet — surface explicitly rather
-        // than letting it silently land as a regular table.
-        if (tableName.Leaf.Length >= 2 && tableName.Leaf[0] == '#' && tableName.Leaf[1] == '#')
-            throw new NotSupportedException($"Global temp tables (##{tableName.Leaf[2..]}) aren't modeled. Use a local temp table (#{tableName.Leaf[2..]}) or a permanent table.");
         // In a skipped IF branch, gate both the existence check (Msg 2714)
         // and the dict add: the safe-CREATE idiom (`IF NOT EXISTS (...) CREATE
         // TABLE foo (...)`) relies on the un-taken CREATE not surfacing
@@ -203,13 +197,19 @@ partial class Simulation
         // schemaId we stamp on KeyConstraint / CheckConstraint / HeapTable so
         // constraint object_ids allocate alongside the table's id without
         // discovering they had no home.
-        var isTempTable = BatchContext.IsLocalTempName(tableName.Leaf);
+        var isLocalTempTable = BatchContext.IsLocalTempName(tableName.Leaf);
+        var isGlobalTempTable = BatchContext.IsGlobalTempName(tableName.Leaf);
+        var isTempTable = isLocalTempTable || isGlobalTempTable;
         Schema? schema = null;
         var schemaId = Database.DboSchemaId;
         ConcurrentDictionary<string, HeapTable> destination;
-        if (isTempTable)
+        if (isLocalTempTable)
         {
             destination = context.Batch.Connection.TempTables;
+        }
+        else if (isGlobalTempTable)
+        {
+            destination = context.Batch.Connection.Simulation.GlobalTempTables;
         }
         else
         {
@@ -263,6 +263,8 @@ partial class Simulation
             keyConstraints,
             checkConstraints,
             periodColumns: resolvedPeriod);
+        if (isGlobalTempTable)
+            heapTable.OwnerConnection = context.Batch.Connection;
         if (!destination.TryAdd(heapTable.Name, heapTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
 
@@ -305,11 +307,11 @@ partial class Simulation
         }
 
         // Temp-table DDL participates in transaction rollback: probe-confirmed
-        // that a CREATE TABLE #foo inside BEGIN TRAN is undone by ROLLBACK on
-        // real SQL Server. Regular CREATE TABLE isn't logged — a known
-        // asymmetry documented as a quirk.
+        // that both CREATE TABLE #foo and CREATE TABLE ##foo inside BEGIN TRAN
+        // are undone by ROLLBACK on real SQL Server. Regular CREATE TABLE
+        // isn't logged — a known asymmetry documented as a quirk.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
-            tx.UndoLog.RecordTempTableCreation(context.Batch.Connection.TempTables, heapTable.Name);
+            tx.UndoLog.RecordTempTableCreation(destination, heapTable.Name);
         return true;
     }
 

@@ -398,15 +398,20 @@ partial class Simulation
         // branch rather than raise.
         if (context.Batch.IsSkipping)
             return;
-        var isTempTable = BatchContext.IsLocalTempName(name.Leaf);
+        var isLocalTempTable = BatchContext.IsLocalTempName(name.Leaf);
+        var isGlobalTempTable = BatchContext.IsGlobalTempName(name.Leaf);
+        var isTempTable = isLocalTempTable || isGlobalTempTable;
         // For temp tables a qualifier is cosmetic (real SQL Server ignores it
-        // — `tempdb..#foo` and `tempdb.dbo.#foo` both resolve to the same
-        // session-local table). For regular tables the schema is looked up
-        // through CurrentDatabase.Schemas; a missing schema or db-mismatched
-        // 3-part name surfaces the standard Msg 3701 below.
-        var destination = isTempTable
+        // — `tempdb..#foo` and `tempdb.dbo.#foo` both resolve the same way,
+        // and `##foo` accepts the same qualifier shapes). For regular tables
+        // the schema is looked up through CurrentDatabase.Schemas; a missing
+        // schema or db-mismatched 3-part name surfaces the standard Msg 3701
+        // below.
+        var destination = isLocalTempTable
             ? context.Batch.Connection.TempTables
-            : context.Batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
+            : isGlobalTempTable
+                ? context.Batch.Connection.Simulation.GlobalTempTables
+                : context.Batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
         if (destination is null || !destination.TryGetValue(name.Leaf, out var removedTable))
         {
             if (ifExists)
@@ -444,7 +449,7 @@ partial class Simulation
         // documented for CREATE TABLE.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
         {
-            tx.UndoLog.RecordTempTableRemoval(context.Batch.Connection.TempTables, name.Leaf, removedTable);
+            tx.UndoLog.RecordTempTableRemoval(destination, name.Leaf, removedTable);
         }
         else
         {

@@ -251,9 +251,124 @@ public sealed class TempTableTests
     }
 
     [TestMethod]
-    public void GlobalTempTables_Unsupported()
+    public void GlobalTemp_CrossSession_Visible()
     {
+        var sim = new Simulation();
+        using var a = sim.CreateOpenConnection();
+        using var b = sim.CreateOpenConnection();
+        Exec(a, "create table ##g (id int)");
+        Exec(a, "insert ##g values (10)");
+        AreEqual(10, (int)b.CreateCommand("select id from ##g").ExecuteScalar()!);
+        Exec(b, "insert ##g values (20)");
+        AreEqual(2, CountRows(a, "##g"));
+    }
+
+    [TestMethod]
+    public void GlobalTemp_DropFromNonOwnerSession_Works()
+    {
+        // Probe-confirmed: any session can drop another's ##foo.
+        var sim = new Simulation();
+        using var owner = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        Exec(owner, "create table ##g (id int)");
+        Exec(other, "drop table ##g");
+        var ex = Throws<DbException>(() => Exec(owner, "select * from ##g"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void GlobalTemp_AutoDroppedOnOwnerDisconnect()
+    {
+        // Probe-confirmed against SQL Server 2025 (pooling disabled): ##foo
+        // dropped unconditionally when the creating session disconnects,
+        // regardless of other sessions' references.
+        var sim = new Simulation();
+        using var witness = sim.CreateOpenConnection();
+        using (var owner = sim.CreateOpenConnection())
+        {
+            Exec(owner, "create table ##g (id int)");
+            Exec(owner, "insert ##g values (1)");
+            AreEqual(1, CountRows(witness, "##g"));
+        }
+        var ex = Throws<DbException>(() => Exec(witness, "select * from ##g"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void GlobalTemp_DuplicateCreate_RaisesMsg2714()
+    {
+        var sim = new Simulation();
+        using var a = sim.CreateOpenConnection();
+        using var b = sim.CreateOpenConnection();
+        Exec(a, "create table ##dup (id int)");
+        var ex = Throws<DbException>(() => Exec(b, "create table ##dup (id int)"));
+        AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+        AreEqual("There is already an object named '##dup' in the database.", ex.Message);
+    }
+
+    [TestMethod]
+    public void GlobalTemp_BareDoubleHash_IsValidName()
+    {
+        // Probe-confirmed: real SQL Server accepts ## (length 2) as a table name.
         using var conn = new Simulation().CreateOpenConnection();
-        _ = Throws<NotSupportedException>(() => Exec(conn, "create table ##g (id int)"));
+        Exec(conn, "create table ## (id int)");
+        Exec(conn, "insert ## values (1), (2)");
+        AreEqual(2, CountRows(conn, "##"));
+    }
+
+    [TestMethod]
+    public void GlobalTemp_QualifierIgnored()
+    {
+        // Probe-confirmed: `tempdb..##q` and `tempdb.dbo.##q` both resolve to
+        // the same global temp regardless of qualifier shape.
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table ##q (id int)");
+        Exec(conn, "insert ##q values (5)");
+        AreEqual(5, (int)conn.CreateCommand("select id from tempdb..##q").ExecuteScalar()!);
+        AreEqual(5, (int)conn.CreateCommand("select id from tempdb.dbo.##q").ExecuteScalar()!);
+    }
+
+    [TestMethod]
+    public void GlobalTemp_RollbackUndoesCreate()
+    {
+        var sim = new Simulation();
+        using var owner = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        using (var tx = owner.BeginTransaction())
+        {
+            ExecInTx(owner, tx, "create table ##rb (id int)");
+            tx.Rollback();
+        }
+        // Visible to neither session after rollback.
+        var ex = Throws<DbException>(() => Exec(owner, "select * from ##rb"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        AreEqual("208", Throws<DbException>(() => Exec(other, "select * from ##rb")).Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void GlobalTemp_RollbackRestoresDropped()
+    {
+        var sim = new Simulation();
+        using var owner = sim.CreateOpenConnection();
+        Exec(owner, "create table ##rd (id int)");
+        Exec(owner, "insert ##rd values (1), (2)");
+        using (var tx = owner.BeginTransaction())
+        {
+            ExecInTx(owner, tx, "drop table ##rd");
+            tx.Rollback();
+        }
+        AreEqual(2, CountRows(owner, "##rd"));
+    }
+
+    [TestMethod]
+    public void GlobalTemp_Truncate_FromAnySession()
+    {
+        var sim = new Simulation();
+        using var owner = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        Exec(owner, "create table ##t (id int)");
+        Exec(owner, "insert ##t values (1), (2), (3)");
+        Exec(other, "truncate table ##t");
+        AreEqual(0, CountRows(owner, "##t"));
     }
 }

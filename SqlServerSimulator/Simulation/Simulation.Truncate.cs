@@ -54,10 +54,13 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
 
-        var isTempTable = BatchContext.IsLocalTempName(name.Leaf);
-        var destination = isTempTable
+        var isLocalTempTable = BatchContext.IsLocalTempName(name.Leaf);
+        var isGlobalTempTable = BatchContext.IsGlobalTempName(name.Leaf);
+        var destination = isLocalTempTable
             ? context.Connection.TempTables
-            : batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
+            : isGlobalTempTable
+                ? context.Connection.Simulation.GlobalTempTables
+                : batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
 
         // Msg 4701 carries only the leaf name (probe-confirmed against SQL
         // Server 2025), distinct from Msg 208 / 3701 which embed the qualifier.

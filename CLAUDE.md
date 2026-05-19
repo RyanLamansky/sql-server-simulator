@@ -149,7 +149,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Name resolution, schema lookup, CREATE / DROP / ALTER SCHEMA TRANSFER, OBJECT_ID** → [`schemas.md`](docs/claude/schemas.md).
 - **System metadata surfaces** (sys.* / INFORMATION_SCHEMA.*) → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL** → [`programmable.md`](docs/claude/programmable.md).
-- **`#foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
+- **`#foo` / `##foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** → [`table-variables.md`](docs/claude/table-variables.md).
 - **`CREATE TYPE … AS TABLE`, TVP params + `READONLY`, ADO.NET TVP** → [`table-valued-parameters.md`](docs/claude/table-valued-parameters.md).
 - **`CREATE TYPE … FROM <builtin>` (scalar alias types / UDDTs), multi-part type-references** → [`alias-types.md`](docs/claude/alias-types.md).
@@ -189,7 +189,6 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - `UNIQUE` on a *non-persisted* computed column (PK/UNIQUE on `PERSISTED` ships). Msg 4936 determinism gate for PERSISTED computed columns also not enforced.
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - **Table-variable named constraints / foreign keys** — Msg 102 (matches real SQL Server's grammar restriction inside `DECLARE @t TABLE`). Multi-variable DECLARE with a table variable, mixed scalar+table DECLARE, and `SET IDENTITY_INSERT @t ON` also reject. Column features (IDENTITY / UNIQUE / inline + table-level CHECK / computed / rowversion) all ship — see [`table-variables.md`](docs/claude/table-variables.md).
-- **Global temp tables (`##foo`)** — `NotSupportedException` at parse. Local `#foo` ships.
 - **`ALTER TABLE #foo`**, `OBJECT_ID('tempdb..#foo')` — none modeled. Use `DROP TABLE IF EXISTS #foo` for the common cleanup idiom.
 - **`CREATE SCHEMA AUTHORIZATION`** — `NotSupportedException` (no principal model on schemas). `DROP SCHEMA` + `ALTER SCHEMA TRANSFER` ship — see [`schemas.md`](docs/claude/schemas.md).
 - **`CREATE SCHEMA <schema_element>` greedy form** — simulator dispatches trailing CREATE/GRANT as their own statements rather than as part of the same CREATE SCHEMA. Same end state for the common idiom; mismatched-grammar trailers raise.
