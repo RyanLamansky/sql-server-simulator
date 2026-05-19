@@ -420,4 +420,88 @@ public sealed class JoinTests
             select a.id, bx.id from a right join (select id from b where b.id = a.id) bx on a.id = bx.id
             """, 207);
     }
+
+    [TestMethod]
+    public void CommaFrom_TwoSources_FilterEqualsInnerJoin()
+    {
+        using var connection = SeededAB();
+        var rows = ReadIntPairs(connection.CreateCommand("select a.id, b.val from a, b where a.id = b.a_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 100), (1, 200), (2, 300) }, rows);
+    }
+
+    [TestMethod]
+    public void CommaFrom_NoWhere_ProducesCartesianProduct()
+    {
+        using var connection = SeededAB();
+        AreEqual(9, connection.CreateCommand("select count(*) from a, b").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void CommaFrom_ThreeSources_AllJoined()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int, av varchar(10));
+            create table b (id int, bv varchar(10));
+            create table c (id int, cv varchar(10));
+            insert a values (1, 'a1'), (2, 'a2'), (3, 'a3');
+            insert b values (1, 'b1'), (2, 'b2'), (4, 'b4');
+            insert c values (1, 'c1'), (3, 'c3'), (5, 'c5')
+            """);
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand(
+            "select a.av, b.bv, c.cv from a, b, c where a.id = b.id and b.id = c.id").ExecuteReader();
+        var rows = new List<(string, string, string)>();
+        while (reader.Read())
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        CollectionAssert.AreEquivalent(new[] { ("a1", "b1", "c1") }, rows);
+    }
+
+    [TestMethod]
+    public void CommaFrom_DerivedTableAfterComma_Works()
+    {
+        using var connection = SeededAB();
+        var rows = ReadIntPairs(connection.CreateCommand(
+            "select a.id, d.val from a, (select a_id, val from b) d where a.id = d.a_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 100), (1, 200), (2, 300) }, rows);
+    }
+
+    [TestMethod]
+    public void CommaFrom_ExplicitJoinThenComma_Composes()
+    {
+        // Real SQL Server: `a JOIN b ON ..., c WHERE a.id = c.id` works; the
+        // explicit JOIN chain binds first, then a Cross splices in c.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int, av varchar(10));
+            create table b (id int, bv varchar(10));
+            create table c (id int, cv varchar(10));
+            insert a values (1, 'a1'), (2, 'a2'), (3, 'a3');
+            insert b values (1, 'b1'), (2, 'b2'), (4, 'b4');
+            insert c values (1, 'c1'), (3, 'c3'), (5, 'c5')
+            """);
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand(
+            "select a.av, b.bv, c.cv from a join b on a.id = b.id, c where a.id = c.id").ExecuteReader();
+        var rows = new List<(string, string, string)>();
+        while (reader.Read())
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        CollectionAssert.AreEquivalent(new[] { ("a1", "b1", "c1") }, rows);
+    }
+
+    [TestMethod]
+    public void CommaFrom_TrailingComma_RaisesSyntaxError()
+        => _ = new Simulation().AssertSqlError("""
+            create table a (id int);
+            select * from a,
+            """, 102);
+
+    [TestMethod]
+    public void CommaFrom_LeadingComma_RaisesSyntaxError()
+        => _ = new Simulation().AssertSqlError("""
+            create table a (id int);
+            select * from , a
+            """, 102);
 }

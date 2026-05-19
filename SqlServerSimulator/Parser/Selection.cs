@@ -720,6 +720,31 @@ internal sealed partial class Selection
         List<JoinSpec> joins,
         Func<MultiPartName, SqlType>? outerTypeResolver)
     {
+        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
+
+        // Comma-separated FROM (ANSI-89 syntax) binds at lower precedence than
+        // explicit JOINs: `FROM a, b JOIN c ON p` means `a CROSS JOIN (b JOIN c
+        // ON p)`. Each comma starts a fresh explicit-join chain; a Cross
+        // JoinSpec splices the chains together so the runtime JoinDriver folds
+        // them into a Cartesian product (filtered later by WHERE). The comma
+        // itself isn't consumed here — ParseSingleFromSource starts with
+        // GetNextRequired() to advance past whatever preceding token it was
+        // handed (FROM / JOIN keyword / comma), so leave the cursor on the ',
+        // for the chain's first ParseSingleFromSource call.
+        while (context.Token is Operator { Character: ',' })
+        {
+            joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null));
+            ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
+        }
+    }
+
+    private static void ParseExplicitJoinChain(
+        ParserContext context,
+        uint depth,
+        List<FromSource> sources,
+        List<JoinSpec> joins,
+        Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
         sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
 
         // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
