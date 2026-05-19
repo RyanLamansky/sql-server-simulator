@@ -295,6 +295,30 @@ partial class Simulation
         SqlType[] sourceSchema;
         string[] columnNames;
 
+        // CTE binding shadows table / view resolution: `WITH c AS (…) MERGE …
+        // USING c ON …` references the CTE, not any same-named base object.
+        // Only 1-part names route here; CTEs aren't schema-qualifiable.
+        if (objectName.Count == 1
+            && context.CteBindings is { } cteBindings
+            && cteBindings.TryGetValue(objectName.Leaf, out var cteBinding))
+        {
+            if (cteBinding.Plan is null)
+                throw SimulatedSqlException.RecursiveCteMissingUnionAll(cteBinding.Name);
+            var ctePlan = cteBinding.Plan;
+            sourceSchema = ctePlan.Schema;
+            columnNames = cteBinding.ColumnNames;
+            var cteAlias = Selection.ConsumeOptionalAlias(context) ?? cteBinding.Name;
+            materialize = batch =>
+            {
+                var rs = ctePlan.Execute(batch);
+                var rows = new List<SqlValue[]>();
+                foreach (var rowBytes in rs.RowBytes)
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                return rows;
+            };
+            return (materialize, cteAlias, columnNames, sourceSchema);
+        }
+
         if (context.Batch.TryResolveView(objectName, out var resolvedView))
         {
             sourceSchema = new SqlType[resolvedView.OutputColumns.Length];
