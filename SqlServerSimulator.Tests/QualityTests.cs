@@ -23,6 +23,10 @@ public class QualityTests
             typeof(BacpacImportOptions),
             typeof(BacpacImportResult),
             typeof(BacpacSkipped),
+            typeof(SimulatedDbConnection),
+            typeof(SimulatedError),
+            typeof(SimulatedErrorCollection),
+            typeof(SimulatedInfoMessageEventArgs),
         ];
         Assert.HasCount(allowedTypes.Count, types);
         foreach (var type in types)

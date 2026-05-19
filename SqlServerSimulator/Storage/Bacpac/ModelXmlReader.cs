@@ -54,7 +54,7 @@ internal static class ModelXmlReader
             result.IncrementElementCount(type);
         }
 
-        using var connection = (SimulatedDbConnection)simulation.CreateDbConnection();
+        using var connection = simulation.CreateDbConnection();
         connection.Open();
         // Route every DDL the loader synthesizes (CREATE TABLE, CREATE
         // VIEW, ALTER DATABASE, …) to the target database. The connection

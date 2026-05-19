@@ -6,11 +6,20 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedDbConnection : DbConnection
+/// <summary>
+/// ADO.NET <see cref="DbConnection"/> against a <see cref="Simulation"/>.
+/// Obtain via <see cref="Simulation.CreateDbConnection"/>; constructor is
+/// internal (apps shouldn't materialize the connection without a backing
+/// simulation). The class is public so consumers can cast a base-typed
+/// <see cref="DbConnection"/> down to subscribe to
+/// <see cref="InfoMessage"/> the same way they would against a
+/// <c>SqlConnection</c>.
+/// </summary>
+public sealed class SimulatedDbConnection : DbConnection
 {
     internal readonly Simulation Simulation;
 
-    public SimulatedDbConnection(Simulation simulation)
+    internal SimulatedDbConnection(Simulation simulation)
     {
         this.Simulation = simulation;
         this.Spid = simulation.AllocateSpid();
@@ -280,41 +289,50 @@ sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>
     /// Fires once per batch when the batch contained at least one
-    /// <c>PRINT</c> statement that produced output (the un-taken-IF /
-    /// skip-mode path doesn't fire). Multiple <c>PRINT</c> calls in the
-    /// batch coalesce into a single event with the messages joined by
-    /// <c>\n</c> — matches SqlClient's <c>InfoMessage</c> probe behavior.
-    /// Internal-only until the consumer-facing event shape is settled
-    /// (<c>DbConnection</c> has no equivalent event in the base
-    /// class — going public means adding a new public-API surface).
+    /// <c>PRINT</c> or severity-0-10 <c>RAISERROR</c> statement that
+    /// produced output (the un-taken-IF / skip-mode path doesn't fire).
+    /// Multiple contributing statements in the batch coalesce into a single
+    /// event with the messages joined by <c>\n</c> — matches SqlClient's
+    /// <c>InfoMessage</c> probe behavior. Mirrors the shape of
+    /// <c>SqlConnection.InfoMessage</c> so consumers can subscribe
+    /// identically after casting a base-typed <see cref="DbConnection"/>
+    /// down to <see cref="SimulatedDbConnection"/>.
     /// </summary>
-    internal event EventHandler<SimulatedInfoMessageEventArgs>? InfoMessage;
+    public event EventHandler<SimulatedInfoMessageEventArgs>? InfoMessage;
 
     /// <summary>
-    /// Delivers a buffered <c>PRINT</c> batch to <see cref="InfoMessage"/>
-    /// subscribers. Called from <see cref="Parser.BatchContext.FlushPrintMessages"/>
-    /// at the end of each command's dispatch.
+    /// Delivers a buffered <c>PRINT</c> / informational <c>RAISERROR</c>
+    /// batch to <see cref="InfoMessage"/> subscribers. Called from
+    /// <see cref="Parser.BatchContext.FlushPrintMessages"/> at the end of
+    /// each command's dispatch.
     /// </summary>
     internal void RaiseInfoMessage(SimulatedInfoMessageEventArgs args) => this.InfoMessage?.Invoke(this, args);
 
+    /// <inheritdoc/>
     [AllowNull]
     public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }
 
+    /// <inheritdoc/>
     public override string Database => "master";
 
+    /// <inheritdoc/>
     public override string DataSource => "simulator";
 
+    /// <inheritdoc/>
     public override string ServerVersion => "16.0.0";
 
     private ConnectionState state;
 
+    /// <inheritdoc/>
     public override ConnectionState State => this.state;
 
+    /// <inheritdoc/>
     public override void ChangeDatabase(string databaseName)
     {
         throw new NotImplementedException();
     }
 
+    /// <inheritdoc/>
     public override void Close()
     {
         // SqlClient auto-rolls-back any active transaction when its
@@ -325,6 +343,7 @@ sealed class SimulatedDbConnection : DbConnection
         this.state = ConnectionState.Closed;
     }
 
+    /// <inheritdoc/>
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -353,11 +372,13 @@ sealed class SimulatedDbConnection : DbConnection
         base.Dispose(disposing);
     }
 
+    /// <inheritdoc/>
     public override void Open()
     {
         this.state = ConnectionState.Open;
     }
 
+    /// <inheritdoc/>
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
         if (this.CurrentTransaction is not null)
@@ -380,6 +401,7 @@ sealed class SimulatedDbConnection : DbConnection
         return tx;
     }
 
+    /// <inheritdoc/>
     protected override DbCommand CreateDbCommand()
     {
         return new SimulatedDbCommand(this.Simulation, this);

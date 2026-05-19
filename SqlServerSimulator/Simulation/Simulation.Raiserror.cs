@@ -174,10 +174,12 @@ partial class Simulation
             throw SimulatedSqlException.RaiserrorRaised(formatted, (byte)severity, state);
         }
 
-        // Informational severity (0-10): no throw. The message text is
-        // discarded — same compat decision as PRINT (DbConnection has no
-        // InfoMessage event). WITH SETERROR forces @@ERROR to 50000 for the
-        // next statement to observe.
+        // Informational severity (0-10): no throw. The message routes through
+        // the connection's InfoMessage event (severity / state / number 50000
+        // captured on the SimulatedError); coalesces with any PRINTs in the
+        // same batch. WITH SETERROR forces @@ERROR to 50000 for the next
+        // statement to observe.
+        batch.AppendInfoError(@class: (byte)severity, state: state, number: 50000, message: formatted);
         if (withSetError)
         {
             batch.Connection.LastErrorNumber = 50000;

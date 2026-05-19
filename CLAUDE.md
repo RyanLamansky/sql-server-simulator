@@ -4,7 +4,7 @@ Auto-loaded orientation. `README.md` is for humans.
 
 ## Identity
 
-`SqlServerSimulator`: in-process .NET 10 SQL Server simulation. It's an **ADO.NET stand-in for `Microsoft.Data.SqlClient`** — consumers create a `Simulation`, get a `DbConnection` via `CreateDbConnection()`, and use it with (for example) `Microsoft.EntityFrameworkCore.SqlServer` instead of going through SqlClient over the wire. Public surface is `Simulation` + `CreateDbConnection()`; `QualityTests.PublicApiWhitelist` fails the build if anything else leaks public — resist expanding.
+`SqlServerSimulator`: in-process .NET 10 SQL Server simulation. It's an **ADO.NET stand-in for `Microsoft.Data.SqlClient`** — consumers create a `Simulation`, get a `SimulatedDbConnection` via `CreateDbConnection()`, and use it with (for example) `Microsoft.EntityFrameworkCore.SqlServer` instead of going through SqlClient over the wire. Public surface is `Simulation` + `CreateDbConnection()` + `SimulatedDbConnection` (subscribers for `InfoMessage` + supporting `SimulatedInfoMessageEventArgs` / `SimulatedError` / `SimulatedErrorCollection`); `QualityTests.PublicApiWhitelist` fails the build if anything else leaks public — resist expanding.
 
 `SqlServerSimulator.EFCore` is a sibling package whose only public method is `UseSqlServerSimulator(DbContextOptionsBuilder, DbConnection)`. EF Core's SqlServer provider keeps emitting SQL-Server-flavored SQL; the adapter just registers an `IRelationalTypeMappingSourcePlugin` for the (CLR, store) pairs whose default mappings downcast to `SqlParameter` (since the simulator's connection isn't a `SqlConnection`).
 
@@ -30,6 +30,8 @@ dotnet test
 ```
 
 Every `.csproj` sets `EnforceCodeStyleInBuild=true`, so `dotnet build` runs the IDE / SSS / MSTEST analyzer rules and fails on violations. No separate `dotnet format` pass is needed — running it costs seconds and catches nothing build doesn't already. CI matrix: Debug + Release. If `obj/` permission errors appear, the user's been building outside the dev container; `rm -rf obj/ bin/` clears them.
+
+Full suite runs in ~3s; single-test filter (`--filter "FullyQualifiedName~Foo"`) under 100ms. Treat `dotnet test` as a verifier between micro-edits, not a checkpoint between major ones.
 
 ## Architecture — load-bearing patterns
 
@@ -185,13 +187,12 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - `UNIQUE` on a *non-persisted* computed column (PK/UNIQUE on `PERSISTED` ships). Msg 4936 determinism gate for PERSISTED computed columns also not enforced.
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - **Table-variable named constraints / foreign keys** — Msg 102 (matches real SQL Server's grammar restriction inside `DECLARE @t TABLE`). Multi-variable DECLARE with a table variable, mixed scalar+table DECLARE, and `SET IDENTITY_INSERT @t ON` also reject. Column features (IDENTITY / UNIQUE / inline + table-level CHECK / computed / rowversion) all ship — see [`table-variables.md`](docs/claude/table-variables.md).
-- **`ALTER TABLE #foo`**, `OBJECT_ID('tempdb..#foo')` — none modeled. Use `DROP TABLE IF EXISTS #foo` for the common cleanup idiom.
 - **`CREATE SCHEMA AUTHORIZATION`** — `NotSupportedException` (no principal model on schemas). `DROP SCHEMA` + `ALTER SCHEMA TRANSFER` ship — see [`schemas.md`](docs/claude/schemas.md).
 - **`CREATE SCHEMA <schema_element>` greedy form** — simulator dispatches trailing CREATE/GRANT as their own statements rather than as part of the same CREATE SCHEMA. Same end state for the common idiom; mismatched-grammar trailers raise.
 - **`CREATE SCHEMA sys` / `INFORMATION_SCHEMA`** — Msg 2760, matching real SQL Server. The schemas exist as catalog-view hosts.
 - T-SQL `GOTO` / labels — `IF` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` ship; unconditional jumps don't.
 - **Programmable-object top-level gaps**: CLR functions, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, JOIN-view single-base UPDATE/DELETE, OUTPUT through views, multi-source alias-form UPDATE/DELETE through views (Msg 4405). **Natively-compiled procedures** ship at parser-fidelity tier (`WITH NATIVE_COMPILATION, SCHEMABINDING, EXECUTE AS …` + `BEGIN ATOMIC` dispatch the body; ATOMIC's transaction boundary falls through to session isolation). See [`programmable.md`](docs/claude/programmable.md).
-- **Public `InfoMessage` event** — `SimulatedDbConnection.InfoMessage` ships `internal` with `BatchContext`-side coalescing of multi-`PRINT` per command. Public surface deferred pending API-shape decision. PRINT semantic gaps: Msg 1046 subquery-in-operand not raised; non-string formatting uses `CoerceTo(varchar(8000))` instead of PRINT-specific style 0; 8000/4000-byte truncation not enforced.
+- **PRINT semantic gaps** — Msg 1046 subquery-in-operand not raised; non-string formatting uses `CoerceTo(varchar(8000))` instead of PRINT-specific style 0; 8000/4000-byte truncation not enforced. `InfoMessage` event surface itself ships (see `SimulatedDbConnection.InfoMessage`); these are the residual fidelity gaps in what each entry carries.
 - **`ALTER TABLE` out-of-scope**: DROP PERIOD FOR SYSTEM_TIME, REBUILD, SWITCH PARTITION, `ALTER COLUMN ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}`, identity → non-integer type change, multi-constraint ADD in one statement. Modeled shapes in [`alter-table.md`](docs/claude/alter-table.md).
 - **`hierarchyid` / `geography` / `geometry` byte-identical CAST encoding** — currently simulator-native; cross-engine byte transfer deferred. See [`hierarchyid.md`](docs/claude/hierarchyid.md), [`spatial.md`](docs/claude/spatial.md).
 - **Query hints gaps**: FROM-source `(unknown)` without alias falls through to Msg 102 (real raises Msg 207/321); `FORCESEEK(name(cols))` nested-form name validation isn't run. Surface in [`query-hints.md`](docs/claude/query-hints.md).

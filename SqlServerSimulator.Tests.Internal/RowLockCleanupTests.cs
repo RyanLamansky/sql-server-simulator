@@ -17,7 +17,7 @@ public sealed class RowLockCleanupTests
     private static (Simulation Sim, SimulatedDbConnection Conn) Open()
     {
         var sim = new Simulation();
-        var conn = (SimulatedDbConnection)sim.CreateDbConnection();
+        var conn = sim.CreateDbConnection();
         conn.Open();
         return (sim, conn);
     }

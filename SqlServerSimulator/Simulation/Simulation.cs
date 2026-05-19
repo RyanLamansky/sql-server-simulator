@@ -34,7 +34,7 @@ public sealed partial class Simulation
     /// Creates a simulated database connection.
     /// </summary>
     /// <returns>A new simulated database connection instance.</returns>
-    public DbConnection CreateDbConnection() => new SimulatedDbConnection(this);
+    public SimulatedDbConnection CreateDbConnection() => new(this);
 
     /// <summary>
     /// The database name woven into error messages that include a fully
@@ -245,12 +245,22 @@ public sealed partial class Simulation
         }
 
         var batch = new BatchContext(command);
-        var context = batch.Parser;
-        context.MoveNextOptional();
-        foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
-            yield return outcome;
-        WriteBackOutputParameters(batch);
-        batch.FlushPrintMessages();
+        try
+        {
+            var context = batch.Parser;
+            context.MoveNextOptional();
+            foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
+                yield return outcome;
+            WriteBackOutputParameters(batch);
+        }
+        finally
+        {
+            // The flush has to run even when the consumer disposes the reader
+            // before fully draining the iterator (ExecuteScalar reads one row
+            // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
+            // fired before the first SELECT silently vanishes.
+            batch.FlushPrintMessages();
+        }
     }
 
     /// <summary>

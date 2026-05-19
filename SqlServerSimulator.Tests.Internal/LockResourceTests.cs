@@ -21,7 +21,7 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var conn = (SimulatedDbConnection)sim.CreateDbConnection();
+        var conn = sim.CreateDbConnection();
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, conn, timeoutMillis: 0);
         sim.LockManager.Release(resource, LockMode.SchemaStability, conn);
     }
@@ -31,8 +31,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, b, 0);
         sim.LockManager.Release(resource, LockMode.SchemaStability, b);
@@ -44,8 +44,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         sim.LockManager.Acquire(resource, LockMode.SchemaModification, a, 0);
         var ex = Throws<DbException>(() =>
@@ -60,8 +60,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         sim.LockManager.Acquire(resource, LockMode.Exclusive, a, 0);
         var ex = Throws<DbException>(() =>
@@ -75,8 +75,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         sim.LockManager.Acquire(resource, LockMode.Exclusive, a, 0);
         _ = Throws<DbException>(() =>
@@ -89,8 +89,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         sim.LockManager.Acquire(resource, LockMode.Shared, a, 0);
         sim.LockManager.Acquire(resource, LockMode.Shared, b, 0);
         sim.LockManager.Release(resource, LockMode.Shared, b);
@@ -105,8 +105,8 @@ public sealed class LockResourceTests
         // vice versa.
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
         sim.LockManager.Acquire(resource, LockMode.Exclusive, b, 0);
         sim.LockManager.Release(resource, LockMode.Exclusive, b);
@@ -118,11 +118,11 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
         sim.LockManager.Release(resource, LockMode.SchemaStability, a);
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, LockMode.SchemaModification, b, 0));
         sim.LockManager.Release(resource, LockMode.SchemaStability, a);
@@ -135,8 +135,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var holder = (SimulatedDbConnection)sim.CreateDbConnection();
-        var waiter = (SimulatedDbConnection)sim.CreateDbConnection();
+        var holder = sim.CreateDbConnection();
+        var waiter = sim.CreateDbConnection();
         var holderTask = Task.Run(() =>
         {
             holder.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
@@ -156,8 +156,8 @@ public sealed class LockResourceTests
     {
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, a, 0);
         var ex = Throws<DbException>(() =>
@@ -180,8 +180,8 @@ public sealed class LockResourceTests
         var sim = new Simulation();
         var r1 = new LockResource();
         var r2 = new LockResource();
-        var caller = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var caller = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         caller.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         b.CurrentExecutingThreadId = -1; // foreign thread — avoids the same-thread short-circuit
         sim.LockManager.Acquire(r1, LockMode.Exclusive, caller, 0);
@@ -213,7 +213,7 @@ public sealed class LockResourceTests
         ExecuteNonQuery(sim, "create table t (id int)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
-        var table = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "begin tran; insert t values (1)");
         IsNotEmpty(table.TableDataLock.Holders);
         ExecuteNonQuery(conn, "commit tran");
@@ -229,7 +229,7 @@ public sealed class LockResourceTests
         ExecuteNonQuery(sim, "create table t (id int)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
-        var table = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "begin tran; insert t values (1); rollback tran");
         IsEmpty(table.TableDataLock.Holders);
         foreach (var (_, resource) in table.RowLocks)
@@ -254,8 +254,8 @@ public sealed class LockResourceTests
     public void Spid_FirstUserConnection_Is51()
     {
         var sim = new Simulation();
-        var conn1 = (SimulatedDbConnection)sim.CreateDbConnection();
-        var conn2 = (SimulatedDbConnection)sim.CreateDbConnection();
+        var conn1 = sim.CreateDbConnection();
+        var conn2 = sim.CreateDbConnection();
         AreEqual(51, conn1.Spid);
         AreEqual(52, conn2.Spid);
     }
@@ -264,7 +264,7 @@ public sealed class LockResourceTests
     public void LockTimeoutMillis_DefaultIsMinusOne()
     {
         var sim = new Simulation();
-        var conn = (SimulatedDbConnection)sim.CreateDbConnection();
+        var conn = sim.CreateDbConnection();
         AreEqual(-1, conn.LockTimeoutMillis);
     }
 
@@ -277,7 +277,7 @@ public sealed class LockResourceTests
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "set lock_timeout 5000";
         _ = cmd.ExecuteNonQuery();
-        AreEqual(5000, ((SimulatedDbConnection)conn).LockTimeoutMillis);
+        AreEqual(5000, conn.LockTimeoutMillis);
     }
 
     [TestMethod]
@@ -289,7 +289,7 @@ public sealed class LockResourceTests
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "set lock_timeout 0";
         _ = cmd.ExecuteNonQuery();
-        AreEqual(0, ((SimulatedDbConnection)conn).LockTimeoutMillis);
+        AreEqual(0, conn.LockTimeoutMillis);
     }
 
     [TestMethod]
@@ -300,8 +300,8 @@ public sealed class LockResourceTests
         // a different child of the same parent).
         var sim = new Simulation();
         var resource = new LockResource();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         sim.LockManager.Acquire(resource, LockMode.Shared, a, 0);
         sim.LockManager.Acquire(resource, LockMode.Update, b, 0);
         sim.LockManager.Release(resource, LockMode.Update, b);
@@ -316,8 +316,8 @@ public sealed class LockResourceTests
     public void U_ConflictsWith_U_X_IX_SIX()
     {
         var sim = new Simulation();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         foreach (var conflict in new[] { LockMode.Update, LockMode.Exclusive, LockMode.IntentExclusive, LockMode.SharedIntentExclusive })
         {
@@ -332,8 +332,8 @@ public sealed class LockResourceTests
     public void IS_CompatibleWithEverythingExceptX()
     {
         var sim = new Simulation();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         foreach (var ok in new[] { LockMode.IntentShared, LockMode.IntentExclusive, LockMode.SharedIntentExclusive, LockMode.Shared, LockMode.Update })
         {
@@ -354,8 +354,8 @@ public sealed class LockResourceTests
     public void IX_ConflictsWith_S_U_SIX_X()
     {
         var sim = new Simulation();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         foreach (var conflict in new[] { LockMode.Shared, LockMode.Update, LockMode.SharedIntentExclusive, LockMode.Exclusive })
         {
@@ -370,8 +370,8 @@ public sealed class LockResourceTests
     public void SIX_OnlyCompatibleWith_IS()
     {
         var sim = new Simulation();
-        var a = (SimulatedDbConnection)sim.CreateDbConnection();
-        var b = (SimulatedDbConnection)sim.CreateDbConnection();
+        var a = sim.CreateDbConnection();
+        var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         // SIX × IS: compatible.
         var r1 = new LockResource();
@@ -401,13 +401,13 @@ public sealed class LockResourceTests
         ExecuteNonQuery(sim, "create table t (id int)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
-        var table = ((SimulatedDbConnection)conn).CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "begin tran");
         for (var i = 0; i < SimulatedDbTransaction.RowLockEscalationThreshold + 2; i++)
             ExecuteNonQuery(conn, $"insert t values ({i})");
         // After escalation, the active transaction holds table-X on this
         // table; row-lock count is zeroed.
-        var tx = ((SimulatedDbConnection)conn).CurrentTransaction;
+        var tx = conn.CurrentTransaction;
         IsNotNull(tx);
         Contains(table, tx.EscalatedTables);
         ExecuteNonQuery(conn, "commit tran");

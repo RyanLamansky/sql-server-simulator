@@ -95,59 +95,83 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
-    /// Buffer of <c>PRINT</c>-emitted strings collected across this batch.
-    /// Probe-confirmed coalescing semantic: multiple <c>PRINT</c> statements
-    /// in one command join with <c>\n</c> separators into a single
-    /// <see cref="SimulatedDbConnection.InfoMessage"/> firing at end of
-    /// dispatch. Null when no PRINT has fired yet (avoids the per-batch
-    /// allocation for the typical PRINT-less batch).
+    /// Buffer of message texts collected across this batch from <c>PRINT</c>
+    /// and severity-0-10 <c>RAISERROR</c> statements. Probe-confirmed
+    /// coalescing semantic: multiple contributing statements in one command
+    /// fire a single <see cref="SimulatedDbConnection.InfoMessage"/> event
+    /// at end of dispatch with all message texts joined by <c>\n</c> into
+    /// the <em>single</em> <see cref="SimulatedError"/> entry that
+    /// <see cref="SimulatedInfoMessageEventArgs.Errors"/> carries. Null when
+    /// no info statement has fired yet (avoids the per-batch allocation for
+    /// the typical info-less batch).
     /// </summary>
-    private List<string>? pendingPrintMessages;
+    private List<string>? pendingInfoMessages;
 
     /// <summary>
-    /// 1-based line of the first <c>PRINT</c> statement in this batch —
-    /// captured at the moment the first message is buffered. SqlClient
-    /// probe-confirmed: the coalesced <c>InfoMessage</c> event carries
-    /// the first contributing statement's line, even when later <c>PRINT</c>s
-    /// in the same batch live on different lines.
+    /// Class / state / number / line of the <em>first</em> contributing
+    /// statement, captured when the first message is buffered. Coalesced
+    /// events report through these fields; the first contributor's
+    /// diagnostic metadata wins (matching the probe-confirmed first-line
+    /// rule for the line-number field).
     /// </summary>
-    private int firstPrintLine;
+    private (byte Class, byte State, int Number, int LineNumber) firstInfoMetadata;
 
     /// <summary>
     /// Buffers a <c>PRINT</c>-emitted string against this batch's pending
-    /// output list. Caller has already formatted the operand value into its
-    /// display string (NULL → single space per probe). Skipped-IF / loop-
-    /// control suppression is decided by the caller (<see cref="IsSkipping"/>),
-    /// not here.
+    /// info-message list with <c>PRINT</c>'s standard severity/number/state
+    /// defaults (class 0, number 0, state 1 — matching <c>SqlError</c>'s
+    /// fields for an inline <c>PRINT</c>). Caller has already formatted the
+    /// operand value into its display string (NULL → single space per probe).
+    /// Skipped-IF / loop-control suppression is decided by the caller
+    /// (<see cref="IsSkipping"/>), not here.
     /// </summary>
-    internal void AppendPrintMessage(string text)
+    internal void AppendPrintMessage(string text) =>
+        AppendInfoError(@class: 0, state: 1, number: 0, message: text);
+
+    /// <summary>
+    /// Buffers an informational message with caller-supplied class / state /
+    /// number. The <c>RAISERROR</c> sev-0-10 path uses this to carry the
+    /// statement's severity and state through to subscribers; the message
+    /// number defaults to <c>50000</c> for inline-string RAISERROR (mirrors
+    /// SqlClient). Multiple appends in one batch coalesce — only the first
+    /// call's class / state / number / line is retained for the single
+    /// surfaced <see cref="SimulatedError"/>.
+    /// </summary>
+    internal void AppendInfoError(byte @class, byte state, int number, string message)
     {
-        if (this.pendingPrintMessages is null)
+        if (this.pendingInfoMessages is null)
         {
-            this.pendingPrintMessages = [];
-            this.firstPrintLine = this.CurrentStatement.StartLine;
+            this.pendingInfoMessages = [];
+            this.firstInfoMetadata = (@class, state, number, this.CurrentStatement.StartLine);
         }
-        this.pendingPrintMessages.Add(text);
+        this.pendingInfoMessages.Add(message);
     }
 
     /// <summary>
-    /// If any <c>PRINT</c> statements buffered output during this batch,
-    /// delivers them to <see cref="SimulatedDbConnection.InfoMessage"/>
-    /// subscribers as a single event (messages joined with <c>\n</c>,
-    /// <see cref="SimulatedInfoMessageEventArgs.LineNumber"/> set to the
-    /// first contributing PRINT's line). No-op when the buffer is empty.
-    /// Called by <see cref="Simulation.CreateResultSetsForCommand"/> after
-    /// dispatch completes.
+    /// If any info statements buffered output during this batch, delivers
+    /// them to <see cref="SimulatedDbConnection.InfoMessage"/> subscribers
+    /// as a single event whose <see cref="SimulatedInfoMessageEventArgs.Errors"/>
+    /// carries one coalesced <see cref="SimulatedError"/> entry. No-op when
+    /// the buffer is empty. Called by
+    /// <see cref="Simulation.CreateResultSetsForCommand"/> after dispatch
+    /// completes.
     /// </summary>
     internal void FlushPrintMessages()
     {
-        if (this.pendingPrintMessages is not { Count: > 0 } list)
+        if (this.pendingInfoMessages is not { Count: > 0 } list)
             return;
         var joined = string.Join('\n', list);
-        this.Connection.RaiseInfoMessage(new SimulatedInfoMessageEventArgs(
-            joined,
-            this.firstPrintLine,
-            source: "SqlServerSimulator"));
+        var (firstClass, firstState, firstNumber, firstLine) = this.firstInfoMetadata;
+        var errors = new SimulatedErrorCollection([new SimulatedError(
+            @class: firstClass,
+            lineNumber: firstLine,
+            message: joined,
+            number: firstNumber,
+            procedure: "",
+            server: this.Connection.DataSource,
+            source: "SqlServerSimulator",
+            state: firstState)]);
+        this.Connection.RaiseInfoMessage(new SimulatedInfoMessageEventArgs(errors));
         list.Clear();
     }
 
