@@ -46,11 +46,30 @@ partial class Simulation
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         context.Batch.RejectCrossDatabaseMutation(destinationName);
-        var destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
-            ? table
-            : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
-                ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
-                : SimulatedSqlException.InvalidObjectName(destinationName));
+
+        // View target: resolve via TryResolveView first (CTE bindings are
+        // already shadowed at the source level, not the target). An updatable
+        // single-base view routes through its base table for the actual
+        // mutation; a non-updatable view raises Msg 4403 / Msg 4405 the same
+        // way INSERT / UPDATE / DELETE through view do.
+        View? sourceView = null;
+        HeapTable destinationTable;
+        if (context.Batch.TryResolveView(destinationName, out var resolvedView))
+        {
+            sourceView = resolvedView;
+            destinationTable = resolvedView.BaseTable
+                ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{resolvedView.Schema.Name}.{resolvedView.Name}")
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{resolvedView.Schema.Name}.{resolvedView.Name}"));
+        }
+        else
+        {
+            destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
+                ? table
+                : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
+                    ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
+                    : SimulatedSqlException.InvalidObjectName(destinationName));
+        }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
 
@@ -71,14 +90,26 @@ partial class Simulation
         // Optional target alias: AS <alias> or bare <alias>.
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
             context.MoveNextRequired();
+        // Default alias: the surface name the user typed — view's own name
+        // when the target is a view (so `MERGE INTO vbase … ON vbase.col …`
+        // works), otherwise the base table's name.
+        var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
         var targetAlias = context.Token switch
         {
-            UnquotedString { ContextualKeyword: ContextualKeyword.Using } => destinationTable.Name,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Using } => defaultTargetName,
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        if (!Collation.Default.Equals(targetAlias, destinationTable.Name))
+        if (!Collation.Default.Equals(targetAlias, defaultTargetName))
             context.MoveNextRequired();
+
+        // Target-side parse-time column shape: the view's projection when
+        // present (so user-typed names like `vbase.pk` resolve against the
+        // view's renamed columns), otherwise the base table's columns. All
+        // parse-time / runtime column lookups against the target go through
+        // this array; writes translate back to the base via
+        // <see cref="View.BaseColumnOrdinals"/> at action-resolve time.
+        var targetColumns = sourceView?.OutputColumns ?? destinationTable.Columns;
 
         // USING (<source>) [AS] alias [(col, ...)]
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
@@ -94,12 +125,12 @@ partial class Simulation
         SqlType ResolveTypeBoth(MultiPartName name)
         {
             if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
-                || Collation.Default.Equals(name.ImmediateQualifier, destinationTable.Name))
+                || Collation.Default.Equals(name.ImmediateQualifier, defaultTargetName))
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return destinationTable.Columns[i].Type;
+                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                        return targetColumns[i].Type;
                 }
             }
             if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
@@ -113,10 +144,10 @@ partial class Simulation
             // Unqualified: try target then source.
             if (name.Count == 1)
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return destinationTable.Columns[i].Type;
+                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                        return targetColumns[i].Type;
                 }
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
@@ -142,17 +173,17 @@ partial class Simulation
         }
 
         // WHEN clauses.
-        var whenClauses = ParseMergeWhenClauses(context, destinationTable, targetAlias, sourceAlias, sourceColumnNames, sourceSchema);
+        var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
 
         // OUTPUT.
-        var output = TryParseMergeOutputClause(context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema);
+        var output = TryParseMergeOutputClause(context, destinationTable, sourceView, sourceAlias, sourceColumnNames, sourceSchema);
 
         // Required trailing ; — but the dispatch loop may have already
         // consumed it (statement separators are flexible). If the cursor
         // sits on either ; or end-of-batch, accept; otherwise raise Msg 10713.
         return context.Token is not (null or Operator { Character: ';' })
             ? throw SimulatedSqlException.MergeMustBeTerminated()
-            : ExecuteMerge(context, destinationTable, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
+            : ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
     }
 
     /// <summary>
@@ -391,7 +422,9 @@ partial class Simulation
     private static List<WhenClause> ParseMergeWhenClauses(
         ParserContext context,
         HeapTable destinationTable,
+        View? sourceView,
         string targetAlias,
+        string defaultTargetName,
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema)
@@ -401,15 +434,19 @@ partial class Simulation
         var nmbsUnconditionalSeen = false;
         var nmbtSeen = false;
 
+        // See ParseMerge's commentary on `targetColumns` — view target's
+        // user-facing column shape is OutputColumns; base shape otherwise.
+        var targetColumns = sourceView?.OutputColumns ?? destinationTable.Columns;
+
         SqlType ResolveType(MultiPartName name)
         {
             if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
-                || Collation.Default.Equals(name.ImmediateQualifier, destinationTable.Name))
+                || Collation.Default.Equals(name.ImmediateQualifier, defaultTargetName))
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return destinationTable.Columns[i].Type;
+                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                        return targetColumns[i].Type;
                 }
             }
             if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
@@ -422,10 +459,10 @@ partial class Simulation
             }
             if (name.Count == 1)
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return destinationTable.Columns[i].Type;
+                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                        return targetColumns[i].Type;
                 }
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
@@ -518,7 +555,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
 
-            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, ResolveType));
+            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, ResolveType));
         }
 
         return clauses.Count == 0 ? throw SimulatedSqlException.SyntaxErrorNear(context) : clauses;
@@ -529,11 +566,12 @@ partial class Simulation
         WhenClauseKind kind,
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
+        View? sourceView,
         Func<MultiPartName, SqlType> resolveType) =>
         context.Token switch
         {
-            ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, resolveType),
-            ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, resolveType),
+            ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
+            ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
             ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
@@ -543,6 +581,7 @@ partial class Simulation
         WhenClauseKind kind,
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
+        View? sourceView,
         Func<MultiPartName, SqlType> resolveType)
     {
         if (kind == WhenClauseKind.Matched)
@@ -558,8 +597,11 @@ partial class Simulation
             {
                 if (context.GetNextRequired() is not StringToken colTok)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                var col = destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, colTok.Value))
-                    ?? throw SimulatedSqlException.InvalidColumnName(colTok.Value);
+                // Same helper INSERT … through view uses: looks up the
+                // name against view.OutputColumns when applicable and
+                // translates to the base table column, rejecting writes
+                // to a derived projection (Msg 4406).
+                var col = ResolveInsertTargetColumn(colTok.Value, destinationTable, sourceView);
                 if (col.Computed is not null)
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
                 if (col.Type == SqlType.RowVersion)
@@ -603,13 +645,27 @@ partial class Simulation
         HeapColumn[] columns;
         if (insertColumns.Count == 0)
         {
-            var defaultCols = new List<HeapColumn>();
-            foreach (var c in destinationTable.Columns)
+            // Implicit column list: the writable shape of the view's
+            // projection (mapped through BaseColumnOrdinals) when targeting
+            // a view, otherwise the base table's writable columns.
+            // IDENTITY_INSERT-on doesn't apply to MERGE — its source-list
+            // structure precludes the same opt-in shape INSERT supports —
+            // so implicit-list IDENTITY columns drop the same way real
+            // SQL Server's MERGE INTO does.
+            if (sourceView is not null)
             {
-                if (c.Computed is null && c.Type != SqlType.RowVersion)
-                    defaultCols.Add(c);
+                columns = BuildImplicitInsertColumnsForView(sourceView, destinationTable, identityInsertOn: false);
             }
-            columns = [.. defaultCols];
+            else
+            {
+                var defaultCols = new List<HeapColumn>();
+                foreach (var c in destinationTable.Columns)
+                {
+                    if (c.Computed is null && c.Type != SqlType.RowVersion)
+                        defaultCols.Add(c);
+                }
+                columns = [.. defaultCols];
+            }
         }
         else
         {
@@ -626,6 +682,7 @@ partial class Simulation
         WhenClauseKind kind,
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
+        View? sourceView,
         Func<MultiPartName, SqlType> resolveType)
     {
         if (kind == WhenClauseKind.NotMatchedByTarget)
@@ -662,17 +719,43 @@ partial class Simulation
                 context.MoveNextRequired();
                 var rhs = Expression.Parse(context);
 
-                var ordinal = -1;
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                // Resolve user-facing column name into the base-table ordinal
+                // that the WHEN executor will mutate. View paths translate
+                // via OutputColumns + BaseColumnOrdinals (derived projections
+                // reject with Msg 4406); table paths look up directly.
+                int ordinal;
+                if (sourceView is not null)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, columnName))
+                    var matched = -1;
+                    for (var i = 0; i < sourceView.OutputColumns.Length; i++)
                     {
-                        ordinal = i;
-                        break;
+                        if (Collation.Default.Equals(sourceView.OutputColumns[i].Name, columnName))
+                        {
+                            matched = i;
+                            break;
+                        }
                     }
+                    if (matched < 0)
+                        throw SimulatedSqlException.InvalidColumnName(columnName);
+                    var baseOrd = sourceView.BaseColumnOrdinals[matched];
+                    if (baseOrd < 0)
+                        throw SimulatedSqlException.ViewDmlTouchesDerivedField($"{sourceView.Schema.Name}.{sourceView.Name}");
+                    ordinal = baseOrd;
                 }
-                if (ordinal < 0)
-                    throw SimulatedSqlException.InvalidColumnName(columnName);
+                else
+                {
+                    ordinal = -1;
+                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                    {
+                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, columnName))
+                        {
+                            ordinal = i;
+                            break;
+                        }
+                    }
+                    if (ordinal < 0)
+                        throw SimulatedSqlException.InvalidColumnName(columnName);
+                }
                 var targetColumn = destinationTable.Columns[ordinal];
                 if (targetColumn.Identity is not null)
                     throw SimulatedSqlException.CannotUpdateIdentityColumn(targetColumn.Name);
@@ -712,12 +795,19 @@ partial class Simulation
     private static MergeOutputProjection? TryParseMergeOutputClause(
         ParserContext context,
         HeapTable destinationTable,
+        View? sourceView,
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
+        // OUTPUT through a view is not modeled — matches the existing pattern
+        // for UPDATE / INSERT / DELETE OUTPUT through view. INSERTED.* /
+        // DELETED.* projection through view OutputColumns + BaseColumnOrdinals
+        // remains deferred.
+        if (sourceView is not null)
+            throw new NotSupportedException($"MERGE … OUTPUT through a view ('{sourceView.Schema.Name}.{sourceView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
 
         var expressions = new List<Expression>();
         var columnNames = new List<string>();
@@ -823,9 +913,53 @@ partial class Simulation
     /// into the <c>WHEN NOT MATCHED [BY TARGET]</c> clause if present.
     /// All queued mutations apply atomically before triggers fire.
     /// </summary>
+    /// <summary>
+    /// Maps a user-typed target column name to its base-table ordinal and
+    /// type. For a view target, looks up the name in
+    /// <see cref="View.OutputColumns"/> and translates via
+    /// <see cref="View.BaseColumnOrdinals"/>; derived view projections
+    /// (ordinal <c>-1</c>) are reported as not-found so the caller raises
+    /// the appropriate column-reference error. For a table target, looks up
+    /// directly in <see cref="HeapTable.Columns"/>.
+    /// </summary>
+    private static bool TryLookupTargetColumn(string columnName, HeapTable destinationTable, View? sourceView, out int baseOrdinal, out SqlType type)
+    {
+        if (sourceView is not null)
+        {
+            for (var i = 0; i < sourceView.OutputColumns.Length; i++)
+            {
+                if (Collation.Default.Equals(sourceView.OutputColumns[i].Name, columnName))
+                {
+                    var baseOrd = sourceView.BaseColumnOrdinals[i];
+                    if (baseOrd < 0)
+                        break; // Derived projection — unreadable in MERGE context.
+                    baseOrdinal = baseOrd;
+                    type = sourceView.OutputColumns[i].Type;
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            {
+                if (Collation.Default.Equals(destinationTable.Columns[i].Name, columnName))
+                {
+                    baseOrdinal = i;
+                    type = destinationTable.Columns[i].Type;
+                    return true;
+                }
+            }
+        }
+        baseOrdinal = 0;
+        type = SqlType.Int32;
+        return false;
+    }
+
     private static SimulatedStatementOutcome ExecuteMerge(
         ParserContext context,
         HeapTable destinationTable,
+        View? sourceView,
         string targetAlias,
         Func<BatchContext, List<SqlValue[]>> materializeSource,
         string sourceAlias,
@@ -837,18 +971,23 @@ partial class Simulation
     {
         var sourceRows = materializeSource(context.Batch);
         var sourceMatched = new bool[sourceRows.Count];
+        var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
 
+        // Target-side column lookup: user-facing names match view OutputColumns
+        // when a view target is in scope, otherwise base table columns. View
+        // path translates the matched user-name to a base ordinal via
+        // BaseColumnOrdinals so the heap-decoded targetValues array indexes
+        // correctly. Derived view columns (BaseColumnOrdinals[i] == -1)
+        // can be read at runtime by re-evaluating the projection's
+        // expression — but writes to them were rejected at parse time.
         // Resolve target columns by qualifier; null-source means BY-SOURCE branch (everything in source resolver returns NULL).
         SqlValue ResolveCombined(SqlValue[]? targetValues, SqlValue[]? sourceValues, MultiPartName name)
         {
             if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
-                || Collation.Default.Equals(name.ImmediateQualifier, destinationTable.Name))
+                || Collation.Default.Equals(name.ImmediateQualifier, defaultTargetName))
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
-                {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return targetValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : targetValues[i];
-                }
+                if (TryLookupTargetColumn(name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
+                    return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
             }
             if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
             {
@@ -860,11 +999,8 @@ partial class Simulation
             }
             if (name.Count == 1)
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
-                {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return targetValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : targetValues[i];
-                }
+                if (TryLookupTargetColumn(name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
+                    return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
                     if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
@@ -883,6 +1019,13 @@ partial class Simulation
         {
             var targetValues = DecodeFullRow(destinationTable, rowBytes);
             EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+
+            // View visibility filter: a base row not visible through the
+            // view participates in neither the ON-predicate match nor the
+            // BY-SOURCE enumeration. Mirrors UPDATE / DELETE through view
+            // semantics.
+            if (sourceView?.VisibilityCheck is { } vis && !vis(targetValues, context.Batch))
+                continue;
 
             // Find all matching source rows.
             var matchedSources = new List<int>();
@@ -906,14 +1049,14 @@ partial class Simulation
                 if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
                     throw SimulatedSqlException.MergeMultiMatch();
 
-                ApplyChosenMatchedAction(context, destinationTable, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
+                ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
             }
             else
             {
                 var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
                 if (chosen is null)
                     continue;
-                ApplyChosenMatchedAction(context, destinationTable, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+                ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
             }
         }
 
@@ -921,6 +1064,9 @@ partial class Simulation
         var nmbtClause = whenClauses.FirstOrDefault(c => c.Kind == WhenClauseKind.NotMatchedByTarget);
         if (nmbtClause is not null)
         {
+            // INSTEAD OF INSERT fires against the view when applicable;
+            // otherwise the action targets the base table directly.
+            var insteadOfInsertTarget = (SchemaObject?)sourceView ?? destinationTable;
             for (var si = 0; si < sourceRows.Count; si++)
             {
                 if (sourceMatched[si])
@@ -931,12 +1077,12 @@ partial class Simulation
                 {
                     continue;
                 }
-                ApplyInsert(context, destinationTable, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert));
+                ApplyInsert(context, destinationTable, sourceView, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
             }
         }
 
         // Phase C: commit mutations.
-        return CommitMerge(context, destinationTable, pendingInserts, pendingUpdates, pendingDeletes, output);
+        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output);
     }
 
     /// <summary>
@@ -971,6 +1117,7 @@ partial class Simulation
     private static void ApplyChosenMatchedAction(
         ParserContext context,
         HeapTable destinationTable,
+        View? sourceView,
         WhenClause clause,
         int pageIndex,
         int slotIndex,
@@ -1007,12 +1154,19 @@ partial class Simulation
         EnforceNotNull(destinationTable, newValues, "UPDATE");
         EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE");
 
+        // WITH CHECK OPTION: post-update row must still satisfy the view's
+        // visibility chain. Raised before commit so a violating row leaves
+        // the heap unchanged.
+        if (sourceView?.CheckOptionCheck is { } co && !co(newValues, context.Batch))
+            throw SimulatedSqlException.ViewCheckOptionViolation();
+
         pendingUpdates.Add((pageIndex, slotIndex, targetValues, newValues, sourceValues));
     }
 
     private static void ApplyInsert(
         ParserContext context,
         HeapTable destinationTable,
+        View? sourceView,
         WhenClause clause,
         SqlValue[] sourceValues,
         Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined,
@@ -1126,12 +1280,20 @@ partial class Simulation
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
         }
 
+        // WITH CHECK OPTION on the post-insert row, matching INSERT-through-view.
+        // Skipped for INSTEAD OF INSERT because the trigger body's own DML is
+        // what actually lands a row; the view's CheckOption only gates direct
+        // heap writes through it.
+        if (!insteadOfInsert && sourceView?.CheckOptionCheck is { } co && !co(rowValues, context.Batch))
+            throw SimulatedSqlException.ViewCheckOptionViolation();
+
         pendingInserts.Add((rowValues, sourceValues));
     }
 
     private static SimulatedStatementOutcome CommitMerge(
         ParserContext context,
         HeapTable destinationTable,
+        View? sourceView,
         List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
@@ -1140,15 +1302,17 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        // Per-action INSTEAD OF detection. When set, the corresponding
-        // pending list bypasses the heap-write + AFTER-trigger path and
-        // fires its INSTEAD OF trigger with would-be values. Real SQL
-        // Server allows a mixed MERGE where, say, INSERT routes through
-        // INSTEAD OF while UPDATE writes to the heap normally — each
-        // action is decided independently.
-        var insteadOfInsert = pendingInserts.Count > 0 && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert);
-        var insteadOfUpdate = pendingUpdates.Count > 0 && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Update);
-        var insteadOfDelete = pendingDeletes.Count > 0 && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Delete);
+        // Per-action INSTEAD OF detection. INSTEAD OF triggers live on the
+        // view when the target is a view, otherwise on the base table.
+        // When set, the corresponding pending list bypasses the heap-write +
+        // AFTER-trigger path and fires its INSTEAD OF trigger with would-be
+        // values. Real SQL Server allows a mixed MERGE where, say, INSERT
+        // routes through INSTEAD OF while UPDATE writes to the heap normally
+        // — each action is decided independently.
+        var insteadOfTarget = (SchemaObject?)sourceView ?? destinationTable;
+        var insteadOfInsert = pendingInserts.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Insert);
+        var insteadOfUpdate = pendingUpdates.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Update);
+        var insteadOfDelete = pendingDeletes.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Delete);
 
         // Validate key constraints across only the actions that actually
         // hit the heap. INSTEAD OF action lists bypass key checks since
@@ -1296,6 +1460,12 @@ partial class Simulation
         // For each action, route to INSTEAD OF if attached, else AFTER (if
         // attached). The branch-presence checks short-circuit when there's
         // no trigger of either timing for the action.
+        // INSTEAD OF triggers see view-shaped INSERTED / DELETED columns
+        // when the target is a view; AFTER triggers continue to fire against
+        // the base table with base-shaped values (AFTER triggers on views
+        // aren't a thing in SQL Server).
+        var pseudoColumns = sourceView?.OutputColumns ?? destinationTable.Columns;
+
         var totalAffected = pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count;
         if (pendingInserts.Count > 0)
         {
@@ -1304,10 +1474,13 @@ partial class Simulation
                 insertedRows.Add(newValues);
             if (insteadOfInsert)
             {
+                var insertedViewRows = sourceView is null
+                    ? insertedRows
+                    : insertedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
                 context.Connection.LastStatementRowCount = pendingInserts.Count;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
-                    context.Batch, destinationTable, TriggerActions.Insert,
-                    destinationTable.Columns, insertedRows, deletedRows: null,
+                    context.Batch, insteadOfTarget, TriggerActions.Insert,
+                    pseudoColumns, insertedViewRows, deletedRows: null,
                     affectedRowCount: pendingInserts.Count);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert))
@@ -1330,10 +1503,16 @@ partial class Simulation
             }
             if (insteadOfUpdate)
             {
+                var insertedViewRows = sourceView is null
+                    ? insertedRows
+                    : insertedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
+                var deletedViewRows = sourceView is null
+                    ? deletedRows
+                    : deletedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
                 context.Connection.LastStatementRowCount = pendingUpdates.Count;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
-                    context.Batch, destinationTable, TriggerActions.Update,
-                    destinationTable.Columns, insertedRows, deletedRows,
+                    context.Batch, insteadOfTarget, TriggerActions.Update,
+                    pseudoColumns, insertedViewRows, deletedViewRows,
                     affectedRowCount: pendingUpdates.Count);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Update))
@@ -1352,10 +1531,13 @@ partial class Simulation
                 deletedRows.Add(oldValues);
             if (insteadOfDelete)
             {
+                var deletedViewRows = sourceView is null
+                    ? deletedRows
+                    : deletedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
                 context.Connection.LastStatementRowCount = pendingDeletes.Count;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
-                    context.Batch, destinationTable, TriggerActions.Delete,
-                    destinationTable.Columns, insertedRows: null, deletedRows: deletedRows,
+                    context.Batch, insteadOfTarget, TriggerActions.Delete,
+                    pseudoColumns, insertedRows: null, deletedRows: deletedViewRows,
                     affectedRowCount: pendingDeletes.Count);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Delete))
