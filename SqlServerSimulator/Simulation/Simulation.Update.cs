@@ -924,11 +924,11 @@ partial class Simulation
     /// tuple is checked against (a) every other affected row's new key and
     /// (b) every non-affected heap row's existing key. Self-collision (a row
     /// matching its own pre-update self) is impossible because affected
-    /// addresses are excluded from the heap-side scan. Edge case not
-    /// modeled: SQL Server allows mass "shift" updates like
-    /// <c>UPDATE t SET k = k + 1</c> over a unique-key column — the simulator's
-    /// per-row check fails when the shifted value matches another affected
-    /// row's pre-shift value pattern (CLAUDE.md flags this as a quirk).
+    /// addresses are excluded from the heap-side scan. Mass-shift updates
+    /// (<c>UPDATE t SET k = k + 1</c>) work correctly because (a) only
+    /// compares new-vs-new among affected rows — overlap with the pre-shift
+    /// snapshot via (b) only fires when a non-affected row's existing key
+    /// genuinely collides with the new value (a true violation).
     /// </summary>
     private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
     {

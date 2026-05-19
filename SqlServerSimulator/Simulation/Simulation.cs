@@ -52,9 +52,11 @@ public sealed partial class Simulation
     /// to a Simulation that has no databases (so the all-T-SQL use case
     /// keeps working without an explicit import / CREATE DATABASE).
     /// <see cref="ImportBacpac(System.IO.Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>
-    /// adds further entries; <c>USE &lt;db&gt;</c> isn't wired up yet, so
-    /// <see cref="SimulatedDbConnection.CurrentDatabase"/> picks the lazy
-    /// seed when present, else the sole entry when there's exactly one.
+    /// adds further entries; <c>USE &lt;db&gt;</c> switches a session's
+    /// <see cref="SimulatedDbConnection.CurrentDatabase"/> across entries
+    /// (Msg 911 on miss). Fresh connections pick the lazy seed when present,
+    /// else the alphabetically-first entry (see
+    /// <see cref="SimulatedDbConnection"/>'s ResolveInitialDatabase).
     /// </summary>
     internal readonly Dictionary<string, Database> Databases = new(Collation.Default);
 
