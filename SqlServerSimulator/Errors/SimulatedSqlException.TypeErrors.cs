@@ -364,7 +364,7 @@ partial class SimulatedSqlException
     /// (<c>varchar</c>, <c>nvarchar</c>, etc.).
     /// </summary>
     internal static SimulatedSqlException ConversionFailedFromString(SqlType sourceType, string sourceValue, SqlType targetType) =>
-        new($"Conversion failed when converting the {sourceType} value '{sourceValue}' to data type {targetType}.", 245, 16, 1);
+        new($"Conversion failed when converting the {sourceType.SqlServerName} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 244: parsing a string succeeded but the
@@ -465,6 +465,20 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CollationConflict(string leftCollation, string rightCollation, string operatorName) =>
         new($"Cannot resolve the collation conflict between \"{leftCollation}\" and \"{rightCollation}\" in the {operatorName} operation.", 468, 16, 9);
+
+    /// <summary>
+    /// Mimics SQL Server error 457: a string-producing operation (concat with
+    /// <c>+</c>, <c>UNION ALL</c>, <c>DISTINCT</c> over a unioned column,
+    /// <c>ORDER BY</c> on a concat result) couldn't pick a single output
+    /// collation because two same-rank operands had different collations.
+    /// Probe-confirmed against SQL Server 2025: Class 16 State 1, wording
+    /// reads "Implicit conversion of {srcType} value to {dstType} ...". The
+    /// source/destination type names are both the same bare keyword (e.g.
+    /// <c>varchar</c>) — SQL Server's wording uses the same word twice in
+    /// the unresolved-collation case.
+    /// </summary>
+    internal static SimulatedSqlException UnresolvedCollationInImplicitConversion(SqlType type) =>
+        new($"Implicit conversion of {type.SqlServerName} value to {type.SqlServerName} cannot be performed because the collation of the value is unresolved due to a collation conflict.", 457, 16, 1);
 
     /// <summary>
     /// Returns the type name SQL Server uses in Msg 402 / 206 / 529 for a

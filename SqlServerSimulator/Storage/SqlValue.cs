@@ -41,6 +41,16 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <summary>NULL value of the given type.</summary>
     public static SqlValue Null(SqlType type) => new(type, 0, null, isNull: true);
 
+    /// <summary>
+    /// Returns a copy of this value re-tagged with a different
+    /// <see cref="SqlType"/>. The new type must be wire-compatible with the
+    /// current type (same primitive / reference shape) — used by
+    /// <c>CollateExpression</c> to swap a string value's type to one carrying
+    /// an explicit collation, where the underlying string reference is
+    /// unchanged.
+    /// </summary>
+    internal SqlValue WithType(SqlType type) => new(type, this.primitive, this.reference, this.IsNull);
+
     /// <summary>Non-NULL <see cref="int"/> value.</summary>
     public static SqlValue FromInt32(int value) => new(SqlType.Int32, value, null, isNull: false);
 
@@ -56,18 +66,32 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <summary>Non-NULL <see cref="bool"/> (SQL <c>bit</c>) value.</summary>
     public static SqlValue FromBoolean(bool value) => new(SqlType.Bit, value ? 1L : 0L, null, isNull: false);
 
-    /// <summary>Non-NULL SQL <c>varchar</c> value (UTF-8 on disk, .NET string in memory).</summary>
+    /// <summary>Non-NULL SQL <c>varchar</c> value (UTF-8 on disk, .NET string in memory). Type collation defaults to <see cref="SqlServerSimulator.Collation.Default"/> at <see cref="Coercibility.CoercibleDefault"/> — appropriate for literals, parameters, and CAST results.</summary>
     public static SqlValue FromVarchar(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
         return new(SqlType.Varchar, 0, value, isNull: false);
     }
 
-    /// <summary>Non-NULL SQL <c>nvarchar</c> value (UTF-16 LE on disk, .NET string in memory).</summary>
+    /// <summary>Non-NULL SQL <c>varchar</c> value tagged with an explicit type instance — preserves the column's pinned collation through row decode and per-column INSERT.</summary>
+    public static SqlValue FromVarchar(VarcharSqlType type, string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(type, 0, value, isNull: false);
+    }
+
+    /// <summary>Non-NULL SQL <c>nvarchar</c> value (UTF-16 LE on disk, .NET string in memory). Type collation defaults to <see cref="SqlServerSimulator.Collation.Default"/> at <see cref="Coercibility.CoercibleDefault"/>.</summary>
     public static SqlValue FromNVarchar(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
         return new(SqlType.NVarchar, 0, value, isNull: false);
+    }
+
+    /// <summary>Non-NULL SQL <c>nvarchar</c> value tagged with an explicit type instance — preserves the column's pinned collation through row decode and per-column INSERT.</summary>
+    public static SqlValue FromNVarchar(NVarcharSqlType type, string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(type, 0, value, isNull: false);
     }
 
     /// <summary>Non-NULL SQL <c>xml</c> value (encoded identically to <c>nvarchar(MAX)</c>; identity preserved through <see cref="SqlType.Xml"/>).</summary>
@@ -115,7 +139,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.Varbinary, 0, value, isNull: false);
     }
 
-    /// <summary>Non-NULL SQL deprecated <c>text</c> value. Encoded as CP1252 bytes; same in-memory shape as <see cref="FromVarchar"/>.</summary>
+    /// <summary>Non-NULL SQL deprecated <c>text</c> value. Encoded as CP1252 bytes; same in-memory shape as <see cref="FromVarchar(string)"/>.</summary>
     public static SqlValue FromText(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -441,13 +465,15 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public static SqlValue FromSingle(float value) => new(SqlType.Real, BitConverter.SingleToInt32Bits(value), null, isNull: false);
 
     /// <summary>
-    /// Constructs a string-typed value of the given SQL type. Used by string
-    /// functions (UPPER, LEFT, etc.) that preserve their input's string subtype.
+    /// Constructs a string-typed value of the given SQL type, preserving the
+    /// target type's pinned collation and coercibility. Used by string
+    /// functions (UPPER, LEFT, etc.) that preserve their input's string
+    /// subtype and by the cross-string-family coercion path.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="type"/> is not a string type.</exception>
     public static SqlValue FromString(SqlType type, string value) =>
-        type is VarcharSqlType ? FromVarchar(value)
-        : type is NVarcharSqlType ? FromNVarchar(value)
+        type is VarcharSqlType v ? FromVarchar(v, value)
+        : type is NVarcharSqlType n ? FromNVarchar(n, value)
         : type == SqlType.SystemName ? FromSystemName(value)
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)
@@ -634,7 +660,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         && this.IsNull == other.IsNull
         && (this.IsNull
             || (IsStringTypeRef(this.Type)
-                ? Collation.Default.Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
+                ? (this.Type.Collation ?? Collation.Default).Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
                 : this.Type is DateTimeOffsetSqlType
                     ? this.primitive == other.primitive
                     : this.Type == SqlType.UniqueIdentifier
@@ -689,7 +715,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type == SqlType.SmallInt ? this.AsInt16.CompareTo(other.AsInt16)
         : this.Type == SqlType.TinyInt ? this.AsByte.CompareTo(other.AsByte)
         : this.Type == SqlType.Bit ? this.AsBoolean.CompareTo(other.AsBoolean)
-        : IsStringTypeRef(this.Type) ? Collation.Default.Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
+        : IsStringTypeRef(this.Type) ? (this.Type.Collation ?? Collation.Default).Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
         : this.Type is RowVersionSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType ? this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes)
         : this.Type == SqlType.Date ? this.primitive.CompareTo(other.primitive)
@@ -720,7 +746,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         {
             // Trailing spaces and case folding are part of equality, so the
             // hash must agree.
-            hash.Add(Collation.Default.GetHashCode(TrimTrailing((string)this.reference!)));
+            hash.Add((this.Type.Collation ?? Collation.Default).GetHashCode(TrimTrailing((string)this.reference!)));
         }
         else if (this.Type is DateTimeOffsetSqlType)
         {

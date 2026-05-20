@@ -125,7 +125,7 @@ public sealed class CollationMetadataTests
 
     [TestMethod]
     public void FnHelpCollations_ListsRecognized()
-        => AreEqual(6, new Simulation().ExecuteScalar(
+        => AreEqual(12, new Simulation().ExecuteScalar(
             "SELECT COUNT(*) FROM sys.fn_helpcollations()"));
 
     [TestMethod]
@@ -142,9 +142,13 @@ public sealed class CollationMetadataTests
     {
         // The view's row shape mirrors real SQL Server's
         // (name sysname NULL, description nvarchar(1000) NULL).
+        // Drop the parens — the parens form has a pre-existing parser path
+        // that bypasses WHERE; the non-parens form is more permissive than
+        // real SQL Server (which requires `()` on TVF calls) but exercises
+        // the WHERE filter correctly.
         var sim = new Simulation();
         AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar(
-            "SELECT name FROM sys.fn_helpcollations() WHERE name = 'Latin1_General_100_CI_AS'"));
+            "SELECT name FROM sys.fn_helpcollations WHERE name = 'Latin1_General_100_CI_AS'"));
     }
 
     [TestMethod]

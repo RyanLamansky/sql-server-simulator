@@ -683,14 +683,22 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        // Optional COLLATE clause — parse-accept and discard (simulator
-        // operates on the default collation only). The collation name is a
-        // single identifier token (e.g. `Latin1_General_BIN`).
+        // Optional COLLATE clause. The collation name is a single identifier
+        // token (e.g. `Latin1_General_BIN`). Captured here and applied to the
+        // new SqlType below; when absent, the existing column's collation is
+        // preserved.
+        string? newCollationName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Collate })
         {
             context.MoveNextRequired();
-            if (context.Token is not (Name or UnquotedString))
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            newCollationName = context.Token switch
+            {
+                UnquotedString us => us.Value,
+                Name n => n.Value,
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            if (!Collation.IsRecognized(newCollationName))
+                throw new NotSupportedException($"COLLATE: collation '{newCollationName}' isn't on the simulator's recognized list.");
             context.MoveNextOptional();
         }
 
@@ -744,6 +752,24 @@ partial class Simulation
         // semantics for the alias-default propagation step.
         var newNullable = nullable ?? aliasIsNullable ?? existingCol.Nullable;
 
+        // Collation: explicit ALTER COLUMN ... COLLATE wins; otherwise
+        // preserve the existing column's collation (when the type stays
+        // string); when transitioning into a string type from non-string,
+        // default to the database default.
+        string? newCollationStored;
+        if (newType.Category == SqlTypeCategory.String)
+        {
+            var newCollation = newCollationName is not null && Collation.ByName.TryGetValue(newCollationName, out var named)
+                ? named
+                : existingCol.Type.Collation ?? Collation.Default;
+            newType = newType.WithCollation(newCollation, Coercibility.Implicit);
+            newCollationStored = newCollationName ?? existingCol.Collation;
+        }
+        else
+        {
+            newCollationStored = null;
+        }
+
         // Identity preservation: ALTER COLUMN keeps the IdentityState alive
         // (probe-confirmed — INT IDENTITY → BIGINT keeps the counter), and
         // SQL Server forbids changing identity to a non-integer type. The
@@ -770,7 +796,8 @@ partial class Simulation
             identity: existingCol.Identity,
             defaultExpression: existingCol.Default,
             generatedAs: existingCol.GeneratedAs,
-            isHidden: existingCol.IsHidden)
+            isHidden: existingCol.IsHidden,
+            collation: newCollationStored)
         {
             DefaultConstraint = existingCol.DefaultConstraint,
         };

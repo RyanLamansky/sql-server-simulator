@@ -30,12 +30,14 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// <summary>
     /// Declared per-column <c>COLLATE name</c> override. <c>null</c> when
     /// the column inherits the database default (<see cref="Database.CollationName"/>).
-    /// Metadata-only — every comparison / sort / LIKE in the simulator still
-    /// routes through <see cref="Collation.Default"/> regardless of what
-    /// this names. Surfaces through <c>sys.columns.collation_name</c> /
-    /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c> so BACPAC round-trip
-    /// preserves the declaration; comparison semantics are a separate
-    /// project.
+    /// Surfaces through <c>sys.columns.collation_name</c> /
+    /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c> for BACPAC
+    /// round-trip. The actual comparison semantics live on
+    /// <see cref="Type"/>: when CREATE TABLE wires the column, the declared
+    /// collation (or the database default) is pinned onto the column's
+    /// <see cref="SqlType.Collation"/> at <see cref="Coercibility.Implicit"/>
+    /// rank, so values decoded from this column sort / compare under the
+    /// declared rules and cross-collation joins raise Msg 468 / Msg 457.
     /// </summary>
     public readonly string? Collation = collation;
 

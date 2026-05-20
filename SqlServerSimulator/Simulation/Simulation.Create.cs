@@ -861,6 +861,25 @@ partial class Simulation
             actualNullable = false;
         }
 
+        if (resolvedType.Category == SqlTypeCategory.String)
+        {
+            // Pin the column's declared collation onto its SqlType so values
+            // decoded from this column carry it through to comparison / sort
+            // / hash, and so expression resolution sees Implicit-rank
+            // coercibility on column references. Columns without an explicit
+            // COLLATE clause inherit the current database's default
+            // collation — temp tables (which dispatch through this same
+            // routine) inherit whatever database is active when they're
+            // created, avoiding the EF #temp-vs-user-table join footgun
+            // when BACPAC-loaded databases declare a non-default collation.
+            var resolvedCollation = columnCollation is not null && Collation.ByName.TryGetValue(columnCollation, out var named)
+                ? named
+                : Collation.ByName.TryGetValue(context.Batch.Connection.CurrentDatabase.CollationName, out var dbDefault)
+                    ? dbDefault
+                    : Collation.Default;
+            resolvedType = resolvedType.WithCollation(resolvedCollation, Coercibility.Implicit);
+        }
+
         var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation);
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;

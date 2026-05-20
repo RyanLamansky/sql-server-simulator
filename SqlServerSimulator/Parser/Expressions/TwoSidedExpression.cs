@@ -52,8 +52,25 @@ internal abstract class TwoSidedExpression : Expression
 
     protected abstract SqlValue Run(SqlValue left, SqlValue right);
 
-    public sealed override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        SqlType.PromoteForArithmetic(left.GetSqlType(resolveColumnType), right.GetSqlType(resolveColumnType), this.Operator);
+    public sealed override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var leftType = left.GetSqlType(resolveColumnType);
+        var rightType = right.GetSqlType(resolveColumnType);
+        var result = SqlType.PromoteForArithmetic(leftType, rightType, this.Operator);
+        if (result.Category == SqlTypeCategory.String
+            && leftType.Category == SqlTypeCategory.String
+            && rightType.Category == SqlTypeCategory.String)
+        {
+            // Propagate collation through string concat (+) so the projection
+            // schema type matches the runtime SqlType produced in Add.Run.
+            // Other arithmetic operators on string operands reject in
+            // PromoteForArithmetic before this point.
+            var resolved = Collation.Resolve(leftType, rightType)
+                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(result);
+            result = result.WithCollation(resolved.Collation, resolved.Coercibility);
+        }
+        return result;
+    }
 
     /// <summary>
     /// Numeric binary-operator dispatcher. Despite the name, this is the

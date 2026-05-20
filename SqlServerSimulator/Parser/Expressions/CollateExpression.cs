@@ -37,14 +37,17 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     /// <summary>The collation named by the postfix. <c>LIKE</c> reads <see cref="Collation.CaseSensitive"/> off this to choose the regex's case-folding behavior.</summary>
     public readonly Collation ResolvedCollation = collation;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Inner.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
+        this.Inner.GetSqlType(resolveColumnType).WithCollation(this.ResolvedCollation, Coercibility.Explicit);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Inner.Run(runtime);
-        return !value.IsNull && value.Type.Category != SqlTypeCategory.String
-            ? throw SimulatedSqlException.CollateClauseRequiresString(value.Type)
-            : value;
+        var rewrapped = value.Type.WithCollation(this.ResolvedCollation, Coercibility.Explicit);
+        return value.IsNull ? SqlValue.Null(rewrapped)
+            : value.Type.Category != SqlTypeCategory.String
+                ? throw SimulatedSqlException.CollateClauseRequiresString(value.Type)
+                : value.WithType(rewrapped);
     }
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} COLLATE {this.ResolvedCollation.Name}";

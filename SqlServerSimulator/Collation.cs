@@ -1,7 +1,33 @@
 using System.Collections.Frozen;
 using System.Globalization;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
+
+/// <summary>
+/// SQL Server's collation-precedence rank. Used by the expression layer to
+/// decide which collation wins when two string operands meet; mismatched
+/// peers raise <c>Msg 468</c> / <c>Msg 457</c>.
+/// </summary>
+/// <remarks>
+/// Real SQL Server defines additional ranks (<c>Coercible-default</c>,
+/// <c>Implicit X</c>, <c>Explicit X</c>, <c>No-collation</c>); the simulator
+/// collapses them to the three that drive observable behavior. Hierarchy:
+/// <see cref="Explicit"/> beats <see cref="Implicit"/> beats
+/// <see cref="CoercibleDefault"/>; peers with the same rank but different
+/// collations raise the conflict error.
+/// </remarks>
+internal enum Coercibility : byte
+{
+    /// <summary>Literal, parameter, system-function result, CAST of a coercible-default source. Yields to <see cref="Implicit"/> / <see cref="Explicit"/> peers.</summary>
+    CoercibleDefault = 0,
+
+    /// <summary>Column reference, CAST of a column, computed-column expression. Two implicits with different collations raise Msg 468 / 457.</summary>
+    Implicit = 1,
+
+    /// <summary>Explicit <c>COLLATE</c> postfix. Beats both lower ranks; two explicits with different collations raise Msg 468 / 457.</summary>
+    Explicit = 2,
+}
 
 /// <summary>
 /// The SQL Server equivalent to .NET's <see cref="IComparer{T}"/> for strings.
@@ -22,21 +48,21 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// True when the collation name carries the <c>_CS_</c> or <c>_BIN</c>
     /// marker — i.e. case differences are significant. Consulted by
     /// <c>LIKE</c>'s regex builder to decide whether to set
-    /// <c>System.Text.RegularExpressions.RegexOptions.IgnoreCase</c>;
-    /// every other simulator string op still routes through
-    /// <see cref="Default"/> regardless of this flag (see
-    /// <c>docs/claude/database-options.md</c>).
+    /// <c>System.Text.RegularExpressions.RegexOptions.IgnoreCase</c>.
+    /// Other string ops (sort, equality, hash) honor the collation
+    /// directly through <see cref="Compare"/> / <see cref="Equals"/> /
+    /// <see cref="GetHashCode"/> via the column type's pinned collation.
     /// </summary>
     public virtual bool CaseSensitive => false;
 
     /// <summary>
     /// The instance returned for "SQL_Latin1_General_CP1_CI_AS" — the
-    /// simulator's default database collation. Routed through
+    /// simulator's default database collation. Used by
     /// <see cref="Database.CollationName"/> when no explicit
-    /// <c>ALTER DATABASE COLLATE</c> has been issued, and (for the time
-    /// being — see <c>docs/claude/database-options.md</c>) is also the
-    /// comparer every string op falls back to regardless of declared
-    /// column / database collation.
+    /// <c>ALTER DATABASE COLLATE</c> has been issued, and as the fallback
+    /// when a string-typed value's <see cref="SqlType.Collation"/> is
+    /// <see langword="null"/> (literals built via the singleton
+    /// <c>SqlValue.FromVarchar(string)</c> / etc. paths).
     /// </summary>
     internal static readonly SQL_Latin1_General_CP1_CI_AS Default = new();
 
@@ -94,17 +120,78 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     internal static readonly Latin1_General_BIN2 Latin1GeneralBin2 = new();
 
     /// <summary>
-    /// Closed accept-list of collation names the simulator recognizes as
-    /// metadata. ALTER DATABASE COLLATE / CREATE TABLE column COLLATE accept
-    /// these names without raising; the loader records them on the
-    /// database / column for catalog-view round-trip. The comparison /
-    /// sort pipeline still routes every op through
-    /// <see cref="Default"/> regardless of declared column / database
-    /// collation; <c>LIKE</c> is the one site that honors the
-    /// <see cref="CaseSensitive"/> flag of an explicit
-    /// <c>COLLATE</c> override (see <c>docs/claude/database-options.md</c>).
-    /// Names outside this set surface as <see cref="NotSupportedException"/>
-    /// in direct SQL; the BACPAC loader catches and records on
+    /// "Japanese_XJIS_140_CI_AS" — the modern Japanese collation that
+    /// handles supplementary characters via the XJIS-140 mapping table.
+    /// Comparison routes through .NET's <c>ja-JP</c> <see cref="CompareInfo"/>
+    /// with the simulator's standard CI/AS options (case-insensitive,
+    /// accent-sensitive, kana-type-insensitive, width-insensitive).
+    /// Probe-confirmed presence in real-database column-collation profiles;
+    /// per-name sort-order parity with real SQL Server is not yet probed.
+    /// </summary>
+    internal static readonly CultureCollation JapaneseXJIS140CiAs = new("Japanese_XJIS_140_CI_AS", "ja-JP", caseSensitive: false);
+
+    /// <summary>
+    /// "Chinese_PRC_CI_AS" — Simplified Chinese (pinyin sort) via .NET's
+    /// <c>zh-CN</c> <see cref="CompareInfo"/>. Per-name sort-order parity
+    /// with real SQL Server is not yet probed.
+    /// </summary>
+    internal static readonly CultureCollation ChinesePrcCiAs = new("Chinese_PRC_CI_AS", "zh-CN", caseSensitive: false);
+
+    /// <summary>
+    /// "Turkish_CI_AS" — Turkish collation via .NET's <c>tr-TR</c>
+    /// <see cref="CompareInfo"/>. Notably handles the i / İ / ı / I
+    /// folding that catches non-Turkish-aware code (the "Turkish-i
+    /// problem"). Per-name sort-order parity with real SQL Server is not
+    /// yet probed.
+    /// </summary>
+    internal static readonly CultureCollation TurkishCiAs = new("Turkish_CI_AS", "tr-TR", caseSensitive: false);
+
+    /// <summary>
+    /// "Latin1_General_CI_AS_KS_WS" — a Latin1 variant with kana-type and
+    /// width <em>sensitive</em>. Used in real databases for some sysname
+    /// columns and a handful of user columns; included so BACPAC import
+    /// doesn't warn on its presence. Comparison routes through the
+    /// invariant culture with KS/WS enabled.
+    /// </summary>
+    internal static readonly CultureCollation Latin1GeneralCiAsKsWs = new("Latin1_General_CI_AS_KS_WS", CultureInfo.InvariantCulture.Name, caseSensitive: false);
+
+    /// <summary>
+    /// "SQL_Latin1_General_CP437_CS_AS" — legacy CP437 code-page binding
+    /// (the original IBM PC code page), case-sensitive. The simulator
+    /// routes comparison through invariant culture case-sensitive options
+    /// — close enough for the system-column shapes this collation actually
+    /// appears in; non-ASCII CP437 glyphs aren't probed.
+    /// </summary>
+    internal static readonly CultureCollation SqlLatin1GeneralCp437CsAs = new("SQL_Latin1_General_CP437_CS_AS", CultureInfo.InvariantCulture.Name, caseSensitive: true);
+
+    /// <summary>
+    /// "UNICODE_CODEPOINT" — pure ordinal Unicode codepoint comparison.
+    /// Semantically equivalent to <see cref="Latin1GeneralBin2"/> at the
+    /// value level; the name appears on a handful of system columns in
+    /// some BACPACs (notably AdventureWorks2025). Reuses the binary
+    /// codepath via a separate metadata-only instance.
+    /// </summary>
+    internal static readonly UNICODE_CODEPOINT UnicodeCodepoint = new();
+
+    /// <summary>Metadata-only binary collation under the
+    /// <c>UNICODE_CODEPOINT</c> name; behavior body is <see cref="BinaryCollation"/>.</summary>
+    internal sealed class UNICODE_CODEPOINT : BinaryCollation
+    {
+        public override string Name => "UNICODE_CODEPOINT";
+    }
+
+    /// <summary>
+    /// Closed accept-list of collation names the simulator recognizes.
+    /// ALTER DATABASE COLLATE / CREATE TABLE column COLLATE accept these
+    /// names without raising; the loader records them on the database /
+    /// column for catalog-view round-trip and pins the resolved
+    /// <see cref="Collation"/> instance onto the column's
+    /// <see cref="SqlType"/> at <see cref="Coercibility.Implicit"/> rank,
+    /// so subsequent comparisons / sorts honor the declared collation.
+    /// Cross-collation operand pairs that can't be resolved by coercibility
+    /// raise Msg 468 (comparison) / Msg 457 (concat). Names outside this
+    /// set surface as <see cref="NotSupportedException"/> in direct SQL;
+    /// the BACPAC loader catches and records on
     /// <c>BacpacImportResult.Warnings</c>. Each entry's value is the
     /// human-readable description that <c>sys.fn_helpcollations()</c>
     /// exposes verbatim (probe-confirmed against SQL Server 2025).
@@ -118,6 +205,12 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             [Latin1GeneralCsAs.Name] = "Latin1-General, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
             [Latin1GeneralBin.Name] = "Latin1-General, binary",
             [Latin1GeneralBin2.Name] = "Latin1-General, binary code point comparison sort",
+            [Latin1GeneralCiAsKsWs.Name] = "Latin1-General, case-insensitive, accent-sensitive, kanatype-sensitive, width-sensitive",
+            [SqlLatin1GeneralCp437CsAs.Name] = "Latin1-General, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive for Unicode Data, SQL Server Sort Order 30 on Code Page 437 for non-Unicode Data",
+            [UnicodeCodepoint.Name] = "Unicode code point comparison sort",
+            [JapaneseXJIS140CiAs.Name] = "Japanese-XJIS-140, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [ChinesePrcCiAs.Name] = "Chinese-PRC, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [TurkishCiAs.Name] = "Turkish, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
         }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -135,6 +228,12 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             [Latin1GeneralCsAs.Name] = Latin1GeneralCsAs,
             [Latin1GeneralBin.Name] = Latin1GeneralBin,
             [Latin1GeneralBin2.Name] = Latin1GeneralBin2,
+            [Latin1GeneralCiAsKsWs.Name] = Latin1GeneralCiAsKsWs,
+            [SqlLatin1GeneralCp437CsAs.Name] = SqlLatin1GeneralCp437CsAs,
+            [UnicodeCodepoint.Name] = UnicodeCodepoint,
+            [JapaneseXJIS140CiAs.Name] = JapaneseXJIS140CiAs,
+            [ChinesePrcCiAs.Name] = ChinesePrcCiAs,
+            [TurkishCiAs.Name] = TurkishCiAs,
         }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -143,6 +242,39 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// collation names are themselves case-insensitive identifiers).
     /// </summary>
     internal static bool IsRecognized(string name) => Recognized.ContainsKey(name);
+
+    /// <summary>
+    /// SQL Server's collation-coercibility resolution for two operands.
+    /// Returns the winning <see cref="Collation"/> and <see cref="SqlServerSimulator.Coercibility"/>
+    /// when the pair is resolvable; <see langword="null"/> when both
+    /// operands have the same rank but different collations (the caller is
+    /// expected to raise Msg 468 / Msg 457 with operator context).
+    /// </summary>
+    /// <remarks>
+    /// <para>Hierarchy: <see cref="Coercibility.Explicit"/> beats
+    /// <see cref="Coercibility.Implicit"/> beats
+    /// <see cref="Coercibility.CoercibleDefault"/>. Mismatched higher rank
+    /// wins regardless of the lower-rank operand's collation. Equal-rank
+    /// peers must share a collation; different collations at the same rank
+    /// are unresolvable.</para>
+    /// <para>Non-string operands return <see langword="null"/> for
+    /// <c>Collation</c> on the SqlType, which collapses to the default
+    /// collation under this resolution (a non-string operand is
+    /// coercible-default by definition, and there's nothing to conflict
+    /// with).</para>
+    /// </remarks>
+    internal static (Collation Collation, Coercibility Coercibility)? Resolve(SqlType a, SqlType b)
+    {
+        var ca = a.Coercibility;
+        var cb = b.Coercibility;
+        if (ca > cb)
+            return (a.Collation ?? Default, ca);
+        if (cb > ca)
+            return (b.Collation ?? Default, cb);
+        var aCol = a.Collation ?? Default;
+        var bCol = b.Collation ?? Default;
+        return StringComparer.OrdinalIgnoreCase.Equals(aCol.Name, bCol.Name) ? (aCol, ca) : null;
+    }
 
     public abstract int Compare(string? x, string? y);
 
@@ -319,5 +451,60 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     internal sealed class Latin1_General_BIN2 : BinaryCollation
     {
         public override string Name => "Latin1_General_BIN2";
+    }
+
+    /// <summary>
+    /// Generic culture-based collation: pins a <see cref="CompareInfo"/>
+    /// and a <see cref="CompareOptions"/> set, routing
+    /// <see cref="Compare"/> / <see cref="Equals"/> / <see cref="GetHashCode"/>
+    /// through them. Sort options layer <see cref="CompareOptions.IgnoreSymbols"/>
+    /// on top of the equality options, matching SQL Server's sort-only
+    /// ignore-symbols treatment (the same asymmetry <see cref="WindowsCiAs"/>
+    /// captures for Latin1). Used for the locale-specific collations that
+    /// don't justify their own dedicated subclass yet.
+    /// </summary>
+    internal sealed class CultureCollation : Collation
+    {
+        private readonly string name;
+
+        private readonly bool caseSensitive;
+
+        private readonly CompareInfo compareInfo;
+
+        private readonly CompareOptions equalityOptions;
+
+        private readonly CompareOptions sortOptions;
+
+        internal CultureCollation(string name, string cultureName, bool caseSensitive)
+        {
+            this.name = name;
+            this.caseSensitive = caseSensitive;
+            this.compareInfo = CultureInfo.GetCultureInfo(cultureName).CompareInfo;
+            var baseOpts = caseSensitive
+                ? CompareOptions.None
+                : CompareOptions.IgnoreCase;
+            // CI_AS / CS_AS without KS / WS suffixes ignore kana type and
+            // width by default — matches SQL Server's "*_CI_AS" semantics.
+            baseOpts |= CompareOptions.IgnoreKanaType | CompareOptions.IgnoreWidth;
+            this.equalityOptions = baseOpts;
+            this.sortOptions = baseOpts | CompareOptions.IgnoreSymbols;
+        }
+
+        public override string Name => this.name;
+
+        public override bool CaseSensitive => this.caseSensitive;
+
+        public override int Compare(string? x, string? y) =>
+            x is null
+                ? (y is null ? 0 : -1)
+                : y is null ? 1 : this.compareInfo.Compare(x, y, this.sortOptions);
+
+        public override bool Equals(string? x, string? y) =>
+            x is null
+                ? y is null
+                : y is not null && this.compareInfo.Compare(x, y, this.equalityOptions) == 0;
+
+        public override int GetHashCode(string obj) =>
+            this.compareInfo.GetHashCode(obj, this.equalityOptions);
     }
 }

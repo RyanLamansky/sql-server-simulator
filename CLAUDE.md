@@ -169,7 +169,8 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **`CREATE FULLTEXT CATALOG`/`INDEX`, `CONTAINS`/`FREETEXT` rejection** → [`full-text.md`](docs/claude/full-text.md).
 - **`xml` data type, XML schema collections, XML method dispatch, XML indexes** → [`xml.md`](docs/claude/xml.md).
 - **`geography` / `geometry` types, spatial methods, spatial indexes** → [`spatial.md`](docs/claude/spatial.md).
-- **`ALTER DATABASE SET <option>` accept-list + `COLLATE` clause** → [`database-options.md`](docs/claude/database-options.md).
+- **`ALTER DATABASE SET <option>` accept-list + database-level `COLLATE` clause** → [`database-options.md`](docs/claude/database-options.md).
+- **Per-column / per-expression collation, coercibility precedence, Msg 468 / 457 cross-collation enforcement, recognized catalog, `#temp` collation inheritance** → [`collations.md`](docs/claude/collations.md).
 - **New top-level statement parser or dispatch-loop separator rules** → [`grammar.md`](docs/claude/grammar.md) + [`control-flow.md`](docs/claude/control-flow.md).
 - **BACPAC import** (`Simulation.ImportBacpac` instance method — multi-database via repeated calls, `BacpacImportOptions`, `ModelXmlReader` dispatcher, BCP wire format, `BacpacBuilder` test harness) → [`bacpac-loader.md`](docs/claude/bacpac-loader.md).
 - **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part-name FROM routing through the remote's ADO.NET pipeline, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).

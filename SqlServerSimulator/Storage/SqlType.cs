@@ -50,6 +50,38 @@ internal abstract partial class SqlType
     public abstract bool IsFixedLength { get; }
 
     /// <summary>
+    /// The collation associated with this type instance, or <see langword="null"/>
+    /// for non-string types. Set when a string type is bound to a column
+    /// declaration's <c>COLLATE</c> clause, after a <c>COLLATE</c> postfix on
+    /// an expression, or any other time the simulator pins the comparison
+    /// rules. <see langword="null"/> on the default-singleton path means
+    /// "fall through to <see cref="SqlServerSimulator.Collation.Default"/>"
+    /// at comparison time — matching the simulator's historical behavior
+    /// before per-type collation was wired through.
+    /// </summary>
+    public virtual Collation? Collation => null;
+
+    /// <summary>
+    /// SQL Server's collation-precedence rank for this type instance. Drives
+    /// Msg 468 / Msg 457 resolution when two string operands meet with
+    /// different collations. Non-string types and string types whose
+    /// collation hasn't been pinned report <see cref="SqlServerSimulator.Coercibility.CoercibleDefault"/>.
+    /// </summary>
+    public virtual Coercibility Coercibility => Coercibility.CoercibleDefault;
+
+    /// <summary>
+    /// Returns the interned variant of this string type carrying the given
+    /// collation and coercibility. Non-string types and string types whose
+    /// instance shape doesn't intern per collation (sysname, text, ntext)
+    /// return <see langword="this"/> unchanged — the simulator doesn't model
+    /// per-collation variants for those types. Used by <c>CollateExpression</c>
+    /// to apply an explicit COLLATE postfix, by column resolution to pin
+    /// declared collation onto a column's type, and by expression-result-type
+    /// propagation to forward a resolved collation.
+    /// </summary>
+    public virtual SqlType WithCollation(Collation collation, Coercibility coercibility) => this;
+
+    /// <summary>
     /// True for types that always store their content off-row in a LOB page
     /// chain — currently <c>text</c>, <c>ntext</c>, <c>image</c>. The MAX
     /// variants of <c>varchar</c>/<c>nvarchar</c>/<c>varbinary</c> are LOB-
