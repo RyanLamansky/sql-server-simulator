@@ -2,11 +2,16 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 
+[module: SuppressMessage("Microsoft.Design", "CA1065:DoNotRaiseExceptionsInUnexpectedLocations", Scope = "member", Target = "~P:SqlServerSimulator.SimulatedDbParameter.DbType", Justification = "Mirrors SqlParameter inference: a CLR Value with no DbType mapping is surfaced as ArgumentException at property read, not later at command execution.")]
+
 namespace SqlServerSimulator;
 
 /// <summary>
 /// Provider-agnostic <see cref="DbParameter"/> for the simulator's command
-/// pipeline.
+/// pipeline. Mirrors enough of <c>Microsoft.Data.SqlClient.SqlParameter</c>'s
+/// shape (<see cref="TypeName"/>, defaulted <see cref="SourceColumn"/>) that
+/// consumers can downcast a base-typed <see cref="DbParameter"/> the same way
+/// they would against a <c>SqlConnection</c>'s parameters.
 /// </summary>
 /// <remarks>
 /// EF Core's SqlServer provider downcasts <see cref="DbParameter"/> to
@@ -28,10 +33,11 @@ namespace SqlServerSimulator;
 /// pairs. Without the adapter (plain <c>UseSqlServer</c>) those casts
 /// still throw.
 /// </remarks>
-sealed class SimulatedDbParameter : DbParameter
+public sealed class SimulatedDbParameter : DbParameter
 {
     private DbType? dbType;
 
+    /// <inheritdoc/>
     public override DbType DbType
     {
         get
@@ -59,10 +65,13 @@ sealed class SimulatedDbParameter : DbParameter
         set => this.dbType = value;
     }
 
+    /// <inheritdoc/>
     public override ParameterDirection Direction { get; set; }
 
+    /// <inheritdoc/>
     public override bool IsNullable { get; set; }
 
+    /// <inheritdoc/>
     [AllowNull]
     public override string ParameterName { get; set; }
 
@@ -75,12 +84,28 @@ sealed class SimulatedDbParameter : DbParameter
     /// </summary>
     public override int Size { get; set; }
 
+    /// <inheritdoc/>
     [AllowNull]
-    public override string SourceColumn { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public override string SourceColumn { get; set; } = "";
 
-    public override bool SourceColumnNullMapping { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    /// <inheritdoc/>
+    public override bool SourceColumnNullMapping { get; set; }
 
+    /// <inheritdoc/>
     public override object? Value { get; set; }
 
+    /// <summary>
+    /// User-defined-table-type name (<c>schema.name</c>) for a table-valued
+    /// parameter. Defaults to the empty string, matching
+    /// <c>SqlParameter.TypeName</c>. The simulator's command-execution path
+    /// reads this alongside <see cref="DbParameter.Value"/>: when both a
+    /// non-empty <c>TypeName</c> and a <see cref="DataTable"/> /
+    /// <see cref="IDataReader"/>-typed <see cref="DbParameter.Value"/>
+    /// are present, the parameter binds as a TVP rather than a scalar.
+    /// </summary>
+    [AllowNull]
+    public string TypeName { get; set; } = "";
+
+    /// <inheritdoc/>
     public override void ResetDbType() => this.dbType = null;
 }

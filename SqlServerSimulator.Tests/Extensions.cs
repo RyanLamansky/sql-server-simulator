@@ -113,13 +113,14 @@ static class Extensions
 
     /// <summary>
     /// Verifies that <paramref name="commandText"/> against this simulation raises a
-    /// <see cref="DbException"/> whose SQL Server error number matches
-    /// <paramref name="errorNumber"/>. Returns the exception for further assertions.
+    /// <see cref="SimulatedSqlException"/> whose
+    /// <see cref="SimulatedSqlException.Number"/> matches <paramref name="errorNumber"/>.
+    /// Returns the exception for further assertions.
     /// </summary>
-    public static DbException AssertSqlError(this Simulation simulation, string commandText, int errorNumber)
+    public static SimulatedSqlException AssertSqlError(this Simulation simulation, string commandText, int errorNumber)
     {
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteScalar(commandText));
-        Assert.AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteScalar(commandText));
+        Assert.AreEqual(errorNumber, ex.Number);
         return ex;
     }
 

@@ -406,4 +406,13 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         return new SimulatedDbCommand(this.Simulation, this);
     }
+
+    /// <summary>Strongly-typed shadow over <see cref="DbConnection.CreateCommand"/>.</summary>
+    public new SimulatedDbCommand CreateCommand() => new(this.Simulation, this);
+
+    /// <summary>Strongly-typed shadow over <see cref="DbConnection.BeginTransaction()"/>.</summary>
+    public new SimulatedDbTransaction BeginTransaction() => (SimulatedDbTransaction)base.BeginTransaction();
+
+    /// <summary>Strongly-typed shadow over <see cref="DbConnection.BeginTransaction(IsolationLevel)"/>.</summary>
+    public new SimulatedDbTransaction BeginTransaction(IsolationLevel isolationLevel) => (SimulatedDbTransaction)base.BeginTransaction(isolationLevel);
 }

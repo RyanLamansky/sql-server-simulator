@@ -86,9 +86,11 @@ The child `BatchContext` is constructed via a new ctor overload that accepts the
 
 ## ADO.NET Structured parameter surface
 
-C# 14 extension property `DbParameter.TypeName` (in `TableValuedParameterExtensions`, the second public type) provides the `SqlParameter.TypeName`-shaped API:
+`SimulatedDbParameter.TypeName` provides the `SqlParameter.TypeName`-shaped API. The ADO.NET concrete-pipeline chain is strongly typed end-to-end (`SimulatedDbConnection.CreateCommand()` → `SimulatedDbCommand`; `SimulatedDbCommand.CreateParameter()` → `SimulatedDbParameter`; `Parameters` → `SimulatedDbParameterCollection`), so no downcast is needed when the variables are typed concretely:
 
 ```csharp
+using var con = simulation.CreateDbConnection();
+using var cmd = con.CreateCommand();
 var p = cmd.CreateParameter();
 p.ParameterName = "@rows";
 p.Value = dataTable;        // or any IDataReader
@@ -96,7 +98,7 @@ p.TypeName = "dbo.MyType";
 cmd.Parameters.Add(p);
 ```
 
-Backing store: a process-wide `ConditionalWeakTable<DbParameter, string>` so storage is keyed by parameter-instance identity and unreferenced parameters get reclaimed automatically. Default is the empty string (matching `SqlParameter.TypeName`); setting null or empty clears the mapping.
+`TypeName` is a plain `[AllowNull] string TypeName { get; set; } = ""` on `SimulatedDbParameter`. `SimulatedDbParameterCollection` implements `IReadOnlyList<SimulatedDbParameter>` and ships strongly-typed indexers + an `Add(SimulatedDbParameter)` overload returning the parameter — mirroring the `SqlParameterCollection` shape.
 
 `BatchContext` constructor seeds TVP-shaped parameters into `TableVariables` (via `SeedTableVariablesFromStructuredParameters`) before the dispatch loop runs. Detection is value-type-based: `Value is DataTable or IDataReader`. Missing `TypeName` on such a value raises `ArgumentException` from the seeding path (mirroring the `Microsoft.Data.SqlClient`-side check); unknown `TypeName` raises Msg 2715.
 
@@ -136,4 +138,4 @@ Scalar function resolving a system or user-defined type name to its `user_type_i
 - **`HeapTable.IsTableValuedParameter` distinct from `IsTableVariable`**: every TVP is also a table variable; the extra flag gates the Msg 10700 enforcement at the four DML sites (INSERT / UPDATE / DELETE / MERGE). TVP parameter clones set both flags; `DECLARE @t MyType` only sets `IsTableVariable`.
 - **Row copy at TVP binding**: real SQL Server's TVP semantics are pass-by-value (the proc body's modifications don't affect the caller). Since Msg 10700 already blocks all body-side modifications, pass-by-reference would be observably equivalent — but the simulator does a row-copy via `Heap.Insert` for clarity (and to match the documented semantics if Msg 10700 enforcement ever moves to CREATE-time validation).
 - **`SeedTableVariablesFromStructuredParameters` runs after `Parser` is initialized**: needs `BatchContext.CurrentDatabase` (which routes through `Parser.CurrentDatabase`). Constructor ordering matters.
-- **C# 14 extension property** as the `TypeName` API: keeps `SimulatedDbParameter` internal (matches the rest of the surface) while giving callers the `parameter.TypeName = "..."` ergonomic. ConditionalWeakTable storage keys by parameter-instance identity. Note: applying the extension to a real `SqlParameter` writes to the simulator's table without touching `SqlParameter.TypeName` — harmless in practice since SqlParameter users don't reach the simulator's binding path.
+- **The ADO.NET concrete-pipeline classes (`SimulatedDbConnection` / `SimulatedDbCommand` / `SimulatedDbParameter` / `SimulatedDbParameterCollection` / `SimulatedDbDataReader` / `SimulatedDbTransaction`) are all public** with `new`-shadowed strongly-typed return shapes (`CreateCommand` → `SimulatedDbCommand`, `CreateParameter` → `SimulatedDbParameter`, `Parameters` → `SimulatedDbParameterCollection`, `ExecuteReader` → `SimulatedDbDataReader`, `BeginTransaction` → `SimulatedDbTransaction`). `TypeName` rides as an ordinary `SimulatedDbParameter` property; consumers never need a downcast when the variables are typed concretely. Previously `TypeName` was a C# 14 `extension(DbParameter)` block over a process-wide `ConditionalWeakTable` — the publicization replaced it.

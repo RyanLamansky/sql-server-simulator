@@ -142,7 +142,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// transaction-related parsers and <see cref="Expressions.TranCountExpression"/>
     /// to reach the connection's <see cref="SimulatedDbConnection.CurrentTransaction"/>.
     /// </summary>
-    public SimulatedDbConnection Connection => (SimulatedDbConnection)Command.Connection!;
+    public SimulatedDbConnection Connection => Command.Connection!;
 
     /// <summary>
     /// The database this batch is executing against. Threads through

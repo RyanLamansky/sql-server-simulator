@@ -140,7 +140,7 @@ internal static class VersionStoreDmvs
                 SqlValue.FromInt64(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tx)),
                 SqlValue.FromInt64(xid),
                 nullBigInt,
-                SqlValue.FromInt32(tx.connection.Spid),
+                SqlValue.FromInt32(tx.Connection.Spid),
                 trueBit,
                 nullBigInt,
                 zeroInt,

@@ -461,10 +461,10 @@ public sealed class TableValuedParameterTests
         AreEqual(80, rdr.GetInt32(1));
     }
 
-    // ---- TypeName extension property ----
+    // ---- TypeName property ----
 
     [TestMethod]
-    public void TypeNameExtension_DefaultsToEmptyString()
+    public void TypeName_DefaultsToEmptyString()
     {
         var simulation = new Simulation();
         using var con = simulation.CreateDbConnection();
@@ -474,7 +474,7 @@ public sealed class TableValuedParameterTests
     }
 
     [TestMethod]
-    public void TypeNameExtension_SetThenGet_RoundTrips()
+    public void TypeName_SetThenGet_RoundTrips()
     {
         var simulation = new Simulation();
         using var con = simulation.CreateDbConnection();
@@ -485,7 +485,7 @@ public sealed class TableValuedParameterTests
     }
 
     [TestMethod]
-    public void TypeNameExtension_SetEmpty_Clears()
+    public void TypeName_SetEmpty_Clears()
     {
         var simulation = new Simulation();
         using var con = simulation.CreateDbConnection();

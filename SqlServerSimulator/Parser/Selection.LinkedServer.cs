@@ -69,7 +69,7 @@ partial class Selection
     {
         using var conn = server.Target.CreateDbConnection();
         conn.Open();
-        var cmd = (SimulatedDbCommand)conn.CreateCommand();
+        using var cmd = conn.CreateCommand();
         cmd.CommandText = string.Create(
             CultureInfo.InvariantCulture,
             $"SELECT * FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]");

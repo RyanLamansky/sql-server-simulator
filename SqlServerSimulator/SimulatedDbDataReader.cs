@@ -6,21 +6,31 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedDbDataReader : DbDataReader
+/// <summary>
+/// <see cref="DbDataReader"/> for the simulator's command pipeline. Public
+/// so consumers who downcast a base-typed <see cref="DbDataReader"/> reach
+/// the simulator's concrete shape — same role <c>SqlDataReader</c> plays
+/// against <c>DbDataReader</c>. Instances are produced by
+/// <see cref="SimulatedDbCommand.ExecuteReader()"/>.
+/// </summary>
+[SuppressMessage("Design", "CA1010:Generic interface should also be implemented", Justification = "Row enumeration is base-class-driven (DbDataReader → IEnumerable), not naturally generic — matches Microsoft.Data.SqlClient.SqlDataReader.")]
+public sealed class SimulatedDbDataReader : DbDataReader
 {
     private readonly IEnumerator<SimulatedQueryResult> results;
     private RowCursor cursor;
     private int recordsAffected;
     private bool closed;
 
-    public SimulatedDbDataReader(IEnumerable<SimulatedQueryResult> results)
+    internal SimulatedDbDataReader(IEnumerable<SimulatedQueryResult> results)
     {
         this.results = results.GetEnumerator();
         this.cursor = this.results.MoveNext() ? this.results.Current.CreateCursor() : EmptyCursor.Instance;
     }
 
+    /// <inheritdoc/>
     public override object this[int ordinal] => GetValue(ordinal);
 
+    /// <inheritdoc/>
     public override object this[string name] => GetValue(GetOrdinal(name));
 
     /// <summary>
@@ -30,20 +40,26 @@ sealed class SimulatedDbDataReader : DbDataReader
     /// </summary>
     public override int Depth => 0;
 
+    /// <inheritdoc/>
     public override int FieldCount => cursor.FieldCount;
 
+    /// <inheritdoc/>
     public override bool HasRows => cursor.HasRows;
 
+    /// <inheritdoc/>
     public override bool IsClosed => closed;
 
+    /// <inheritdoc/>
     public override int RecordsAffected => recordsAffected;
 
+    /// <inheritdoc/>
     public override bool GetBoolean(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsBoolean;
     }
 
+    /// <inheritdoc/>
     public override byte GetByte(int ordinal)
     {
         var v = cursor[ordinal];
@@ -116,6 +132,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         return toCopy;
     }
 
+    /// <inheritdoc/>
     public override string GetDataTypeName(int ordinal) => CurrentSchema[ordinal].SqlServerName;
 
     /// <summary>
@@ -154,48 +171,57 @@ sealed class SimulatedDbDataReader : DbDataReader
             : throw new InvalidCastException($"Cannot cast column of type {v.Type} to decimal.");
     }
 
+    /// <inheritdoc/>
     public override double GetDouble(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsDouble;
     }
 
+    /// <inheritdoc/>
     public override IEnumerator GetEnumerator() => new DbEnumerator(this, closeReader: false);
 
+    /// <inheritdoc/>
     [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
     [UnconditionalSuppressMessage("Trimming", "IL2073:Member return value does not satisfy 'DynamicallyAccessedMembersAttribute' requirements.", Justification = "The closed set of concrete SqlType subclasses returns BCL types whose public surface is not trimmed away in practice; the simulator never feeds linker-pruned types here.")]
     public override Type GetFieldType(int ordinal) => CurrentSchema[ordinal].ClrType;
 
+    /// <inheritdoc/>
     public override float GetFloat(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsSingle;
     }
 
+    /// <inheritdoc/>
     public override Guid GetGuid(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsGuid;
     }
 
+    /// <inheritdoc/>
     public override short GetInt16(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsInt16;
     }
 
+    /// <inheritdoc/>
     public override int GetInt32(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsInt32;
     }
 
+    /// <inheritdoc/>
     public override long GetInt64(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsInt64;
     }
 
+    /// <inheritdoc/>
     public override string GetName(int ordinal)
     {
         if (ordinal >= this.FieldCount)
@@ -233,12 +259,14 @@ sealed class SimulatedDbDataReader : DbDataReader
 #pragma warning restore
     }
 
+    /// <inheritdoc/>
     public override string GetString(int ordinal)
     {
         var v = cursor[ordinal];
         return v.IsNull ? throw new SqlNullValueException() : v.AsString;
     }
 
+    /// <inheritdoc/>
     public override object GetValue(int ordinal)
     {
         var v = cursor[ordinal];
@@ -269,6 +297,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         return (T)(v.IsNull ? DBNull.Value : v.ToObject()!);
     }
 
+    /// <inheritdoc/>
     public override int GetValues(object[] values)
     {
         ArgumentNullException.ThrowIfNull(values);
@@ -278,8 +307,10 @@ sealed class SimulatedDbDataReader : DbDataReader
         return count;
     }
 
+    /// <inheritdoc/>
     public override bool IsDBNull(int ordinal) => cursor[ordinal].IsNull;
 
+    /// <inheritdoc/>
     public override bool NextResult()
     {
         var hasNext = this.results.MoveNext();
@@ -293,6 +324,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         return hasNext;
     }
 
+    /// <inheritdoc/>
     public override bool Read()
     {
         var hasNext = this.cursor.MoveNext();
@@ -303,6 +335,7 @@ sealed class SimulatedDbDataReader : DbDataReader
         return hasNext;
     }
 
+    /// <inheritdoc/>
     protected override void Dispose(bool disposing)
     {
         this.closed = true;

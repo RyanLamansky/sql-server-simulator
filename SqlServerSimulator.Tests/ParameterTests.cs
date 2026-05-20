@@ -79,21 +79,23 @@ public class ParameterTests
     }
 
     [TestMethod]
-    public void SourceColumn_ThrowsNotImplemented()
+    public void SourceColumn_DefaultsToEmptyAndRoundTrips()
     {
         using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
         var p = cmd.CreateParameter();
-        _ = Throws<NotImplementedException>(() => _ = p.SourceColumn);
-        _ = Throws<NotImplementedException>(() => p.SourceColumn = "x");
+        AreEqual("", p.SourceColumn);
+        p.SourceColumn = "x";
+        AreEqual("x", p.SourceColumn);
     }
 
     [TestMethod]
-    public void SourceColumnNullMapping_ThrowsNotImplemented()
+    public void SourceColumnNullMapping_DefaultsToFalseAndRoundTrips()
     {
         using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
         var p = cmd.CreateParameter();
-        _ = Throws<NotImplementedException>(() => _ = p.SourceColumnNullMapping);
-        _ = Throws<NotImplementedException>(() => p.SourceColumnNullMapping = true);
+        IsFalse(p.SourceColumnNullMapping);
+        p.SourceColumnNullMapping = true;
+        IsTrue(p.SourceColumnNullMapping);
     }
 
     [TestMethod]

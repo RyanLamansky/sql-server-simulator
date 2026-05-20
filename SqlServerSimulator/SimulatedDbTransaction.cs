@@ -4,13 +4,23 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel) : DbTransaction
+/// <summary>
+/// <see cref="DbTransaction"/> for the simulator's command pipeline. Adds a
+/// strongly-typed <see cref="Connection"/> shadow so consumers who downcast
+/// a base-typed <see cref="DbTransaction"/> stay in <c>Simulated*</c> shapes
+/// — same pattern <c>SqlTransaction</c> follows against <c>DbTransaction</c>.
+/// Instances are created via
+/// <see cref="SimulatedDbConnection.BeginTransaction()"/>.
+/// </summary>
+public sealed class SimulatedDbTransaction : DbTransaction
 {
-    internal readonly Simulation simulation = simulation;
-#pragma warning disable CA2213 // Disposable fields should be disposed
-    // This is intended to survive even if the transaction is disposed.
-    internal readonly SimulatedDbConnection connection = connection;
-#pragma warning restore
+    internal SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel)
+    {
+        this.simulation = simulation;
+        this.Connection = connection;
+        this.IsolationLevel = isolationLevel;
+    }
+    internal readonly Simulation simulation;
 
     /// <summary>
     /// Cross-statement undo log for this transaction. Statements executed
@@ -84,9 +94,16 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     /// </summary>
     internal const int RowLockEscalationThreshold = 5000;
 
-    public override IsolationLevel IsolationLevel { get; } = isolationLevel;
+    /// <inheritdoc/>
+    public override IsolationLevel IsolationLevel { get; }
 
-    protected override DbConnection DbConnection => this.connection;
+    /// <inheritdoc/>
+    protected override DbConnection DbConnection => this.Connection;
+
+#pragma warning disable CA2213 // Disposable fields should be disposed — the transaction is owned by the connection, not vice versa.
+    /// <summary>Strongly-typed shadow over <see cref="DbTransaction.Connection"/>.</summary>
+    public new SimulatedDbConnection Connection { get; }
+#pragma warning restore CA2213
 
     /// <summary>
     /// The session's <see cref="SimulatedDbConnection.SessionIsolationLevel"/>
@@ -139,6 +156,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     /// </summary>
     private bool finished;
 
+    /// <inheritdoc/>
     public override void Commit()
     {
         if (this.finished)
@@ -146,22 +164,23 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         this.TranCount--;
         if (this.TranCount > 0)
             return;
-        var db = this.connection.CurrentDatabase;
+        var db = this.Connection.CurrentDatabase;
         Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, db);
         this.UndoLog.Clear();
         ReleaseAllLocks();
         UnregisterActiveSnapshot(db);
         Storage.VersionStore.RunGarbageCollection(db);
         RestoreSessionIsolation();
-        this.connection.CurrentTransaction = null;
+        this.Connection.CurrentTransaction = null;
         this.finished = true;
     }
 
+    /// <inheritdoc/>
     public override void Rollback()
     {
         if (this.finished)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
-        var db = this.connection.CurrentDatabase;
+        var db = this.Connection.CurrentDatabase;
         Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
         this.UndoLog.Rollback();
         this.TranCount = 0;
@@ -169,7 +188,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         UnregisterActiveSnapshot(db);
         Storage.VersionStore.RunGarbageCollection(db);
         RestoreSessionIsolation();
-        this.connection.CurrentTransaction = null;
+        this.Connection.CurrentTransaction = null;
         this.finished = true;
     }
 
@@ -183,14 +202,14 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     {
         if (disposing && !this.finished)
         {
-            var db = this.connection.CurrentDatabase;
+            var db = this.Connection.CurrentDatabase;
             Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
             this.UndoLog.Rollback();
             ReleaseAllLocks();
             UnregisterActiveSnapshot(db);
             Storage.VersionStore.RunGarbageCollection(db);
             RestoreSessionIsolation();
-            this.connection.CurrentTransaction = null;
+            this.Connection.CurrentTransaction = null;
             this.finished = true;
         }
         base.Dispose(disposing);
@@ -205,7 +224,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
     private void RestoreSessionIsolation()
     {
         if (this.OverrodeSessionIsolation)
-            this.connection.SessionIsolationLevel = this.PreviousSessionIsolationLevel;
+            this.Connection.SessionIsolationLevel = this.PreviousSessionIsolationLevel;
     }
 
     /// <summary>
@@ -223,7 +242,7 @@ sealed class SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection
         for (var i = this.HeldLocks.Count - 1; i >= 0; i--)
         {
             var (resource, mode) = this.HeldLocks[i];
-            manager.Release(resource, mode, this.connection);
+            manager.Release(resource, mode, this.Connection);
         }
         this.HeldLocks.Clear();
         this.RowLockCountsByTable.Clear();

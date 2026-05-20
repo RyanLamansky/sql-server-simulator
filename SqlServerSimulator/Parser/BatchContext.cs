@@ -974,15 +974,15 @@ internal sealed class BatchContext
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
     {
         var dict = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
-        foreach (DbParameter parameter in command.Parameters)
+        foreach (SimulatedDbParameter parameter in command.Parameters)
         {
             // Skip structured / table-valued parameters here — they land in
             // TableVariables via SeedTableVariablesFromStructuredParameters.
             // Detection: a DataTable or IDataReader value combined with a
-            // non-empty TypeName extension property. SqlDbType.Structured
-            // itself isn't directly observable on DbParameter (the simulator
-            // doesn't expose a SqlDbType property), so the value-type +
-            // TypeName combination is the signal.
+            // non-empty TypeName. SqlDbType.Structured itself isn't directly
+            // observable on DbParameter (the simulator doesn't expose a
+            // SqlDbType property), so the value-type + TypeName combination
+            // is the signal.
             if (IsTableValuedParameterValue(parameter))
                 continue;
             var name = parameter.ParameterName;
@@ -1012,14 +1012,14 @@ internal sealed class BatchContext
     /// <see cref="ArgumentException"/> at materialization (mirroring
     /// <c>Microsoft.Data.SqlClient</c>'s client-side check).
     /// </summary>
-    private static bool IsTableValuedParameterValue(DbParameter parameter) =>
+    private static bool IsTableValuedParameterValue(SimulatedDbParameter parameter) =>
         parameter.Value is System.Data.DataTable or System.Data.IDataReader;
 
     /// <summary>
-    /// Materializes each TVP-shaped <see cref="DbParameter"/> into the
-    /// batch's <see cref="TableVariables"/> dict. Reads the
-    /// <c>TypeName</c> extension property off the parameter to look up the
-    /// registered <see cref="TableType"/>;
+    /// Materializes each TVP-shaped <see cref="SimulatedDbParameter"/> into the
+    /// batch's <see cref="TableVariables"/> dict. Reads
+    /// <see cref="SimulatedDbParameter.TypeName"/> off the parameter to look up
+    /// the registered <see cref="TableType"/>;
     /// resolves the value source (<see cref="System.Data.DataTable"/> or
     /// <see cref="System.Data.IDataReader"/>) into rows via the type's
     /// <see cref="TableType.Clone"/> + per-row INSERT path. The clone is
@@ -1028,7 +1028,7 @@ internal sealed class BatchContext
     /// </summary>
     private static void SeedTableVariablesFromStructuredParameters(BatchContext batch, SimulatedDbCommand command)
     {
-        foreach (DbParameter parameter in command.Parameters)
+        foreach (SimulatedDbParameter parameter in command.Parameters)
         {
             if (!IsTableValuedParameterValue(parameter))
                 continue;
