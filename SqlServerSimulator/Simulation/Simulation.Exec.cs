@@ -108,6 +108,33 @@ partial class Simulation
             yield break;
         }
 
+        // Linked-server sprocs — sp_addlinkedserver / sp_dropserver carry
+        // semantic effect (activating / deactivating an entry in
+        // Simulation.ActiveLinkedServers); sp_addlinkedsrvlogin /
+        // sp_droplinkedsrvlogin / sp_serveroption parse-and-discard since
+        // the simulator has no principal-mapping or per-server-option model
+        // but BACPAC / migration scripts often emit them.
+        if (Collation.Default.Equals(procName.Leaf, "sp_addlinkedserver"))
+        {
+            foreach (var outcome in InvokeSpAddLinkedServer(batch))
+                yield return outcome;
+            yield break;
+        }
+        if (Collation.Default.Equals(procName.Leaf, "sp_dropserver"))
+        {
+            foreach (var outcome in InvokeSpDropServer(batch))
+                yield return outcome;
+            yield break;
+        }
+        if (Collation.Default.Equals(procName.Leaf, "sp_addlinkedsrvlogin")
+            || Collation.Default.Equals(procName.Leaf, "sp_droplinkedsrvlogin")
+            || Collation.Default.Equals(procName.Leaf, "sp_serveroption"))
+        {
+            foreach (var outcome in InvokeSpLinkedServerNoOp(batch))
+                yield return outcome;
+            yield break;
+        }
+
         // Args + invocation. Skip-mode runs the arg parser (cursor advance,
         // syntax errors still fire), but suppresses the invocation itself.
         var arguments = ParseExecArguments(context, batch);

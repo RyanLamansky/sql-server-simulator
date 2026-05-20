@@ -285,6 +285,27 @@ partial class SimulatedSqlException
         new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
 
     /// <summary>
+    /// Shares Msg 15600 wording with
+    /// <see cref="InvalidExtendedPropertyParameter"/> — real SQL Server
+    /// surfaces the same error number for any system-procedure parameter
+    /// validation miss. Used by the linked-server sprocs
+    /// (<c>sp_addlinkedserver</c> / <c>sp_dropserver</c> /
+    /// <c>sp_addlinkedsrvlogin</c> / etc.).
+    /// </summary>
+    internal static SimulatedSqlException InvalidLinkedServerParameter(string procLabel) =>
+        new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15015: <c>sp_dropserver</c> referenced a
+    /// linked-server name that isn't registered. Wording probe-confirmed
+    /// against SQL Server 2025 — the server name appears in single quotes;
+    /// the trailing sentence points users at <c>sys.servers</c> /
+    /// <c>sp_helpserver</c> for the available set.
+    /// </summary>
+    internal static SimulatedSqlException LinkedServerDoesNotExist(string serverName) =>
+        new($"The server '{serverName}' does not exist. Use sp_helpserver to show available servers.", 15015, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2715: a <c>DECLARE</c> / <c>CREATE
     /// PROCEDURE</c> / <c>CREATE FUNCTION</c> parameter referenced a type
     /// name that doesn't resolve. Probe-confirmed two-line wording against

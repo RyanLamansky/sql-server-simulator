@@ -42,6 +42,7 @@ public class QualityTests
             ".ctor",
             nameof(Simulation.CreateDbConnection),
             nameof(Simulation.ImportBacpac),
+            nameof(Simulation.AddRemoteSimulation),
         ];
 
         Assert.HasCount(allowedMemberNames.Count, memberNames);

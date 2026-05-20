@@ -971,6 +971,36 @@ internal sealed partial class Selection
                 // qualified — they're aliases, not real tables).
                 var objectName = BatchContext.ParseObjectName(context);
 
+                // Linked-server fork: four-part `server.db.schema.t` routes
+                // to the matching <see cref="LinkedServer"/>'s remote
+                // <see cref="HeapTable"/>. The lateral plan opens a fresh
+                // remote connection at execute time and issues
+                // `SELECT * FROM [db].[schema].[t]` through the remote's
+                // full pipeline. An unknown leading segment falls through
+                // to the standard Msg 208 path (this branch returns false
+                // only when the remote table isn't found; the 4-part-name
+                // case never falls through to CTE / view / TVF / heap
+                // lookups since those are 1- to 3-part forms).
+                if (objectName.Count == 4)
+                {
+                    if (!context.Batch.TryResolveLinkedServerTable(objectName, out var linkedServer, out var remoteTable, out var remoteDbName, out var remoteSchemaName))
+                        throw SimulatedSqlException.InvalidObjectName(objectName);
+                    var linkedColumnNames = new string[remoteTable.Columns.Length];
+                    for (var ci = 0; ci < linkedColumnNames.Length; ci++)
+                        linkedColumnNames[ci] = remoteTable.Columns[ci].Name;
+                    var linkedAlias = ConsumeOptionalAlias(context);
+                    _ = ParseOptionalTableHints(context);
+                    return new FromSource(
+                        qualifier: linkedAlias ?? remoteTable.Name,
+                        columnNames: linkedColumnNames,
+                        columns: remoteTable.Columns,
+                        storedSchema: remoteTable.Columns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteTable.Name, remoteTable.Columns));
+                }
+
                 if (objectName.Count == 1
                     && context.CteBindings is { } cteBindings
                     && cteBindings.TryGetValue(objectName.Leaf, out var cteBinding))

@@ -1077,9 +1077,29 @@ internal static class BuiltInResources
         };
         var fnHelpCollationsView = new CatalogView("fn_helpcollations", fnHelpCollationsColumns, EnumerateFnHelpCollations);
 
+        // sys.servers: the local instance projects as row 0 (is_linked = 0);
+        // each entry in <see cref="Simulation.ActiveLinkedServers"/> follows
+        // with a stable monotonic server_id keyed by name-sort. Real SQL
+        // Server exposes ~26 columns; the simulator surfaces the
+        // load-bearing subset that BACPAC scripts + diagnostic queries
+        // touch (server_id / name / product / provider / data_source /
+        // is_linked). modify_date is always epoch-zero since linked-server
+        // registration doesn't carry a creation timestamp.
+        var serversColumns = new HeapColumn[]
+        {
+            new("server_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("product", SqlType.NVarchar, 128, true),
+            new("provider", SqlType.NVarchar, 128, true),
+            new("data_source", SqlType.NVarchar, 4000, true),
+            new("is_linked", SqlType.Bit, null, false),
+        };
+        var serversView = new CatalogView("servers", serversColumns, EnumerateSysServers);
+
         return new Dictionary<string, CatalogView>(Collation.Default)
         {
             ["sys.databases"] = databasesView,
+            ["sys.servers"] = serversView,
             ["sys.fn_helpcollations"] = fnHelpCollationsView,
             ["sys.schemas"] = schemasView,
             ["sys.tables"] = tablesView,
@@ -2283,6 +2303,45 @@ internal static class BuiltInResources
                 SqlValue.FromBoolean(db.ReadCommittedSnapshot),
                 SqlValue.FromByte(0),
                 SqlValue.FromNVarchar("ONLINE"),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.servers</c>. Row 0 is the local instance
+    /// (<c>is_linked = 0</c>, name <c>"SIMULATED"</c>, product
+    /// <c>"SQL Server"</c>); each subsequent row is one entry from
+    /// <see cref="Simulation.ActiveLinkedServers"/> in name-sort order
+    /// (stable across runs, distinct from real SQL Server's
+    /// <c>object_id</c>-derived ordering — see the quirks list).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServers(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var notLinked = SqlValue.FromBoolean(false);
+        var isLinked = SqlValue.FromBoolean(true);
+        var localProduct = SqlValue.FromNVarchar("SQL Server");
+        var nullProvider = SqlValue.Null(SqlType.NVarchar);
+        var nullDataSource = SqlValue.Null(SqlType.NVarchar);
+        yield return [
+            SqlValue.FromInt32(0),
+            SqlValue.FromSystemName("SIMULATED"),
+            localProduct,
+            nullProvider,
+            nullDataSource,
+            notLinked,
+        ];
+
+        var serverId = 1;
+        foreach (var ls in batch.Connection.Simulation.ActiveLinkedServers.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            yield return [
+                SqlValue.FromInt32(serverId++),
+                SqlValue.FromSystemName(ls.Name),
+                SqlValue.FromNVarchar(ls.SrvProduct),
+                SqlValue.FromNVarchar(ls.Provider),
+                ls.DataSource is null ? nullDataSource : SqlValue.FromNVarchar(ls.DataSource),
+                isLinked,
             ];
         }
     }

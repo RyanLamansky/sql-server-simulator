@@ -37,6 +37,50 @@ public sealed partial class Simulation
     public SimulatedDbConnection CreateDbConnection() => new(this);
 
     /// <summary>
+    /// Binds <paramref name="target"/> under <paramref name="name"/> so the
+    /// <c>sp_addlinkedserver @server = '<paramref name="name"/>'</c>
+    /// procedure can activate it as a linked server on this simulation.
+    /// Two-step model: this call only establishes the in-process object-
+    /// graph link; <c>sp_addlinkedserver</c> is what makes four-part-name
+    /// references (<c>linkedserver.db.schema.t</c>) resolve. Re-registering
+    /// the same name overwrites the prior binding; an active linked server
+    /// continues to point at its original target until
+    /// <c>sp_addlinkedserver</c> is called again.
+    /// </summary>
+    /// <param name="name">Linked-server name. Matched case-insensitively to
+    /// <c>@server</c> on the <c>sp_addlinkedserver</c> call and to the
+    /// leading segment of a four-part name at FROM resolution.</param>
+    /// <param name="target">The remote <see cref="Simulation"/>. May be any
+    /// other instance; a simulation may register itself for round-trip
+    /// testing.</param>
+    /// <exception cref="ArgumentNullException">Either argument is null.</exception>
+    public void AddRemoteSimulation(string name, Simulation target)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(target);
+        this.AvailableRemotes[name] = target;
+    }
+
+    /// <summary>
+    /// Bindings established via
+    /// <see cref="AddRemoteSimulation(string, Simulation)"/>: name → remote
+    /// <see cref="Simulation"/>. A bare binding has no SQL-visible effect;
+    /// <c>sp_addlinkedserver</c> reads from this dict to pick which
+    /// <see cref="Simulation"/> backs the linked-server activation.
+    /// Case-insensitive keys (<see cref="Collation.Default"/>).
+    /// </summary>
+    internal readonly ConcurrentDictionary<string, Simulation> AvailableRemotes = new(Collation.Default);
+
+    /// <summary>
+    /// Active linked servers: name → <see cref="LinkedServer"/>. Populated
+    /// by <c>sp_addlinkedserver</c>; cleared by <c>sp_dropserver</c>.
+    /// Four-part-name FROM resolution consults this dict; <c>sys.servers</c>
+    /// projects one row per entry plus the local-server row. Case-
+    /// insensitive keys (<see cref="Collation.Default"/>).
+    /// </summary>
+    internal readonly ConcurrentDictionary<string, LinkedServer> ActiveLinkedServers = new(Collation.Default);
+
+    /// <summary>
     /// The database name woven into error messages that include a fully
     /// qualified table reference (e.g. Msg 515's <c>"&lt;db&gt;.dbo.&lt;t&gt;"</c>,
     /// Msg 547's <c>database "&lt;db&gt;"</c> wording). Also the key of the

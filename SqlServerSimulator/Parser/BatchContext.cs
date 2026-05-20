@@ -1314,6 +1314,11 @@ internal sealed class BatchContext
             throw new NotSupportedException(
                 $"Cross-database write to '{name}' isn't modeled. The simulator routes 3-part-name reads (SELECT / JOIN / catalog views) across databases but defers cross-database INSERT / UPDATE / DELETE / MERGE / TRUNCATE / DDL — trigger scope swapping, identity allocation routing, and FK validation across DB boundaries are pending. Issue USE [{name[0]}] from this connection and reference the target with a 1- or 2-part name.");
         }
+        if (name.Count >= 4)
+        {
+            throw new NotSupportedException(
+                $"Cross-server write to '{name}' through a four-part linked-server reference isn't modeled. The simulator routes four-part-name reads (SELECT / JOIN) through the remote Simulation's full pipeline but defers INSERT / UPDATE / DELETE / MERGE — lock-manager coordination, undo-log scoping, and identity routing across Simulation boundaries are pending (paralleling the BEGIN DISTRIBUTED TRANSACTION stance). Open a SimulatedDbConnection on the target Simulation directly to mutate it.");
+        }
     }
 
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
@@ -1494,6 +1499,64 @@ internal sealed class BatchContext
             return false;
         var key = $"{name.ImmediateQualifier}.{name.Leaf}";
         return Simulation.CatalogViews.TryGetValue(key, out view);
+    }
+
+    /// <summary>
+    /// Routes a four-part name (<c>server.db.schema.t</c>) through the
+    /// connection's <see cref="Simulation.ActiveLinkedServers"/> dict to
+    /// the matching <see cref="LinkedServer"/> + remote <see cref="HeapTable"/>.
+    /// Returns false for non-4-part names (so callers can fall through to
+    /// regular table resolution); returns false for 4-part names whose
+    /// leading segment isn't an active linked server (caller surfaces
+    /// Msg 208 via the standard <c>InvalidObjectName</c> path). On a
+    /// successful match, <paramref name="remoteDatabaseName"/> /
+    /// <paramref name="remoteSchemaName"/> are the resolved literal
+    /// segments (with empty-middle <c>srv..t</c> substitution applied via
+    /// <see cref="Database.DefaultSchemaName"/>) so the caller can plumb
+    /// them into the remote-query SQL string.
+    /// </summary>
+    /// <remarks>
+    /// Looks up the remote <see cref="HeapTable"/> via direct access to
+    /// <see cref="LinkedServer.Target"/>'s <see cref="Database.Schemas"/>
+    /// dict — parse-time metadata stays in-process even though execution
+    /// round-trips through the remote's public ADO.NET surface. Matches
+    /// real SQL Server's "metadata at compile, data at execute" linked-
+    /// server contract; the in-process shortcut avoids a no-row query on
+    /// every parse without changing observable behavior.
+    /// </remarks>
+    public bool TryResolveLinkedServerTable(
+        MultiPartName name,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out LinkedServer? linkedServer,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? remoteTable,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteDatabaseName,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteSchemaName)
+    {
+        linkedServer = null;
+        remoteTable = null;
+        remoteDatabaseName = null;
+        remoteSchemaName = null;
+        if (name.Count != 4)
+            return false;
+        var simulation = this.Connection.Simulation;
+        if (!simulation.ActiveLinkedServers.TryGetValue(name[0], out linkedServer))
+            return false;
+
+        // Empty middle segments fall back to defaults the same way 3-part
+        // intra-Simulation references do: missing db → remote's default
+        // database; missing schema → remote's per-database DefaultSchemaName.
+        var dbSegment = string.IsNullOrEmpty(name[1])
+            ? (linkedServer.Target.Databases.Keys.FirstOrDefault() ?? Simulation.DefaultDatabaseName)
+            : name[1];
+        if (!linkedServer.Target.Databases.TryGetValue(dbSegment, out var remoteDatabase))
+            return false;
+        var schemaSegment = string.IsNullOrEmpty(name[2]) ? Database.DefaultSchemaName : name[2];
+        if (!remoteDatabase.Schemas.TryGetValue(schemaSegment, out var remoteSchema))
+            return false;
+        if (!remoteSchema.HeapTables.TryGetValue(name.Leaf, out remoteTable))
+            return false;
+        remoteDatabaseName = dbSegment;
+        remoteSchemaName = schemaSegment;
+        return true;
     }
 
     /// <summary>
