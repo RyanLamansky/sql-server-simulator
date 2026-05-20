@@ -4,7 +4,7 @@ namespace SqlServerSimulator.Schemas;
 
 /// <summary>
 /// Common metadata base for every named, schema-resident database object —
-/// <see cref="Storage.HeapTable"/>, <see cref="View"/>,
+/// <see cref="HeapTable"/>, <see cref="View"/>,
 /// <see cref="Procedure"/>, <see cref="UserDefinedFunction"/>,
 /// <see cref="Sequence"/>, <see cref="TableType"/>, <see cref="Trigger"/>.
 /// The base unifies the fields every concrete type was previously
@@ -17,13 +17,13 @@ namespace SqlServerSimulator.Schemas;
 /// <remarks>
 /// <para>
 /// <see cref="Trigger.Parent"/> is typed as <c>SchemaObject</c> so a trigger
-/// can be attached to a <see cref="Storage.HeapTable"/> or a <see cref="View"/>
+/// can be attached to a <see cref="HeapTable"/> or a <see cref="View"/>
 /// without falling through <c>object</c>. DML hooks that need to dispatch on
 /// the trigger's parent take a <c>SchemaObject</c> parameter directly.
 /// </para>
 /// <para>
 /// <see cref="SchemaId"/> is stored as the integer ID for both the
-/// <c>SchemaId</c>-only types (<see cref="Storage.HeapTable"/>) and the
+/// <c>SchemaId</c>-only types (<see cref="HeapTable"/>) and the
 /// types that also carry a <see cref="Schema"/> reference (every other
 /// schema-object kind); those derived types continue to expose their
 /// <see cref="Schema"/> field independently — the base just keeps the

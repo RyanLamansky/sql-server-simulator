@@ -39,7 +39,7 @@ internal enum LockMode
 /// (each a <see cref="Hold"/> entry with owner / mode / re-entrance
 /// count). Every <see cref="SchemaObject"/> carries one via the inherited
 /// <see cref="SchemaObject.SchemaLock"/>; row-level locks live in
-/// <see cref="Storage.HeapTable.RowLocks"/>, lazily-interned per
+/// <see cref="HeapTable.RowLocks"/>, lazily-interned per
 /// <c>(pageIndex, slotIndex)</c>. All mutations to <see cref="Holders"/>
 /// happen under <see cref="LockManager"/>'s gate; the class itself has no
 /// logic.

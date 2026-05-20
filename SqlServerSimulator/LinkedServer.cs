@@ -21,7 +21,7 @@ namespace SqlServerSimulator;
 /// <para>
 /// Writes through a four-part name (<c>INSERT</c>, <c>UPDATE</c>,
 /// <c>DELETE</c>, <c>MERGE</c> targeting <c>linkedserver.db.schema.t</c>)
-/// raise <see cref="System.NotSupportedException"/> at parse time. Lock-
+/// raise <see cref="NotSupportedException"/> at parse time. Lock-
 /// manager and undo-log coordination across <see cref="Simulation"/>
 /// boundaries isn't modeled; this mirrors the existing
 /// <see cref="System.Data.IsolationLevel"/>-related deferral for

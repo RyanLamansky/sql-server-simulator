@@ -261,7 +261,7 @@ public sealed class MergeViewTests
         sim.ExecuteBatches(
             "create table base_t (id int primary key, v int)",
             "create view v_base as select id, v from base_t");
-        _ = Throws<System.NotSupportedException>(() => sim.ExecuteNonQuery("""
+        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("""
             merge into v_base using (values(1, 10)) src(id, v) on v_base.id = src.id
             when not matched then insert (id, v) values (src.id, src.v) output inserted.id;
             """));

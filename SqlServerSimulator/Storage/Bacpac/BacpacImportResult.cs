@@ -2,7 +2,7 @@ namespace SqlServerSimulator.Storage.Bacpac;
 
 /// <summary>
 /// Diagnostics carrier returned from <see cref="Simulation.ImportBacpac(string, out BacpacImportResult, BacpacImportOptions?)"/>
-/// and its <see cref="System.IO.Stream"/> overload. Tracks model.xml elements
+/// and its <see cref="Stream"/> overload. Tracks model.xml elements
 /// the loader recognized but couldn't fully apply (e.g. a feature the
 /// simulator doesn't model end-to-end) so the caller has a feature-gap report
 /// rather than a single throw.

@@ -95,7 +95,7 @@ public sealed partial class Simulation
     /// lazily seeds <see cref="DefaultDatabaseName"/> on first connection
     /// to a Simulation that has no databases (so the all-T-SQL use case
     /// keeps working without an explicit import / CREATE DATABASE).
-    /// <see cref="ImportBacpac(System.IO.Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>
+    /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>
     /// adds further entries; <c>USE &lt;db&gt;</c> switches a session's
     /// <see cref="SimulatedDbConnection.CurrentDatabase"/> across entries
     /// (Msg 911 on miss). Fresh connections pick the lazy seed when present,

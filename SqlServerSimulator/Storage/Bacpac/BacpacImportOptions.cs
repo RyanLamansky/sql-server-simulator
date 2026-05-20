@@ -2,7 +2,7 @@ namespace SqlServerSimulator.Storage.Bacpac;
 
 /// <summary>
 /// Options passed to <see cref="Simulation.ImportBacpac(string, out BacpacImportResult, BacpacImportOptions?)"/>
-/// and its <see cref="System.IO.Stream"/> overload. Defaulted-everything: the
+/// and its <see cref="Stream"/> overload. Defaulted-everything: the
 /// parameterless constructor (and a <see langword="null"/>-defaulted
 /// <c>options</c> argument) produce the simulator's standard import behavior.
 /// </summary>
@@ -31,7 +31,7 @@ public sealed record class BacpacImportOptions
     /// <summary>
     /// Worker-thread cap for the per-table parallel data-load phase. <c>-1</c>
     /// (the default) uses <see cref="Environment.ProcessorCount"/>, matching
-    /// the convention on <see cref="System.Threading.Tasks.ParallelOptions"/>.
+    /// the convention on <see cref="ParallelOptions"/>.
     /// Positive values cap at that many workers; the loader still won't spin
     /// up more workers than there are work items.
     /// </summary>

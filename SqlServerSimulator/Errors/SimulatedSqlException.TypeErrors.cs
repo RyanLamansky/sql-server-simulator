@@ -439,7 +439,7 @@ partial class SimulatedSqlException
     /// attached to a non-string expression (probe-confirmed wording:
     /// <c>"Expression type int is invalid for COLLATE clause."</c>).
     /// Real SQL Server raises this at bind time; the simulator raises at
-    /// runtime because <see cref="Storage.SqlType"/> isn't fully bound
+    /// runtime because <see cref="SqlType"/> isn't fully bound
     /// during the parse pass (column refs without a resolver are typed
     /// lazily). Same Msg + same wording; only the firing point differs.
     /// </summary>
