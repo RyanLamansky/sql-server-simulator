@@ -504,5 +504,214 @@ public sealed class CollationDeclaredColumnTests
             "select count(*) from (select distinct s from t) d"));
     }
 
+    /// <summary>
+    /// <c>varchar Latin1_General_BIN2</c> sorts by CP1252 byte order — which
+    /// diverges from Unicode codepoint order in the 0x80-0x9F window. The
+    /// euro sign U+20AC encodes to CP1252 byte 0x80, so it sorts BEFORE
+    /// NBSP (U+00A0, CP1252 byte 0xA0). Probe-confirmed against SQL Server
+    /// 2025 — order matches byte order across the test fixture.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_VarcharBin2_UsesCp1252ByteOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(2) collate Latin1_General_BIN2);
+            insert t values
+                (cast(nchar(161) as varchar(2))),
+                (cast(nchar(8364) as varchar(2))),
+                (cast(nchar(402) as varchar(2))),
+                (cast(nchar(376) as varchar(2))),
+                (cast(nchar(160) as varchar(2)))
+            """);
+        using var reader = sim.CreateCommand("select ascii(s) from t order by s").ExecuteReader();
+        var rows = new List<int>();
+        while (reader.Read())
+            rows.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 0x80, 0x83, 0x9F, 0xA0, 0xA1 }, rows);
+    }
+
+    /// <summary>
+    /// <c>nvarchar Latin1_General_BIN2</c> sorts by UTF-16 code unit
+    /// (16-bit big-endian value), <em>not</em> code point. The Microsoft
+    /// docs say "BIN2 = code point sort" but the empirical behavior on
+    /// SQL Server 2025 is code-unit — probe-confirmed with the
+    /// supplementary char U+1F600 (emoji, encoded as surrogate pair
+    /// D83D DE00) sorting BEFORE U+E000, which can only happen if the
+    /// compare is code-unit (D83D &lt; E000) and not code-point
+    /// (U+1F600 &gt; U+E000). For the BMP-only inputs here the two
+    /// orderings happen to agree, so the assertion is the same either
+    /// way — what's exercised is that nvarchar BIN2 sorts by something
+    /// other than the varchar BIN2 CP1252 byte order. See
+    /// <c>docs/claude/collations.md</c> "Microsoft-docs-vs-real-behavior
+    /// gap" for the contrast and citations.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_NvarcharBin2_UsesCodeUnitOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s nvarchar(2) collate Latin1_General_BIN2);
+            insert t values (nchar(161)), (nchar(8364)), (nchar(402)), (nchar(376)), (nchar(160))
+            """);
+        using var reader = sim.CreateCommand("select unicode(s) from t order by s").ExecuteReader();
+        var rows = new List<int>();
+        while (reader.Read())
+            rows.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 160, 161, 376, 402, 8364 }, rows);
+    }
+
+    /// <summary>
+    /// <c>nvarchar Latin1_General_BIN2</c> with a supplementary character
+    /// (U+1F600, 😀, encoded as surrogate pair D83D DE00) sorts BEFORE
+    /// the high BMP char U+E000 because D83D &lt; E000 as 16-bit code
+    /// units. Under a hypothetical code-point compare (which the docs
+    /// claim) the supplementary U+1F600 would sort AFTER U+E000.
+    /// Probe-confirmed against SQL Server 2025. This test catches any
+    /// regression that would introduce "code-point fixing" logic into
+    /// the binary collation body.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_NvarcharBin2_SupplementaryCharSortsByCodeUnit()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, s nvarchar(4) collate Latin1_General_BIN2);
+            insert t (s) values
+                (nchar(57344)),                      -- U+E000
+                (nchar(55357) + nchar(56832))        -- surrogate pair for U+1F600 (😀)
+            """);
+        // ORDER BY s should give: emoji (D83D…) before U+E000.
+        // We project the first code unit's UNICODE() value to make the
+        // assertion source-encoding-independent.
+        using var reader = sim.CreateCommand("select unicode(s) from t order by s").ExecuteReader();
+        var rows = new List<int>();
+        while (reader.Read())
+            rows.Add(reader.GetInt32(0));
+        // 55357 = 0xD83D (high surrogate of emoji, sorts first).
+        // 57344 = 0xE000 (sorts second).
+        CollectionAssert.AreEqual(new[] { 55357, 57344 }, rows);
+    }
+
+    /// <summary>
+    /// <c>varchar Latin1_General_BIN</c> uses the same CP1252 byte body as
+    /// BIN2 at the simulator's value layer — the BIN-vs-BIN2 code-page-
+    /// prefix asymmetry isn't observable through a single-codepage value
+    /// stack. Confirms the substitution wires up symmetrically for BIN.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_VarcharBin_UsesCp1252ByteOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(2) collate Latin1_General_BIN);
+            insert t values
+                (cast(nchar(8364) as varchar(2))),
+                (cast(nchar(160) as varchar(2))),
+                (cast(nchar(402) as varchar(2)))
+            """);
+        using var reader = sim.CreateCommand("select ascii(s) from t order by s").ExecuteReader();
+        var rows = new List<int>();
+        while (reader.Read())
+            rows.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 0x80, 0x83, 0xA0 }, rows);
+    }
+
+    /// <summary>
+    /// DISTINCT hash on a varchar BIN2 column agrees with the CP1252
+    /// byte-equality contract — duplicates collapse and CP1252-distinct
+    /// values stay in separate buckets. Covers the GetHashCode path on
+    /// <c>Cp1252BinaryCollation</c>.
+    /// </summary>
+    [TestMethod]
+    public void Distinct_VarcharBin2_HashRespectsCp1252Bytes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(2) collate Latin1_General_BIN2);
+            insert t values
+                (cast(nchar(8364) as varchar(2))),
+                (cast(nchar(8364) as varchar(2))),
+                (cast(nchar(402) as varchar(2)))
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from (select distinct s from t) d"));
+    }
+
+    /// <summary>
+    /// <c>char(N) Latin1_General_BIN2</c> picks up the CP1252 substitution
+    /// through the same <c>CharSqlType.WithCollation</c> hook as varchar.
+    /// Same input characters produce the same byte-order ranking.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_CharBin2_UsesCp1252ByteOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s char(2) collate Latin1_General_BIN2);
+            insert t values
+                (cast(nchar(8364) as char(2))),
+                (cast(nchar(160) as char(2))),
+                (cast(nchar(402) as char(2)))
+            """);
+        using var reader = sim.CreateCommand("select ascii(s) from t order by s").ExecuteReader();
+        var rows = new List<int>();
+        while (reader.Read())
+            rows.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 0x80, 0x83, 0xA0 }, rows);
+    }
+
+    /// <summary>
+    /// Pre-SQL-Server-2005 <c>Latin1_General_BIN</c> on nvarchar has an
+    /// asymmetric sort rule: position 0 is a 16-bit code-unit compare
+    /// (matches BIN2), but position 1+ combines surrogate pairs into
+    /// 32-bit scalars and code-point-compares. So <c>'Z' + N'😀'</c>
+    /// (after the shared <c>'Z'</c>, the supplementary U+1F600 vs the
+    /// high BMP U+E000) sorts as <c>0x1F600 &gt; 0xE000</c> — emoji-row
+    /// LAST. Under BIN2 with the same data the comparison is code-unit
+    /// (0xD83D &lt; 0xE000), so emoji-row sorts FIRST — see
+    /// <see cref="OrderBy_NvarcharBin2_Position1Plus_KeepsCodeUnitOrder"/>
+    /// for the companion contrast.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_NvarcharBin_Position1Plus_UsesCodePointOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, s nvarchar(4) collate Latin1_General_BIN);
+            insert t (s) values
+                (N'Z' + nchar(55357) + nchar(56832)),  -- 'Z' + emoji U+1F600
+                (N'Z' + nchar(57344))                  -- 'Z' + U+E000
+            """);
+        using var reader = sim.CreateCommand("select id from t order by s").ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // 'Z'+U+E000 (id=2) sorts first; 'Z'+emoji (id=1) sorts second.
+        CollectionAssert.AreEqual(new[] { 2, 1 }, ids);
+    }
+
+    /// <summary>
+    /// Contrast to <see cref="OrderBy_NvarcharBin_Position1Plus_UsesCodePointOrder"/>:
+    /// the same data under BIN2 sorts the opposite way because BIN2 is
+    /// code-unit throughout (0xD83D &lt; 0xE000 at position 1).
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_NvarcharBin2_Position1Plus_KeepsCodeUnitOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, s nvarchar(4) collate Latin1_General_BIN2);
+            insert t (s) values
+                (N'Z' + nchar(55357) + nchar(56832)),
+                (N'Z' + nchar(57344))
+            """);
+        using var reader = sim.CreateCommand("select id from t order by s").ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // 'Z'+emoji (id=1) sorts first under code-unit; 'Z'+U+E000 (id=2) second.
+        CollectionAssert.AreEqual(new[] { 1, 2 }, ids);
+    }
+
     private static void IsNull(object? value) => Microsoft.VisualStudio.TestTools.UnitTesting.Assert.IsNull(value is DBNull ? null : value);
 }

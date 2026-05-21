@@ -68,8 +68,8 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 | `Latin1_General_100_CI_AS` | Invariant culture CI + IgnoreKanaType + IgnoreWidth | Sort layers `IgnoreSymbols` on top — primary-weight-zero punctuation collapses. |
 | `Latin1_General_CI_AS` | Same body as the `_100_` variant | Pre-v100 Unicode-table difference not modeled (no non-Latin script change on the inputs the regression bar exercises). |
 | `Latin1_General_CS_AS` | Invariant culture + IgnoreKanaType + IgnoreWidth | No IgnoreCase. |
-| `Latin1_General_BIN` | `StringComparer.Ordinal` | Pure codepoint. |
-| `Latin1_General_BIN2` | `StringComparer.Ordinal` | Same body as BIN; the BIN-vs-BIN2 non-Unicode-`varchar` asymmetry isn't observable through the simulator's SQL surface. |
+| `Latin1_General_BIN` | nvarchar / nchar: `StringComparer.Ordinal`. varchar / char: CP1252 byte compare (`Cp1252BinaryCollation`) substituted in via `Collation.ForVarcharStorage()`. | Pure codepoint on Unicode types; pure CP1252 byte on non-Unicode types (matches real SQL Server's CP1252 byte sort). |
+| `Latin1_General_BIN2` | Same per-storage dispatch as BIN above. | Identical body to BIN at the simulator's value layer — the BIN-vs-BIN2 code-page-prefix asymmetry only matters when the underlying codepage isn't CP1252, which the simulator collapses. |
 | `Latin1_General_CI_AS_KS_WS` | Invariant culture CI (KS / WS preserved) | Appears on sysname-backed columns in real DBs; included for BACPAC quiet-loading. |
 | `SQL_Latin1_General_CP437_CS_AS` | Invariant culture case-sensitive | Legacy CP437 binding; one column per AdventureWorks-class DB. |
 | `Latin1_General_100_CI_AS_SC_UTF8` | Invariant culture CI (same body as `_100_CI_AS`) | UTF-8 is a storage encoding only at the simulator's UTF-16 value layer; `_SC` (supplementary characters) is handled natively by `CompareInfo`. |
@@ -112,6 +112,33 @@ Probed against SQL Server 2025 with a curated word set per locale (mixed-case AS
 **Equality + CI/CS / KS / WS folding all align** for the inputs probed (Turkish-i, kana-type, width, accent). Pure sort-key parity within those equivalence classes doesn't — SQL Server's NLS sort tables aren't reproducible from .NET `CompareInfo` for these locales, and the simulator doesn't ship its own NLS data. Apps whose tests assert on exact byte-for-byte ORDER BY output of locale-collation columns will see divergence; apps using these collations for grouping / equality / LIKE / Turkish-i case folding match.
 
 **`varchar(N)` on the Japanese / Chinese collations** is meaningfully wrong because the underlying codepage differs. Real SQL Server routes these through CP932 / CP936 respectively; the simulator routes through the invariant UTF-16 CompareInfo at the value layer. Use `nvarchar(N)` for any non-Latin column that needs even approximate sort parity.
+
+## Binary collation storage-aware dispatch
+
+`Latin1_General_BIN` and `Latin1_General_BIN2` carry two comparer bodies and dispatch on the column's storage type:
+
+- **nvarchar / nchar**: `BinaryCollation` body via `StringComparer.Ordinal`. UTF-16 code-unit ordinal compare equals real SQL Server's nvarchar BIN/BIN2 storage byte compare for any BMP input, and matches code-unit-by-code-unit for supplementary characters too (the surrogate pair is compared as two separate 16-bit code units, not as a unified 32-bit scalar — see the "code unit, not code point" note below).
+- **varchar / char**: `Cp1252BinaryCollation` body. Encodes each operand to CP1252 via `CharSqlType.Cp1252Encoder`, then `SequenceCompareTo` on the bytes. Matches real SQL Server's CP1252 byte sort byte-for-byte.
+
+The two bodies diverge for any string containing characters whose CP1252 byte lies in the 0x80-0x9F window: those bytes map to Unicode codepoints scattered across the BMP (`€` U+20AC → 0x80, `ƒ` U+0192 → 0x83, `Ÿ` U+0178 → 0x9F, `‚` U+201A → 0x82, …), so codepoint order ≠ byte order. Probe-confirmed against SQL Server 2025 — the simulator now matches.
+
+The dispatch hangs off `Collation.ForVarcharStorage()` (a virtual returning `this` by default; the BIN / BIN2 singletons override to point at the `Cp1252BinaryCollation` sibling). `VarcharSqlType.WithCollation` and `CharSqlType.WithCollation` call it at column-pin time; `NVarcharSqlType` / `NCharSqlType` don't substitute. Both bodies share the same `Name` so catalog views report one collation name and `Collation.Resolve` treats them as the same collation for cross-operand coercibility.
+
+`Latin1_General_100_BIN2_UTF8` keeps the codepoint-order body — UTF-8 byte order equals codepoint order (UTF-8 invariant), so the substitution isn't needed even though it's a varchar collation. `UNICODE_CODEPOINT` is Unicode-only (the simulator doesn't reject it on varchar at parse time — a low-priority gap).
+
+### Microsoft-docs-vs-real-behavior gap: BIN2 is code *unit*, not code point
+
+Microsoft's [Collation and Unicode Support](https://learn.microsoft.com/en-us/sql/relational-databases/collations/collation-and-unicode-support) page states "In a `BIN2` collation all characters are sorted according to their code points." This is **inaccurate for supplementary characters on nvarchar**. Empirical behavior on SQL Server 2025 (probed 2026-05-21, three routes — `NCHAR`-synthesized, parameter-passed .NET string, raw SQL literal — all agree): BIN2 nvarchar compares UTF-16 16-bit code units, which differs from code-point order when surrogate pairs are involved.
+
+Demo: `(NCHAR(0xD83D) + NCHAR(0xDE00))` (the surrogate pair for 😀 U+1F600) sorts BEFORE `NCHAR(0xE000)` under BIN2, because the high surrogate D83D (0xD83D) < E000 (0xE000) as 16-bit values. Under code-point order, U+1F600 (0x1F600) > U+E000 would put the emoji last. Real SQL Server returns the code-unit answer; the simulator's `StringComparer.Ordinal` (which is also code-unit) matches.
+
+Community sources documenting the same gap:
+- [Solomon Rutzky — Differences Between the Various Binary Collations (Sql Quantum Leap, 2019)](https://sqlquantumleap.com/2019/03/13/differences-between-the-various-binary-collations-cultures-versions-and-bin-vs-bin2/): "the BIN2 collations, when dealing with NVARCHAR data, sort by code *unit*, not by code *point*."
+- [SQLServerCentral mirror of the same analysis](https://www.sqlservercentral.com/blogs/differences-between-the-various-binary-collations-cultures-versions-and-bin-vs-bin2).
+
+This aligns with the [Unicode specification](https://www.unicode.org/versions/latest/) — UTF-16 binary order is not codepoint order when supplementary characters are present. SQL Server matches the Unicode spec; only its own product docs are out of step. Don't "fix" the simulator by adding code-point logic — that would introduce a divergence where none exists.
+
+The pre-2005 `_BIN` (not `_BIN2`) variant has a different, real quirk: at position 0 it's code-unit (same as BIN2), but at position 1+ it switches to code-point. Probe-confirmed via `'Z'+emoji > 'Z'+nchar(0xE000)` returning TRUE under BIN and FALSE under BIN2. **The simulator models this**: `Latin1_General_BIN.Compare` (the nvarchar body) overrides `BinaryCollation.Compare` to walk the strings with the asymmetric rule — first 16-bit unit raw, then surrogate-pair-combining scalar compare. `Equals` / `GetHashCode` stay on `Ordinal` because equality of code-unit sequences implies equality of scalar sequences regardless of which rule walked them.
 
 ## Known gaps
 

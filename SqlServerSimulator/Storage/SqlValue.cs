@@ -66,7 +66,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <summary>Non-NULL <see cref="bool"/> (SQL <c>bit</c>) value.</summary>
     public static SqlValue FromBoolean(bool value) => new(SqlType.Bit, value ? 1L : 0L, null, isNull: false);
 
-    /// <summary>Non-NULL SQL <c>varchar</c> value (UTF-8 on disk, .NET string in memory). Type collation defaults to <see cref="SqlServerSimulator.Collation.Default"/> at <see cref="Coercibility.CoercibleDefault"/> — appropriate for literals, parameters, and CAST results.</summary>
+    /// <summary>Non-NULL SQL <c>varchar</c> value (UTF-8 on disk, .NET string in memory). Type collation defaults to <see cref="Collation.Default"/> at <see cref="Coercibility.CoercibleDefault"/> — appropriate for literals, parameters, and CAST results.</summary>
     public static SqlValue FromVarchar(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -80,7 +80,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(type, 0, value, isNull: false);
     }
 
-    /// <summary>Non-NULL SQL <c>nvarchar</c> value (UTF-16 LE on disk, .NET string in memory). Type collation defaults to <see cref="SqlServerSimulator.Collation.Default"/> at <see cref="Coercibility.CoercibleDefault"/>.</summary>
+    /// <summary>Non-NULL SQL <c>nvarchar</c> value (UTF-16 LE on disk, .NET string in memory). Type collation defaults to <see cref="Collation.Default"/> at <see cref="Coercibility.CoercibleDefault"/>.</summary>
     public static SqlValue FromNVarchar(string value)
     {
         ArgumentNullException.ThrowIfNull(value);

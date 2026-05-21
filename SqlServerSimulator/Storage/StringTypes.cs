@@ -8,7 +8,7 @@ namespace SqlServerSimulator.Storage;
 /// length 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is
 /// a distinct interned singleton via <see cref="Get(int, SqlServerSimulator.Collation, SqlServerSimulator.Coercibility)"/>;
 /// the length-only <see cref="Get(int)"/> overload returns the
-/// (length, <see cref="SqlServerSimulator.Collation.Default"/>, <see cref="SqlServerSimulator.Coercibility.CoercibleDefault"/>)
+/// (length, <see cref="Collation.Default"/>, <see cref="Coercibility.CoercibleDefault"/>)
 /// variant used by literal / CAST / parameter contexts that haven't pinned a
 /// collation. <see cref="Unspecified"/> (length 0) is the length-unspecified
 /// sentinel returned from arithmetic / column resolution paths that haven't
@@ -19,11 +19,11 @@ internal sealed class VarcharSqlType : SqlType
 {
     public readonly short length;
 
-    private readonly SqlServerSimulator.Collation collation;
+    private readonly Collation collation;
 
     private readonly Coercibility coercibility;
 
-    private VarcharSqlType(short length, SqlServerSimulator.Collation collation, Coercibility coercibility)
+    private VarcharSqlType(short length, Collation collation, Coercibility coercibility)
         : base(SqlTypeCategory.String)
     {
         this.length = length;
@@ -37,11 +37,11 @@ internal sealed class VarcharSqlType : SqlType
 
     public override bool IsFixedLength => false;
 
-    public override SqlServerSimulator.Collation Collation => this.collation;
+    public override Collation Collation => this.collation;
 
     public override Coercibility Coercibility => this.coercibility;
 
-    public override SqlType WithCollation(SqlServerSimulator.Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation.ForVarcharStorage(), coercibility);
 
     public override int GetVariableByteCount(SqlValue value) => CharSqlType.Cp1252Encoder.GetByteCount(value.AsString);
 
@@ -58,7 +58,7 @@ internal sealed class VarcharSqlType : SqlType
         _ => $"varchar({this.length})",
     };
 
-    private static readonly ConcurrentDictionary<(short Length, SqlServerSimulator.Collation Collation, Coercibility Coercibility), VarcharSqlType> cache = new();
+    private static readonly ConcurrentDictionary<(short Length, Collation Collation, Coercibility Coercibility), VarcharSqlType> cache = new();
 
     internal static readonly VarcharSqlType Unspecified = Intern(0, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
@@ -66,12 +66,12 @@ internal sealed class VarcharSqlType : SqlType
 
     public static VarcharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
-    public static VarcharSqlType Get(int length, SqlServerSimulator.Collation collation, Coercibility coercibility) =>
+    public static VarcharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is not (0 or SqlType.MaxLengthSentinel) and (< 1 or > 8000)
             ? throw new ArgumentOutOfRangeException(nameof(length), $"varchar length must be 1-8000, 0 (unspecified), or -1 (MAX); got {length}.")
             : Intern((short)length, collation, coercibility);
 
-    private static VarcharSqlType Intern(short length, SqlServerSimulator.Collation collation, Coercibility coercibility) =>
+    private static VarcharSqlType Intern(short length, Collation collation, Coercibility coercibility) =>
         cache.GetOrAdd((length, collation, coercibility), static key => new VarcharSqlType(key.Length, key.Collation, key.Coercibility));
 }
 
@@ -85,11 +85,11 @@ internal sealed class NVarcharSqlType : SqlType
 {
     public readonly short length;
 
-    private readonly SqlServerSimulator.Collation collation;
+    private readonly Collation collation;
 
     private readonly Coercibility coercibility;
 
-    private NVarcharSqlType(short length, SqlServerSimulator.Collation collation, Coercibility coercibility)
+    private NVarcharSqlType(short length, Collation collation, Coercibility coercibility)
         : base(SqlTypeCategory.String)
     {
         this.length = length;
@@ -103,11 +103,11 @@ internal sealed class NVarcharSqlType : SqlType
 
     public override bool IsFixedLength => false;
 
-    public override SqlServerSimulator.Collation Collation => this.collation;
+    public override Collation Collation => this.collation;
 
     public override Coercibility Coercibility => this.coercibility;
 
-    public override SqlType WithCollation(SqlServerSimulator.Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
 
     public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
 
@@ -124,7 +124,7 @@ internal sealed class NVarcharSqlType : SqlType
         _ => $"nvarchar({this.length})",
     };
 
-    private static readonly ConcurrentDictionary<(short Length, SqlServerSimulator.Collation Collation, Coercibility Coercibility), NVarcharSqlType> cache = new();
+    private static readonly ConcurrentDictionary<(short Length, Collation Collation, Coercibility Coercibility), NVarcharSqlType> cache = new();
 
     internal static readonly NVarcharSqlType Unspecified = Intern(0, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
@@ -132,20 +132,20 @@ internal sealed class NVarcharSqlType : SqlType
 
     public static NVarcharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
-    public static NVarcharSqlType Get(int length, SqlServerSimulator.Collation collation, Coercibility coercibility) =>
+    public static NVarcharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is not (0 or SqlType.MaxLengthSentinel) and (< 1 or > 4000)
             ? throw new ArgumentOutOfRangeException(nameof(length), $"nvarchar length must be 1-4000, 0 (unspecified), or -1 (MAX); got {length}.")
             : Intern((short)length, collation, coercibility);
 
-    private static NVarcharSqlType Intern(short length, SqlServerSimulator.Collation collation, Coercibility coercibility) =>
+    private static NVarcharSqlType Intern(short length, Collation collation, Coercibility coercibility) =>
         cache.GetOrAdd((length, collation, coercibility), static key => new NVarcharSqlType(key.Length, key.Collation, key.Coercibility));
 }
 
 /// <summary>
 /// SQL Server's <c>sysname</c>: <c>nvarchar(128) NOT NULL</c> alias used by
 /// the system catalogs. Always carries the server-default collation
-/// (<see cref="SqlServerSimulator.Collation.Default"/>) at
-/// <see cref="SqlServerSimulator.Coercibility.Implicit"/> rank — sysname
+/// (<see cref="Collation.Default"/>) at
+/// <see cref="Coercibility.Implicit"/> rank — sysname
 /// columns don't accept a <c>COLLATE</c> clause and never coerce, so a
 /// single shared instance is sufficient.
 /// </summary>
@@ -155,7 +155,7 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 
     public override bool IsFixedLength => false;
 
-    public override SqlServerSimulator.Collation Collation => SqlServerSimulator.Collation.Default;
+    public override Collation Collation => SqlServerSimulator.Collation.Default;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
@@ -239,7 +239,7 @@ internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
 
     public override bool IsLob => true;
 
-    public override SqlServerSimulator.Collation Collation => SqlServerSimulator.Collation.Default;
+    public override Collation Collation => SqlServerSimulator.Collation.Default;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
@@ -265,7 +265,7 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
 
     public override bool IsLob => true;
 
-    public override SqlServerSimulator.Collation Collation => SqlServerSimulator.Collation.Default;
+    public override Collation Collation => SqlServerSimulator.Collation.Default;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
@@ -309,7 +309,7 @@ internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
 /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string, declared length
 /// 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is a
 /// distinct interned singleton; the length-only <see cref="Get(int)"/> picks
-/// the (length, <see cref="SqlServerSimulator.Collation.Default"/>, <see cref="SqlServerSimulator.Coercibility.CoercibleDefault"/>)
+/// the (length, <see cref="Collation.Default"/>, <see cref="Coercibility.CoercibleDefault"/>)
 /// variant. Stored values are right-padded with U+0020 to the declared
 /// length, both in memory and on disk; comparison and equality strip
 /// trailing spaces via the type's collation so <c>char(5) 'abc  '</c> equals
@@ -319,11 +319,11 @@ internal sealed class CharSqlType : SqlType
 {
     public readonly short length;
 
-    private readonly SqlServerSimulator.Collation collation;
+    private readonly Collation collation;
 
     private readonly Coercibility coercibility;
 
-    private CharSqlType(short length, SqlServerSimulator.Collation collation, Coercibility coercibility)
+    private CharSqlType(short length, Collation collation, Coercibility coercibility)
         : base(SqlTypeCategory.String)
     {
         this.length = length;
@@ -339,11 +339,11 @@ internal sealed class CharSqlType : SqlType
 
     public override int FixedLength => this.length;
 
-    public override SqlServerSimulator.Collation Collation => this.collation;
+    public override Collation Collation => this.collation;
 
     public override Coercibility Coercibility => this.coercibility;
 
-    public override SqlType WithCollation(SqlServerSimulator.Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation.ForVarcharStorage(), coercibility);
 
     public override int Encode(SqlValue value, Span<byte> destination) => Cp1252Encoder.GetBytes(value.AsString, destination);
 
@@ -353,12 +353,12 @@ internal sealed class CharSqlType : SqlType
 
     public static CharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
-    public static CharSqlType Get(int length, SqlServerSimulator.Collation collation, Coercibility coercibility) =>
+    public static CharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is < 1 or > 8000
             ? throw new ArgumentOutOfRangeException(nameof(length), $"char length must be 1-8000; got {length}.")
             : cache.GetOrAdd(((short)length, collation, coercibility), static key => new CharSqlType(key.Item1, key.Item2, key.Item3));
 
-    private static readonly ConcurrentDictionary<(short, SqlServerSimulator.Collation, Coercibility), CharSqlType> cache = new();
+    private static readonly ConcurrentDictionary<(short, Collation, Coercibility), CharSqlType> cache = new();
 
     /// <summary>Shared CP1252 encoder; identical configuration to <see cref="VarcharSqlType"/>.</summary>
     internal static readonly Encoding Cp1252Encoder = LoadCp1252();
@@ -384,11 +384,11 @@ internal sealed class NCharSqlType : SqlType
 {
     public readonly short length;
 
-    private readonly SqlServerSimulator.Collation collation;
+    private readonly Collation collation;
 
     private readonly Coercibility coercibility;
 
-    private NCharSqlType(short length, SqlServerSimulator.Collation collation, Coercibility coercibility)
+    private NCharSqlType(short length, Collation collation, Coercibility coercibility)
         : base(SqlTypeCategory.String)
     {
         this.length = length;
@@ -404,11 +404,11 @@ internal sealed class NCharSqlType : SqlType
 
     public override int FixedLength => this.length * 2;
 
-    public override SqlServerSimulator.Collation Collation => this.collation;
+    public override Collation Collation => this.collation;
 
     public override Coercibility Coercibility => this.coercibility;
 
-    public override SqlType WithCollation(SqlServerSimulator.Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
 
     public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
 
@@ -418,12 +418,12 @@ internal sealed class NCharSqlType : SqlType
 
     public static NCharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
-    public static NCharSqlType Get(int length, SqlServerSimulator.Collation collation, Coercibility coercibility) =>
+    public static NCharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is < 1 or > 4000
             ? throw new ArgumentOutOfRangeException(nameof(length), $"nchar length must be 1-4000; got {length}.")
             : cache.GetOrAdd(((short)length, collation, coercibility), static key => new NCharSqlType(key.Item1, key.Item2, key.Item3));
 
-    private static readonly ConcurrentDictionary<(short, SqlServerSimulator.Collation, Coercibility), NCharSqlType> cache = new();
+    private static readonly ConcurrentDictionary<(short, Collation, Coercibility), NCharSqlType> cache = new();
 }
 
 /// <summary>

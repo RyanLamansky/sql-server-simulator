@@ -55,7 +55,7 @@ internal abstract partial class SqlType
     /// declaration's <c>COLLATE</c> clause, after a <c>COLLATE</c> postfix on
     /// an expression, or any other time the simulator pins the comparison
     /// rules. <see langword="null"/> on the default-singleton path means
-    /// "fall through to <see cref="SqlServerSimulator.Collation.Default"/>"
+    /// "fall through to <see cref="Collation.Default"/>"
     /// at comparison time — matching the simulator's historical behavior
     /// before per-type collation was wired through.
     /// </summary>
@@ -65,7 +65,7 @@ internal abstract partial class SqlType
     /// SQL Server's collation-precedence rank for this type instance. Drives
     /// Msg 468 / Msg 457 resolution when two string operands meet with
     /// different collations. Non-string types and string types whose
-    /// collation hasn't been pinned report <see cref="SqlServerSimulator.Coercibility.CoercibleDefault"/>.
+    /// collation hasn't been pinned report <see cref="Coercibility.CoercibleDefault"/>.
     /// </summary>
     public virtual Coercibility Coercibility => Coercibility.CoercibleDefault;
 

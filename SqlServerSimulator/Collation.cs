@@ -97,27 +97,45 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     internal static readonly Latin1_General_CS_AS Latin1GeneralCsAs = new();
 
     /// <summary>
-    /// "Latin1_General_BIN" — pure binary / codepoint comparison. For LIKE
-    /// the .NET regex backend already matches by codepoint when
-    /// <c>RegexOptions.IgnoreCase</c> is off, so the LIKE behavior
-    /// is indistinguishable from <see cref="Latin1GeneralCsAs"/> on the
-    /// inputs the simulator can produce; the distinction matters mainly
-    /// for sort / equality outside LIKE (which still route through
-    /// <see cref="Default"/>, see <c>docs/claude/database-options.md</c>).
+    /// "Latin1_General_BIN" — pre-SQL-Server-2005 binary collation. nvarchar
+    /// / nchar values use the asymmetric "code unit at position 0,
+    /// code point at position 1+" rule (see
+    /// <see cref="Latin1_General_BIN.Compare"/>); varchar / char values use
+    /// CP1252 byte compare under <see cref="Latin1GeneralBinForVarchar"/>
+    /// via <see cref="ForVarcharStorage"/>. Diverges from
+    /// <see cref="Latin1GeneralBin2"/> only when supplementary characters
+    /// appear at position 1+ — uncommon, but probe-confirmed against
+    /// SQL Server 2025.
     /// </summary>
     internal static readonly Latin1_General_BIN Latin1GeneralBin = new();
 
     /// <summary>
-    /// "Latin1_General_BIN2" — pure codepoint comparison (the v2 binary
-    /// collation that fixes the BIN-vs-BIN2 asymmetry on non-Unicode
-    /// types: BIN sorts by code-page-prefix-then-byte on legacy
-    /// <c>varchar</c>, BIN2 is pure byte/codepoint everywhere). For the
-    /// simulator's LIKE path the distinction isn't observable (.NET
-    /// regex without IgnoreCase already matches by codepoint), and
-    /// equality / sort outside LIKE routes through <see cref="Default"/>
-    /// regardless. Carried for BACPAC round-trip coverage.
+    /// "Latin1_General_BIN2" — v2 binary collation. Same storage-aware
+    /// dispatch as <see cref="Latin1GeneralBin"/>: nvarchar / nchar
+    /// columns use UTF-16 code-unit ordinal compare; varchar / char
+    /// columns use <see cref="Latin1GeneralBin2ForVarchar"/> for CP1252
+    /// byte compare. The BIN-vs-BIN2 distinction on legacy varchar
+    /// (code-page-prefix-then-byte vs pure byte) isn't observable through
+    /// the simulator's single-codepage value layer.
     /// </summary>
     internal static readonly Latin1_General_BIN2 Latin1GeneralBin2 = new();
+
+    /// <summary>
+    /// CP1252-byte body for <see cref="Latin1GeneralBin"/> when pinned on
+    /// a varchar / char column. Substituted in by
+    /// <see cref="VarcharSqlType.WithCollation"/> /
+    /// <see cref="CharSqlType.WithCollation"/> via
+    /// <see cref="ForVarcharStorage"/>. <see cref="Name"/> matches the
+    /// nvarchar sibling so catalog views report a single collation name.
+    /// </summary>
+    internal static readonly Cp1252BinaryCollation Latin1GeneralBinForVarchar = new("Latin1_General_BIN");
+
+    /// <summary>
+    /// CP1252-byte body for <see cref="Latin1GeneralBin2"/> when pinned
+    /// on a varchar / char column. See <see cref="Latin1GeneralBinForVarchar"/>
+    /// for the dispatch.
+    /// </summary>
+    internal static readonly Cp1252BinaryCollation Latin1GeneralBin2ForVarchar = new("Latin1_General_BIN2");
 
     /// <summary>
     /// "Japanese_XJIS_140_CI_AS" — the modern Japanese collation that
@@ -384,7 +402,7 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
     /// <summary>
     /// SQL Server's collation-coercibility resolution for two operands.
-    /// Returns the winning <see cref="Collation"/> and <see cref="SqlServerSimulator.Coercibility"/>
+    /// Returns the winning <see cref="Collation"/> and <see cref="Coercibility"/>
     /// when the pair is resolvable; <see langword="null"/> when both
     /// operands have the same rank but different collations (the caller is
     /// expected to raise Msg 468 / Msg 457 with operator context).
@@ -420,6 +438,23 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     public abstract bool Equals(string? x, string? y);
 
     public abstract int GetHashCode(string obj);
+
+    /// <summary>
+    /// Returns the comparer body to use when this collation is pinned on
+    /// a varchar / char column (CP1252 storage). The base implementation
+    /// returns <see langword="this"/> — most collations compare via .NET
+    /// <see cref="CompareInfo"/> on UTF-16 string content regardless of
+    /// storage encoding. Binary collations override to return a CP1252-
+    /// byte-aware sibling: real SQL Server's BIN / BIN2 on varchar
+    /// byte-compares CP1252, which diverges from UTF-16 codepoint compare
+    /// in the 0x80-0x9F window where Unicode codepoints (e.g. U+20AC `€`,
+    /// U+0192 `ƒ`) scatter across the BMP. Called by
+    /// <see cref="VarcharSqlType.WithCollation"/> and
+    /// <see cref="CharSqlType.WithCollation"/>; <c>NVarcharSqlType</c> /
+    /// <c>NCharSqlType</c> don't substitute (UTF-16 storage already
+    /// matches the UTF-16 code-unit-order body).
+    /// </summary>
+    internal virtual Collation ForVarcharStorage() => this;
 
     /// <summary>
     /// Shared host for the Windows-flavored CI_AS pair
@@ -572,24 +607,126 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     }
 
     /// <summary>
-    /// "Latin1_General_BIN" — pure binary / codepoint comparison.
-    /// Behavior body lives on <see cref="BinaryCollation"/>; this class
-    /// supplies the metadata <see cref="Name"/> only.
+    /// "Latin1_General_BIN" — pre-SQL-Server-2005 binary collation. nvarchar
+    /// body overrides <see cref="Compare"/> to model the asymmetric
+    /// position-0-vs-rest rule: the first 16-bit code unit compares as-is
+    /// (matches BIN2), but at position 1+ surrogate pairs combine into
+    /// 32-bit scalars before comparing (code-point order). Equals /
+    /// GetHashCode stay on <see cref="StringComparer.Ordinal"/> from
+    /// <see cref="BinaryCollation"/> — two strings that compare-equal under
+    /// either rule produce the same code-unit sequence. Probe-confirmed
+    /// against SQL Server 2025 (2026-05-21):
+    /// <c>('Z' + N'😀') &gt; ('Z' + N'') collate Latin1_General_BIN</c>
+    /// is TRUE (code-point: 0x1F600 &gt; 0xE000), while the same query
+    /// under BIN2 returns FALSE (code-unit: 0xD83D &lt; 0xE000). For BMP-
+    /// only inputs the two rules agree, so the override only matters when
+    /// supplementary characters appear at position 1+.
     /// </summary>
     internal sealed class Latin1_General_BIN : BinaryCollation
     {
         public override string Name => "Latin1_General_BIN";
+
+        internal override Collation ForVarcharStorage() => Latin1GeneralBinForVarchar;
+
+        public override int Compare(string? x, string? y)
+        {
+            if (x is null) return y is null ? 0 : -1;
+            if (y is null) return 1;
+            var minLen = Math.Min(x.Length, y.Length);
+            var i = 0;
+            while (i < minLen)
+            {
+                int xVal, yVal, advance;
+                if (i == 0)
+                {
+                    xVal = x[0];
+                    yVal = y[0];
+                    advance = 1;
+                }
+                else
+                {
+                    xVal = ScalarAt(x, i, out var xAdv);
+                    yVal = ScalarAt(y, i, out _);
+                    advance = xAdv;
+                }
+                if (xVal != yVal) return xVal.CompareTo(yVal);
+                i += advance;
+            }
+            return x.Length.CompareTo(y.Length);
+        }
+
+        private static int ScalarAt(string s, int i, out int advance)
+        {
+            var c = s[i];
+            if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                advance = 2;
+                return char.ConvertToUtf32(c, s[i + 1]);
+            }
+            advance = 1;
+            return c;
+        }
     }
 
     /// <summary>
     /// "Latin1_General_BIN2" — v2 binary collation. Behavior body lives
     /// on <see cref="BinaryCollation"/>; this class supplies the metadata
-    /// <see cref="Name"/> only. See <see cref="Latin1GeneralBin2"/> for
-    /// the BIN/BIN2 distinction summary.
+    /// <see cref="Name"/> and the varchar-storage substitution.
     /// </summary>
     internal sealed class Latin1_General_BIN2 : BinaryCollation
     {
         public override string Name => "Latin1_General_BIN2";
+
+        internal override Collation ForVarcharStorage() => Latin1GeneralBin2ForVarchar;
+    }
+
+    /// <summary>
+    /// CP1252-byte body for the binary collations when pinned on a
+    /// <c>varchar</c> / <c>char</c> column. Encodes each operand to CP1252
+    /// then byte-compares — matches real SQL Server's BIN / BIN2 varchar
+    /// sort and equality. Diverges from <see cref="BinaryCollation"/>
+    /// (UTF-16 codepoint compare) for any string containing characters
+    /// whose CP1252 byte is in the 0x80-0x9F window: those bytes map to
+    /// Unicode codepoints scattered across the BMP (`€` U+20AC = 0x80,
+    /// `ƒ` U+0192 = 0x83, `Ÿ` U+0178 = 0x9F, …), so byte order doesn't
+    /// equal codepoint order. <see cref="Name"/> is shared with the
+    /// nvarchar-bodied sibling so catalog views report one collation
+    /// name; <see cref="Resolve"/> treats them as the same
+    /// collation for cross-operand coercibility.
+    /// </summary>
+    internal sealed class Cp1252BinaryCollation : Collation
+    {
+        private readonly string name;
+
+        internal Cp1252BinaryCollation(string name)
+        {
+            this.name = name;
+        }
+
+        public override string Name => this.name;
+
+        public override bool CaseSensitive => true;
+
+        public override int Compare(string? x, string? y) =>
+            x is null
+                ? (y is null ? 0 : -1)
+                : y is null ? 1 : CompareBytes(x, y);
+
+        public override bool Equals(string? x, string? y) =>
+            x is null
+                ? y is null
+                : y is not null && CompareBytes(x, y) == 0;
+
+        public override int GetHashCode(string obj)
+        {
+            var bytes = CharSqlType.Cp1252Encoder.GetBytes(obj);
+            var hash = default(HashCode);
+            hash.AddBytes(bytes);
+            return hash.ToHashCode();
+        }
+
+        private static int CompareBytes(string x, string y) =>
+            CharSqlType.Cp1252Encoder.GetBytes(x).AsSpan().SequenceCompareTo(CharSqlType.Cp1252Encoder.GetBytes(y));
     }
 
     /// <summary>
