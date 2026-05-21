@@ -18,6 +18,9 @@ public class EFCoreShadowAlternateKeys
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new AccountContext(new Simulation()));
+
     private sealed class Account
     {
         public int Id { get; set; }

@@ -17,6 +17,9 @@ public class EFCoreOwnedEntities
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new CustomerContext(new Simulation()));
+
     private sealed class Address
     {
         [Column(TypeName = "nvarchar(60)")]

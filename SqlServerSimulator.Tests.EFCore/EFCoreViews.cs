@@ -13,6 +13,9 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class EFCoreViews
 {
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new ViewDbContext(new Simulation()));
+
     private static ViewDbContext WithOrderSummary()
     {
         var simulation = new Simulation();

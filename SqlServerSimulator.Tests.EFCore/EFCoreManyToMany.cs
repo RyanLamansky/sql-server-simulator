@@ -17,6 +17,9 @@ public class EFCoreManyToMany
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new BlogContext(new Simulation()));
+
     private sealed class Post
     {
         public int Id { get; set; }

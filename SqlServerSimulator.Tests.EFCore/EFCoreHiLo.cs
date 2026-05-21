@@ -16,6 +16,9 @@ public sealed class EFCoreHiLo
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new HiLoDbContext(new Simulation()));
+
     private class HiLoEntity
     {
         public int Id { get; set; }

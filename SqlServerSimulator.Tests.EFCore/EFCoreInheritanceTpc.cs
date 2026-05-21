@@ -17,6 +17,9 @@ public class EFCoreInheritanceTpc
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new PetContext(new Simulation()));
+
     private abstract class Pet
     {
         public int Id { get; set; }

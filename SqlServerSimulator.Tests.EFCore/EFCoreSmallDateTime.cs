@@ -14,6 +14,9 @@ public class EFCoreSmallDateTime
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new AdapterTestDbContext(new Simulation()));
+
     private static Schedule NewSchedule(int id, DateTime? checkIn = null) => new()
     {
         Id = id,

@@ -14,6 +14,9 @@ public class EFCoreTime
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new AdapterTestDbContext(new Simulation()));
+
     private static Schedule NewSchedule(int id, TimeOnly? alarm = null, TimeOnly? snooze = null, TimeSpan? shift = null, TimeSpan? @break = null) => new()
     {
         Id = id,

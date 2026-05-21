@@ -20,6 +20,9 @@ public sealed class EFCoreTriggers
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new TriggerDbContext(new Simulation()));
+
     private class Product
     {
         public int Id { get; set; }

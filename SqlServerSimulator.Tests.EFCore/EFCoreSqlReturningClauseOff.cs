@@ -19,6 +19,9 @@ public class EFCoreSqlReturningClauseOff
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new OutputOffDbContext(new Simulation()));
+
     [TestMethod]
     public void SaveChanges_SingleEntity_RehydratesIdentityViaTableVariable()
     {

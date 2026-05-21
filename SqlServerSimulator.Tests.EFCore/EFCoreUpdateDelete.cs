@@ -15,6 +15,13 @@ public class EFCoreUpdateDelete
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _)
+    {
+        AssemblyHooks.WarmModel(() => new ScoreContext(new Simulation()));
+        AssemblyHooks.WarmModel(() => new TimestampedDbContext(new Simulation()));
+    }
+
     private static TestDbContext SeededContext()
     {
         var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());

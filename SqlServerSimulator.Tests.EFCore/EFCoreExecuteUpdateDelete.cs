@@ -19,6 +19,9 @@ public class EFCoreExecuteUpdateDelete
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new UserContext(new Simulation()));
+
     private sealed class User
     {
         public int Id { get; set; }

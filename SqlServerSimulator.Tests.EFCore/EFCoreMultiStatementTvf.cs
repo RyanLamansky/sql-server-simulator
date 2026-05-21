@@ -16,6 +16,9 @@ public sealed class EFCoreMultiStatementTvf
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new DocumentContext(new Simulation()));
+
     private sealed class Doc
     {
         public int Id { get; set; }

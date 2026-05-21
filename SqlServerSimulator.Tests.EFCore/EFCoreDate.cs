@@ -13,6 +13,9 @@ public class EFCoreDate
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new AdapterTestDbContext(new Simulation()));
+
     [TestMethod]
     public void Insert_DateOnly_RoundTrips()
     {

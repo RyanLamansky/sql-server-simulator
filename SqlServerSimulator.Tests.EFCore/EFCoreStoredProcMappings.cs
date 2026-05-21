@@ -19,6 +19,9 @@ public class EFCoreStoredProcMappings
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new PetContext(new Simulation()));
+
     private sealed class Pet
     {
         public int Id { get; set; }

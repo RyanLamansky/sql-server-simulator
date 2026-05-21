@@ -16,6 +16,9 @@ public sealed class EFCoreForeignKey
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new LibraryContext(new Simulation()));
+
     private sealed class Author
     {
         public int Id { get; set; }

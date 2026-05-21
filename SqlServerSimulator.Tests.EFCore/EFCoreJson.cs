@@ -15,6 +15,9 @@ public class EFCoreJson
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new JsonContext(new Simulation()));
+
     private static JsonContext NewContext()
     {
         var simulation = new Simulation();

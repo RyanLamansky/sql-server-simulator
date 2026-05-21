@@ -18,6 +18,9 @@ public class EFCoreValueConverters
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new UserContext(new Simulation()));
+
     private enum Status { Active, Inactive, Archived }
 
     private sealed class User

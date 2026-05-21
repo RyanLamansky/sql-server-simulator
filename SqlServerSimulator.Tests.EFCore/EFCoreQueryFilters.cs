@@ -17,6 +17,9 @@ public class EFCoreQueryFilters
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new CustomerContext(new Simulation()));
+
     private sealed class Customer
     {
         public int Id { get; set; }

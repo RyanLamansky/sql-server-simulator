@@ -20,6 +20,9 @@ public class EFCoreConcurrencyTokens
 {
     public TestContext TestContext { get; set; } = null!;
 
+    [ClassInitialize]
+    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new InventoryContext(new Simulation()));
+
     private sealed class Item
     {
         public int Id { get; set; }
