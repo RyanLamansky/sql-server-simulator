@@ -75,52 +75,13 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// </summary>
     internal static Collation Default => defaultLazy.Value;
 
-    /// <summary>
-    /// Convenience accessor for the v100 Windows-style CI_AS variant.
-    /// Retained for the internal test surface that exercises the dormant
-    /// Windows-CI body directly; new call sites should use
-    /// <see cref="TryGet"/> with the literal name.
-    /// </summary>
-    internal static Collation Latin1General100CiAs => latin1General100CiAsLazy.Value;
-
-    /// <summary>
-    /// Convenience accessor for the pre-v100 Windows-style CI_AS variant.
-    /// Same retention rationale as <see cref="Latin1General100CiAs"/>.
-    /// </summary>
-    internal static Collation Latin1GeneralCiAs => latin1GeneralCiAsLazy.Value;
-
-    /// <summary>
-    /// Convenience accessor for the Windows-style CS_AS variant. Same
-    /// retention rationale as <see cref="Latin1General100CiAs"/>.
-    /// </summary>
-    internal static Collation Latin1GeneralCsAs => latin1GeneralCsAsLazy.Value;
-
-    /// <summary>
-    /// Convenience accessor for the pre-2005 binary collation (asymmetric
-    /// position-0-codeunit / position-1+-codepoint compare on nvarchar).
-    /// Same retention rationale as <see cref="Latin1General100CiAs"/>.
-    /// </summary>
-    internal static Collation Latin1GeneralBin => latin1GeneralBinLazy.Value;
-
-    // <see cref="Lazy{T}"/> wrappers defer the <see cref="TryGet"/> call
+    // <see cref="Lazy{T}"/> wrapper defers the <see cref="TryGet"/> call
     // until first access — the alternative (eager field initialization)
     // races the parser-state fields across partial-class file boundaries
     // and the textual-order guarantee for static-field initializers
     // doesn't cross those.
     private static readonly Lazy<Collation> defaultLazy =
         new(() => TryGet("SQL_Latin1_General_CP1_CI_AS")!);
-
-    private static readonly Lazy<Collation> latin1General100CiAsLazy =
-        new(() => TryGet("Latin1_General_100_CI_AS")!);
-
-    private static readonly Lazy<Collation> latin1GeneralCiAsLazy =
-        new(() => TryGet("Latin1_General_CI_AS")!);
-
-    private static readonly Lazy<Collation> latin1GeneralCsAsLazy =
-        new(() => TryGet("Latin1_General_CS_AS")!);
-
-    private static readonly Lazy<Collation> latin1GeneralBinLazy =
-        new(() => TryGet("Latin1_General_BIN")!);
 
     /// <summary>
     /// SQL Server's collation-coercibility resolution for two operands.
