@@ -69,14 +69,8 @@ internal sealed class ObjectId : Expression
             // 'IF' (inline table-valued function), 'V' (view), 'P' (stored
             // procedure). Other documented codes (TF / TR / ...) return
             // NULL pending those features.
-            if (!Collation.Default.Equals(typeFilter, "U")
-                && !Collation.Default.Equals(typeFilter, "FN")
-                && !Collation.Default.Equals(typeFilter, "IF")
-                && !Collation.Default.Equals(typeFilter, "V")
-                && !Collation.Default.Equals(typeFilter, "P"))
-            {
+            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P"))
                 return SqlValue.Null(SqlType.Int32);
-            }
         }
 
         var nameStr = nameValue.CoerceTo(SqlType.NVarchar).AsString;
@@ -87,19 +81,16 @@ internal sealed class ObjectId : Expression
         // specific filter the function must match that kind (scalar vs.
         // inline TVF vs. multi-statement TVF); without a filter, any kind
         // matches.
-        if (typeFilter is null
-            || Collation.Default.Equals(typeFilter, "FN")
-            || Collation.Default.Equals(typeFilter, "IF")
-            || Collation.Default.Equals(typeFilter, "TF"))
+        if (typeFilter is null || BuiltInToken.EqualsAny(typeFilter, "FN", "IF", "TF"))
         {
             if (runtime.Batch.TryResolveFunction(parsed, out var function))
             {
                 var kindMatches = typeFilter switch
                 {
                     null => true,
-                    _ when Collation.Default.Equals(typeFilter, "FN") => function is ScalarFunction,
-                    _ when Collation.Default.Equals(typeFilter, "IF") => function is InlineTableValuedFunction,
-                    _ when Collation.Default.Equals(typeFilter, "TF") => function is MultiStatementTableValuedFunction,
+                    _ when BuiltInToken.Equals(typeFilter, "FN") => function is ScalarFunction,
+                    _ when BuiltInToken.Equals(typeFilter, "IF") => function is InlineTableValuedFunction,
+                    _ when BuiltInToken.Equals(typeFilter, "TF") => function is MultiStatementTableValuedFunction,
                     _ => false,
                 };
                 if (kindMatches)
@@ -111,7 +102,7 @@ internal sealed class ObjectId : Expression
 
         // 'V' / no filter: try view resolution before falling through to
         // tables. With a specific 'V' filter, a table miss returns NULL.
-        if (typeFilter is null || Collation.Default.Equals(typeFilter, "V"))
+        if (typeFilter is null || BuiltInToken.Equals(typeFilter, "V"))
         {
             if (runtime.Batch.TryResolveView(parsed, out var view))
                 return SqlValue.FromInt32(view.ObjectId);
@@ -122,7 +113,7 @@ internal sealed class ObjectId : Expression
         // 'P' / no filter: try procedure resolution. Procs share the
         // object-name namespace with tables / views / functions, so the
         // no-filter form falls through here too.
-        if (typeFilter is null || Collation.Default.Equals(typeFilter, "P"))
+        if (typeFilter is null || BuiltInToken.Equals(typeFilter, "P"))
         {
             if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
                 return SqlValue.FromInt32(procedure.ObjectId);

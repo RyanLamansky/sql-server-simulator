@@ -113,8 +113,8 @@ partial class Simulation
             context.MoveNextRequired();
             if (TryDetectStarReference(context, out var starQualifier))
             {
-                var insertedRef = Collation.Default.Equals(starQualifier, "INSERTED");
-                var deletedRef = Collation.Default.Equals(starQualifier, "DELETED");
+                var insertedRef = BuiltInToken.Equals(starQualifier, "INSERTED");
+                var deletedRef = BuiltInToken.Equals(starQualifier, "DELETED");
                 if ((insertedRef && !allowInserted) || (deletedRef && !allowDeleted) || (!insertedRef && !deletedRef))
                     throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");
                 var columnNameList = new string[table.Columns.Length];
@@ -147,8 +147,8 @@ partial class Simulation
             if (reference.Count == 1)
                 throw SimulatedSqlException.InvalidColumnName(reference);
 
-            var insertedRef = Collation.Default.Equals(reference.ImmediateQualifier, "INSERTED");
-            var deletedRef = Collation.Default.Equals(reference.ImmediateQualifier, "DELETED");
+            var insertedRef = BuiltInToken.Equals(reference.ImmediateQualifier, "INSERTED");
+            var deletedRef = BuiltInToken.Equals(reference.ImmediateQualifier, "DELETED");
 
             if (insertedRef && !allowInserted)
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
@@ -357,8 +357,8 @@ partial class Simulation
         {
             SqlValue Resolve(MultiPartName reference)
             {
-                var source = (Collation.Default.Equals(reference.ImmediateQualifier, "INSERTED") ? insertedValues
-                    : Collation.Default.Equals(reference.ImmediateQualifier, "DELETED") ? deletedValues
+                var source = (BuiltInToken.Equals(reference.ImmediateQualifier, "INSERTED") ? insertedValues
+                    : BuiltInToken.Equals(reference.ImmediateQualifier, "DELETED") ? deletedValues
                     : null)
                     ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
                 for (var i = 0; i < table.Columns.Length; i++)
@@ -401,7 +401,7 @@ partial class Simulation
 
         SqlType ResolveOutputType(MultiPartName name)
         {
-            if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED"))
+            if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
             {
                 for (var i = 0; i < destinationTable.Columns.Length; i++)
                 {
@@ -425,7 +425,7 @@ partial class Simulation
             context.MoveNextRequired();
             if (TryDetectStarReference(context, out var starQualifier))
             {
-                if (Collation.Default.Equals(starQualifier, "INSERTED"))
+                if (BuiltInToken.Equals(starQualifier, "INSERTED"))
                 {
                     var cols = new string[destinationTable.Columns.Length];
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
@@ -499,7 +499,7 @@ partial class Simulation
         {
             SqlValue Resolve(MultiPartName name)
             {
-                if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED"))
+                if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {

@@ -152,12 +152,12 @@ partial class Selection
             f.ClassFilter = 0;
             return f;
         }
-        if (!Collation.Default.Equals(l0Type, "SCHEMA"))
+        if (!BuiltInToken.Equals(l0Type, "SCHEMA"))
             throw new NotSupportedException($"fn_listextendedproperty level0type '{l0Type}' isn't modeled (only SCHEMA / NULL).");
         if (l0Name is null)
             return null;
         if (!batch.CurrentDatabase.Schemas.TryGetValue(l0Name, out var schema)
-            && !Collation.Default.Equals(l0Name, "default"))
+            && !BuiltInToken.Equals(l0Name, "default"))
         {
             return null;
         }
@@ -176,7 +176,7 @@ partial class Selection
         // 'default' wildcard fans out across every object of that kind in
         // the parent schema.
         SchemaObject? l1Obj = null;
-        if (schema is not null && !Collation.Default.Equals(l1Name, "default"))
+        if (schema is not null && !BuiltInToken.Equals(l1Name, "default"))
         {
             Span<char> l1Kind = stackalloc char[l1Type.Length];
             _ = l1Type.ToUpperInvariant(l1Kind);
@@ -203,14 +203,14 @@ partial class Selection
         }
         if (l2Name is null)
             return null;
-        if (!Collation.Default.Equals(l2Type, "COLUMN"))
+        if (!BuiltInToken.Equals(l2Type, "COLUMN"))
             throw new NotSupportedException($"fn_listextendedproperty level2type '{l2Type}' isn't modeled (only COLUMN).");
 
         f.ClassFilter = 1;
         if (l1Obj is HeapTable table)
         {
             f.MajorIdFilter = table.ObjectId;
-            if (!Collation.Default.Equals(l2Name, "default"))
+            if (!BuiltInToken.Equals(l2Name, "default"))
             {
                 for (var i = 0; i < table.Columns.Length; i++)
                 {

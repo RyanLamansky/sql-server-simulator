@@ -65,29 +65,29 @@ partial class Simulation
                 throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
             switch (arg.Name)
             {
-                case var n when Collation.Default.Equals(n, "name"):
+                case var n when BuiltInToken.Equals(n, "name"):
                     name = ExpectStringArg(arg.Value);
                     break;
-                case var n when Collation.Default.Equals(n, "value"):
+                case var n when BuiltInToken.Equals(n, "value"):
                     value = arg.Value;
                     hasValueArg = true;
                     break;
-                case var n when Collation.Default.Equals(n, "level0type"):
+                case var n when BuiltInToken.Equals(n, "level0type"):
                     level0Type = ExpectStringArgOrNull(arg.Value);
                     break;
-                case var n when Collation.Default.Equals(n, "level0name"):
+                case var n when BuiltInToken.Equals(n, "level0name"):
                     level0Name = ExpectStringArgOrNull(arg.Value);
                     break;
-                case var n when Collation.Default.Equals(n, "level1type"):
+                case var n when BuiltInToken.Equals(n, "level1type"):
                     level1Type = ExpectStringArgOrNull(arg.Value);
                     break;
-                case var n when Collation.Default.Equals(n, "level1name"):
+                case var n when BuiltInToken.Equals(n, "level1name"):
                     level1Name = ExpectStringArgOrNull(arg.Value);
                     break;
-                case var n when Collation.Default.Equals(n, "level2type"):
+                case var n when BuiltInToken.Equals(n, "level2type"):
                     level2Type = ExpectStringArgOrNull(arg.Value);
                     break;
-                case var n when Collation.Default.Equals(n, "level2name"):
+                case var n when BuiltInToken.Equals(n, "level2name"):
                     level2Name = ExpectStringArgOrNull(arg.Value);
                     break;
                 default:
@@ -161,7 +161,7 @@ partial class Simulation
             // call with all 6 level args absent).
             return (new ExtendedPropertyKey(0, 0, 0, propertyName), "object specified");
         }
-        if (!Collation.Default.Equals(level0Type, "SCHEMA"))
+        if (!BuiltInToken.Equals(level0Type, "SCHEMA"))
             throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
         if (level0Name is null)
             throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
@@ -179,23 +179,23 @@ partial class Simulation
         // level1 kinds — anything else raises Msg 15600 (real SQL Server's
         // grammar accepts more but AW only uses these five).
         SchemaObject? obj = null;
-        if (Collation.Default.Equals(level1Type, "TABLE"))
+        if (BuiltInToken.Equals(level1Type, "TABLE"))
         {
             if (schema.HeapTables.TryGetValue(level1Name, out var t)) obj = t;
         }
-        else if (Collation.Default.Equals(level1Type, "VIEW"))
+        else if (BuiltInToken.Equals(level1Type, "VIEW"))
         {
             if (schema.Views.TryGetValue(level1Name, out var v)) obj = v;
         }
-        else if (Collation.Default.Equals(level1Type, "PROCEDURE"))
+        else if (BuiltInToken.Equals(level1Type, "PROCEDURE"))
         {
             if (schema.Procedures.TryGetValue(level1Name, out var p)) obj = p;
         }
-        else if (Collation.Default.Equals(level1Type, "FUNCTION"))
+        else if (BuiltInToken.Equals(level1Type, "FUNCTION"))
         {
             if (schema.Functions.TryGetValue(level1Name, out var f)) obj = f;
         }
-        else if (Collation.Default.Equals(level1Type, "TYPE"))
+        else if (BuiltInToken.Equals(level1Type, "TYPE"))
         {
             // TYPE-level extended properties target alias or table types.
             // The object_id is the table-type's, alias types don't carry one.
@@ -219,7 +219,7 @@ partial class Simulation
         if (obj is not HeapTable table)
             throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
 
-        if (Collation.Default.Equals(level2Type, "COLUMN"))
+        if (BuiltInToken.Equals(level2Type, "COLUMN"))
         {
             // 1-based column ordinal (real SQL Server's minor_id convention).
             for (var i = 0; i < table.Columns.Length; i++)
@@ -230,7 +230,7 @@ partial class Simulation
             throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
         }
 
-        if (Collation.Default.Equals(level2Type, "CONSTRAINT"))
+        if (BuiltInToken.Equals(level2Type, "CONSTRAINT"))
         {
             // Constraints (PK / UQ / FK / CHECK / DEFAULT) all carry their own
             // object_id and reuse class=1 (OBJECT_OR_COLUMN) like every other
@@ -258,7 +258,7 @@ partial class Simulation
             throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
         }
 
-        if (Collation.Default.Equals(level2Type, "INDEX"))
+        if (BuiltInToken.Equals(level2Type, "INDEX"))
         {
             // INDEX-level uses class=7. major_id=table.object_id, minor_id=
             // index_id (matches real SQL Server's sys.extended_properties).

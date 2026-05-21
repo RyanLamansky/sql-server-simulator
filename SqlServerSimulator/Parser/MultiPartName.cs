@@ -103,7 +103,7 @@ internal readonly struct MultiPartName
     /// <c>schema.table.col</c>, the table in <c>db.schema.table.col</c> —
     /// or <see langword="null"/> when the reference is unqualified
     /// (<see cref="Count"/> == 1). Use with
-    /// <c>Collation.Default.Equals(name.ImmediateQualifier, "INSERTED")</c>
+    /// <c>BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED")</c>
     /// shape: the equality check folds the null-or-unqualified case into a
     /// <c>false</c> result without a separate guard.
     /// </summary>

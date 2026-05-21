@@ -1204,12 +1204,12 @@ internal sealed class BatchContext
         // (no DDL can target them).
         if (this.TriggerFrame is { } triggerFrame && name.Count == 1)
         {
-            if (Collation.Default.Equals(name.Leaf, "inserted") && triggerFrame.Inserted is { } ins)
+            if (BuiltInToken.Equals(name.Leaf, "inserted") && triggerFrame.Inserted is { } ins)
             {
                 table = ins;
                 return true;
             }
-            if (Collation.Default.Equals(name.Leaf, "deleted") && triggerFrame.Deleted is { } del)
+            if (BuiltInToken.Equals(name.Leaf, "deleted") && triggerFrame.Deleted is { } del)
             {
                 table = del;
                 return true;

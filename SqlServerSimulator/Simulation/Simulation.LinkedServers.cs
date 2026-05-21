@@ -47,21 +47,21 @@ partial class Simulation
             positionalIndex++;
             switch (name)
             {
-                case var n when Collation.Default.Equals(n, "server"):
+                case var n when BuiltInToken.Equals(n, "server"):
                     server = arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.SystemName).AsString;
                     break;
-                case var n when Collation.Default.Equals(n, "srvproduct"):
+                case var n when BuiltInToken.Equals(n, "srvproduct"):
                     srvProduct = arg.Value.IsNull ? string.Empty : arg.Value.CoerceTo(SqlType.SystemName).AsString;
                     break;
-                case var n when Collation.Default.Equals(n, "provider"):
+                case var n when BuiltInToken.Equals(n, "provider"):
                     provider = arg.Value.IsNull ? "SQLNCLI" : arg.Value.CoerceTo(SqlType.SystemName).AsString;
                     break;
-                case var n when Collation.Default.Equals(n, "datasrc"):
+                case var n when BuiltInToken.Equals(n, "datasrc"):
                     dataSource = arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.SystemName).AsString;
                     break;
-                case var n when Collation.Default.Equals(n, "location"):
-                case var n2 when Collation.Default.Equals(n2, "provider_string"):
-                case var n3 when Collation.Default.Equals(n3, "catalog"):
+                case var n when BuiltInToken.Equals(n, "location"):
+                case var n2 when BuiltInToken.Equals(n2, "provider_string"):
+                case var n3 when BuiltInToken.Equals(n3, "catalog"):
                     break;
                 default:
                     throw SimulatedSqlException.InvalidLinkedServerParameter("sp_addlinkedserver");
@@ -106,10 +106,10 @@ partial class Simulation
             positionalIndex++;
             switch (name)
             {
-                case var n when Collation.Default.Equals(n, "server"):
+                case var n when BuiltInToken.Equals(n, "server"):
                     server = arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.SystemName).AsString;
                     break;
-                case var n when Collation.Default.Equals(n, "droplogins"):
+                case var n when BuiltInToken.Equals(n, "droplogins"):
                     break;
                 default:
                     throw SimulatedSqlException.InvalidLinkedServerParameter("sp_dropserver");

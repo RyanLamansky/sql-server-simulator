@@ -814,8 +814,7 @@ partial class Simulation
 
         SqlType ResolveOutputType(MultiPartName name)
         {
-            if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED")
-                || Collation.Default.Equals(name.ImmediateQualifier, "DELETED"))
+            if (BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED"))
             {
                 for (var i = 0; i < destinationTable.Columns.Length; i++)
                 {
@@ -862,8 +861,7 @@ partial class Simulation
             if (TryDetectStarReference(context, out var starQualifier))
             {
                 string[]? cols = null;
-                if (Collation.Default.Equals(starQualifier, "INSERTED")
-                    || Collation.Default.Equals(starQualifier, "DELETED"))
+                if (BuiltInToken.EqualsAny(starQualifier, "INSERTED", "DELETED"))
                 {
                     cols = new string[destinationTable.Columns.Length];
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
@@ -1670,7 +1668,7 @@ partial class Simulation
         {
             SqlValue Resolve(MultiPartName name)
             {
-                if (Collation.Default.Equals(name.ImmediateQualifier, "INSERTED"))
+                if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
@@ -1678,7 +1676,7 @@ partial class Simulation
                             return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : insertedValues[i];
                     }
                 }
-                else if (Collation.Default.Equals(name.ImmediateQualifier, "DELETED"))
+                else if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
