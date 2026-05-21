@@ -872,11 +872,10 @@ partial class Simulation
             // routine) inherit whatever database is active when they're
             // created, avoiding the EF #temp-vs-user-table join footgun
             // when BACPAC-loaded databases declare a non-default collation.
-            var resolvedCollation = columnCollation is not null && Collation.ByName.TryGetValue(columnCollation, out var named)
-                ? named
-                : Collation.ByName.TryGetValue(context.Batch.Connection.CurrentDatabase.CollationName, out var dbDefault)
-                    ? dbDefault
-                    : Collation.Default;
+            var resolvedCollation =
+                (columnCollation is not null ? Collation.TryGet(columnCollation) : null)
+                ?? Collation.TryGet(context.Batch.Connection.CurrentDatabase.CollationName)
+                ?? Collation.Default;
             resolvedType = resolvedType.WithCollation(resolvedCollation, Coercibility.Implicit);
         }
 

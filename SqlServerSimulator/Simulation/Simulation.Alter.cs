@@ -363,7 +363,7 @@ partial class Simulation
 
     /// <summary>
     /// Parses <c>ALTER DATABASE name COLLATE &lt;collation_name&gt;</c>.
-    /// Validates the name against <see cref="Collation.Recognized"/> and
+    /// Validates the name against <see cref="Collation.IsRecognized"/> and
     /// stores it on <see cref="Database.CollationName"/> — comparisons /
     /// sort / LIKE still route through <see cref="Collation.Default"/>; the
     /// stored name is metadata for catalog-view round-trip

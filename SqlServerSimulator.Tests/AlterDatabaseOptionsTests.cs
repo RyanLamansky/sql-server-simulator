@@ -98,12 +98,20 @@ public class AlterDatabaseOptionsTests
         => AreEqual(-1, new Simulation().ExecuteNonQuery(
             "ALTER DATABASE claude COLLATE SQL_Latin1_General_CP1_CI_AS"));
 
+    /// <summary>
+    /// Names outside the catalog raise <c>NotSupportedException</c> with the
+    /// "recognized list" wording. Real SQL Server raises Msg 448; the
+    /// simulator's "honest about what's modeled" stance keeps the
+    /// distinction visible. The chosen name <c>MadeUp_Locale_CI_AS</c> has
+    /// a parseable grammar but isn't in the per-prefix tail-set catalog
+    /// (probed against SQL Server 2025).
+    /// </summary>
     [TestMethod]
     public void Collate_NonDefault_RaisesNotSupported()
     {
         var ex = Throws<NotSupportedException>(() =>
-            new Simulation().ExecuteNonQuery("ALTER DATABASE claude COLLATE Japanese_CI_AS"));
-        Contains("Japanese_CI_AS", ex.Message);
+            new Simulation().ExecuteNonQuery("ALTER DATABASE claude COLLATE MadeUp_Locale_CI_AS"));
+        Contains("MadeUp_Locale_CI_AS", ex.Message);
         Contains("recognized list", ex.Message);
     }
 

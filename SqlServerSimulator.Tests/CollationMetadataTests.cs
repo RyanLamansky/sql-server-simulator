@@ -114,18 +114,33 @@ public sealed class CollationMetadataTests
             "SELECT COLLATION_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE COLUMN_NAME = 'b'"));
     }
 
+    /// <summary>
+    /// Names structurally valid but absent from the catalog raise
+    /// <c>NotSupportedException</c>. <c>Mapudungan_BIN</c> has a known
+    /// prefix and a recognized suffix grammar but the specific pair
+    /// doesn't ship in real SQL Server (probed 2026-05-21: Mapudungan is
+    /// v100-only).
+    /// </summary>
     [TestMethod]
     public void Column_Collate_UnrecognizedName_RaisesNotSupported()
     {
         var ex = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "CREATE TABLE t (a nvarchar(50) COLLATE Japanese_CI_AS)"));
-        Contains("Japanese_CI_AS", ex.Message);
+            "CREATE TABLE t (a nvarchar(50) COLLATE Mapudungan_BIN)"));
+        Contains("Mapudungan_BIN", ex.Message);
         Contains("recognized list", ex.Message);
     }
 
+    /// <summary>
+    /// The simulator's catalog matches real SQL Server's
+    /// <c>sys.fn_helpcollations()</c> count — 77 SQL_* names + 5463
+    /// non-SQL_* names = 5540 total, probed against SQL Server 2025 on
+    /// 2026-05-21. The parser validates names against the per-prefix
+    /// tail-set catalog so phantom combinations (grammar-valid but never
+    /// shipped) are rejected.
+    /// </summary>
     [TestMethod]
     public void FnHelpCollations_ListsRecognized()
-        => AreEqual(26, new Simulation().ExecuteScalar(
+        => AreEqual(5540, new Simulation().ExecuteScalar(
             "SELECT COUNT(*) FROM sys.fn_helpcollations()"));
 
     [TestMethod]
@@ -150,6 +165,39 @@ public sealed class CollationMetadataTests
         AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar(
             "SELECT name FROM sys.fn_helpcollations WHERE name = 'Latin1_General_100_CI_AS'"));
     }
+
+    /// <summary>
+    /// Parser-driven catalog accepts the full breadth of real SQL Server
+    /// 2025 names — locale × version × flag combinations beyond the 26
+    /// hand-tuned entries the prior implementation maintained. Probed
+    /// names from each pattern bucket: a v100-only locale (Pattern_0), a
+    /// versioned-and-unversioned locale (Pattern_1), a SQL_* CP1250
+    /// variant, and a v140 + VSS combo (Pattern_6).
+    /// </summary>
+    [TestMethod]
+    [DataRow("Albanian_100_CI_AS", "Albanian-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive")]
+    [DataRow("Greek_BIN2", "Greek, binary code point comparison sort")]
+    [DataRow("SQL_Polish_CP1250_CS_AS", "Polish, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive for Unicode Data, SQL Server Sort Order 87 on Code Page 1250 for non-Unicode Data")]
+    [DataRow("Japanese_XJIS_140_CI_AS_KS_WS_VSS", "Japanese-XJIS-140, case-insensitive, accent-sensitive, kanatype-sensitive, width-sensitive, supplementary characters, variation selector sensitive")]
+    [DataRow("German_PhoneBook_100_CI_AS_KS_WS_SC_UTF8", "German-PhoneBook-100, case-insensitive, accent-sensitive, kanatype-sensitive, width-sensitive, supplementary characters, UTF8")]
+    public void FnHelpCollations_Description_MatchesProbedSqlServer(string name, string description)
+        => AreEqual(description, new Simulation().ExecuteScalar(
+            $"SELECT description FROM sys.fn_helpcollations WHERE name = '{name}'"));
+
+    /// <summary>
+    /// Grammar-valid but never-shipped name combinations reject — the
+    /// parser validates against the per-prefix tail-set catalog, not just
+    /// the suffix grammar. <c>Pashto_CI_AS</c> (unversioned form of a
+    /// v100-only locale) and <c>Latin1_General_140_BIN</c> (v140 doesn't
+    /// have BIN/BIN2) are both phantom; both reject.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Pashto_CI_AS")]
+    [DataRow("Latin1_General_140_BIN")]
+    [DataRow("Albanian_BIN2_UTF8")]
+    public void PhantomCollationName_RejectedByParser(string name)
+        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
+            $"CREATE TABLE t (a nvarchar(50) COLLATE {name})"));
 
     [TestMethod]
     public void SysDatabases_RowShape_CarriesCompatibilityAndIsolation()

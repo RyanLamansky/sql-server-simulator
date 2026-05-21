@@ -369,16 +369,19 @@ public sealed class CollationDeclaredColumnTests
 
     /// <summary>
     /// Unknown collation name raises a clear NotSupportedException (it's
-    /// not on the simulator's recognized whitelist). Probes confirm this
+    /// not on the simulator's recognized catalog). Probes confirm this
     /// is the simulator's "honest about what's modeled" stance, distinct
-    /// from real SQL Server's Msg 448.
+    /// from real SQL Server's Msg 448. <c>Pashto_CI_AS</c> doesn't ship
+    /// (only the v100 form does): the prefix is known, the suffix
+    /// grammar is valid, but the specific combination is absent from
+    /// the per-prefix tail-set catalog.
     /// </summary>
     [TestMethod]
     public void UnknownCollationName_RaisesNotSupported()
     {
         var ex = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create table t (s varchar(20) collate Hungarian_CI_AS)"));
-        Contains("Hungarian_CI_AS", ex.Message);
+            "create table t (s varchar(20) collate Pashto_CI_AS)"));
+        Contains("Pashto_CI_AS", ex.Message);
     }
 
     /// <summary>

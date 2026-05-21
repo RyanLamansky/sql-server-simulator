@@ -56,47 +56,30 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 
 `ALTER COLUMN` without an explicit `COLLATE` clause preserves the existing column's collation (probe-aligned). With an explicit `COLLATE`, the new collation pins at `Implicit` rank.
 
-## Recognized catalog
+## Parser-driven catalog
 
-26 entries today. Resolution at parse / load time consults the case-insensitive `Collation.ByName` map; names outside the set raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads (graceful degradation).
+`Collation.TryGet(name)` decodes the grammatical shape of a name and constructs the matching instance on demand; results are interned so the same name always resolves to the same reference. The complete `sys.fn_helpcollations()` catalog ships — 5540 names total (77 SQL_* + 5463 non-SQL_*), probed against SQL Server 2025 on 2026-05-21 and validated against the per-prefix tail-set tables in `Collation.Catalog.cs`. Names outside the catalog (whether outright misspellings or grammar-valid but never-shipped combinations like `Pashto_CI_AS` or `Latin1_General_140_BIN`) raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads.
 
-### Latin1 / SQL_Latin1
+### Architecture
 
-| Name | Comparer | Notes |
-|---|---|---|
-| `SQL_Latin1_General_CP1_CI_AS` | Invariant culture CI + IgnoreKanaType + IgnoreWidth | Default. Sort doesn't ignore symbols (apostrophe / hyphen significant). |
-| `Latin1_General_100_CI_AS` | Invariant culture CI + IgnoreKanaType + IgnoreWidth | Sort layers `IgnoreSymbols` on top — primary-weight-zero punctuation collapses. |
-| `Latin1_General_CI_AS` | Same body as the `_100_` variant | Pre-v100 Unicode-table difference not modeled (no non-Latin script change on the inputs the regression bar exercises). |
-| `Latin1_General_CS_AS` | Invariant culture + IgnoreKanaType + IgnoreWidth | No IgnoreCase. |
-| `Latin1_General_BIN` | nvarchar / nchar: `StringComparer.Ordinal`. varchar / char: CP1252 byte compare (`Cp1252BinaryCollation`) substituted in via `Collation.ForVarcharStorage()`. | Pure codepoint on Unicode types; pure CP1252 byte on non-Unicode types (matches real SQL Server's CP1252 byte sort). |
-| `Latin1_General_BIN2` | Same per-storage dispatch as BIN above. | Identical body to BIN at the simulator's value layer — the BIN-vs-BIN2 code-page-prefix asymmetry only matters when the underlying codepage isn't CP1252, which the simulator collapses. |
-| `Latin1_General_CI_AS_KS_WS` | Invariant culture CI (KS / WS preserved) | Appears on sysname-backed columns in real DBs; included for BACPAC quiet-loading. |
-| `SQL_Latin1_General_CP437_CS_AS` | Invariant culture case-sensitive | Legacy CP437 binding; one column per AdventureWorks-class DB. |
-| `Latin1_General_100_CI_AS_SC_UTF8` | Invariant culture CI (same body as `_100_CI_AS`); UTF-8 storage on varchar / char | Varchar / char storage is UTF-8 bytes; nvarchar / nchar stays UTF-16. `_SC` LEN/SUBSTRING semantics on supplementary characters: separate gap. |
-| `Latin1_General_100_CS_AS_SC_UTF8` | Invariant culture CS; UTF-8 storage on varchar / char | Same storage dispatch as the CI sibling. |
-| `Latin1_General_100_BIN2_UTF8` | nvarchar / nchar: `StringComparer.Ordinal` (`BinaryCollation` body). varchar / char: `Utf8CodepointBinaryCollation` — codepoint-order compare (= UTF-8 byte order). | UTF-8 storage on varchar / char. The codepoint-order body diverges from the CP1252-byte body in the 0x80-0x9F window (€ U+20AC sorts AFTER NBSP U+00A0 under codepoint order; BEFORE under CP1252 byte order). |
+Three files carry the work:
 
-### CJK locales
+- **`Collation.Catalog.cs`** — data. 124 prefix entries (`KnownPrefixes`: prefix → BCP-47 culture + human-readable description prefix); 77 SQL_* per-name entries (`SqlServerSortOrders`: full name → sort order number + human prefix); 9 distinct tail-set patterns (`Pattern0Tails`..`Pattern8Tails`) covering every (prefix, version, flag) combination real SQL Server ships across the non-SQL_* family; the 89 non-SQL_* prefixes share these 9 patterns via `PrefixToPattern`.
+- **`Collation.Parser.cs`** — `TryParse(name)` tokenizes the suffix from the right, extracts version / code-page / flag bitmask, then validates: SQL_* names against `SqlServerSortOrders`, non-SQL_* names against the prefix's tail-set pattern. Description column is generated from the flag bitmask + prefix metadata + (for SQL_*) the baked sort order.
+- **`Collation.cs`** — abstract base + four concrete bodies (`CultureCollation` for the generic comparer, `BinaryCollationBody` for `_BIN`/`_BIN2` with the pre-Bin2 position-0-quirk dispatch, `Cp1252BinaryCollation` and `Utf8CodepointBinaryCollation` for the varchar-storage substitutes).
 
-| Name | Comparer | Notes |
-|---|---|---|
-| `Japanese_XJIS_140_CI_AS` | `ja-JP` `CompareInfo` + CI + KanaType-/Width-insensitive | Equality / kana-folding align; sort interleaves hiragana / full-width katakana / half-width katakana differently from SQL Server. See [Locale-comparer sort-parity gap](#locale-comparer-sort-parity-gap). |
-| `Chinese_PRC_CI_AS` | `zh-CN` `CompareInfo` + CI | Pinyin ordering mostly aligns; Latin-vs-CJK block position is reversed (.NET puts CJK first, SQL Server puts Latin first). |
-| `Korean_100_CI_AS` | `ko-KR` `CompareInfo` + CI | Hangul ordering routed through .NET culture; per-name sort-parity caveat applies. |
-| `Korean_Wansung_CI_AS` | `ko-KR` `CompareInfo` + CI | Legacy Wansung code-page binding; at the simulator's UTF-16 value layer behaves identically to `Korean_100_CI_AS`. |
+### Override slot
 
-### European locales
+The override registry (`overrides` ConcurrentDictionary in `Collation.Parser.cs`) takes precedence over the parser. Adding a bespoke implementation for a specific name is a 3-step source change: subclass one of the concrete bodies (or `Collation` directly) with a hand-tuned `Compare` / `Equals` / `GetHashCode`, instantiate it in `Collation`'s static initializer, and call `RegisterOverride`. The override fires before the parser; everything else continues to fall through to the grammatical path. No overrides ship today — every modeled name routes through `CultureCollation` or `BinaryCollationBody` with the appropriate flag-driven options.
 
-| Name | Comparer | Notes |
-|---|---|---|
-| `Turkish_CI_AS` | `tr-TR` `CompareInfo` + CI | i / İ / ı / I folding correct end-to-end; tiebreaker within case-equivalence classes (`çay` vs `Çay`) differs. |
-| `Greek_CI_AS` / `Greek_100_CI_AS` | `el-GR` `CompareInfo` + CI | Tonos / dialytika fold under accent-sensitive rules; final-sigma / medial-sigma case-insensitive peers. v100 and pre-v100 share the same body. |
-| `Cyrillic_General_CI_AS` / `Cyrillic_General_100_CI_AS` | `ru-RU` `CompareInfo` + CI | Pan-Cyrillic (Russian / Ukrainian / Bulgarian / Serbian). v100 and pre-v100 share the same body. |
-| `German_PhoneBook_CI_AS` / `German_PhoneBook_100_CI_AS` | `de-DE` `CompareInfo` + CI | Routed through .NET's default `de-DE` ordering (umlaut-as-letter), not phonebook (ä → ae, ß → ss). Sort divergence on umlauted letters; equality / case folding still align. |
-| `French_CI_AS` / `French_100_CI_AS` | `fr-FR` `CompareInfo` + CI | Real SQL Server's French sorts accents from the END of the string; .NET `fr-FR` default doesn't, so accented-string adjacencies sort differently. |
-| `Modern_Spanish_CI_AS` / `Modern_Spanish_100_CI_AS` | `es-ES` `CompareInfo` + CI | .NET's default Spanish sort already matches the modern convention (no `ch` / `ll` as separate letters), so alignment is closer here than for the other European locales. |
+### Behavioral notes by family
 
-Generic culture-based collations use the `CultureCollation` class — name + culture + case-sensitive flag drive comparer construction.
+- **SQL_\* family**: routed through invariant `CompareInfo` (unless the human-prefix description maps to a locale-specific culture, e.g., `SQL_Croatian_CP1250_CI_AS` → `hr-HR`); same IgnoreSymbols-in-sort treatment as the Windows family. Description carries the per-name SQL Server Sort Order number + Code Page (extracted from the `CP*` token).
+- **Windows-style Latin1_General**: invariant `CompareInfo`; IgnoreSymbols layered on sort options. `_BIN` engages the pre-2005 position-0-codeunit / position-1+-codepoint quirk; `_BIN2` is pure UTF-16 code-unit ordinal.
+- **`_UTF8` collations**: storage encoding flips from CP1252 to UTF-8 for varchar/char columns. `_BIN2_UTF8` substitutes `Utf8CodepointBinaryCollation` (codepoint-order = UTF-8 byte order) on varchar storage.
+- **`_SC_` collations** (and v140+ implicitly): set `IsSupplementaryCharacterAware` on the constructed instance, driving codepoint-aware LEN/SUBSTRING/etc. dispatch (see [`_SC_` function-semantics dispatch](#_sc_-function-semantics-dispatch)).
+- **`_KS_` / `_WS_` flags**: flip `CompareOptions.IgnoreKanaType` / `IgnoreWidth` off (default = both on).
+- **Locale prefixes** (Japanese, Chinese, Turkish, Korean, etc.): map to the closest .NET culture via `KnownPrefixes`; fall back to invariant when no clean .NET equivalent exists (Tamazight, Traditional_Spanish, Indic_General). Sort-parity caveat in [Locale-comparer sort-parity gap](#locale-comparer-sort-parity-gap) applies — equality / CI/CS / KS / WS folding align, secondary sort tiebreakers within equivalence classes may diverge.
 
 ## Locale-comparer sort-parity gap
 
@@ -181,9 +164,8 @@ The pre-2005 `_BIN` (not `_BIN2`) variant has a different, real quirk: at positi
 - **Sysname's collation is always `Collation.Default`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
 - **`CAST(expr AS varchar(N)) COLLATE …UTF8` doesn't re-truncate under the postfix collation.** The CAST runs against the local default (CP1252, single-byte), so a 3-char input into `varchar(2)` truncates to 2 chars; the postfix COLLATE then rewraps as `varchar(2)` UTF-8 with that 2-char .NET string, which under UTF-8 may be more than 2 bytes. Probe-confirmed against SQL Server 2025: real SQL Server effectively applies the postfix collation's byte budget at CAST time — `CAST(N'AéB' AS varchar(2)) COLLATE Latin1_General_100_CI_AS_SC_UTF8` returns `'A'` (1 byte), the simulator returns `'Aé'` (3 bytes). The fixed-length sibling `CAST(... AS char(N))` doesn't have this gap because `CollateExpression.Run` re-normalizes char(N) values through `FromString` when the storage encoding changes (the char(N) destination buffer is fixed at N bytes, so the regression would manifest as an encoder overflow; varchar sizes dynamically and only the truncation cutoff disagrees). Workaround: pin the UTF-8 collation directly on the CAST target via the column's declared collation, rather than as a postfix on a CAST output.
 - **Pre-v100 collation sort divergence on supplementary chars at position 1+.** Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` (the default) and `Latin1_General_CI_AS` (pre-v100) sort `Z+emoji` BEFORE `Z+U+E000` — code-unit order (high surrogate D83D < E000). The v100 family (`Latin1_General_100_CI_AS` and its SC sibling) sort the other way (codepoint U+1F600 > U+E000 → `Z+E000` first). The simulator routes both pre-v100 and v100 through `CompareInfo`, which always does codepoint compare — so both ranges of collations behave like v100 in the simulator. Narrow gap (only supplementary chars at non-position-0); fixing requires per-collation Compare bodies that drop to code-unit ordinal at supplementary positions.
-- **Most `_SC_` and locale variants aren't in the recognized catalog.** `sys.fn_helpcollations()` lists 3008 `_SC_` collations on SQL Server 2025; the simulator recognizes 3 of them (`Latin1_General_100_CI_AS_SC_UTF8`, `_CS_AS_SC_UTF8`, `_BIN2_UTF8`). The non-`_UTF8` `_SC_` variants (e.g. plain `Latin1_General_100_CI_AS_SC`) and the locale `_SC_` variants (e.g. `Japanese_XJIS_140_CI_AS_SC`) aren't recognized. Adding entries is mechanical (one line per name in `Recognized` + `ByName`), and behavior body falls back to the closest non-`_SC_` sibling. Currently surfaces as `NotSupportedException` in direct SQL or a `BacpacImportResult.Warnings` entry on import — graceful degradation per the existing pattern.
 
 ## Cross-references
 
-- Database-level `ALTER DATABASE COLLATE` and the `Collation.Recognized` whitelist → [`database-options.md`](database-options.md).
-- BACPAC import collation handling (loader warns on names outside `Recognized` and continues) → [`bacpac-loader.md`](bacpac-loader.md).
+- Database-level `ALTER DATABASE COLLATE` and the parser-driven recognition gate → [`database-options.md`](database-options.md).
+- BACPAC import collation handling (loader warns on names the parser rejects and continues) → [`bacpac-loader.md`](bacpac-loader.md).

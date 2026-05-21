@@ -413,20 +413,17 @@ public sealed class AggregateTests
             "Operand data type bit is invalid for max operator.");
 
     /// <summary>
-    /// Under <c>SQL_Latin1_General_CP1_CI_AS</c> (the simulator's default),
-    /// apostrophe is meaningful in sort — its CP1252 code point 0x27 sorts
-    /// before all letters, so MIN of ('Aaronsburg', "'Aiea") is "'Aiea".
-    /// The Windows-style primary-weight-zero treatment that would push
-    /// "'Aiea" alongside "A…" entries is exclusive to
-    /// <c>Latin1_General_100_CI_AS</c> / <c>Latin1_General_CI_AS</c> — see
-    /// <c>SqlServerSimulator.Tests.Internal/CollationTests.cs</c> for the
-    /// direct exercise of that algorithm. Data routing still goes through
-    /// the database default regardless of declared column collation (see
-    /// <c>docs/claude/database-options.md</c>).
+    /// Probe-confirmed against SQL Server 2025: every recognized collation
+    /// (SQL_*, Windows-style, locale) applies <c>IgnoreSymbols</c> in sort
+    /// — apostrophe / hyphen drop out of the primary sort key, so MIN of
+    /// ('Aaronsburg', "'Aiea") returns 'Aaronsburg' because apostrophe is
+    /// stripped from "'Aiea" leaving "Aiea" > "Aaronsburg". Equality keeps
+    /// symbols significant; <see cref="Equality_String_DistinguishesApostrophe"/>
+    /// pins that asymmetry.
     /// </summary>
     [TestMethod]
-    public void Min_String_SqlCollation_ApostropheSortsBeforeLetters()
-        => AreEqual("'Aiea", new Simulation().ExecuteScalar(
+    public void Min_String_DefaultCollation_ApostropheIsIgnoredInSort()
+        => AreEqual("Aaronsburg", new Simulation().ExecuteScalar(
             "create table t (s nvarchar(40) not null); insert t values (N'Aaronsburg'), (N'''Aiea'); select min(s) from t"));
 
     /// <summary>

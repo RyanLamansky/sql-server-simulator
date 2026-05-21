@@ -2348,7 +2348,7 @@ internal static class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.fn_helpcollations()</c>. Emits one row per entry in
-    /// <see cref="Collation.Recognized"/> — the simulator's whitelist of
+    /// <see cref="Collation.IsRecognized"/> — the simulator's whitelist of
     /// metadata-accepted collation names. Real SQL Server returns ~5540
     /// rows here; the simulator's shorter list is honest about which
     /// collation names round-trip through <see cref="Database.CollationName"/>
@@ -2357,8 +2357,8 @@ internal static class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateFnHelpCollations(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        foreach (var entry in Collation.Recognized.OrderBy(e => e.Key, StringComparer.Ordinal))
-            yield return [SqlValue.FromSystemName(entry.Key), SqlValue.FromNVarchar(entry.Value)];
+        foreach (var (entryName, entryDesc) in Collation.EnumerateRecognized().OrderBy(e => e.Name, StringComparer.Ordinal))
+            yield return [SqlValue.FromSystemName(entryName), SqlValue.FromNVarchar(entryDesc)];
     }
 
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch, Database database)

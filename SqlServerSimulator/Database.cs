@@ -93,7 +93,7 @@ internal sealed class Database
     /// round-trip and catalog-view fidelity (<c>sys.databases.collation_name</c>,
     /// <c>DATABASEPROPERTYEX(name, 'Collation')</c>,
     /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c>). Whitelist of accepted
-    /// names lives in <see cref="Collation.Recognized"/>; <c>ALTER DATABASE
+    /// names lives in <see cref="Collation.IsRecognized"/>; <c>ALTER DATABASE
     /// name COLLATE name</c> raises <see cref="NotSupportedException"/> on an
     /// unrecognized name. Defaults to the simulator's modeled collation
     /// (<see cref="Collation.Default"/>.Name).

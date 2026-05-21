@@ -759,9 +759,10 @@ partial class Simulation
         string? newCollationStored;
         if (newType.Category == SqlTypeCategory.String)
         {
-            var newCollation = newCollationName is not null && Collation.ByName.TryGetValue(newCollationName, out var named)
-                ? named
-                : existingCol.Type.Collation ?? Collation.Default;
+            var newCollation =
+                (newCollationName is not null ? Collation.TryGet(newCollationName) : null)
+                ?? existingCol.Type.Collation
+                ?? Collation.Default;
             newType = newType.WithCollation(newCollation, Coercibility.Implicit);
             newCollationStored = newCollationName ?? existingCol.Collation;
         }

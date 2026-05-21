@@ -90,8 +90,8 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        return !Collation.ByName.TryGetValue(collationName, out var collation)
-            ? throw SimulatedSqlException.InvalidCollation(collationName)
-            : new CollateExpression(source, collation);
+        var collation = Collation.TryGet(collationName)
+            ?? throw SimulatedSqlException.InvalidCollation(collationName);
+        return new CollateExpression(source, collation);
     }
 }

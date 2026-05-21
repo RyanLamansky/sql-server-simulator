@@ -62,13 +62,14 @@ public sealed class CollationBehaviorTests
     }
 
     /// <summary>
-    /// Apostrophe is significant in the default collation's sort key, so
-    /// <c>'Aaronsburg' &lt; '''Aiea'</c> — apostrophe (0x27) sorts before
-    /// 'a' (0x61). Distinct from the Windows-100 CI_AS variant where the
-    /// apostrophe drops out of the primary sort key.
+    /// Probe-confirmed against SQL Server 2025: the default collation
+    /// applies <c>IgnoreSymbols</c> in sort — apostrophe drops out of the
+    /// primary sort key, so "'Aiea" sorts as "Aiea" which is greater than
+    /// "Aaronsburg". Equality keeps symbols significant — the direct
+    /// asymmetry probe lives in <c>CollationTests</c>.
     /// </summary>
     [TestMethod]
-    public void DefaultCollation_OrderBy_ApostropheIsSignificant()
+    public void DefaultCollation_OrderBy_ApostropheIsIgnored()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(
@@ -77,7 +78,7 @@ public sealed class CollationBehaviorTests
         var rows = new List<string>();
         while (reader.Read())
             rows.Add(reader.GetString(0));
-        CollectionAssert.AreEqual(new[] { "'Aiea", "Aaronsburg" }, rows);
+        CollectionAssert.AreEqual(new[] { "Aaronsburg", "'Aiea" }, rows);
     }
 
     /// <summary>

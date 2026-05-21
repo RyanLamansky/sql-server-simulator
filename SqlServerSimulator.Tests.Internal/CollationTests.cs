@@ -5,9 +5,9 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Algorithm-contract tests for the <see cref="Collation"/> implementations
 /// that aren't routed through public SQL today. The default collation's
-/// behavior (<see cref="Collation.Default"/>) and the recognized-name
-/// surface (<see cref="Collation.Recognized"/> /
-/// <see cref="Collation.ByName"/>) are exercised in the public
+/// behavior (<see cref="Collation.Default"/>) and the parser-driven
+/// name-resolution surface (<see cref="Collation.TryGet"/> /
+/// <see cref="Collation.IsRecognized"/>) are exercised in the public
 /// <c>CollationBehaviorTests</c> / <c>CollationMetadataTests</c> /
 /// <c>LikeTests</c>; this file keeps only the dormant comparers
 /// (<see cref="Collation.Latin1General100CiAs"/>,

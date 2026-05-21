@@ -24,7 +24,7 @@ internal static class LikePatternBuilder
     /// <c>$</c> so a final <c>\n</c> in the subject isn't silently allowed
     /// outside Multiline mode. <paramref name="caseSensitive"/> is sourced
     /// from the resolved <see cref="Collation"/> (default + every <c>_CI_</c>
-    /// entry on <see cref="Collation.Recognized"/> is case-insensitive;
+    /// entry on <see cref="Collation.IsRecognized"/> is case-insensitive;
     /// <c>_CS_</c> and <c>_BIN</c> are case-sensitive).
     /// </summary>
     public static Regex BuildAnchored(string pattern, char? escapeChar, bool caseSensitive)
