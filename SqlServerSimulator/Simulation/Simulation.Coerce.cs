@@ -60,7 +60,14 @@ partial class Simulation
         {
             if (source.Type.Category != SqlTypeCategory.String)
                 return;
-            actual = SqlType.Varchar.GetVariableByteCount(SqlValue.FromVarchar(source.AsString));
+            // Route through the column collation's storage encoding so the
+            // byte budget reflects what the column will actually store:
+            // CP1252 for default / Latin1 / BIN / BIN2, UTF-8 for the three
+            // *_UTF8 collations. Reading the encoding off the collation
+            // (rather than calling GetVariableByteCount on column.Type)
+            // works uniformly for both VarcharSqlType (variable-length) and
+            // CharSqlType (fixed-length, no GetVariableByteCount override).
+            actual = column.Type.Collation!.StorageEncoding.GetByteCount(source.AsString);
         }
         else
         {

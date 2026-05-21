@@ -1,6 +1,7 @@
 using System.Data.SqlTypes;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 
 namespace SqlServerSimulator.Storage;
 
@@ -161,18 +162,23 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
-    /// Non-NULL SQL <c>char(N)</c> value. The .NET string is normalized to the
-    /// declared length: shorter inputs are right-padded with U+0020, longer
-    /// inputs are truncated. Truncation is silent — matches SQL Server's
-    /// <c>CAST</c> semantics. The INSERT/UPDATE pipeline raises Msg 2628 / 8152
-    /// before this method is reached when the source would lose data.
+    /// Non-NULL SQL <c>char(N)</c> value. The .NET string is normalized so its
+    /// storage-encoded form is exactly N bytes: shorter inputs are right-
+    /// padded with U+0020 (ASCII space = 1 byte under both CP1252 and UTF-8),
+    /// longer inputs are truncated at a rune boundary. Truncation is silent
+    /// — matches SQL Server's <c>CAST</c> semantics. The INSERT/UPDATE
+    /// pipeline raises Msg 2628 / 8152 before this method is reached when the
+    /// source would lose data. The padding count is computed against the
+    /// column's collation's <see cref="Collation.StorageEncoding"/>, so a
+    /// UTF-8 collation with a 2-byte input into <c>char(5)</c> appends 3
+    /// space chars (not 4).
     /// </summary>
     public static SqlValue FromChar(SqlType type, string value)
     {
         ArgumentNullException.ThrowIfNull(value);
         return type is not CharSqlType c
             ? throw new ArgumentException($"{type} is not a char(N) type.", nameof(type))
-            : new(type, 0, NormalizeFixedLengthString(value, c.length), isNull: false);
+            : new(type, 0, NormalizeFixedLengthStringToByteCount(value, c.length, c.Collation.StorageEncoding), isNull: false);
     }
 
     /// <summary>Non-NULL SQL <c>nchar(N)</c> value. Same padding/truncation rule as <see cref="FromChar"/>; declared length is in code units.</summary>
@@ -227,6 +233,41 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         value.Length == length ? value
         : value.Length < length ? value.PadRight(length, ' ')
         : value[..length];
+
+    /// <summary>
+    /// Normalizes a <c>char(N)</c>-bound value so its
+    /// <paramref name="encoding"/>-encoded form is exactly
+    /// <paramref name="byteLength"/> bytes. Used by <see cref="FromChar"/>
+    /// to honor per-collation storage encoding: CP1252 chars are
+    /// single-byte so the result matches <see cref="NormalizeFixedLengthString"/>
+    /// trivially, but UTF-8 chars can be 1-4 bytes each so padding must
+    /// count bytes rather than chars (a 2-UTF-8-byte <c>é</c> in
+    /// <c>char(5)</c> gets 3 trailing spaces, not 4). Truncation walks
+    /// runes to avoid splitting a multi-byte sequence; the resulting
+    /// rune-truncated string then gets space-padded to the target byte
+    /// width when the prefix doesn't land exactly.
+    /// </summary>
+    private static string NormalizeFixedLengthStringToByteCount(string value, int byteLength, Encoding encoding)
+    {
+        var actualBytes = encoding.GetByteCount(value);
+        if (actualBytes == byteLength) return value;
+        if (actualBytes < byteLength)
+            return value + new string(' ', byteLength - actualBytes);
+        // Truncation: single-byte encodings can slice directly; multi-byte
+        // encodings (UTF-8) must walk runes to avoid splitting mid-sequence.
+        if (encoding.IsSingleByte) return value[..byteLength];
+        var bytesUsed = 0;
+        var charsUsed = 0;
+        foreach (var rune in value.EnumerateRunes())
+        {
+            var runeBytes = encoding.GetByteCount(rune.ToString());
+            if (bytesUsed + runeBytes > byteLength) break;
+            bytesUsed += runeBytes;
+            charsUsed += rune.Utf16SequenceLength;
+        }
+        var pad = byteLength - bytesUsed;
+        return pad > 0 ? value[..charsUsed] + new string(' ', pad) : value[..charsUsed];
+    }
 
     private static byte[] NormalizeFixedLengthBytes(byte[] value, int length)
     {

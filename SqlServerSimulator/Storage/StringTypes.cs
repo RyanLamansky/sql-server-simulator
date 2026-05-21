@@ -43,11 +43,11 @@ internal sealed class VarcharSqlType : SqlType
 
     public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation.ForVarcharStorage(), coercibility);
 
-    public override int GetVariableByteCount(SqlValue value) => CharSqlType.Cp1252Encoder.GetByteCount(value.AsString);
+    public override int GetVariableByteCount(SqlValue value) => this.collation.StorageEncoding.GetByteCount(value.AsString);
 
-    public override int Encode(SqlValue value, Span<byte> destination) => CharSqlType.Cp1252Encoder.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination) => this.collation.StorageEncoding.GetBytes(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromVarchar(this, CharSqlType.Cp1252Encoder.GetString(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromVarchar(this, this.collation.StorageEncoding.GetString(source));
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw);
 
@@ -345,9 +345,9 @@ internal sealed class CharSqlType : SqlType
 
     public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation.ForVarcharStorage(), coercibility);
 
-    public override int Encode(SqlValue value, Span<byte> destination) => Cp1252Encoder.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination) => this.collation.StorageEncoding.GetBytes(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromChar(this, Cp1252Encoder.GetString(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromChar(this, this.collation.StorageEncoding.GetString(source));
 
     public override string ToString() => $"char({this.length})";
 

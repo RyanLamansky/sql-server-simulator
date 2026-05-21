@@ -1,5 +1,6 @@
 using System.Collections.Frozen;
 using System.Globalization;
+using System.Text;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -273,29 +274,55 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
     /// <summary>"Latin1_General_100_CI_AS_SC_UTF8" — Latin1 v100 CI_AS
     /// with supplementary-character support and UTF-8 varchar storage.
-    /// UTF-8 is a storage encoding only; sort / compare semantics are
-    /// identical to <see cref="Latin1General100CiAs"/>. .NET's
-    /// <see cref="CompareInfo"/> handles surrogate pairs natively, so the
-    /// SC marker doesn't require special handling either.</summary>
+    /// Sort / compare bodies match <see cref="Latin1General100CiAs"/>;
+    /// <c>StorageEncoding</c> is UTF-8 so varchar / char columns store
+    /// UTF-8 bytes (probe-confirmed against SQL Server 2025:
+    /// <c>DATALENGTH(N'café')</c> on a <c>varchar(20)</c> UTF-8 column
+    /// returns 5, not 4). The <c>_SC_</c> LEN / SUBSTRING semantics on
+    /// supplementary characters are a separately documented gap — see
+    /// <c>collations.md</c>.</summary>
     internal static readonly CultureCollation Latin1General100CiAsScUtf8 = new(
-        "Latin1_General_100_CI_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: false);
+        "Latin1_General_100_CI_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: false,
+        storageEncoding: Encoding.UTF8);
 
     /// <summary>"Latin1_General_100_CS_AS_SC_UTF8" — case-sensitive UTF-8
     /// variant. Sort / compare matches <see cref="Latin1GeneralCsAs"/>;
-    /// UTF-8 / SC distinctions are storage-layer only.</summary>
+    /// <c>StorageEncoding</c> is UTF-8.</summary>
     internal static readonly CultureCollation Latin1General100CsAsScUtf8 = new(
-        "Latin1_General_100_CS_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: true);
+        "Latin1_General_100_CS_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: true,
+        storageEncoding: Encoding.UTF8);
 
     /// <summary>"Latin1_General_100_BIN2_UTF8" — binary UTF-8 variant.
-    /// Pure codepoint comparison via <see cref="BinaryCollation"/>;
-    /// metadata-only instance for catalog recognition.</summary>
+    /// On nvarchar / nchar storage the comparer body is
+    /// <see cref="BinaryCollation"/> (UTF-16 code-unit ordinal), matching
+    /// real SQL Server's nvarchar BIN2 sort (the <c>_UTF8</c> suffix is a
+    /// no-op for UTF-16 storage). On varchar / char storage,
+    /// <see cref="ForVarcharStorage"/> substitutes
+    /// <see cref="Latin1General100Bin2Utf8ForVarchar"/> — codepoint-order
+    /// compare, equal to UTF-8 byte order, which differs from plain BIN2
+    /// in the 0x80-0x9F window (CP1252 0xA0 NBSP &gt; CP1252 0x80 €, but
+    /// codepoint U+00A0 &lt; U+20AC).</summary>
     internal static readonly Latin1_General_100_BIN2_UTF8 Latin1General100Bin2Utf8 = new();
 
-    /// <summary>Metadata-only binary collation under the
-    /// <c>Latin1_General_100_BIN2_UTF8</c> name.</summary>
+    /// <summary>Codepoint-order body for <see cref="Latin1General100Bin2Utf8"/>
+    /// when pinned on a varchar / char column. See
+    /// <see cref="Utf8CodepointBinaryCollation"/> for the comparer
+    /// semantics; <see cref="Name"/> matches the nvarchar sibling so
+    /// catalog views report a single collation name.</summary>
+    internal static readonly Utf8CodepointBinaryCollation Latin1General100Bin2Utf8ForVarchar =
+        new("Latin1_General_100_BIN2_UTF8");
+
+    /// <summary>Binary collation under the <c>Latin1_General_100_BIN2_UTF8</c>
+    /// name. Carries UTF-8 <see cref="StorageEncoding"/> (affects
+    /// <c>varchar</c> / <c>char</c> storage byte width) and substitutes
+    /// the codepoint-order body when pinned on those storage types.</summary>
     internal sealed class Latin1_General_100_BIN2_UTF8 : BinaryCollation
     {
         public override string Name => "Latin1_General_100_BIN2_UTF8";
+
+        internal override Encoding StorageEncoding => Encoding.UTF8;
+
+        internal override Collation ForVarcharStorage() => Latin1General100Bin2Utf8ForVarchar;
     }
 
     /// <summary>
@@ -437,13 +464,31 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// byte-aware sibling: real SQL Server's BIN / BIN2 on varchar
     /// byte-compares CP1252, which diverges from UTF-16 codepoint compare
     /// in the 0x80-0x9F window where Unicode codepoints (e.g. U+20AC `€`,
-    /// U+0192 `ƒ`) scatter across the BMP. Called by
-    /// <see cref="VarcharSqlType.WithCollation"/> and
+    /// U+0192 `ƒ`) scatter across the BMP. <c>Latin1_General_100_BIN2_UTF8</c>
+    /// substitutes a codepoint-order body (UTF-8 byte order = codepoint
+    /// order). Called by <see cref="VarcharSqlType.WithCollation"/> and
     /// <see cref="CharSqlType.WithCollation"/>; <c>NVarcharSqlType</c> /
     /// <c>NCharSqlType</c> don't substitute (UTF-16 storage already
     /// matches the UTF-16 code-unit-order body).
     /// </summary>
     internal virtual Collation ForVarcharStorage() => this;
+
+    /// <summary>
+    /// The byte encoding the storage layer uses when this collation is
+    /// pinned on a <c>varchar</c> / <c>char</c> column. Default is CP1252,
+    /// matching SQL Server's legacy non-Unicode storage for the simulator's
+    /// modeled collations. <c>*_UTF8</c> collations override to
+    /// <see cref="Encoding.UTF8"/> — real SQL Server stores values as UTF-8
+    /// bytes (`€` U+20AC → 3 bytes, NBSP U+00A0 → 2 bytes, supplementary
+    /// codepoints → 4 bytes), so <c>DATALENGTH</c>, the <c>varchar(N)</c>
+    /// byte budget, and <c>char(N)</c> padding all reflect UTF-8 byte
+    /// widths under those collations. Read by
+    /// <see cref="VarcharSqlType.Encode"/> / <see cref="VarcharSqlType.Decode"/>
+    /// / <see cref="VarcharSqlType.GetVariableByteCount"/> and the
+    /// equivalent <see cref="CharSqlType"/> entry points; not consulted by
+    /// nvarchar / nchar (UTF-16 storage is fixed regardless of collation).
+    /// </summary>
+    internal virtual Encoding StorageEncoding => CharSqlType.Cp1252Encoder;
 
     /// <summary>
     /// Shared host for the Windows-flavored CI_AS pair
@@ -719,6 +764,82 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     }
 
     /// <summary>
+    /// Codepoint-order body for <see cref="Latin1_General_100_BIN2_UTF8"/>
+    /// when pinned on a <c>varchar</c> / <c>char</c> column. Walks both
+    /// operands as Unicode scalars (surrogate pairs combine into 32-bit
+    /// codepoints before comparing), which equals UTF-8 byte order — a
+    /// UTF-8 invariant. Diverges from the nvarchar sibling
+    /// (<see cref="BinaryCollation"/> = <see cref="StringComparer.Ordinal"/>
+    /// = UTF-16 code-unit) for any string containing supplementary
+    /// characters, and diverges from <see cref="Cp1252BinaryCollation"/>
+    /// in the 0x80-0x9F window where CP1252 byte order scatters the
+    /// codepoints (`€` U+20AC = CP1252 0x80, `Ÿ` U+0178 = CP1252 0x9F).
+    /// Probe-confirmed against SQL Server 2025: a <c>varchar BIN2_UTF8</c>
+    /// column populated with `Z`, `€`, `ƒ`, NBSP sorts in codepoint order
+    /// (Z, NBSP, ƒ, €), the same order as UTF-8 byte sequences.
+    /// <see cref="Name"/> matches the nvarchar sibling so catalog views
+    /// report one collation name; <see cref="Resolve"/> treats them as
+    /// the same collation for cross-operand coercibility.
+    /// </summary>
+    internal sealed class Utf8CodepointBinaryCollation : Collation
+    {
+        private readonly string name;
+
+        internal Utf8CodepointBinaryCollation(string name)
+        {
+            this.name = name;
+        }
+
+        public override string Name => this.name;
+
+        public override bool CaseSensitive => true;
+
+        internal override Encoding StorageEncoding => Encoding.UTF8;
+
+        public override int Compare(string? x, string? y)
+        {
+            if (x is null) return y is null ? 0 : -1;
+            if (y is null) return 1;
+            var xIdx = 0;
+            var yIdx = 0;
+            while (xIdx < x.Length && yIdx < y.Length)
+            {
+                var xCp = ScalarAt(x, xIdx, out var xAdv);
+                var yCp = ScalarAt(y, yIdx, out var yAdv);
+                if (xCp != yCp) return xCp.CompareTo(yCp);
+                xIdx += xAdv;
+                yIdx += yAdv;
+            }
+            return (x.Length - xIdx).CompareTo(y.Length - yIdx);
+        }
+
+        public override bool Equals(string? x, string? y) =>
+            x is null
+                ? y is null
+                : y is not null && Compare(x, y) == 0;
+
+        public override int GetHashCode(string obj)
+        {
+            var bytes = Encoding.UTF8.GetBytes(obj);
+            var hash = default(HashCode);
+            hash.AddBytes(bytes);
+            return hash.ToHashCode();
+        }
+
+        private static int ScalarAt(string s, int i, out int advance)
+        {
+            var c = s[i];
+            if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                advance = 2;
+                return char.ConvertToUtf32(c, s[i + 1]);
+            }
+            advance = 1;
+            return c;
+        }
+    }
+
+    /// <summary>
     /// Generic culture-based collation: pins a <see cref="CompareInfo"/>
     /// and a <see cref="CompareOptions"/> set, routing
     /// <see cref="Compare"/> / <see cref="Equals"/> / <see cref="GetHashCode"/>
@@ -740,11 +861,14 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
         private readonly CompareOptions sortOptions;
 
-        internal CultureCollation(string name, string cultureName, bool caseSensitive, bool kanaTypeSensitive = false, bool widthSensitive = false)
+        private readonly Encoding storageEncoding;
+
+        internal CultureCollation(string name, string cultureName, bool caseSensitive, bool kanaTypeSensitive = false, bool widthSensitive = false, Encoding? storageEncoding = null)
         {
             this.name = name;
             this.caseSensitive = caseSensitive;
             this.compareInfo = CultureInfo.GetCultureInfo(cultureName).CompareInfo;
+            this.storageEncoding = storageEncoding ?? CharSqlType.Cp1252Encoder;
             var baseOpts = caseSensitive
                 ? CompareOptions.None
                 : CompareOptions.IgnoreCase;
@@ -764,6 +888,8 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
         public override string Name => this.name;
 
         public override bool CaseSensitive => this.caseSensitive;
+
+        internal override Encoding StorageEncoding => this.storageEncoding;
 
         public override int Compare(string? x, string? y) =>
             x is null

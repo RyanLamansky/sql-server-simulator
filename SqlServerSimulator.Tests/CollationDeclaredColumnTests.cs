@@ -740,5 +740,244 @@ public sealed class CollationDeclaredColumnTests
         AreEqual(3, sim.ExecuteScalar("select count(*) from t where s = N'ア'"));
     }
 
+    /// <summary>
+    /// <c>varchar Latin1_General_100_BIN2_UTF8</c> sorts by UTF-8 byte order
+    /// — which equals Unicode codepoint order. So {Z (U+005A), NBSP (U+00A0),
+    /// ƒ (U+0192), € (U+20AC)} sorts in that codepoint order. Diverges from
+    /// the CP1252-byte order of plain <c>varchar BIN2</c>, where € (CP1252
+    /// 0x80) sorts BEFORE NBSP (CP1252 0xA0). Probe-confirmed against
+    /// SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_VarcharBin2Utf8_UsesCodepointOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, s varchar(10) collate Latin1_General_100_BIN2_UTF8);
+            insert t (s) values (N'€'), (nchar(160)), (N'ƒ'), ('Z')
+            """);
+        using var reader = sim.CreateCommand("select id from t order by s").ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // Inserted as €(1), NBSP(2), ƒ(3), Z(4); codepoint order is Z, NBSP, ƒ, €.
+        CollectionAssert.AreEqual(new[] { 4, 2, 3, 1 }, ids);
+    }
+
+    /// <summary>
+    /// Contrast to <see cref="OrderBy_VarcharBin2Utf8_UsesCodepointOrder"/>:
+    /// the same data on a plain <c>varchar BIN2</c> column sorts in CP1252
+    /// byte order — Z, €, ƒ, NBSP — because under CP1252 storage € maps to
+    /// byte 0x80 (before NBSP's 0xA0). UTF-8 storage flips €'s first byte
+    /// to 0xE2 (after NBSP's 0xC2), inverting the relationship.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_VarcharBin2_VsBin2Utf8_DifferAtCp1252HoleWindow()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, s varchar(10) collate Latin1_General_BIN2);
+            insert t (s) values (N'€'), (nchar(160)), (N'ƒ'), ('Z')
+            """);
+        using var reader = sim.CreateCommand("select id from t order by s").ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // Inserted as €(1), NBSP(2), ƒ(3), Z(4); CP1252 byte order is Z(0x5A), €(0x80), ƒ(0x83), NBSP(0xA0).
+        CollectionAssert.AreEqual(new[] { 4, 1, 3, 2 }, ids);
+    }
+
+    /// <summary>
+    /// <c>nvarchar Latin1_General_100_BIN2_UTF8</c> is a no-op on the UTF-8
+    /// suffix — nvarchar storage stays UTF-16, and the sort body is
+    /// <see cref="StringComparer.Ordinal"/> (UTF-16 code-unit), identical to
+    /// plain <c>nvarchar BIN2</c>. Demonstrates that the codepoint-order
+    /// dispatch happens only when the collation is pinned on a varchar /
+    /// char column.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_NvarcharBin2Utf8_MatchesNvarcharBin2CodeUnitOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int identity primary key, s nvarchar(4) collate Latin1_General_100_BIN2_UTF8);
+            insert t (s) values
+                (N'Z' + nchar(55357) + nchar(56832)),  -- 'Z' + emoji U+1F600 (high surrogate D83D)
+                (N'Z' + nchar(57344))                  -- 'Z' + U+E000
+            """);
+        using var reader = sim.CreateCommand("select id from t order by s").ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // Code-unit order on nvarchar: 0xD83D < 0xE000, so emoji-row (id=1) sorts first.
+        CollectionAssert.AreEqual(new[] { 1, 2 }, ids);
+    }
+
+    /// <summary>
+    /// <c>DATALENGTH</c> on a <c>varchar *_UTF8</c> column reflects UTF-8
+    /// byte counts — `café` is 5 bytes (c=1, a=1, f=1, é=2), not 4
+    /// characters. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void Datalength_VarcharCiAsScUtf8_ReturnsUtf8ByteCount()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(20) collate Latin1_General_100_CI_AS_SC_UTF8);
+            insert t values (N'café')
+            """);
+        AreEqual(5, sim.ExecuteScalar("select datalength(s) from t"));
+    }
+
+    /// <summary>
+    /// Same data through the BIN2_UTF8 sibling — UTF-8 storage is shared
+    /// across all three <c>*_UTF8</c> collations, so the byte count
+    /// matches. Distinct test catches a regression where only one of the
+    /// three UTF-8 collations was wired correctly.
+    /// </summary>
+    [TestMethod]
+    public void Datalength_VarcharBin2Utf8_ReturnsUtf8ByteCount()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(20) collate Latin1_General_100_BIN2_UTF8);
+            insert t values (N'café')
+            """);
+        AreEqual(5, sim.ExecuteScalar("select datalength(s) from t"));
+    }
+
+    /// <summary>
+    /// Contrast: the same `café` literal on a default-collation
+    /// <c>varchar</c> column stores 4 CP1252 bytes (é → 0xE9). Pins down
+    /// the per-collation storage dispatch — the same .NET string produces
+    /// different byte widths depending on the column's collation.
+    /// </summary>
+    [TestMethod]
+    public void Datalength_VarcharDefault_ReturnsCp1252ByteCount()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(20));
+            insert t values (N'café')
+            """);
+        AreEqual(4, sim.ExecuteScalar("select datalength(s) from t"));
+    }
+
+    /// <summary>
+    /// <c>nvarchar *_UTF8</c> still uses UTF-16 storage — the _UTF8 suffix
+    /// is varchar-only at the storage layer. `café` on
+    /// <c>nvarchar(20) BIN2_UTF8</c> is 8 bytes (4 chars × 2 UTF-16 code
+    /// units). Lock-in test for the "nvarchar ignores StorageEncoding" rule.
+    /// </summary>
+    [TestMethod]
+    public void Datalength_NvarcharBin2Utf8_StaysUtf16()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s nvarchar(20) collate Latin1_General_100_BIN2_UTF8);
+            insert t values (N'café')
+            """);
+        AreEqual(8, sim.ExecuteScalar("select datalength(s) from t"));
+    }
+
+    /// <summary>
+    /// <c>char(N)</c> with a UTF-8 collation pads to N <em>bytes</em>, not
+    /// N characters: real SQL Server stores `é` (2 UTF-8 bytes) in
+    /// <c>char(5)</c> as `é` + 3 space bytes = 5 bytes total. Probe-
+    /// confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void CharN_Utf8_PadsToNBytesNotChars()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s char(5) collate Latin1_General_100_CI_AS_SC_UTF8);
+            insert t values (N'é')
+            """);
+        AreEqual(5, sim.ExecuteScalar("select datalength(s) from t"));
+    }
+
+    /// <summary>
+    /// <c>varchar(N)</c> under a UTF-8 collation budgets N <em>bytes</em>:
+    /// `é` (2 UTF-8 bytes) fits in <c>varchar(2)</c> exactly; adding any
+    /// further byte overflows. Locks in <c>EnforceMaxLength</c>'s use of
+    /// the column collation's <c>StorageEncoding</c>.
+    /// </summary>
+    [TestMethod]
+    public void VarcharN_Utf8_BudgetIsBytesNotChars()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(2) collate Latin1_General_100_CI_AS_SC_UTF8);
+            insert t values (N'é')
+            """);
+        AreEqual(2, sim.ExecuteScalar("select datalength(s) from t"));
+        // 'éA' is 2 UTF-8 bytes + 1 byte = 3 bytes; exceeds varchar(2).
+        // Default session raises the verbose Msg 2628 form (with table/
+        // column/value), not the legacy 8152.
+        _ = sim.AssertSqlError("insert t values (N'éA')", 2628);
+    }
+
+    /// <summary>
+    /// Same value `é` on a default-collation <c>varchar(2)</c> stores 1
+    /// CP1252 byte (0xE9), and there's room left for another ASCII byte:
+    /// <c>'éA'</c> stores as 2 CP1252 bytes, fits exactly. Demonstrates
+    /// the storage-encoding-driven budget difference between defaults and
+    /// UTF-8 collations.
+    /// </summary>
+    [TestMethod]
+    public void VarcharN_Default_BudgetIsCp1252Bytes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(2));
+            insert t values (N'é'), (N'éA')
+            """);
+        AreEqual(1, sim.ExecuteScalar("select datalength(s) from t where s = N'é'"));
+        AreEqual(2, sim.ExecuteScalar("select datalength(s) from t where s = N'éA'"));
+    }
+
+    /// <summary>
+    /// DISTINCT hash on a <c>varchar BIN2_UTF8</c> column agrees with the
+    /// UTF-8 byte-equality contract — duplicates collapse and codepoint-
+    /// distinct values stay in separate buckets. Covers the GetHashCode
+    /// path on <c>Utf8CodepointBinaryCollation</c>.
+    /// </summary>
+    [TestMethod]
+    public void Distinct_VarcharBin2Utf8_HashRespectsUtf8Bytes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s varchar(10) collate Latin1_General_100_BIN2_UTF8);
+            insert t values (N'€'), (N'€'), (N'ƒ')
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from (select distinct s from t) d"));
+    }
+
+    /// <summary>
+    /// <c>CAST(... AS char(N)) COLLATE …UTF8</c>: the postfix COLLATE swaps
+    /// to a UTF-8 storage encoding after the CAST has already normalized
+    /// the .NET string under the default CP1252 byte budget. Without re-
+    /// normalization the encoder would overflow when the new UTF-8 byte
+    /// count exceeds N. <c>CollateExpression.Run</c> re-routes char(N)
+    /// values through <c>FromString</c> when the storage encoding changes,
+    /// triggering <c>NormalizeFixedLengthStringToByteCount</c> under the
+    /// new encoding. Four probe-confirmed shapes (SQL Server 2025,
+    /// 2026-05-21).
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'é'", 1, "20", DisplayName = "N'é' -> char(1) UTF8 → 0x20 (é dropped, 1 space)")]
+    [DataRow("N'éA'", 2, "C3A9", DisplayName = "N'éA' -> char(2) UTF8 → 0xC3A9 (é exact)")]
+    [DataRow("N'Aé'", 2, "4120", DisplayName = "N'Aé' -> char(2) UTF8 → 0x4120 (A + space)")]
+    [DataRow("N'AéB'", 3, "41C3A9", DisplayName = "N'AéB' -> char(3) UTF8 → 0x41C3A9 (Aé)")]
+    public void CastAsCharN_WithPostfixCollateUtf8_MatchesByteBudget(string input, int n, string expectedHex)
+    {
+        var sim = new Simulation();
+        var actualHex = Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(
+            (string)sim.ExecuteScalar(
+                $"select cast({input} as char({n})) collate Latin1_General_100_CI_AS_SC_UTF8")!));
+        AreEqual(expectedHex, actualHex);
+    }
+
     private static void IsNull(object? value) => Microsoft.VisualStudio.TestTools.UnitTesting.Assert.IsNull(value is DBNull ? null : value);
 }

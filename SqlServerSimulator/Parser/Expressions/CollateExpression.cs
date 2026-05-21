@@ -44,9 +44,24 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     {
         var value = this.Inner.Run(runtime);
         var rewrapped = value.Type.WithCollation(this.ResolvedCollation, Coercibility.Explicit);
-        return value.IsNull ? SqlValue.Null(rewrapped)
-            : value.Type.Category != SqlTypeCategory.String
-                ? throw SimulatedSqlException.CollateClauseRequiresString(value.Type)
+        if (value.IsNull)
+            return SqlValue.Null(rewrapped);
+        if (value.Type.Category != SqlTypeCategory.String)
+            throw SimulatedSqlException.CollateClauseRequiresString(value.Type);
+        // When the postfix swaps to a collation with a different storage
+        // encoding (e.g. CP1252 → UTF-8 on the *_UTF8 collations), a fixed-
+        // length char(N) value carries a .NET string sized for the inner
+        // collation's byte budget but the outer encoder's fixed N-byte slot
+        // would overflow. Re-route through FromString so the new type's
+        // <see cref="SqlValue.NormalizeFixedLengthStringToByteCount"/> re-
+        // pads / re-truncates the .NET string for the new storage encoding.
+        // Variable-length varchar values size their destination buffer
+        // dynamically via GetVariableByteCount, so they don't need the same
+        // dance; their per-collation byte semantics fall under the broader
+        // CAST + postfix-COLLATE composition gap (see collations.md).
+        return rewrapped is CharSqlType
+            && value.Type.Collation!.StorageEncoding != rewrapped.Collation!.StorageEncoding
+                ? SqlValue.FromString(rewrapped, value.AsString)
                 : value.WithType(rewrapped);
     }
 
