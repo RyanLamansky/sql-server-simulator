@@ -74,4 +74,13 @@ internal static class BuiltInToken
         }
         return false;
     }
+
+    /// <summary>
+    /// Hash code consistent with <see cref="Equals(string?, string?)"/>:
+    /// two strings that compare equal under the built-in-token options
+    /// hash to the same value. Required when a built-in-token-keyed type
+    /// participates in a dictionary or hashset.
+    /// </summary>
+    public static int GetHashCode(string value) =>
+        compareInfo.GetHashCode(value, Options);
 }

@@ -1410,7 +1410,7 @@ internal static class BuiltInResources
                     {
                         for (var i = 0; i < table.Columns.Length; i++)
                         {
-                            if (Collation.Default.Equals(table.Columns[i].Name, inlineCol))
+                            if (database.Collation.Equals(table.Columns[i].Name, inlineCol))
                             {
                                 parentColumnId = i + 1;
                                 break;

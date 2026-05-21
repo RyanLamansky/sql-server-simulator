@@ -177,4 +177,76 @@ public sealed class NameComparisonRegimeTests
     public void Regime3_SpatialStatic_LowercasePoint_NotResolved()
         => _ = Throws<Exception>(() => new Simulation().ExecuteScalar(
             "select cast(geography::point(0, 0, 4326) as varchar(50))"));
+
+    // ===== CS-database fidelity: regime 1 sites flip case-sensitivity =====
+    // Probe-confirmed (2026-05-21): under a case-sensitive database
+    // collation (SQL_Latin1_General_CP1_CS_AS), reserved-name checks,
+    // system-proc dispatch, and CLR-type-prefix lookups all follow the
+    // database collation. Width-folding still applies (IgnoreWidth stays
+    // on under CS_AS — no _WS_ suffix). True system tokens routed through
+    // BuiltInToken (INSERTED / DELETED / OBJECT_ID type filter /
+    // sp_addextendedproperty arg names) stay invariant — those have
+    // dedicated regime-1 coverage in the section above.
+
+    private static Simulation CsCollation()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("ALTER DATABASE simulated COLLATE SQL_Latin1_General_CP1_CS_AS");
+        return sim;
+    }
+
+    [TestMethod]
+    public void CsDatabase_CreateSchemaUppercaseDBO_PassesReservedCheck()
+    {
+        // The reserved-name check follows database collation: under CS,
+        // `DBO` doesn't case-equal the reserved `dbo`, so the check
+        // passes (the schema-creation attempt then proceeds). The
+        // Schemas dict's construction-time CI comparer doesn't rebuild
+        // on ALTER COLLATE (documented fidelity gap on
+        // <see cref="Database.Schemas"/>), so the TryAdd collides with
+        // the pre-seeded `dbo` and raises Msg 2714 "already exists"
+        // instead. Surfacing Msg 2714 (rather than Msg 2760 "reserved")
+        // confirms the reserved-name check now follows DB collation.
+        var ex = CsCollation().AssertSqlError("CREATE SCHEMA DBO", 2714);
+        Assert.Contains("already an object", ex.Message);
+    }
+
+    [TestMethod]
+    public void CsDatabase_CreateSchemaCanonicalDbo_StillRejectedAsReserved()
+        => _ = CsCollation().AssertSqlError("CREATE SCHEMA dbo", 2760);
+
+    [TestMethod]
+    public void CsDatabase_CreateSchemaFullwidthSys_StillRejectedAsReserved()
+    {
+        // Width-folding stays on under CS_AS (no _WS_ suffix), so ｓys
+        // folds to sys and matches the reserved set.
+        _ = CsCollation().AssertSqlError("CREATE SCHEMA ｓys", 2760);
+    }
+
+    [TestMethod]
+    public void CsDatabase_SystemProcSpExecuteSql_UppercaseCase_NotFound()
+        // `SP_EXECUTESQL` doesn't case-equal `sp_executesql` under CS, so
+        // the dispatch falls through to generic user-proc lookup which
+        // also misses → Msg 2812 "Could not find stored procedure".
+        => _ = CsCollation().AssertSqlError("EXEC SP_EXECUTESQL N'select 1'", 2812);
+
+    [TestMethod]
+    public void CsDatabase_SystemProcSpExecuteSql_FullwidthCase_Dispatches()
+        // Probe-confirmed: ｓp_executesql width-folds to sp_executesql
+        // under CS_AS (IgnoreWidth stays on), so dispatch still routes
+        // through the simulator's sp_executesql handler.
+        => AreEqual(1, CsCollation().ExecuteScalar("EXEC ｓp_executesql N'select 1'"));
+
+    [TestMethod]
+    public void CsDatabase_HierarchyIdTypePrefix_UppercaseHIERARCHYID_NotResolved()
+        // hierarchyid:: is the canonical lowercase form; HIERARCHYID
+        // doesn't case-equal it under CS, so the static-call dispatch
+        // misses and the parser raises a syntax error.
+        => _ = Throws<Exception>(() => CsCollation().ExecuteScalar(
+            "SELECT HIERARCHYID::GetRoot()"));
+
+    [TestMethod]
+    public void CsDatabase_HierarchyIdTypePrefix_CanonicalCase_Resolves()
+        => AreEqual("/", CsCollation().ExecuteScalar(
+            "SELECT hierarchyid::GetRoot().ToString()"));
 }

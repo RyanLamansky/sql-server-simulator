@@ -663,7 +663,7 @@ partial class Simulation
             // by the type name being "xml" (case-insensitive, 1-part). The
             // rest of the branches treat the parens as a length/precision spec.
             var isXmlTypeRef = qualifiedTypeName.Count == 1
-                && Collation.Default.Equals(typeName.Value, "xml");
+                && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml");
             if (isXmlTypeRef && PeekIsXmlSchemaArgument(context))
             {
                 xmlSchemaCollection = ParseXmlSchemaCollectionArgument(context);

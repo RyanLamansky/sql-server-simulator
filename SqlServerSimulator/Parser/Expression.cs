@@ -220,11 +220,12 @@ internal abstract class Expression
                         if (secondColon is not Operator { Character: ':' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         context.MoveNextRequired();
-                        expression = Collation.Default.Equals(typeName, "hierarchyid")
+                        var typePrefixCollation = context.Batch.CurrentDatabase.Collation;
+                        expression = typePrefixCollation.Equals(typeName, "hierarchyid")
                             ? HierarchyIdStaticCall.Parse(context)
-                            : Collation.Default.Equals(typeName, "geography")
+                            : typePrefixCollation.Equals(typeName, "geography")
                                 ? SpatialStaticCall.Parse(SqlType.Geography, context)
-                                : Collation.Default.Equals(typeName, "geometry")
+                                : typePrefixCollation.Equals(typeName, "geometry")
                                     ? SpatialStaticCall.Parse(SqlType.Geometry, context)
                                     : throw SimulatedSqlException.SyntaxErrorNear(context);
                         continue;

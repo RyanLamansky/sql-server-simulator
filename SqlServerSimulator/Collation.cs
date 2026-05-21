@@ -66,12 +66,19 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     public virtual bool CaseSensitive => false;
 
     /// <summary>
-    /// The simulator's default collation — <c>SQL_Latin1_General_CP1_CI_AS</c>.
-    /// Resolved by <see cref="TryGet"/> through the parser; used by
-    /// <see cref="Database.CollationName"/> when no explicit
-    /// <c>ALTER DATABASE COLLATE</c> has landed, and as the fallback when
-    /// a string-typed value's <see cref="SqlType.Collation"/> is
-    /// <see langword="null"/>.
+    /// The simulator's hardcoded baseline collation —
+    /// <c>SQL_Latin1_General_CP1_CI_AS</c>. Resolved once via
+    /// <see cref="TryGet"/>. Used as the seed for new
+    /// <see cref="Database.Collation"/> instances, as the fallback for
+    /// string-typed values whose <see cref="SqlType.Collation"/> is
+    /// <see langword="null"/>, and as the default for the storage-layer
+    /// <see cref="VarcharSqlType"/> / <see cref="NVarcharSqlType"/> /
+    /// <see cref="CharSqlType"/> / <see cref="NCharSqlType"/> singletons.
+    /// Identifier-resolution sites should route through
+    /// <see cref="Database.Collation"/> (which defaults here but may
+    /// diverge under <c>ALTER DATABASE COLLATE</c>); only sites that
+    /// genuinely need "the simulator's baseline regardless of database"
+    /// belong on this property.
     /// </summary>
     internal static Collation Default => defaultLazy.Value;
 

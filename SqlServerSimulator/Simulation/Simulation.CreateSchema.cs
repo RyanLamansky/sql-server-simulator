@@ -69,15 +69,24 @@ partial class Simulation
 
         // Built-ins: dbo lives in every database; sys / INFORMATION_SCHEMA are
         // server-owned. Real SQL Server raises Msg 2760 on each — replicated.
-        return IsReservedSchemaName(schemaName)
+        return IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName)
             ? throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName)
             : context.CurrentDatabase.Schemas.TryAdd(schemaName, new Schema(context.CurrentDatabase, schemaName, context.CurrentDatabase.AllocateSchemaId()))
                 ? true
                 : throw SimulatedSqlException.ThereIsAlreadyAnObject(schemaName);
     }
 
-    private static bool IsReservedSchemaName(string schemaName) =>
-        Collation.Default.Equals(schemaName, "dbo")
-        || Collation.Default.Equals(schemaName, "sys")
-        || Collation.Default.Equals(schemaName, "INFORMATION_SCHEMA");
+    /// <summary>
+    /// True when <paramref name="schemaName"/> matches one of the reserved
+    /// built-in schema names (<c>dbo</c>, <c>sys</c>,
+    /// <c>INFORMATION_SCHEMA</c>) under <paramref name="collation"/>. Real
+    /// SQL Server's check follows the database collation
+    /// (probe-confirmed 2026-05-21 against a CS database: <c>CREATE SCHEMA
+    /// DBO</c> succeeds because <c>DBO</c> doesn't case-equal the reserved
+    /// <c>dbo</c>).
+    /// </summary>
+    private static bool IsReservedSchemaName(Collation collation, string schemaName) =>
+        collation.Equals(schemaName, "dbo")
+        || collation.Equals(schemaName, "sys")
+        || collation.Equals(schemaName, "INFORMATION_SCHEMA");
 }

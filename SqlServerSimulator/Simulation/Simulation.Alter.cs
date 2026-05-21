@@ -364,12 +364,13 @@ partial class Simulation
     /// <summary>
     /// Parses <c>ALTER DATABASE name COLLATE &lt;collation_name&gt;</c>.
     /// Validates the name against <see cref="Collation.IsRecognized"/> and
-    /// stores it on <see cref="Database.CollationName"/> — comparisons /
-    /// sort / LIKE still route through <see cref="Collation.Default"/>; the
-    /// stored name is metadata for catalog-view round-trip
-    /// (<c>sys.databases.collation_name</c>, <c>DATABASEPROPERTYEX</c>).
-    /// An unrecognized name raises <see cref="NotSupportedException"/> in
-    /// direct SQL; the BACPAC loader catches and records on Warnings.
+    /// updates the target database's <see cref="Database.Collation"/> +
+    /// <see cref="Database.CollationName"/>. Subsequent identifier compares
+    /// route through the new collation; pre-existing catalog dict comparers
+    /// don't rebuild (existing objects keep their original identifier
+    /// registration — matches real SQL Server). An unrecognized name raises
+    /// <see cref="NotSupportedException"/> in direct SQL; the BACPAC loader
+    /// catches and records on Warnings.
     /// </summary>
     private static bool TryParseAlterDatabaseCollate(ParserContext context)
     {
@@ -377,9 +378,11 @@ partial class Simulation
             return false;
         if (context.Batch.IsSkipping)
             return true;
-        if (!Collation.IsRecognized(token.Value))
+        if (Collation.TryGet(token.Value) is not { } resolved)
             throw new NotSupportedException($"ALTER DATABASE COLLATE: collation '{token.Value}' isn't on the simulator's recognized list.");
-        context.Batch.CurrentDatabase.CollationName = token.Value;
+        var database = context.Batch.CurrentDatabase;
+        database.Collation = resolved;
+        database.CollationName = resolved.Name;
         return true;
     }
 

@@ -15,7 +15,7 @@ namespace SqlServerSimulator;
 /// shape is in place so they can graft on without touching the resolution
 /// rule again.
 /// </summary>
-internal sealed class Schema(Database database, string name, int schemaId)
+internal sealed class Schema
 {
     /// <summary>
     /// Owning <see cref="Database"/>. Back-pointer threaded through resolvers
@@ -26,9 +26,9 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// that scope their output to the resolved database, not the connection's
     /// <see cref="SimulatedDbConnection.CurrentDatabase"/>.
     /// </summary>
-    public readonly Database Database = database;
+    public readonly Database Database;
 
-    public readonly string Name = name;
+    public readonly string Name;
 
     /// <summary>
     /// Per-database schema identifier — surfaces in <c>SCHEMA_ID()</c>,
@@ -39,9 +39,26 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// starting at 5. Apps occasionally hard-code <c>schema_id = 1</c> for
     /// dbo, so matching is worth the small bit of setup logic.
     /// </summary>
-    public readonly int SchemaId = schemaId;
+    public readonly int SchemaId;
 
-    public readonly ConcurrentDictionary<string, HeapTable> HeapTables = new(Collation.Default);
+    public Schema(Database database, string name, int schemaId)
+    {
+        this.Database = database;
+        this.Name = name;
+        this.SchemaId = schemaId;
+        var collation = database.Collation;
+        this.HeapTables = new(collation);
+        this.Functions = new(collation);
+        this.Views = new(collation);
+        this.Procedures = new(collation);
+        this.TableTypes = new(collation);
+        this.AliasTypes = new(collation);
+        this.XmlSchemaCollections = new(collation);
+        this.Sequences = new(collation);
+        this.Triggers = new(collation);
+    }
+
+    public readonly ConcurrentDictionary<string, HeapTable> HeapTables;
 
     /// <summary>
     /// User-defined functions hosted by this schema — either scalar
@@ -49,7 +66,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// (<see cref="InlineTableValuedFunction"/>) under the
     /// <see cref="UserDefinedFunction"/> base.
     /// </summary>
-    public readonly ConcurrentDictionary<string, UserDefinedFunction> Functions = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, UserDefinedFunction> Functions;
 
     /// <summary>
     /// Views hosted by this schema. <c>CREATE VIEW schema.name AS SELECT
@@ -58,7 +75,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// share the same name namespace as tables (Msg 2714 on collision),
     /// so a view's leaf name is unique across both dicts within the schema.
     /// </summary>
-    public readonly ConcurrentDictionary<string, View> Views = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, View> Views;
 
     /// <summary>
     /// Stored procedures hosted by this schema. <c>CREATE PROCEDURE
@@ -69,7 +86,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// existing <see cref="SchemaObject.ObjectId"/>; <c>DROP PROCEDURE</c>
     /// removes it.
     /// </summary>
-    public readonly ConcurrentDictionary<string, Procedure> Procedures = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, Procedure> Procedures;
 
     /// <summary>
     /// User-defined table types hosted by this schema. Created via
@@ -81,7 +98,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// only). Alias types (<see cref="AliasTypes"/>) share this same
     /// type-name namespace.
     /// </summary>
-    public readonly ConcurrentDictionary<string, TableType> TableTypes = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, TableType> TableTypes;
 
     /// <summary>
     /// Scalar user-defined alias types (UDDTs) hosted by this schema.
@@ -92,7 +109,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// type-name namespace with <see cref="TableTypes"/> — a CREATE TYPE
     /// colliding with an existing entry in either dict raises Msg 219.
     /// </summary>
-    public readonly ConcurrentDictionary<string, AliasType> AliasTypes = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, AliasType> AliasTypes;
 
     /// <summary>
     /// XML schema collections hosted by this schema. Created via
@@ -104,7 +121,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// payloads against it — the schema collection is metadata only,
     /// stored for <c>sys.xml_schema_collections</c> round-trip.
     /// </summary>
-    public readonly ConcurrentDictionary<string, XmlSchemaCollection> XmlSchemaCollections = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, XmlSchemaCollection> XmlSchemaCollections;
 
     /// <summary>
     /// Sequence objects hosted by this schema. Created via <c>CREATE
@@ -112,7 +129,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// schema.name</c>. Shares the object-name namespace with tables /
     /// views / functions / procs (Msg 2714 on collision).
     /// </summary>
-    public readonly ConcurrentDictionary<string, Sequence> Sequences = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, Sequence> Sequences;
 
     /// <summary>
     /// DML triggers hosted by this schema. Created via <c>CREATE [OR
@@ -126,7 +143,7 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// <see cref="HeapTable"/> itself but the dict here is the source
     /// of truth (ENABLE / DISABLE / DROP all operate on it).
     /// </summary>
-    public readonly ConcurrentDictionary<string, Trigger> Triggers = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, Trigger> Triggers;
 
     /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's
@@ -155,9 +172,10 @@ internal sealed class Schema(Database database, string name, int schemaId)
     /// </summary>
     public bool HasNameInSharedNamespace(string leaf)
     {
+        var collation = this.Database.Collation;
         foreach (var obj in this.SchemaObjects())
         {
-            if (Collation.Default.Equals(obj.Name, leaf))
+            if (collation.Equals(obj.Name, leaf))
                 return true;
         }
         return false;

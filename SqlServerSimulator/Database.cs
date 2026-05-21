@@ -26,9 +26,11 @@ internal sealed class Database
     /// default <c>dbo</c> schema; <c>CREATE SCHEMA &lt;name&gt;</c> adds more.
     /// Schema-qualified table references (<c>SELECT * FROM audit.t</c>) route
     /// through here; unqualified references fall back to
-    /// <see cref="DefaultSchemaName"/>.
+    /// <see cref="DefaultSchemaName"/>. Comparer is <see cref="Collation"/>
+    /// at the database's construction time; doesn't rebuild if a later
+    /// <c>ALTER DATABASE COLLATE</c> shifts <see cref="Collation"/>.
     /// </summary>
-    public readonly ConcurrentDictionary<string, Schema> Schemas = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, Schema> Schemas;
 
     /// <summary>
     /// Schema-id of the default <c>dbo</c> schema. Matches real SQL Server's
@@ -44,8 +46,19 @@ internal sealed class Database
     public const int SysSchemaId = 4;
 
     public Database(string name)
+        : this(name, Collation.Default)
+    {
+    }
+
+    public Database(string name, Collation collation)
     {
         this.Name = name;
+        this.Collation = collation;
+        this.CollationName = collation.Name;
+        this.Schemas = new(collation);
+        this.DdlTriggers = new(collation);
+        this.Principals = new(collation);
+        this.FullTextCatalogs = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId);
         this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId);
@@ -87,18 +100,32 @@ internal sealed class Database
     public CompatibilityLevel CompatibilityLevel = CompatibilityLevel.Sql170;
 
     /// <summary>
-    /// Database-scope <c>COLLATE</c> declaration. The simulator routes every
-    /// comparison / sort / LIKE through <see cref="Collation.Default"/>
-    /// regardless of what this names — it's a metadata field for BACPAC
-    /// round-trip and catalog-view fidelity (<c>sys.databases.collation_name</c>,
-    /// <c>DATABASEPROPERTYEX(name, 'Collation')</c>,
-    /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c>). Whitelist of accepted
-    /// names lives in <see cref="Collation.IsRecognized"/>; <c>ALTER DATABASE
-    /// name COLLATE name</c> raises <see cref="NotSupportedException"/> on an
-    /// unrecognized name. Defaults to the simulator's modeled collation
-    /// (<see cref="Collation.Default"/>.Name).
+    /// Database identifier-resolution collation. Drives every catalog dict
+    /// comparer in this database (<see cref="Schemas"/>,
+    /// <see cref="Schema.HeapTables"/>, <see cref="Schema.Functions"/>, …)
+    /// and every <c>BatchContext</c> / <c>Schema</c> identifier-equality
+    /// site. Set once at construction; <c>ALTER DATABASE COLLATE</c>
+    /// updates this so subsequent identifier compares route through the
+    /// new collation, but the construction-time dict comparers don't
+    /// rebuild (matches real SQL Server's behavior: existing objects keep
+    /// their identifier registration, new ones bind under the new
+    /// collation). Defaults to <see cref="Collation.Default"/>.
     /// </summary>
-    public string CollationName = Collation.Default.Name;
+    public Collation Collation;
+
+    /// <summary>
+    /// Database-scope <c>COLLATE</c> declaration as a string. Surfaces in
+    /// <c>sys.databases.collation_name</c>,
+    /// <c>DATABASEPROPERTYEX(name, 'Collation')</c>, and
+    /// <c>INFORMATION_SCHEMA.COLUMNS.COLLATION_NAME</c>. Kept in sync with
+    /// <see cref="Collation"/>.Name on every <c>ALTER DATABASE COLLATE</c>;
+    /// also seeds the per-column default collation for new columns that
+    /// don't carry an explicit <c>COLLATE</c> clause. Whitelist of accepted
+    /// names lives in <see cref="Collation.IsRecognized"/>; an unrecognized
+    /// name raises <see cref="NotSupportedException"/> from
+    /// <c>ALTER DATABASE COLLATE</c>.
+    /// </summary>
+    public string CollationName;
 
     /// <summary>
     /// Explicit override of the per-database <c>VERBOSE_TRUNCATION_WARNINGS</c>
@@ -229,7 +256,7 @@ internal sealed class Database
     /// and <c>sys.sql_modules</c>. <strong>Not fired</strong> — see
     /// <see cref="DdlTrigger"/> for the no-enforcement rationale.
     /// </summary>
-    public readonly ConcurrentDictionary<string, DdlTrigger> DdlTriggers = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, DdlTrigger> DdlTriggers;
 
     /// <summary>
     /// Per-database principals (users + roles). Pre-seeded with the fixed
@@ -240,7 +267,7 @@ internal sealed class Database
     /// model; this dict exists for catalog-view round-trip and for
     /// resolving <c>GRANT … TO &lt;name&gt;</c> at parse time.
     /// </summary>
-    public readonly ConcurrentDictionary<string, DatabasePrincipal> Principals = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, DatabasePrincipal> Principals;
 
     /// <summary>
     /// Per-database permission grants/denies. Populated by
@@ -277,7 +304,7 @@ internal sealed class Database
     /// visibility — query-time CONTAINS / FREETEXT predicates raise
     /// <see cref="NotSupportedException"/> rather than evaluate.
     /// </summary>
-    public readonly ConcurrentDictionary<string, FullTextCatalog> FullTextCatalogs = new(Collation.Default);
+    public readonly ConcurrentDictionary<string, FullTextCatalog> FullTextCatalogs;
 
     private int nextFullTextCatalogId;
 
@@ -326,12 +353,12 @@ internal readonly struct ExtendedPropertyKey(byte @class, int majorId, int minor
         this.Class == other.Class
         && this.MajorId == other.MajorId
         && this.MinorId == other.MinorId
-        && Collation.Default.Equals(this.Name, other.Name);
+        && BuiltInToken.Equals(this.Name, other.Name);
 
     public override bool Equals(object? obj) => obj is ExtendedPropertyKey other && this.Equals(other);
 
     public override int GetHashCode() =>
-        HashCode.Combine(this.Class, this.MajorId, this.MinorId, Collation.Default.GetHashCode(this.Name));
+        HashCode.Combine(this.Class, this.MajorId, this.MinorId, BuiltInToken.GetHashCode(this.Name));
 
     public static bool operator ==(ExtendedPropertyKey left, ExtendedPropertyKey right) => left.Equals(right);
     public static bool operator !=(ExtendedPropertyKey left, ExtendedPropertyKey right) => !left.Equals(right);

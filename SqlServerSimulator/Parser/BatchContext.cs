@@ -1309,7 +1309,7 @@ internal sealed class BatchContext
     /// </summary>
     public void RejectCrossDatabaseMutation(MultiPartName name)
     {
-        if (name.Count == 3 && !Collation.Default.Equals(name[0], this.CurrentDatabase.Name))
+        if (name.Count == 3 && !this.CurrentDatabase.Collation.Equals(name[0], this.CurrentDatabase.Name))
         {
             throw new NotSupportedException(
                 $"Cross-database write to '{name}' isn't modeled. The simulator routes 3-part-name reads (SELECT / JOIN / catalog views) across databases but defers cross-database INSERT / UPDATE / DELETE / MERGE / TRUNCATE / DDL — trigger scope swapping, identity allocation routing, and FK validation across DB boundaries are pending. Issue USE [{name[0]}] from this connection and reference the target with a 1- or 2-part name.");

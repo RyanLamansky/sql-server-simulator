@@ -77,8 +77,12 @@ partial class Simulation
         // sp_executesql is a built-in proc with a special argument shape
         // (param-defs and OUTPUT writeback to @-variables in the caller's
         // scope). Route to its own parser before falling through to the
-        // generic-procedure path.
-        if (Collation.Default.Equals(procName.Leaf, "sp_executesql"))
+        // generic-procedure path. Probe-confirmed (2026-05-21): system proc
+        // names follow the database collation, so `SP_EXECUTESQL` on a CS
+        // database raises "procedure not found" — that's what falls through
+        // here when the case mismatch causes a dispatch miss.
+        var dbCollation = batch.CurrentDatabase.Collation;
+        if (dbCollation.Equals(procName.Leaf, "sp_executesql"))
         {
             foreach (var outcome in ParseSpExecuteSql(batch, returnCodeVar))
                 yield return outcome;
@@ -89,19 +93,19 @@ partial class Simulation
         // resolution via InvokeSpExtendedProperty. The bacpac loader emits
         // `EXEC sp_addextendedproperty …` for every `<SqlExtendedProperty>`
         // element in model.xml; the update/drop variants round out the API.
-        if (Collation.Default.Equals(procName.Leaf, "sp_addextendedproperty"))
+        if (dbCollation.Equals(procName.Leaf, "sp_addextendedproperty"))
         {
             foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add))
                 yield return outcome;
             yield break;
         }
-        if (Collation.Default.Equals(procName.Leaf, "sp_updateextendedproperty"))
+        if (dbCollation.Equals(procName.Leaf, "sp_updateextendedproperty"))
         {
             foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update))
                 yield return outcome;
             yield break;
         }
-        if (Collation.Default.Equals(procName.Leaf, "sp_dropextendedproperty"))
+        if (dbCollation.Equals(procName.Leaf, "sp_dropextendedproperty"))
         {
             foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop))
                 yield return outcome;
@@ -114,21 +118,21 @@ partial class Simulation
         // sp_droplinkedsrvlogin / sp_serveroption parse-and-discard since
         // the simulator has no principal-mapping or per-server-option model
         // but BACPAC / migration scripts often emit them.
-        if (Collation.Default.Equals(procName.Leaf, "sp_addlinkedserver"))
+        if (dbCollation.Equals(procName.Leaf, "sp_addlinkedserver"))
         {
             foreach (var outcome in InvokeSpAddLinkedServer(batch))
                 yield return outcome;
             yield break;
         }
-        if (Collation.Default.Equals(procName.Leaf, "sp_dropserver"))
+        if (dbCollation.Equals(procName.Leaf, "sp_dropserver"))
         {
             foreach (var outcome in InvokeSpDropServer(batch))
                 yield return outcome;
             yield break;
         }
-        if (Collation.Default.Equals(procName.Leaf, "sp_addlinkedsrvlogin")
-            || Collation.Default.Equals(procName.Leaf, "sp_droplinkedsrvlogin")
-            || Collation.Default.Equals(procName.Leaf, "sp_serveroption"))
+        if (dbCollation.Equals(procName.Leaf, "sp_addlinkedsrvlogin")
+            || dbCollation.Equals(procName.Leaf, "sp_droplinkedsrvlogin")
+            || dbCollation.Equals(procName.Leaf, "sp_serveroption"))
         {
             foreach (var outcome in InvokeSpLinkedServerNoOp(batch))
                 yield return outcome;
@@ -166,7 +170,7 @@ partial class Simulation
             return arguments;
 
         var sawNamed = false;
-        var seenNames = new HashSet<string>(Collation.Default);
+        var seenNames = new HashSet<string>(batch.CurrentDatabase.Collation);
         while (true)
         {
             string? argName = null;

@@ -140,7 +140,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schemaName = name.Leaf;
-        if (IsReservedSchemaName(schemaName))
+        if (IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName))
             throw SimulatedSqlException.CannotDropProtectedSchema(schemaName);
         if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema))
         {
