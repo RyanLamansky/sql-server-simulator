@@ -54,15 +54,23 @@ internal sealed class Stuff : Expression
         var startIndex = startValue.CoerceTo(SqlType.Int32).AsInt32;
         var len = lengthValue.CoerceTo(SqlType.Int32).AsInt32;
         var s = inputValue.AsString;
+        // STUFF indexes/lengths are code-unit-based under non-SC and
+        // codepoint-based under _SC_. Under _SC_ a delete count of 1
+        // removes one full codepoint (whole emoji) rather than splitting
+        // a surrogate pair. Probe-confirmed against SQL Server 2025.
+        var isSc = inputValue.Type.Collation?.IsSupplementaryCharacterAware == true;
+        var inputUnits = isSc ? SupplementaryCharacters.CodepointCount(s) : s.Length;
 
         // Invalid argument cases all map to NULL silently — matches SQL
         // Server's documented and probed behavior.
-        if (startIndex < 1 || startIndex > s.Length || len < 0)
+        if (startIndex < 1 || startIndex > inputUnits || len < 0)
             return SqlValue.Null(resultType);
 
-        var deleteCount = Math.Min(len, s.Length - (startIndex - 1));
+        var deleteCount = Math.Min(len, inputUnits - (startIndex - 1));
         var insertText = replacementValue.IsNull ? string.Empty : replacementValue.AsString;
-        var result = string.Concat(s.AsSpan(0, startIndex - 1), insertText, s.AsSpan(startIndex - 1 + deleteCount));
+        var sliceStartCu = isSc ? SupplementaryCharacters.CodepointToCodeUnit(s, startIndex - 1) : startIndex - 1;
+        var sliceEndCu = isSc ? SupplementaryCharacters.CodepointToCodeUnit(s, startIndex - 1 + deleteCount) : startIndex - 1 + deleteCount;
+        var result = string.Concat(s.AsSpan(0, sliceStartCu), insertText, s.AsSpan(sliceEndCu));
         return SqlValue.FromString(resultType, result);
     }
 

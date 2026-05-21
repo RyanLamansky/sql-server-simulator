@@ -48,13 +48,22 @@ internal sealed class Substring : Expression
 
         var input = s.AsString;
         // SQL Server: if start <= 0, the leading |start - 1| characters of the
-        // requested window fall before the string and are truncated.
+        // requested window fall before the string and are truncated. Indexing
+        // is code-unit-based under non-SC collations and codepoint-based
+        // under _SC_; the arithmetic is identical, only the unit of "input
+        // length" and the final slice differ.
         var zeroBased = startIndex - 1;
         var effectiveStart = Math.Max(0, zeroBased);
         var effectiveLength = Math.Max(0, len + Math.Min(0, zeroBased));
-        effectiveLength = Math.Min(effectiveLength, Math.Max(0, input.Length - effectiveStart));
+        var isSc = s.Type.Collation?.IsSupplementaryCharacterAware == true;
+        var inputUnits = isSc ? SupplementaryCharacters.CodepointCount(input) : input.Length;
+        effectiveLength = Math.Min(effectiveLength, Math.Max(0, inputUnits - effectiveStart));
 
-        return SqlValue.FromString(s.Type, input.Substring(effectiveStart, effectiveLength));
+        if (!isSc)
+            return SqlValue.FromString(s.Type, input.Substring(effectiveStart, effectiveLength));
+        var startCu = SupplementaryCharacters.CodepointToCodeUnit(input, effectiveStart);
+        var endCu = SupplementaryCharacters.CodepointToCodeUnit(input, effectiveStart + effectiveLength);
+        return SqlValue.FromString(s.Type, input[startCu..endCu]);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);

@@ -57,8 +57,14 @@ internal sealed class PatIndex : Expression
             : p.CoerceTo(s.Type).AsString;
 
         var regex = LikePatternBuilder.BuildForPatIndex(patternString);
-        var match = regex.Match(s.AsString);
-        var position = match.Success ? (long)match.Index + 1 : 0L;
+        var subjectStr = s.AsString;
+        var match = regex.Match(subjectStr);
+        // Result position is code-unit-based under non-SC, codepoint-based
+        // under _SC_ — matches CHARINDEX dispatch on the subject's collation.
+        var position = !match.Success ? 0L
+            : s.Type.Collation?.IsSupplementaryCharacterAware == true
+                ? (long)SupplementaryCharacters.CodeUnitToCodepoint(subjectStr, match.Index) + 1
+                : (long)match.Index + 1;
         return isBig ? SqlValue.FromInt64(position) : SqlValue.FromInt32((int)position);
     }
 

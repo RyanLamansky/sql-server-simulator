@@ -34,22 +34,34 @@ internal sealed class CharIndex : Expression
         if (!SqlType.IsStringCategory(n.Type) || !SqlType.IsStringCategory(h.Type))
             throw new NotSupportedException("CHARINDEX expects string operands.");
 
-        var startIndex = 0;
+        var needleStr = n.AsString;
+        var haystackStr = h.AsString;
+        // CHARINDEX indexes in code units under non-SC collations and in
+        // codepoints under _SC_. Probe-confirmed against SQL Server 2025:
+        // CHARINDEX(N'X', N'😀X') = 3 under non-SC (surrogate pair occupies
+        // positions 1-2) and = 2 under _SC_UTF8 (emoji = position 1). The
+        // start argument is in the same unit as the result.
+        var isSc = h.Type.Collation?.IsSupplementaryCharacterAware == true;
+        var startUnits = 0;
         if (start is not null)
         {
             var startValue = start.Run(runtime);
             if (startValue.IsNull)
                 return SqlValue.Null(SqlType.Int32);
-            startIndex = Math.Max(0, startValue.CoerceTo(SqlType.Int32).AsInt32 - 1);
+            startUnits = Math.Max(0, startValue.CoerceTo(SqlType.Int32).AsInt32 - 1);
         }
-
-        var needleStr = n.AsString;
-        var haystackStr = h.AsString;
-        if (startIndex >= haystackStr.Length)
+        var startCu = isSc
+            ? SupplementaryCharacters.CodepointToCodeUnit(haystackStr, startUnits)
+            : startUnits;
+        if (startCu >= haystackStr.Length)
             return SqlValue.FromInt32(0);
 
-        var found = haystackStr.IndexOf(needleStr, startIndex, StringComparison.InvariantCultureIgnoreCase);
-        return SqlValue.FromInt32(found < 0 ? 0 : found + 1);
+        var foundCu = haystackStr.IndexOf(needleStr, startCu, StringComparison.InvariantCultureIgnoreCase);
+        return SqlValue.FromInt32(foundCu < 0
+            ? 0
+            : isSc
+                ? SupplementaryCharacters.CodeUnitToCodepoint(haystackStr, foundCu) + 1
+                : foundCu + 1);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

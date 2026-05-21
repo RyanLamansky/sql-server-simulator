@@ -148,6 +148,26 @@ This aligns with the [Unicode specification](https://www.unicode.org/versions/la
 
 The pre-2005 `_BIN` (not `_BIN2`) variant has a different, real quirk: at position 0 it's code-unit (same as BIN2), but at position 1+ it switches to code-point. Probe-confirmed via `'Z'+emoji > 'Z'+nchar(0xE000)` returning TRUE under BIN and FALSE under BIN2. **The simulator models this**: `Latin1_General_BIN.Compare` (the nvarchar body) overrides `BinaryCollation.Compare` to walk the strings with the asymmetric rule — first 16-bit unit raw, then surrogate-pair-combining scalar compare. `Equals` / `GetHashCode` stay on `Ordinal` because equality of code-unit sequences implies equality of scalar sequences regardless of which rule walked them.
 
+## `_SC_` function-semantics dispatch
+
+`Collation.IsSupplementaryCharacterAware` (virtual, default `false`; overridden `true` on `Latin1_General_100_CI_AS_SC_UTF8` and `Latin1_General_100_CS_AS_SC_UTF8`) drives eight scalar functions to switch between UTF-16 code-unit semantics (non-`_SC_`) and Unicode-codepoint semantics (`_SC_`). Each function reads the dispatch flag off its input value's `SqlType.Collation`, so a postfix `COLLATE …_SC_UTF8` flips the semantic per-call. Probe-confirmed against SQL Server 2025 (2026-05-21).
+
+| Function | Non-`_SC_` (code units) | `_SC_` (codepoints) |
+|---|---|---|
+| `LEN(N'😀')` | 2 | 1 |
+| `SUBSTRING(N'😀X', 1, 1)` | lone high surrogate (`0xD83D`) | full emoji (`0xD83D 0xDE00`) |
+| `LEFT(N'😀X', 1)` | lone high surrogate | full emoji |
+| `RIGHT(N'X😀', 1)` | lone low surrogate (`0xDE00`) | full emoji |
+| `CHARINDEX(N'X', N'😀X')` | 3 | 2 |
+| `PATINDEX(N'%X%', N'😀X')` | 3 | 2 |
+| `REVERSE(N'😀X')` | `X` + low surrogate + high surrogate (split pair) | `X` + full emoji (intact pair) |
+| `UNICODE(N'😀')` | 55357 (high surrogate value) | 128512 (U+1F600 codepoint) |
+| `STUFF(N'😀X', 1, 1, N'Y')` | `Y` + lone low surrogate + `X` (replaces 1 code unit) | `Y` + `X` (replaces full codepoint) |
+
+`SupplementaryCharacters` (in `Parser/Expressions/`) holds the rune-walking helpers (`CodepointCount`, `CodepointToCodeUnit`, `CodeUnitToCodepoint`, `LeftByCodepoints`, `RightByCodepoints`, `ReverseByCodepoints`, `ReverseByCodeUnits`, `LeadingCodepoint`). The non-`_SC_` path stays on .NET's native code-unit operations (`string.Length`, `Substring`, `IndexOf`, etc.), which already match real SQL Server's non-`_SC_` semantics.
+
+**Lone-surrogate preservation:** the nvarchar / nchar / sysname / ntext row encoders now byte-copy UTF-16 LE directly (`SystemNameSqlType.Utf16LeEncode` / `Utf16LeDecode` via `MemoryMarshal.AsBytes`) instead of routing through `Encoding.Unicode.GetBytes`, which silently rewrites lone surrogates to `U+FFFD` via its `EncoderReplacementFallback`. Real SQL Server preserves lone surrogates end-to-end (probe-confirmed: `SUBSTRING(N'😀X', 1, 1)` on a non-`_SC_` column round-trips through `sys.columns` storage with the lone high surrogate intact); the byte-copy path keeps the simulator's fidelity bar.
+
 ## KS / WS suffix dispatch
 
 `Latin1_General_CI_AS_KS_WS` is currently the only `_KS_WS`-marked collation in the recognized catalog. Real SQL Server's `_KS_` (kanatype-sensitive) and `_WS_` (width-sensitive) suffixes flip the corresponding `IgnoreKanaType` / `IgnoreWidth` flags OFF. Without them (e.g. plain `_CI_AS`), the trio { full-width katakana ア U+30A2, hiragana あ U+3042, half-width katakana ｱ U+FF71 } folds together under equality and DISTINCT. With `_KS_WS` they distinguish.
@@ -160,10 +180,7 @@ The pre-2005 `_BIN` (not `_BIN2`) variant has a different, real quirk: at positi
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.** Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default. Low impact (text/ntext deprecated since SQL Server 2005).
 - **Sysname's collation is always `Collation.Default`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
 - **`CAST(expr AS varchar(N)) COLLATE …UTF8` doesn't re-truncate under the postfix collation.** The CAST runs against the local default (CP1252, single-byte), so a 3-char input into `varchar(2)` truncates to 2 chars; the postfix COLLATE then rewraps as `varchar(2)` UTF-8 with that 2-char .NET string, which under UTF-8 may be more than 2 bytes. Probe-confirmed against SQL Server 2025: real SQL Server effectively applies the postfix collation's byte budget at CAST time — `CAST(N'AéB' AS varchar(2)) COLLATE Latin1_General_100_CI_AS_SC_UTF8` returns `'A'` (1 byte), the simulator returns `'Aé'` (3 bytes). The fixed-length sibling `CAST(... AS char(N))` doesn't have this gap because `CollateExpression.Run` re-normalizes char(N) values through `FromString` when the storage encoding changes (the char(N) destination buffer is fixed at N bytes, so the regression would manifest as an encoder overflow; varchar sizes dynamically and only the truncation cutoff disagrees). Workaround: pin the UTF-8 collation directly on the CAST target via the column's declared collation, rather than as a postfix on a CAST output.
-- **`_SC_` (supplementary-character-aware) semantics aren't modeled.** Probe showed three observable effects on SQL Server 2025 the simulator doesn't replicate:
-  - `LEN(N'😀')` returns 2 under non-`_SC_` collations, 1 under `_SC_`. The simulator always returns code-unit count (2 in this case).
-  - `SUBSTRING(N'😀X', 1, 1)` returns a lone high surrogate under non-`_SC_`, the full emoji under `_SC_`. The simulator's SUBSTRING is code-unit-based — non-`_SC_` semantics, no `_SC_` path.
-  - ORDER BY on supplementary chars: non-`_SC_` `SQL_Latin1_General_CP1_CI_AS` sorts `Z+emoji` BEFORE `Z+U+E000` (code-unit at position 1+); `_SC_` flips this to `Z+U+E000` BEFORE `Z+emoji` (codepoint at supplementary positions). The simulator's CompareInfo-routed body doesn't model the `_SC_` codepoint-aware path. Fixing all three requires collation-aware LEN / SUBSTRING / Compare; deferred.
+- **Pre-v100 collation sort divergence on supplementary chars at position 1+.** Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` (the default) and `Latin1_General_CI_AS` (pre-v100) sort `Z+emoji` BEFORE `Z+U+E000` — code-unit order (high surrogate D83D < E000). The v100 family (`Latin1_General_100_CI_AS` and its SC sibling) sort the other way (codepoint U+1F600 > U+E000 → `Z+E000` first). The simulator routes both pre-v100 and v100 through `CompareInfo`, which always does codepoint compare — so both ranges of collations behave like v100 in the simulator. Narrow gap (only supplementary chars at non-position-0); fixing requires per-collation Compare bodies that drop to code-unit ordinal at supplementary positions.
 - **Most `_SC_` and locale variants aren't in the recognized catalog.** `sys.fn_helpcollations()` lists 3008 `_SC_` collations on SQL Server 2025; the simulator recognizes 3 of them (`Latin1_General_100_CI_AS_SC_UTF8`, `_CS_AS_SC_UTF8`, `_BIN2_UTF8`). The non-`_UTF8` `_SC_` variants (e.g. plain `Latin1_General_100_CI_AS_SC`) and the locale `_SC_` variants (e.g. `Japanese_XJIS_140_CI_AS_SC`) aren't recognized. Adding entries is mechanical (one line per name in `Recognized` + `ByName`), and behavior body falls back to the closest non-`_SC_` sibling. Currently surfaces as `NotSupportedException` in direct SQL or a `BacpacImportResult.Warnings` entry on import — graceful degradation per the existing pattern.
 
 ## Cross-references

@@ -4,8 +4,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>REVERSE(x)</c>: returns the source with its characters in reverse
-/// order. Surrogate pairs are reversed as a unit (their high/low order is
-/// preserved) so emoji and supplementary-plane characters don't get torn.
+/// order. Reverses by code unit under non-<c>_SC_</c> collations (surrogate
+/// pairs are split — the high/low halves swap positions) and by codepoint
+/// under <c>_SC_</c> collations (surrogate pairs stay intact). Probe-
+/// confirmed against SQL Server 2025: <c>REVERSE(N'😀X')</c> on a non-SC
+/// collation returns <c>X</c> followed by the swapped surrogate bytes,
+/// matching <c>0x580000DE3DD8</c>; the same call on
+/// <c>Latin1_General_100_CI_AS_SC_UTF8</c> returns <c>X</c> followed by an
+/// intact emoji (<c>0x58003DD800DE</c>).
 /// </summary>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/reverse-transact-sql</remarks>
 internal sealed class Reverse(ParserContext context) : Expression
@@ -21,27 +27,10 @@ internal sealed class Reverse(ParserContext context) : Expression
             throw new NotSupportedException($"REVERSE expects a string operand; got {value.Type}.");
 
         var input = value.AsString;
-        var reversed = new char[input.Length];
-        var sourceIndex = 0;
-        var destIndex = input.Length;
-        while (sourceIndex < input.Length)
-        {
-            var c = input[sourceIndex];
-            if (char.IsHighSurrogate(c) && sourceIndex + 1 < input.Length && char.IsLowSurrogate(input[sourceIndex + 1]))
-            {
-                destIndex -= 2;
-                reversed[destIndex] = c;
-                reversed[destIndex + 1] = input[sourceIndex + 1];
-                sourceIndex += 2;
-            }
-            else
-            {
-                destIndex--;
-                reversed[destIndex] = c;
-                sourceIndex++;
-            }
-        }
-        return SqlValue.FromString(value.Type, new string(reversed));
+        var reversed = value.Type.Collation?.IsSupplementaryCharacterAware == true
+            ? SupplementaryCharacters.ReverseByCodepoints(input)
+            : SupplementaryCharacters.ReverseByCodeUnits(input);
+        return SqlValue.FromString(value.Type, reversed);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);

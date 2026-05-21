@@ -979,5 +979,67 @@ public sealed class CollationDeclaredColumnTests
         AreEqual(expectedHex, actualHex);
     }
 
+    /// <summary>
+    /// Scalar functions switch indexing semantics on the input value's
+    /// collation: code-unit semantics under non-<c>_SC_</c>, codepoint
+    /// semantics under <c>_SC_</c>. All eight affected functions
+    /// probe-confirmed against SQL Server 2025 (2026-05-21) using a single
+    /// supplementary character (😀 = U+1F600) as the test fixture.
+    /// </summary>
+    [TestMethod]
+    [DataRow("len(N'😀' collate Latin1_General_100_CI_AS)", "2", DisplayName = "LEN non-SC = 2 code units")]
+    [DataRow("len(N'😀' collate Latin1_General_100_CI_AS_SC_UTF8)", "1", DisplayName = "LEN SC = 1 codepoint")]
+    [DataRow("len(N'a😀b' collate Latin1_General_100_CI_AS)", "4", DisplayName = "LEN non-SC a😀b = 4")]
+    [DataRow("len(N'a😀b' collate Latin1_General_100_CI_AS_SC_UTF8)", "3", DisplayName = "LEN SC a😀b = 3")]
+    [DataRow("charindex(N'X', N'😀X' collate Latin1_General_100_CI_AS)", "3", DisplayName = "CHARINDEX non-SC = position 3")]
+    [DataRow("charindex(N'X', N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8)", "2", DisplayName = "CHARINDEX SC = position 2")]
+    [DataRow("patindex(N'%X%', N'😀X' collate Latin1_General_100_CI_AS)", "3", DisplayName = "PATINDEX non-SC = 3")]
+    [DataRow("patindex(N'%X%', N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8)", "2", DisplayName = "PATINDEX SC = 2")]
+    [DataRow("unicode(N'😀' collate Latin1_General_100_CI_AS)", "55357", DisplayName = "UNICODE non-SC = 55357 high surrogate")]
+    [DataRow("unicode(N'😀' collate Latin1_General_100_CI_AS_SC_UTF8)", "128512", DisplayName = "UNICODE SC = 128512 codepoint")]
+    public void SupplementaryCharFunctions_PositionAndLengthDispatch(string expression, string expectedScalar)
+        => AreEqual(int.Parse(expectedScalar), new Simulation().ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// SUBSTRING / LEFT / RIGHT / REVERSE / STUFF return string results
+    /// whose UTF-16 byte content differs between SC and non-SC. Compares
+    /// the .NET string char-by-char to the expected UTF-16 LE byte hex —
+    /// lone surrogates that real SQL Server preserves under non-SC are
+    /// also preserved by the simulator (the nvarchar Encode/Decode path
+    /// byte-copies directly, bypassing <c>Encoding.Unicode</c>'s lone-
+    /// surrogate replacement).
+    /// </summary>
+    [TestMethod]
+    [DataRow("substring(N'😀X' collate Latin1_General_100_CI_AS, 1, 1)", "3DD8", DisplayName = "SUBSTRING non-SC pos 1 len 1 = lone high surrogate")]
+    [DataRow("substring(N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8, 1, 1)", "3DD800DE", DisplayName = "SUBSTRING SC pos 1 len 1 = full emoji")]
+    [DataRow("substring(N'😀X' collate Latin1_General_100_CI_AS, 2, 1)", "00DE", DisplayName = "SUBSTRING non-SC pos 2 len 1 = lone low surrogate")]
+    [DataRow("substring(N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8, 2, 1)", "5800", DisplayName = "SUBSTRING SC pos 2 len 1 = X")]
+    [DataRow("left(N'😀X' collate Latin1_General_100_CI_AS, 1)", "3DD8", DisplayName = "LEFT non-SC")]
+    [DataRow("left(N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8, 1)", "3DD800DE", DisplayName = "LEFT SC")]
+    [DataRow("right(N'X😀' collate Latin1_General_100_CI_AS, 1)", "00DE", DisplayName = "RIGHT non-SC")]
+    [DataRow("right(N'X😀' collate Latin1_General_100_CI_AS_SC_UTF8, 1)", "3DD800DE", DisplayName = "RIGHT SC")]
+    [DataRow("reverse(N'😀X' collate Latin1_General_100_CI_AS)", "580000DE3DD8", DisplayName = "REVERSE non-SC tears surrogate pair")]
+    [DataRow("reverse(N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8)", "58003DD800DE", DisplayName = "REVERSE SC keeps emoji intact")]
+    [DataRow("stuff(N'😀X' collate Latin1_General_100_CI_AS, 1, 1, N'Y')", "590000DE5800", DisplayName = "STUFF non-SC replaces 1 code unit (high surrogate)")]
+    [DataRow("stuff(N'😀X' collate Latin1_General_100_CI_AS_SC_UTF8, 1, 1, N'Y')", "59005800", DisplayName = "STUFF SC replaces 1 codepoint (whole emoji)")]
+    public void SupplementaryCharFunctions_ResultByteContent(string expression, string expectedHex)
+    {
+        var result = (string)new Simulation().ExecuteScalar($"select {expression}")!;
+        var actualHex = AsUtf16LeHex(result);
+        AreEqual(expectedHex, actualHex);
+    }
+
+    /// <summary>Renders a .NET string as UTF-16 LE byte hex, preserving lone surrogates.</summary>
+    private static string AsUtf16LeHex(string s)
+    {
+        var bytes = new byte[s.Length * 2];
+        for (var i = 0; i < s.Length; i++)
+        {
+            bytes[i * 2] = (byte)(s[i] & 0xFF);
+            bytes[(i * 2) + 1] = (byte)((s[i] >> 8) & 0xFF);
+        }
+        return Convert.ToHexString(bytes);
+    }
+
     private static void IsNull(object? value) => Microsoft.VisualStudio.TestTools.UnitTesting.Assert.IsNull(value is DBNull ? null : value);
 }

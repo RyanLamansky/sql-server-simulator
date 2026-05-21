@@ -3,17 +3,18 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
-/// SQL <c>UNICODE(ncharacter_expression)</c>: returns the UTF-16 code-unit
-/// value of the first character of the input. Mirror of <see cref="Ascii"/>
-/// in input-handling shape; the only divergence is the byte vs code-unit
-/// extraction step.
+/// SQL <c>UNICODE(ncharacter_expression)</c>: returns the first character's
+/// 16-bit code-unit value under non-<c>_SC_</c> collations and the full
+/// Unicode codepoint (combining a leading surrogate pair into its 32-bit
+/// scalar) under <c>_SC_</c> collations. Mirror of <see cref="Ascii"/> in
+/// input-handling shape; the only divergence is the unit of extraction.
 /// </summary>
 /// <remarks>
-/// Probe-confirmed against SQL Server 2025 (2026-05-14):
+/// Probe-confirmed against SQL Server 2025 (2026-05-21):
 /// <list type="bullet">
 /// <item>NULL → NULL; empty string → NULL.</item>
 /// <item>Non-string inputs implicitly stringify, so <c>UNICODE(65)</c> returns 54 (<c>'6'</c>) not 65.</item>
-/// <item>Supplementary code points (above U+FFFF, e.g. <c>N'😀'</c>) under the default non-SC collation return the high surrogate value (55357 for 😀), not the full Unicode code point — matches the simulator's "default collation only" stance documented in CLAUDE.md. An SC-collation-aware variant returning 128512 would need explicit collation modeling.</item>
+/// <item><c>UNICODE(N'😀')</c> returns 55357 (the high surrogate, U+D83D) under non-SC collations and 128512 (U+1F600, the full codepoint) under <c>_SC_</c>.</item>
 /// </list>
 /// </remarks>
 internal sealed class UnicodeCodepoint(ParserContext context) : Expression
@@ -26,7 +27,11 @@ internal sealed class UnicodeCodepoint(ParserContext context) : Expression
         if (v.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var s = SqlType.IsStringCategory(v.Type) ? v.AsString : v.CoerceTo(SqlType.Varchar).AsString;
-        return s.Length == 0 ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(s[0]);
+        return s.Length == 0
+            ? SqlValue.Null(SqlType.Int32)
+            : SqlValue.FromInt32(v.Type.Collation?.IsSupplementaryCharacterAware == true
+                ? SupplementaryCharacters.LeadingCodepoint(s)
+                : s[0]);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

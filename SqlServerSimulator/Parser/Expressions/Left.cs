@@ -34,7 +34,10 @@ internal sealed class Left : Expression
             throw SimulatedSqlException.NegativeLengthNotAllowed("LEFT");
 
         var input = s.AsString;
-        return SqlValue.FromString(s.Type, len >= input.Length ? input : input[..len]);
+        var result = s.Type.Collation?.IsSupplementaryCharacterAware == true
+            ? SupplementaryCharacters.LeftByCodepoints(input, len)
+            : len >= input.Length ? input : input[..len];
+        return SqlValue.FromString(s.Type, result);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);

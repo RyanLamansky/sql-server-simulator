@@ -8,9 +8,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// SQL Server's quirk: <c>LEN</c> ignores trailing spaces but not leading
-/// spaces. The simulator measures characters in <see cref="string.Length"/>
-/// terms (UCS-2 code units for nvarchar; bytes-equal-chars for varchar in
-/// CP1252), matching SQL Server.
+/// spaces. The simulator measures by code unit (<see cref="string.Length"/>)
+/// under non-SC collations and by Unicode codepoint (rune count) under
+/// <c>_SC_</c>-flagged collations — probe-confirmed against SQL Server
+/// 2025: <c>LEN(N'😀')</c> = 2 under default / <c>Latin1_General_100_CI_AS</c>
+/// (code units, surrogate pair counts as 2) and = 1 under
+/// <c>Latin1_General_100_CI_AS_SC_UTF8</c> (the supplementary codepoint
+/// counts as 1).
 /// Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/len-transact-sql
 /// </remarks>
 internal sealed class Length(ParserContext context) : Expression
@@ -28,7 +32,10 @@ internal sealed class Length(ParserContext context) : Expression
         if (!SqlType.IsStringCategory(value.Type))
             throw new NotSupportedException($"LEN expects a string operand; got {value.Type}.");
         var trimmed = value.AsString.TrimEnd(' ');
-        return SqlValue.FromInt32(trimmed.Length);
+        var length = value.Type.Collation?.IsSupplementaryCharacterAware == true
+            ? SupplementaryCharacters.CodepointCount(trimmed)
+            : trimmed.Length;
+        return SqlValue.FromInt32(length);
     }
 
     public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

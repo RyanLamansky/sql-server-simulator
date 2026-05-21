@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace SqlServerSimulator.Storage;
@@ -109,11 +110,11 @@ internal sealed class NVarcharSqlType : SqlType
 
     public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
 
-    public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
+    public override int GetVariableByteCount(SqlValue value) => value.AsString.Length * 2;
 
-    public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination) => SystemNameSqlType.Utf16LeEncode(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNVarchar(this, Encoding.Unicode.GetString(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNVarchar(this, SystemNameSqlType.Utf16LeDecode(source));
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw);
 
@@ -159,13 +160,34 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
-    public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
+    public override int GetVariableByteCount(SqlValue value) => value.AsString.Length * 2;
 
-    public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination) => Utf16LeEncode(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromSystemName(Encoding.Unicode.GetString(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromSystemName(Utf16LeDecode(source));
 
     public override string ToString() => "sysname";
+
+    /// <summary>
+    /// Direct UTF-16 LE byte-copy of a .NET string, bypassing
+    /// <see cref="Encoding.Unicode"/>'s <see cref="EncoderReplacementFallback"/>
+    /// — which silently rewrites lone surrogates to <c>U+FFFD</c>. Real
+    /// SQL Server preserves lone surrogates end-to-end (probe-confirmed:
+    /// <c>SUBSTRING(N'😀X', 1, 1)</c> on a non-<c>_SC_</c> column returns
+    /// the lone high surrogate, not <c>U+FFFD</c>); the simulator's
+    /// nvarchar / nchar / sysname / ntext encoders all reuse this helper
+    /// so the same fidelity applies to every UTF-16 storage path.
+    /// </summary>
+    internal static int Utf16LeEncode(string value, Span<byte> destination)
+    {
+        var src = MemoryMarshal.AsBytes(value.AsSpan());
+        src.CopyTo(destination);
+        return src.Length;
+    }
+
+    /// <summary>Inverse of <see cref="Utf16LeEncode"/>: reinterprets the byte span as <c>char</c>s without surrogate validation.</summary>
+    internal static string Utf16LeDecode(ReadOnlySpan<byte> source) =>
+        new(MemoryMarshal.Cast<byte, char>(source));
 }
 
 /// <summary>
@@ -269,11 +291,11 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
-    public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
+    public override int GetVariableByteCount(SqlValue value) => value.AsString.Length * 2;
 
-    public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination) => SystemNameSqlType.Utf16LeEncode(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNText(Encoding.Unicode.GetString(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNText(SystemNameSqlType.Utf16LeDecode(source));
 
     public override string ToString() => "ntext";
 }
@@ -410,9 +432,9 @@ internal sealed class NCharSqlType : SqlType
 
     public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
 
-    public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination) => SystemNameSqlType.Utf16LeEncode(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNChar(this, Encoding.Unicode.GetString(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNChar(this, SystemNameSqlType.Utf16LeDecode(source));
 
     public override string ToString() => $"nchar({this.length})";
 

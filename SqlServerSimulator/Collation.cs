@@ -283,14 +283,14 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// <c>collations.md</c>.</summary>
     internal static readonly CultureCollation Latin1General100CiAsScUtf8 = new(
         "Latin1_General_100_CI_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: false,
-        storageEncoding: Encoding.UTF8);
+        storageEncoding: Encoding.UTF8, isSupplementaryCharacterAware: true);
 
     /// <summary>"Latin1_General_100_CS_AS_SC_UTF8" — case-sensitive UTF-8
     /// variant. Sort / compare matches <see cref="Latin1GeneralCsAs"/>;
     /// <c>StorageEncoding</c> is UTF-8.</summary>
     internal static readonly CultureCollation Latin1General100CsAsScUtf8 = new(
         "Latin1_General_100_CS_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: true,
-        storageEncoding: Encoding.UTF8);
+        storageEncoding: Encoding.UTF8, isSupplementaryCharacterAware: true);
 
     /// <summary>"Latin1_General_100_BIN2_UTF8" — binary UTF-8 variant.
     /// On nvarchar / nchar storage the comparer body is
@@ -472,6 +472,25 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// matches the UTF-16 code-unit-order body).
     /// </summary>
     internal virtual Collation ForVarcharStorage() => this;
+
+    /// <summary>
+    /// True for collations whose name carries the <c>_SC_</c>
+    /// (supplementary-character-aware) flag. Real SQL Server's text functions
+    /// — <c>LEN</c>, <c>SUBSTRING</c>, <c>LEFT</c>, <c>RIGHT</c>,
+    /// <c>CHARINDEX</c>, <c>PATINDEX</c>, <c>STUFF</c>, <c>REVERSE</c>,
+    /// <c>UNICODE</c> — switch from UTF-16 code-unit semantics (non-SC) to
+    /// Unicode-codepoint semantics (SC) based on the input value's collation:
+    /// <c>LEN(N'😀')</c> returns 2 (code units) under non-SC and 1 (codepoint)
+    /// under SC; <c>SUBSTRING(N'😀X', 1, 1)</c> returns a lone high surrogate
+    /// under non-SC and the full emoji under SC. The simulator's default is
+    /// <see langword="false"/> (code-unit semantics, matching non-SC); the
+    /// two recognized <c>_SC_UTF8</c> collations override to
+    /// <see langword="true"/>. Sort behavior is governed separately by the
+    /// individual collations' <see cref="Compare"/> bodies — see the "Known
+    /// gaps" entry in <c>collations.md</c> for the residual non-<c>_SC_</c>
+    /// sort divergence on pre-v100 collations.
+    /// </summary>
+    internal virtual bool IsSupplementaryCharacterAware => false;
 
     /// <summary>
     /// The byte encoding the storage layer uses when this collation is
@@ -863,12 +882,15 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
         private readonly Encoding storageEncoding;
 
-        internal CultureCollation(string name, string cultureName, bool caseSensitive, bool kanaTypeSensitive = false, bool widthSensitive = false, Encoding? storageEncoding = null)
+        private readonly bool isSupplementaryCharacterAware;
+
+        internal CultureCollation(string name, string cultureName, bool caseSensitive, bool kanaTypeSensitive = false, bool widthSensitive = false, Encoding? storageEncoding = null, bool isSupplementaryCharacterAware = false)
         {
             this.name = name;
             this.caseSensitive = caseSensitive;
             this.compareInfo = CultureInfo.GetCultureInfo(cultureName).CompareInfo;
             this.storageEncoding = storageEncoding ?? CharSqlType.Cp1252Encoder;
+            this.isSupplementaryCharacterAware = isSupplementaryCharacterAware;
             var baseOpts = caseSensitive
                 ? CompareOptions.None
                 : CompareOptions.IgnoreCase;
@@ -890,6 +912,8 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
         public override bool CaseSensitive => this.caseSensitive;
 
         internal override Encoding StorageEncoding => this.storageEncoding;
+
+        internal override bool IsSupplementaryCharacterAware => this.isSupplementaryCharacterAware;
 
         public override int Compare(string? x, string? y) =>
             x is null
