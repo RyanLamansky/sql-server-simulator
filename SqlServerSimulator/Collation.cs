@@ -176,13 +176,20 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     internal static readonly CultureCollation TurkishCiAs = new("Turkish_CI_AS", "tr-TR", caseSensitive: false);
 
     /// <summary>
-    /// "Latin1_General_CI_AS_KS_WS" — a Latin1 variant with kana-type and
+    /// "Latin1_General_CI_AS_KS_WS" — Latin1 variant with kana-type and
     /// width <em>sensitive</em>. Used in real databases for some sysname
-    /// columns and a handful of user columns; included so BACPAC import
-    /// doesn't warn on its presence. Comparison routes through the
-    /// invariant culture with KS/WS enabled.
+    /// columns and a handful of user columns. Comparison routes through
+    /// the invariant culture with `IgnoreKanaType` / `IgnoreWidth` left
+    /// OFF, so full-width katakana / hiragana / half-width katakana of
+    /// the same logical character all compare distinct
+    /// (probe-confirmed against SQL Server 2025).
     /// </summary>
-    internal static readonly CultureCollation Latin1GeneralCiAsKsWs = new("Latin1_General_CI_AS_KS_WS", CultureInfo.InvariantCulture.Name, caseSensitive: false);
+    internal static readonly CultureCollation Latin1GeneralCiAsKsWs = new(
+        "Latin1_General_CI_AS_KS_WS",
+        CultureInfo.InvariantCulture.Name,
+        caseSensitive: false,
+        kanaTypeSensitive: true,
+        widthSensitive: true);
 
     /// <summary>
     /// "SQL_Latin1_General_CP437_CS_AS" — legacy CP437 code-page binding
@@ -751,7 +758,7 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
 
         private readonly CompareOptions sortOptions;
 
-        internal CultureCollation(string name, string cultureName, bool caseSensitive)
+        internal CultureCollation(string name, string cultureName, bool caseSensitive, bool kanaTypeSensitive = false, bool widthSensitive = false)
         {
             this.name = name;
             this.caseSensitive = caseSensitive;
@@ -759,9 +766,15 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             var baseOpts = caseSensitive
                 ? CompareOptions.None
                 : CompareOptions.IgnoreCase;
-            // CI_AS / CS_AS without KS / WS suffixes ignore kana type and
-            // width by default — matches SQL Server's "*_CI_AS" semantics.
-            baseOpts |= CompareOptions.IgnoreKanaType | CompareOptions.IgnoreWidth;
+            // The _KS_ / _WS_ suffixes flip kanatype / width to *sensitive*.
+            // Without them, SQL Server's "*_CI_AS" / "*_CS_AS" semantics ignore
+            // both — probe-confirmed against SQL Server 2025: under
+            // Latin1_General_CI_AS the full-width katakana ア (U+30A2),
+            // hiragana あ (U+3042), and half-width katakana ｱ (U+FF71) all
+            // compare equal; under Latin1_General_CI_AS_KS_WS the three
+            // distinguish.
+            if (!kanaTypeSensitive) baseOpts |= CompareOptions.IgnoreKanaType;
+            if (!widthSensitive) baseOpts |= CompareOptions.IgnoreWidth;
             this.equalityOptions = baseOpts;
             this.sortOptions = baseOpts | CompareOptions.IgnoreSymbols;
         }

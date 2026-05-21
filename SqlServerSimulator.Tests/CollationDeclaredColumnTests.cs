@@ -517,12 +517,7 @@ public sealed class CollationDeclaredColumnTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table t (s varchar(2) collate Latin1_General_BIN2);
-            insert t values
-                (cast(nchar(161) as varchar(2))),
-                (cast(nchar(8364) as varchar(2))),
-                (cast(nchar(402) as varchar(2))),
-                (cast(nchar(376) as varchar(2))),
-                (cast(nchar(160) as varchar(2)))
+            insert t values (nchar(161)), (nchar(8364)), (nchar(402)), (nchar(376)), (nchar(160))
             """);
         using var reader = sim.CreateCommand("select ascii(s) from t order by s").ExecuteReader();
         var rows = new List<int>();
@@ -605,10 +600,7 @@ public sealed class CollationDeclaredColumnTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table t (s varchar(2) collate Latin1_General_BIN);
-            insert t values
-                (cast(nchar(8364) as varchar(2))),
-                (cast(nchar(160) as varchar(2))),
-                (cast(nchar(402) as varchar(2)))
+            insert t values (nchar(8364)), (nchar(160)), (nchar(402))
             """);
         using var reader = sim.CreateCommand("select ascii(s) from t order by s").ExecuteReader();
         var rows = new List<int>();
@@ -629,10 +621,7 @@ public sealed class CollationDeclaredColumnTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table t (s varchar(2) collate Latin1_General_BIN2);
-            insert t values
-                (cast(nchar(8364) as varchar(2))),
-                (cast(nchar(8364) as varchar(2))),
-                (cast(nchar(402) as varchar(2)))
+            insert t values (N'€'), (N'€'), (N'ƒ')
             """);
         AreEqual(2, sim.ExecuteScalar("select count(*) from (select distinct s from t) d"));
     }
@@ -648,10 +637,7 @@ public sealed class CollationDeclaredColumnTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table t (s char(2) collate Latin1_General_BIN2);
-            insert t values
-                (cast(nchar(8364) as char(2))),
-                (cast(nchar(160) as char(2))),
-                (cast(nchar(402) as char(2)))
+            insert t values (nchar(8364)), (nchar(160)), (nchar(402))
             """);
         using var reader = sim.CreateCommand("select ascii(s) from t order by s").ExecuteReader();
         var rows = new List<int>();
@@ -711,6 +697,50 @@ public sealed class CollationDeclaredColumnTests
             ids.Add(reader.GetInt32(0));
         // 'Z'+emoji (id=1) sorts first under code-unit; 'Z'+U+E000 (id=2) second.
         CollectionAssert.AreEqual(new[] { 1, 2 }, ids);
+    }
+
+    /// <summary>
+    /// <c>Latin1_General_CI_AS_KS_WS</c> with <em>KS</em> (kanatype-
+    /// sensitive) and <em>WS</em> (width-sensitive) flips active: the
+    /// full-width katakana ア, hiragana あ, and half-width katakana ｱ
+    /// all compare distinct. Under plain CI_AS (no KS/WS) the same trio
+    /// folds together. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void Equality_Latin1KsWs_DistinguishesKanaTypeAndWidth()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s nvarchar(2) collate Latin1_General_CI_AS_KS_WS);
+            insert t values (N'ア'), (N'あ'), (N'ｱ')
+            """);
+        // Each value is distinct under KS+WS — DISTINCT preserves all three.
+        AreEqual(3, sim.ExecuteScalar("select count(*) from (select distinct s from t) d"));
+        // Equality also distinguishes: each value only matches itself.
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t where s = N'ア'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t where s = N'あ'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t where s = N'ｱ'"));
+    }
+
+    /// <summary>
+    /// Contrast to <see cref="Equality_Latin1KsWs_DistinguishesKanaTypeAndWidth"/>:
+    /// under a plain CI_AS collation (no KS/WS), the same kana trio
+    /// folds together — kanatype-insensitive + width-insensitive are
+    /// the SQL Server defaults for "*_CI_AS" / "*_CS_AS" variants
+    /// without explicit KS/WS markers.
+    /// </summary>
+    [TestMethod]
+    public void Equality_PlainCiAs_FoldsKanaTypeAndWidth()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (s nvarchar(2) collate Latin1_General_100_CI_AS);
+            insert t values (N'ア'), (N'あ'), (N'ｱ')
+            """);
+        // All three fold together — DISTINCT collapses to one bucket.
+        AreEqual(1, sim.ExecuteScalar("select count(*) from (select distinct s from t) d"));
+        // Equality picks up all three regardless of which kana variant is on the right side.
+        AreEqual(3, sim.ExecuteScalar("select count(*) from t where s = N'ア'"));
     }
 
     private static void IsNull(object? value) => Microsoft.VisualStudio.TestTools.UnitTesting.Assert.IsNull(value is DBNull ? null : value);
