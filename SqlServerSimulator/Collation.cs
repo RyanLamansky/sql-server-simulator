@@ -125,15 +125,24 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// Comparison routes through .NET's <c>ja-JP</c> <see cref="CompareInfo"/>
     /// with the simulator's standard CI/AS options (case-insensitive,
     /// accent-sensitive, kana-type-insensitive, width-insensitive).
-    /// Probe-confirmed presence in real-database column-collation profiles;
-    /// per-name sort-order parity with real SQL Server is not yet probed.
+    /// Equality + kana-type / width folding match SQL Server end-to-end;
+    /// the secondary sort tiebreaker inside the hiragana / full-width
+    /// katakana / half-width katakana equivalence classes diverges
+    /// (probe-confirmed against SQL Server 2025: ~half the positions
+    /// reorder on nvarchar; varchar essentially unusable since CP1252
+    /// can't represent Japanese where real SQL Server uses CP932). See
+    /// <c>docs/claude/collations.md</c> "Locale-comparer sort-parity gap".
     /// </summary>
     internal static readonly CultureCollation JapaneseXJIS140CiAs = new("Japanese_XJIS_140_CI_AS", "ja-JP", caseSensitive: false);
 
     /// <summary>
     /// "Chinese_PRC_CI_AS" — Simplified Chinese (pinyin sort) via .NET's
-    /// <c>zh-CN</c> <see cref="CompareInfo"/>. Per-name sort-order parity
-    /// with real SQL Server is not yet probed.
+    /// <c>zh-CN</c> <see cref="CompareInfo"/>. Internal pinyin ordering
+    /// mostly aligns with SQL Server 2025; the .NET vs SQL Server
+    /// convention for Latin-vs-CJK block position is reversed (.NET puts
+    /// CJK before Latin, SQL Server puts Latin before CJK), so any
+    /// mixed-script ORDER BY will shift every position. See
+    /// <c>docs/claude/collations.md</c> "Locale-comparer sort-parity gap".
     /// </summary>
     internal static readonly CultureCollation ChinesePrcCiAs = new("Chinese_PRC_CI_AS", "zh-CN", caseSensitive: false);
 
@@ -141,8 +150,10 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// "Turkish_CI_AS" — Turkish collation via .NET's <c>tr-TR</c>
     /// <see cref="CompareInfo"/>. Notably handles the i / İ / ı / I
     /// folding that catches non-Turkish-aware code (the "Turkish-i
-    /// problem"). Per-name sort-order parity with real SQL Server is not
-    /// yet probed.
+    /// problem"). Equality / case-folding match SQL Server end-to-end on
+    /// nvarchar; tiebreaker within case-equivalence classes (e.g. `çay`
+    /// vs `Çay`) differs (~2 / 19 position drift on probed inputs). See
+    /// <c>docs/claude/collations.md</c> "Locale-comparer sort-parity gap".
     /// </summary>
     internal static readonly CultureCollation TurkishCiAs = new("Turkish_CI_AS", "tr-TR", caseSensitive: false);
 
@@ -180,6 +191,104 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
         public override string Name => "UNICODE_CODEPOINT";
     }
 
+    /// <summary>"Korean_100_CI_AS" — Korean (Hangul) v100 sort via .NET's
+    /// <c>ko-KR</c> <see cref="CompareInfo"/>. Same sort-tiebreaker
+    /// divergence caveat as the other locale collations
+    /// (see <c>docs/claude/collations.md</c>).</summary>
+    internal static readonly CultureCollation Korean100CiAs = new("Korean_100_CI_AS", "ko-KR", caseSensitive: false);
+
+    /// <summary>"Korean_Wansung_CI_AS" — legacy Korean Wansung code-page
+    /// binding. Behavior body identical to <see cref="Korean100CiAs"/> at
+    /// the simulator's value layer; the Wansung-vs-v100 distinction is a
+    /// non-Unicode codepage detail that the simulator's UTF-16 storage
+    /// doesn't materialize.</summary>
+    internal static readonly CultureCollation KoreanWansungCiAs = new("Korean_Wansung_CI_AS", "ko-KR", caseSensitive: false);
+
+    /// <summary>"Greek_CI_AS" — Greek collation via .NET's <c>el-GR</c>
+    /// <see cref="CompareInfo"/>. Tonos / dialytika fold under accent-
+    /// sensitive rules; final-sigma (ς) vs medial-sigma (σ) treated as
+    /// case-insensitive peers (matches real SQL Server).</summary>
+    internal static readonly CultureCollation GreekCiAs = new("Greek_CI_AS", "el-GR", caseSensitive: false);
+
+    /// <summary>"Greek_100_CI_AS" — v100 Greek collation. Same culture as
+    /// <see cref="GreekCiAs"/>; the v100 update touches Unicode-table
+    /// ordering for supplementary characters not relevant to most Greek
+    /// text.</summary>
+    internal static readonly CultureCollation Greek100CiAs = new("Greek_100_CI_AS", "el-GR", caseSensitive: false);
+
+    /// <summary>"Cyrillic_General_CI_AS" — pan-Cyrillic collation routed
+    /// through .NET's <c>ru-RU</c> <see cref="CompareInfo"/>. Covers
+    /// Russian, Ukrainian, Bulgarian, Serbian, etc. at the same fidelity
+    /// bar as the other locale collations — equality / case folding align;
+    /// secondary sort tiebreakers may differ.</summary>
+    internal static readonly CultureCollation CyrillicGeneralCiAs = new("Cyrillic_General_CI_AS", "ru-RU", caseSensitive: false);
+
+    /// <summary>"Cyrillic_General_100_CI_AS" — v100 Cyrillic. Same culture
+    /// as <see cref="CyrillicGeneralCiAs"/>.</summary>
+    internal static readonly CultureCollation CyrillicGeneral100CiAs = new("Cyrillic_General_100_CI_AS", "ru-RU", caseSensitive: false);
+
+    /// <summary>"German_PhoneBook_CI_AS" — German with phonebook sort
+    /// (ä → ae, ö → oe, ü → ue, ß → ss equivalence at sort time). The
+    /// simulator routes through .NET's <c>de-DE</c> default ordering
+    /// (umlaut-as-letter, not phonebook). Recognized for BACPAC quiet-
+    /// loading; sort order for the umlauted letters diverges from real
+    /// SQL Server. Apps that rely on phonebook ordering hit the broader
+    /// locale-comparer sort-parity gap documented in collations.md.</summary>
+    internal static readonly CultureCollation GermanPhoneBookCiAs = new("German_PhoneBook_CI_AS", "de-DE", caseSensitive: false);
+
+    /// <summary>"German_PhoneBook_100_CI_AS" — v100 German phonebook.
+    /// Same routing as <see cref="GermanPhoneBookCiAs"/>; same phonebook
+    /// divergence applies.</summary>
+    internal static readonly CultureCollation GermanPhoneBook100CiAs = new("German_PhoneBook_100_CI_AS", "de-DE", caseSensitive: false);
+
+    /// <summary>"French_CI_AS" — French via .NET's <c>fr-FR</c>
+    /// <see cref="CompareInfo"/>. Note: real SQL Server's French
+    /// collation sorts accents from the END of the string (a French-
+    /// specific rule); .NET's <c>fr-FR</c> default doesn't, so accented
+    /// strings near each other sort differently. Same fidelity bar as
+    /// the other locale collations.</summary>
+    internal static readonly CultureCollation FrenchCiAs = new("French_CI_AS", "fr-FR", caseSensitive: false);
+
+    /// <summary>"French_100_CI_AS" — v100 French.</summary>
+    internal static readonly CultureCollation French100CiAs = new("French_100_CI_AS", "fr-FR", caseSensitive: false);
+
+    /// <summary>"Modern_Spanish_CI_AS" — Spanish (modern, no ch/ll as
+    /// separate letters) via .NET's <c>es-ES</c> <see cref="CompareInfo"/>.
+    /// .NET's default Spanish sort already follows the modern convention,
+    /// so equality / sort alignment is closer here than for the other
+    /// European locales.</summary>
+    internal static readonly CultureCollation ModernSpanishCiAs = new("Modern_Spanish_CI_AS", "es-ES", caseSensitive: false);
+
+    /// <summary>"Modern_Spanish_100_CI_AS" — v100 modern Spanish.</summary>
+    internal static readonly CultureCollation ModernSpanish100CiAs = new("Modern_Spanish_100_CI_AS", "es-ES", caseSensitive: false);
+
+    /// <summary>"Latin1_General_100_CI_AS_SC_UTF8" — Latin1 v100 CI_AS
+    /// with supplementary-character support and UTF-8 varchar storage.
+    /// UTF-8 is a storage encoding only; sort / compare semantics are
+    /// identical to <see cref="Latin1General100CiAs"/>. .NET's
+    /// <see cref="CompareInfo"/> handles surrogate pairs natively, so the
+    /// SC marker doesn't require special handling either.</summary>
+    internal static readonly CultureCollation Latin1General100CiAsScUtf8 = new(
+        "Latin1_General_100_CI_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: false);
+
+    /// <summary>"Latin1_General_100_CS_AS_SC_UTF8" — case-sensitive UTF-8
+    /// variant. Sort / compare matches <see cref="Latin1GeneralCsAs"/>;
+    /// UTF-8 / SC distinctions are storage-layer only.</summary>
+    internal static readonly CultureCollation Latin1General100CsAsScUtf8 = new(
+        "Latin1_General_100_CS_AS_SC_UTF8", CultureInfo.InvariantCulture.Name, caseSensitive: true);
+
+    /// <summary>"Latin1_General_100_BIN2_UTF8" — binary UTF-8 variant.
+    /// Pure codepoint comparison via <see cref="BinaryCollation"/>;
+    /// metadata-only instance for catalog recognition.</summary>
+    internal static readonly Latin1_General_100_BIN2_UTF8 Latin1General100Bin2Utf8 = new();
+
+    /// <summary>Metadata-only binary collation under the
+    /// <c>Latin1_General_100_BIN2_UTF8</c> name.</summary>
+    internal sealed class Latin1_General_100_BIN2_UTF8 : BinaryCollation
+    {
+        public override string Name => "Latin1_General_100_BIN2_UTF8";
+    }
+
     /// <summary>
     /// Closed accept-list of collation names the simulator recognizes.
     /// ALTER DATABASE COLLATE / CREATE TABLE column COLLATE accept these
@@ -211,6 +320,21 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             [JapaneseXJIS140CiAs.Name] = "Japanese-XJIS-140, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
             [ChinesePrcCiAs.Name] = "Chinese-PRC, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
             [TurkishCiAs.Name] = "Turkish, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [Korean100CiAs.Name] = "Korean-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [KoreanWansungCiAs.Name] = "Korean-Wansung, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [GreekCiAs.Name] = "Greek, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [Greek100CiAs.Name] = "Greek-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [CyrillicGeneralCiAs.Name] = "Cyrillic-General, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [CyrillicGeneral100CiAs.Name] = "Cyrillic-General-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [GermanPhoneBookCiAs.Name] = "German-PhoneBook, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [GermanPhoneBook100CiAs.Name] = "German-PhoneBook-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [FrenchCiAs.Name] = "French, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [French100CiAs.Name] = "French-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [ModernSpanishCiAs.Name] = "Modern-Spanish, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [ModernSpanish100CiAs.Name] = "Modern-Spanish-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
+            [Latin1General100CiAsScUtf8.Name] = "Latin1-General-100, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive, supplementary characters, UTF8",
+            [Latin1General100CsAsScUtf8.Name] = "Latin1-General-100, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive, supplementary characters, UTF8",
+            [Latin1General100Bin2Utf8.Name] = "Latin1-General-100, binary code point comparison sort, UTF8",
         }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -234,6 +358,21 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             [JapaneseXJIS140CiAs.Name] = JapaneseXJIS140CiAs,
             [ChinesePrcCiAs.Name] = ChinesePrcCiAs,
             [TurkishCiAs.Name] = TurkishCiAs,
+            [Korean100CiAs.Name] = Korean100CiAs,
+            [KoreanWansungCiAs.Name] = KoreanWansungCiAs,
+            [GreekCiAs.Name] = GreekCiAs,
+            [Greek100CiAs.Name] = Greek100CiAs,
+            [CyrillicGeneralCiAs.Name] = CyrillicGeneralCiAs,
+            [CyrillicGeneral100CiAs.Name] = CyrillicGeneral100CiAs,
+            [GermanPhoneBookCiAs.Name] = GermanPhoneBookCiAs,
+            [GermanPhoneBook100CiAs.Name] = GermanPhoneBook100CiAs,
+            [FrenchCiAs.Name] = FrenchCiAs,
+            [French100CiAs.Name] = French100CiAs,
+            [ModernSpanishCiAs.Name] = ModernSpanishCiAs,
+            [ModernSpanish100CiAs.Name] = ModernSpanish100CiAs,
+            [Latin1General100CiAsScUtf8.Name] = Latin1General100CiAsScUtf8,
+            [Latin1General100CsAsScUtf8.Name] = Latin1General100CsAsScUtf8,
+            [Latin1General100Bin2Utf8.Name] = Latin1General100Bin2Utf8,
         }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>

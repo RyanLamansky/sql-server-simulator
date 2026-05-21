@@ -58,7 +58,9 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 
 ## Recognized catalog
 
-12 entries today. Resolution at parse / load time consults the case-insensitive `Collation.ByName` map; names outside the set raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads (graceful degradation).
+27 entries today. Resolution at parse / load time consults the case-insensitive `Collation.ByName` map; names outside the set raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads (graceful degradation).
+
+### Latin1 / SQL_Latin1
 
 | Name | Comparer | Notes |
 |---|---|---|
@@ -70,17 +72,49 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 | `Latin1_General_BIN2` | `StringComparer.Ordinal` | Same body as BIN; the BIN-vs-BIN2 non-Unicode-`varchar` asymmetry isn't observable through the simulator's SQL surface. |
 | `Latin1_General_CI_AS_KS_WS` | Invariant culture CI (KS / WS preserved) | Appears on sysname-backed columns in real DBs; included for BACPAC quiet-loading. |
 | `SQL_Latin1_General_CP437_CS_AS` | Invariant culture case-sensitive | Legacy CP437 binding; one column per AdventureWorks-class DB. |
+| `Latin1_General_100_CI_AS_SC_UTF8` | Invariant culture CI (same body as `_100_CI_AS`) | UTF-8 is a storage encoding only at the simulator's UTF-16 value layer; `_SC` (supplementary characters) is handled natively by `CompareInfo`. |
+| `Latin1_General_100_CS_AS_SC_UTF8` | Invariant culture CS | Same body as `Latin1_General_CS_AS`. |
+| `Latin1_General_100_BIN2_UTF8` | `StringComparer.Ordinal` (`BinaryCollation` body) | Pure codepoint binary; UTF-8 storage doesn't alter compare semantics. |
 | `UNICODE_CODEPOINT` | `StringComparer.Ordinal` (`BinaryCollation` body) | Semantically equivalent to BIN2 at the value level; appears in AdventureWorks2025. |
-| `Japanese_XJIS_140_CI_AS` | `ja-JP` `CompareInfo` + CI + KanaType-/Width-insensitive | Per-name sort-order parity with real SQL Server not yet probed. |
-| `Chinese_PRC_CI_AS` | `zh-CN` `CompareInfo` + CI | Per-name parity not yet probed. |
-| `Turkish_CI_AS` | `tr-TR` `CompareInfo` + CI | Handles the i / İ / ı / I folding (the "Turkish-i problem"). Per-name parity not yet probed. |
+
+### CJK locales
+
+| Name | Comparer | Notes |
+|---|---|---|
+| `Japanese_XJIS_140_CI_AS` | `ja-JP` `CompareInfo` + CI + KanaType-/Width-insensitive | Equality / kana-folding align; sort interleaves hiragana / full-width katakana / half-width katakana differently from SQL Server. See [Locale-comparer sort-parity gap](#locale-comparer-sort-parity-gap). |
+| `Chinese_PRC_CI_AS` | `zh-CN` `CompareInfo` + CI | Pinyin ordering mostly aligns; Latin-vs-CJK block position is reversed (.NET puts CJK first, SQL Server puts Latin first). |
+| `Korean_100_CI_AS` | `ko-KR` `CompareInfo` + CI | Hangul ordering routed through .NET culture; per-name sort-parity caveat applies. |
+| `Korean_Wansung_CI_AS` | `ko-KR` `CompareInfo` + CI | Legacy Wansung code-page binding; at the simulator's UTF-16 value layer behaves identically to `Korean_100_CI_AS`. |
+
+### European locales
+
+| Name | Comparer | Notes |
+|---|---|---|
+| `Turkish_CI_AS` | `tr-TR` `CompareInfo` + CI | i / İ / ı / I folding correct end-to-end; tiebreaker within case-equivalence classes (`çay` vs `Çay`) differs. |
+| `Greek_CI_AS` / `Greek_100_CI_AS` | `el-GR` `CompareInfo` + CI | Tonos / dialytika fold under accent-sensitive rules; final-sigma / medial-sigma case-insensitive peers. v100 and pre-v100 share the same body. |
+| `Cyrillic_General_CI_AS` / `Cyrillic_General_100_CI_AS` | `ru-RU` `CompareInfo` + CI | Pan-Cyrillic (Russian / Ukrainian / Bulgarian / Serbian). v100 and pre-v100 share the same body. |
+| `German_PhoneBook_CI_AS` / `German_PhoneBook_100_CI_AS` | `de-DE` `CompareInfo` + CI | Routed through .NET's default `de-DE` ordering (umlaut-as-letter), not phonebook (ä → ae, ß → ss). Sort divergence on umlauted letters; equality / case folding still align. |
+| `French_CI_AS` / `French_100_CI_AS` | `fr-FR` `CompareInfo` + CI | Real SQL Server's French sorts accents from the END of the string; .NET `fr-FR` default doesn't, so accented-string adjacencies sort differently. |
+| `Modern_Spanish_CI_AS` / `Modern_Spanish_100_CI_AS` | `es-ES` `CompareInfo` + CI | .NET's default Spanish sort already matches the modern convention (no `ch` / `ll` as separate letters), so alignment is closer here than for the other European locales. |
 
 Generic culture-based collations use the `CultureCollation` class — name + culture + case-sensitive flag drive comparer construction.
 
+## Locale-comparer sort-parity gap
+
+Probed against SQL Server 2025 with a curated word set per locale (mixed-case ASCII, accented Latin, hiragana / katakana / half-width katakana, common CJK characters and 2-character compounds). For each `(collation, storage)` pair, ORDER BY result vs `CompareInfo.Compare` ordering compared position-by-position:
+
+| Collation | nvarchar parity | varchar parity | Divergence shape |
+|---|---|---|---|
+| `Turkish_CI_AS` | 17 / 19 align | 12 / 19 align | nvarchar: only `çay` vs `Çay` case-tiebreaker order within the equality class. varchar: same, plus the `{İ, ı, I, i}` cluster interleaves with neighboring accented letters in a different order — CP1252 vs UTF-16 sort-key generation. |
+| `Japanese_XJIS_140_CI_AS` | 11 / 21 align | 2 / 21 align | nvarchar: hiragana / full-width katakana / half-width katakana group correctly (kana-type folding works), but the secondary tiebreaker order inside each kana family flips for some characters. varchar: essentially unusable — CP1252 doesn't represent Japanese; real SQL Server would use a Japanese codepage (CP932). |
+| `Chinese_PRC_CI_AS` | 0 / 17 align | 12 / 17 align | nvarchar: every position shifts by 2 because `.NET` puts CJK before Latin and SQL Server puts Latin before CJK; internal Chinese pinyin ordering is mostly aligned. varchar: small internal pinyin-order divergence on a few 2-char compounds (`上海` vs `韩国` swap). |
+
+**Equality + CI/CS / KS / WS folding all align** for the inputs probed (Turkish-i, kana-type, width, accent). Pure sort-key parity within those equivalence classes doesn't — SQL Server's NLS sort tables aren't reproducible from .NET `CompareInfo` for these locales, and the simulator doesn't ship its own NLS data. Apps whose tests assert on exact byte-for-byte ORDER BY output of locale-collation columns will see divergence; apps using these collations for grouping / equality / LIKE / Turkish-i case folding match.
+
+**`varchar(N)` on the Japanese / Chinese collations** is meaningfully wrong because the underlying codepage differs. Real SQL Server routes these through CP932 / CP936 respectively; the simulator routes through the invariant UTF-16 CompareInfo at the value layer. Use `nvarchar(N)` for any non-Latin column that needs even approximate sort parity.
+
 ## Known gaps
 
-- **Per-name sort-order parity for the three locale comparers isn't probe-verified.** `CompareInfo` for `ja-JP` / `zh-CN` / `tr-TR` produces plausible orderings, but SQL Server's collations don't always 1:1 match .NET cultures (e.g. SQL's `Japanese_XJIS_*` mapping table for supplementary characters isn't `CompareInfo`'s default). Apps that assert on exact byte-for-byte sort order of CJK data need per-name probing.
-- **Broader locale catalog deferred** — Korean, Greek, Cyrillic, German, Modern Spanish, the `_140_*_UTF8` variants. The pattern (add a `CultureCollation` instance + entries to `Recognized` / `ByName`) is the same; each new locale needs a probe-and-verify pass before shipping.
 - **Set ops (UNION / UNION ALL / INTERSECT / EXCEPT) don't apply collation-conflict checks at the column-pair level yet.** Probe showed UNION raises Msg 468, UNION ALL raises Msg 457 across cross-collation columns; the simulator's set-op type-promotion path doesn't call `Collation.Resolve`. Cross-collation set-op columns currently fall through to the legacy type-precedence resolution.
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.** Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default. Low impact (text/ntext deprecated since SQL Server 2005).
 - **Sysname's collation is always `Collation.Default`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
