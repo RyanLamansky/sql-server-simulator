@@ -200,22 +200,6 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
     /// </summary>
     internal static readonly CultureCollation SqlLatin1GeneralCp437CsAs = new("SQL_Latin1_General_CP437_CS_AS", CultureInfo.InvariantCulture.Name, caseSensitive: true);
 
-    /// <summary>
-    /// "UNICODE_CODEPOINT" — pure ordinal Unicode codepoint comparison.
-    /// Semantically equivalent to <see cref="Latin1GeneralBin2"/> at the
-    /// value level; the name appears on a handful of system columns in
-    /// some BACPACs (notably AdventureWorks2025). Reuses the binary
-    /// codepath via a separate metadata-only instance.
-    /// </summary>
-    internal static readonly UNICODE_CODEPOINT UnicodeCodepoint = new();
-
-    /// <summary>Metadata-only binary collation under the
-    /// <c>UNICODE_CODEPOINT</c> name; behavior body is <see cref="BinaryCollation"/>.</summary>
-    internal sealed class UNICODE_CODEPOINT : BinaryCollation
-    {
-        public override string Name => "UNICODE_CODEPOINT";
-    }
-
     /// <summary>"Korean_100_CI_AS" — Korean (Hangul) v100 sort via .NET's
     /// <c>ko-KR</c> <see cref="CompareInfo"/>. Same sort-tiebreaker
     /// divergence caveat as the other locale collations
@@ -341,7 +325,6 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             [Latin1GeneralBin2.Name] = "Latin1-General, binary code point comparison sort",
             [Latin1GeneralCiAsKsWs.Name] = "Latin1-General, case-insensitive, accent-sensitive, kanatype-sensitive, width-sensitive",
             [SqlLatin1GeneralCp437CsAs.Name] = "Latin1-General, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive for Unicode Data, SQL Server Sort Order 30 on Code Page 437 for non-Unicode Data",
-            [UnicodeCodepoint.Name] = "Unicode code point comparison sort",
             [JapaneseXJIS140CiAs.Name] = "Japanese-XJIS-140, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
             [ChinesePrcCiAs.Name] = "Chinese-PRC, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
             [TurkishCiAs.Name] = "Turkish, case-insensitive, accent-sensitive, kanatype-insensitive, width-insensitive",
@@ -379,7 +362,6 @@ internal abstract class Collation : IComparer<string>, IEqualityComparer<string>
             [Latin1GeneralBin2.Name] = Latin1GeneralBin2,
             [Latin1GeneralCiAsKsWs.Name] = Latin1GeneralCiAsKsWs,
             [SqlLatin1GeneralCp437CsAs.Name] = SqlLatin1GeneralCp437CsAs,
-            [UnicodeCodepoint.Name] = UnicodeCodepoint,
             [JapaneseXJIS140CiAs.Name] = JapaneseXJIS140CiAs,
             [ChinesePrcCiAs.Name] = ChinesePrcCiAs,
             [TurkishCiAs.Name] = TurkishCiAs,

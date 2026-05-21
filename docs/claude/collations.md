@@ -58,7 +58,7 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 
 ## Recognized catalog
 
-27 entries today. Resolution at parse / load time consults the case-insensitive `Collation.ByName` map; names outside the set raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads (graceful degradation).
+26 entries today. Resolution at parse / load time consults the case-insensitive `Collation.ByName` map; names outside the set raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads (graceful degradation).
 
 ### Latin1 / SQL_Latin1
 
@@ -75,7 +75,6 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 | `Latin1_General_100_CI_AS_SC_UTF8` | Invariant culture CI (same body as `_100_CI_AS`) | UTF-8 is a storage encoding only at the simulator's UTF-16 value layer; `_SC` (supplementary characters) is handled natively by `CompareInfo`. |
 | `Latin1_General_100_CS_AS_SC_UTF8` | Invariant culture CS | Same body as `Latin1_General_CS_AS`. |
 | `Latin1_General_100_BIN2_UTF8` | `StringComparer.Ordinal` (`BinaryCollation` body) | Pure codepoint binary; UTF-8 storage doesn't alter compare semantics. |
-| `UNICODE_CODEPOINT` | `StringComparer.Ordinal` (`BinaryCollation` body) | Semantically equivalent to BIN2 at the value level; appears in AdventureWorks2025. |
 
 ### CJK locales
 
@@ -124,7 +123,7 @@ The two bodies diverge for any string containing characters whose CP1252 byte li
 
 The dispatch hangs off `Collation.ForVarcharStorage()` (a virtual returning `this` by default; the BIN / BIN2 singletons override to point at the `Cp1252BinaryCollation` sibling). `VarcharSqlType.WithCollation` and `CharSqlType.WithCollation` call it at column-pin time; `NVarcharSqlType` / `NCharSqlType` don't substitute. Both bodies share the same `Name` so catalog views report one collation name and `Collation.Resolve` treats them as the same collation for cross-operand coercibility.
 
-`Latin1_General_100_BIN2_UTF8` keeps the codepoint-order body — UTF-8 byte order equals codepoint order (UTF-8 invariant), so the substitution isn't needed even though it's a varchar collation. `UNICODE_CODEPOINT` is Unicode-only (the simulator doesn't reject it on varchar at parse time — a low-priority gap).
+`Latin1_General_100_BIN2_UTF8` keeps the codepoint-order body — UTF-8 byte order equals codepoint order (UTF-8 invariant), so the substitution isn't needed even though it's a varchar collation.
 
 ### Microsoft-docs-vs-real-behavior gap: BIN2 is code *unit*, not code point
 
@@ -151,7 +150,6 @@ The pre-2005 `_BIN` (not `_BIN2`) variant has a different, real quirk: at positi
 - **Set ops (UNION / UNION ALL / INTERSECT / EXCEPT) don't apply collation-conflict checks at the column-pair level yet.** Probe showed UNION raises Msg 468, UNION ALL raises Msg 457 across cross-collation columns; the simulator's set-op type-promotion path doesn't call `Collation.Resolve`. Cross-collation set-op columns currently fall through to the legacy type-precedence resolution.
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.** Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default. Low impact (text/ntext deprecated since SQL Server 2005).
 - **Sysname's collation is always `Collation.Default`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
-- **`UNICODE_CODEPOINT` is over-permitted.** Real SQL Server 2025 rejects `COLLATE UNICODE_CODEPOINT` with `Invalid collation 'UNICODE_CODEPOINT'.` — it's an internal-only collation that surfaces on XML-index storage columns in `sys.columns.collation_name` (probed against `AdventureWorks2025.sys.xml_index_nodes_*`) but isn't on `sys.fn_helpcollations()` and can't be applied in a `COLLATE` clause. The simulator accepts it everywhere via the same `Recognized` whitelist that drives BACPAC catalog round-trip. Splitting "loader-recognized" from "COLLATE-acceptable" requires a separate dispatch flag; deferred because real exposure is narrow (someone manually typing `COLLATE UNICODE_CODEPOINT` in user SQL).
 - **`Latin1_General_100_BIN2_UTF8` and the other `*_UTF8` collations are storage-misencoded.** Real SQL Server stores values as UTF-8 bytes (`€` U+20AC → 3 bytes `E2 82 AC`, `NBSP` U+00A0 → 2 bytes `C2 A0`, 😀 U+1F600 → 4 bytes `F0 9F 98 80`). The simulator collapses all varchar storage to CP1252 regardless of collation, so `DATALENGTH`, `LEN` (under `_SC_UTF8`), and storage-size budgeting diverge for non-ASCII inputs. Sort happens to match for most cases because UTF-8 byte order == UTF-16 codepoint order == `StringComparer.Ordinal` (the simulator's value layer). Fixing this requires per-collation storage encoder dispatch in `VarcharSqlType.Encode/Decode`; deferred as a significant refactor.
 - **`_SC_` (supplementary-character-aware) semantics aren't modeled.** Probe showed three observable effects on SQL Server 2025 the simulator doesn't replicate:
   - `LEN(N'😀')` returns 2 under non-`_SC_` collations, 1 under `_SC_`. The simulator always returns code-unit count (2 in this case).

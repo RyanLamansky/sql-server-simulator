@@ -125,7 +125,7 @@ public sealed class CollationMetadataTests
 
     [TestMethod]
     public void FnHelpCollations_ListsRecognized()
-        => AreEqual(27, new Simulation().ExecuteScalar(
+        => AreEqual(26, new Simulation().ExecuteScalar(
             "SELECT COUNT(*) FROM sys.fn_helpcollations()"));
 
     [TestMethod]

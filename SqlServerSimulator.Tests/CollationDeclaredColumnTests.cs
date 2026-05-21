@@ -332,7 +332,6 @@ public sealed class CollationDeclaredColumnTests
     [DataRow("Turkish_CI_AS")]
     [DataRow("Latin1_General_CI_AS_KS_WS")]
     [DataRow("SQL_Latin1_General_CP437_CS_AS")]
-    [DataRow("UNICODE_CODEPOINT")]
     public void NewCollation_AcceptedAndRoundTripsThroughSysColumns(string collationName)
     {
         var sim = new Simulation();
@@ -453,7 +452,6 @@ public sealed class CollationDeclaredColumnTests
     [DataRow("Latin1_General_BIN2")]
     [DataRow("Latin1_General_CI_AS_KS_WS")]
     [DataRow("SQL_Latin1_General_CP437_CS_AS")]
-    [DataRow("UNICODE_CODEPOINT")]
     [DataRow("Japanese_XJIS_140_CI_AS")]
     [DataRow("Chinese_PRC_CI_AS")]
     [DataRow("Turkish_CI_AS")]
@@ -485,7 +483,6 @@ public sealed class CollationDeclaredColumnTests
     [DataRow("Latin1_General_BIN2", 3)]
     [DataRow("Latin1_General_CI_AS_KS_WS", 1)]
     [DataRow("SQL_Latin1_General_CP437_CS_AS", 3)]
-    [DataRow("UNICODE_CODEPOINT", 3)]
     [DataRow("Japanese_XJIS_140_CI_AS", 1)]
     [DataRow("Chinese_PRC_CI_AS", 1)]
     [DataRow("Turkish_CI_AS", 1)]
