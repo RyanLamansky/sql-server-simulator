@@ -148,6 +148,36 @@ internal static class DatePartKinds
     private static bool IsTzPart(DatePartKind k) => k == DatePartKind.TzOffset;
 
     /// <summary>
+    /// Applies SQL Server's implicit-cast rule for the date argument of
+    /// DATEPART / DATEADD / DATEDIFF: string operands parse as
+    /// <c>datetime2(7)</c>; integer operands parse as legacy <c>datetime</c>
+    /// (days-since-1900-01-01). Both behaviors probe-confirmed against
+    /// SQL Server 2025 (2026-05-22): <c>DATEPART(year, '2024-01-15')</c>,
+    /// <c>DATEPART(year, 0)</c> → 1900, <c>DATEADD(day, 1, 0)</c> →
+    /// <c>1900-01-02</c>. Non-date / non-string / non-integer operands
+    /// pass through unchanged so the downstream
+    /// <see cref="RequireCompatible"/> check raises the same Msg 9810 the
+    /// real server would.
+    /// </summary>
+    public static SqlValue CoerceDateArgumentImplicit(SqlValue value) =>
+        SqlType.IsStringCategory(value.Type) ? value.CoerceTo(SqlType.GetDateTime2(7))
+        : SqlType.IsIntegerCategory(value.Type) ? value.CoerceTo(SqlType.DateTime)
+        : value;
+
+    /// <summary>
+    /// Parallel of <see cref="CoerceDateArgumentImplicit"/> for the static
+    /// projection path: maps string types to <c>datetime2(7)</c> and
+    /// integer types to legacy <c>datetime</c>; everything else passes
+    /// through. Used so <c>DATEADD</c>'s schema matches the runtime type
+    /// for the implicit-cast cases (a string-typed source projects as
+    /// datetime2 in real SQL Server, not the input's varchar).
+    /// </summary>
+    public static SqlType ResolveImplicitDateType(SqlType source) =>
+        SqlType.IsStringCategory(source) ? SqlType.GetDateTime2(7)
+        : SqlType.IsIntegerCategory(source) ? SqlType.DateTime
+        : source;
+
+    /// <summary>
     /// Enforces SQL Server's per-type compatibility rules and raises Msg 9810
     /// for the disallowed combinations. The rules:
     /// <list type="bullet">

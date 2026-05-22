@@ -60,7 +60,7 @@ internal sealed class TrigFunction : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.source.Run(runtime);
+        var v = MathScalars.CoerceImplicit(this.source.Run(runtime));
         if (v.IsNull) return SqlValue.Null(SqlType.Float);
         var d = MathScalars.AsDouble(v);
         return this.kind switch

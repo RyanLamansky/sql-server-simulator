@@ -67,8 +67,10 @@ internal sealed class Replicate : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var inputValue = this.input.Run(runtime);
-        var resultType = ResolveResultType(inputValue.Type);
+        // Non-string inputs implicit-coerce to varchar (probe-confirmed
+        // 2026-05-22: REPLICATE(12345, 2) → '1234512345', varchar).
+        var inputValue = StringScalars.CoerceToVarchar(this.input.Run(runtime), runtime.Batch, "replicate");
+        var resultType = ResolveResultType(inputValue.Type, runtime.Batch);
         if (inputValue.IsNull)
             return SqlValue.Null(resultType);
 
@@ -102,10 +104,15 @@ internal sealed class Replicate : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.input.GetSqlType(batch, resolveColumnType));
+        ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), batch);
 
-    private static SqlType ResolveResultType(SqlType inputType) =>
-        SqlType.IsStringCategory(inputType) ? inputType : SqlType.NVarchar;
+    /// <summary>
+    /// Non-string input projects as <c>varchar</c> in the active database's
+    /// collation (matches the runtime coerce + real-server probe). String
+    /// input preserves its declared family.
+    /// </summary>
+    private static SqlType ResolveResultType(SqlType inputType, BatchContext batch) =>
+        StringScalars.ResolveResultType(inputType, batch);
 
     internal override string DebugDisplay() => $"REPLICATE({this.input.DebugDisplay()}, {this.count.DebugDisplay()})";
 }

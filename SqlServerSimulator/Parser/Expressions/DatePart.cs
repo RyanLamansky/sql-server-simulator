@@ -47,7 +47,7 @@ internal sealed class DatePart : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(runtime);
+        var value = DatePartKinds.CoerceDateArgumentImplicit(source.Run(runtime));
         if (value.IsNull)
             return SqlValue.Null(SqlType.Int32);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "datepart");

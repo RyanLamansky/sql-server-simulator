@@ -34,9 +34,9 @@ internal sealed class Atn2 : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var y = this.first.Run(runtime);
+        var y = MathScalars.CoerceImplicit(this.first.Run(runtime));
         if (y.IsNull) return SqlValue.Null(SqlType.Float);
-        var x = this.second.Run(runtime);
+        var x = MathScalars.CoerceImplicit(this.second.Run(runtime));
         if (x.IsNull) return SqlValue.Null(SqlType.Float);
         var yd = MathScalars.AsDouble(y);
         var xd = MathScalars.AsDouble(x);

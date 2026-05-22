@@ -32,7 +32,7 @@ internal sealed class DateAdd : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(runtime);
+        var value = DatePartKinds.CoerceDateArgumentImplicit(source.Run(runtime));
         var n = number.Run(runtime);
         if (value.IsNull || n.IsNull)
             return SqlValue.Null(value.Type);
@@ -42,7 +42,7 @@ internal sealed class DateAdd : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        source.GetSqlType(batch, resolveColumnType);
+        DatePartKinds.ResolveImplicitDateType(source.GetSqlType(batch, resolveColumnType));
 
     internal override string DebugDisplay() => $"DATEADD({this.keywordText}, {number.DebugDisplay()}, {source.DebugDisplay()})";
 }

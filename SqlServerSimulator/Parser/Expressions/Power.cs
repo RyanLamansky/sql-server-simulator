@@ -7,7 +7,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// of <c>base</c> regardless of <c>exponent</c>'s type — probe-confirmed
 /// against SQL Server 2025 (2026-05-09): <c>POWER(int, float) → int</c>
 /// (with truncation toward zero) and <c>POWER(decimal, int) → decimal</c>.
-/// Negative <c>base</c> with fractional <c>exponent</c> raises Msg 3623;
+/// String operands on either side implicit-cast to <c>float</c> via
+/// <see cref="MathScalars.CoerceImplicit"/> (probe-confirmed 2026-05-22:
+/// <c>POWER('2', 3) → float</c>, <c>POWER(2, '3') → int</c> — the first
+/// arg drives the result type via the same widen rule). Negative
+/// <c>base</c> with fractional <c>exponent</c> raises Msg 3623;
 /// <c>POWER(0, negative)</c> raises Msg 8134 (divide by zero); int-result
 /// overflow raises Msg 232.
 /// </summary>
@@ -26,10 +30,10 @@ internal sealed class Power : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var b = this.baseExpr.Run(runtime);
+        var b = MathScalars.CoerceImplicit(this.baseExpr.Run(runtime));
         var resultType = MathScalars.WidenForResult(b.Type);
         if (b.IsNull) return SqlValue.Null(resultType);
-        var e = this.exponent.Run(runtime);
+        var e = MathScalars.CoerceImplicit(this.exponent.Run(runtime));
         if (e.IsNull) return SqlValue.Null(resultType);
 
         var bd = MathScalars.AsDouble(b);

@@ -78,6 +78,35 @@ internal readonly partial struct SqlValue
         if (this.Type is VarbinarySqlType or BinarySqlType && target == SqlType.Image)
             return FromImage(this.AsBytes);
 
+        // Binary → string crossing: reinterpret each byte through the target
+        // string family's encoding (CP1252 for varchar/char, UTF-16 LE for
+        // nvarchar/nchar). Image is intentionally excluded — real SQL Server
+        // raises Msg 8116 for the implicit-coerce path on image, matching
+        // the rejection at LEN / LOWER / etc. Probe-confirmed 2026-05-22:
+        // <c>LEN(0x4142202020) = 2</c> (trailing CP1252-space bytes trim
+        // like ASCII spaces in the resulting varchar), <c>LOWER(0x414243) =
+        // 'abc'</c>, <c>LEN(CAST(0x010203 AS binary(10))) = 10</c>
+        // (binary's zero-padding survives TrimEnd(' ') because nulls aren't
+        // spaces). Implementation routes through the existing
+        // <see cref="CoerceBinaryToStringWithStyle"/> at style 0.
+        if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsStringCategory(target))
+            return this.CoerceBinaryToStringWithStyle(target, 0);
+
+        // String → binary crossing: encode the string into raw bytes using
+        // CP1252 for varchar/char/sysname sources and UTF-16 LE for
+        // nvarchar/nchar sources. <c>varbinary(N)</c> targets get the raw
+        // byte buffer (CAST-level <see cref="Cast.EnforceTargetMaxLength"/>
+        // truncates to N afterwards); <c>binary(N)</c> targets route through
+        // <see cref="FromBinary"/> for zero-pad-or-truncate to the declared
+        // length. Probe-confirmed against SQL Server 2025 (2026-05-22):
+        // <c>CAST('abc' AS VARBINARY(10)) = 0x616263</c> (no padding),
+        // <c>CAST('abc' AS BINARY(10)) = 0x61626300000000000000</c> (padded),
+        // <c>CAST(N'abc' AS VARBINARY(10)) = 0x610062006300</c> (UTF-16 LE).
+        if (SqlType.IsStringCategory(this.Type) && target is VarbinarySqlType)
+            return FromVarbinary(EncodeStringForBinary(this.AsString, this.Type));
+        if (SqlType.IsStringCategory(this.Type) && target is BinarySqlType targetStringToBinary)
+            return FromBinary(targetStringToBinary, EncodeStringForBinary(this.AsString, this.Type));
+
         // rowversion outbound CAST: bigint reads the 8 bytes big-endian (matches
         // SQL Server: the database-scoped @@DBTS counter is exposed as a signed
         // bigint); varbinary / binary copy the raw 8 bytes. No reverse direction
@@ -1089,4 +1118,17 @@ internal readonly partial struct SqlValue
         : value.Type == SqlType.SmallInt ? value.AsInt16.ToString(CultureInfo.InvariantCulture)
         : value.Type == SqlType.Int32 ? value.AsInt32.ToString(CultureInfo.InvariantCulture)
         : value.AsInt64.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Encodes a string for binary/varbinary CAST: CP1252 (Latin1) for
+    /// <c>varchar</c> / <c>char</c> / <c>sysname</c> sources, UTF-16 LE for
+    /// <c>nvarchar</c> / <c>nchar</c> / <c>ntext</c> / <c>text</c> sources.
+    /// Matches the default-style (style 0) byte rendering real SQL Server
+    /// uses; explicit-style CONVERT routes through
+    /// <see cref="CoerceStringToBinaryWithStyle"/> for the hex-string forms.
+    /// </summary>
+    private static byte[] EncodeStringForBinary(string source, SqlType sourceType) =>
+        sourceType is NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType
+            ? System.Text.Encoding.Unicode.GetBytes(source)
+            : System.Text.Encoding.Latin1.GetBytes(source);
 }

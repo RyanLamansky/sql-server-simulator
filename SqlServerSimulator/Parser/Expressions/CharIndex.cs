@@ -28,13 +28,14 @@ internal sealed class CharIndex : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var n = needle.Run(runtime);
-        var h = haystack.Run(runtime);
+        // CHARINDEX's haystack (arg 2) implicit-coerces to varchar per real
+        // (probe-confirmed 2026-05-22: CHARINDEX('2', 12345) = 2). Needle
+        // (arg 1) stays strict — real rejects non-string with Msg 8116.
+        var h = StringScalars.CoerceToVarchar(haystack.Run(runtime), runtime.Batch, "charindex", argumentIndex: 2);
         if (n.IsNull || h.IsNull)
             return SqlValue.Null(SqlType.Int32);
         if (!SqlType.IsStringCategory(n.Type))
             throw SimulatedSqlException.InvalidArgumentDataType(n.Type.SqlServerName, argumentIndex: 1, "charindex");
-        if (!SqlType.IsStringCategory(h.Type))
-            throw SimulatedSqlException.InvalidArgumentDataType(h.Type.SqlServerName, argumentIndex: 2, "charindex");
 
         var needleStr = n.AsString;
         var haystackStr = h.AsString;

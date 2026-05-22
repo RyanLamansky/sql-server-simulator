@@ -39,8 +39,11 @@ internal sealed class Stuff : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var inputValue = this.input.Run(runtime);
-        var replacementValue = this.replacement.Run(runtime);
+        // Non-string input / replacement implicit-coerce to varchar per real
+        // (probe-confirmed 2026-05-22: STUFF('abcde', 2, 1, 99) → 'a99cde',
+        // STUFF(99, 2, 1, 99) → '999', both varchar).
+        var inputValue = StringScalars.CoerceToVarchar(this.input.Run(runtime), runtime.Batch, "stuff", argumentIndex: 1);
+        var replacementValue = StringScalars.CoerceToVarchar(this.replacement.Run(runtime), runtime.Batch, "stuff", argumentIndex: 4);
         var resultType = ResolveResultType(inputValue.Type, replacementValue.Type);
 
         if (inputValue.IsNull)
@@ -75,20 +78,21 @@ internal sealed class Stuff : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), this.replacement.GetSqlType(batch, resolveColumnType));
+        ResolveResultType(
+            StringScalars.ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), batch),
+            StringScalars.ResolveResultType(this.replacement.GetSqlType(batch, resolveColumnType), batch));
 
     /// <summary>
-    /// Promotes input + replacement string types to the result type. <c>nvarchar</c>
-    /// dominates <c>varchar</c>; LOB-ness on either side propagates. When neither side
-    /// is a string (a runtime impossibility for the input — non-string input would
-    /// have surfaced through coercion already), <see cref="SqlType.NVarchar"/> is
-    /// the safe fallback.
+    /// Promotes input + replacement string types to the result type.
+    /// <c>nvarchar</c> dominates <c>varchar</c>; LOB-ness on either side
+    /// propagates. Both inputs are pre-promoted via
+    /// <see cref="StringScalars.ResolveResultType"/> on the call sites, so
+    /// non-string types land here as the database-collation
+    /// <see cref="SqlType.Varchar"/>; <see cref="SqlType.Promote"/> handles
+    /// the rest.
     /// </summary>
     private static SqlType ResolveResultType(SqlType inputType, SqlType replacementType) =>
-        SqlType.IsStringCategory(inputType) && SqlType.IsStringCategory(replacementType) ? SqlType.Promote(inputType, replacementType)
-        : SqlType.IsStringCategory(inputType) ? inputType
-        : SqlType.IsStringCategory(replacementType) ? replacementType
-        : SqlType.NVarchar;
+        SqlType.Promote(inputType, replacementType);
 
     internal override string DebugDisplay() =>
         $"STUFF({this.input.DebugDisplay()}, {this.start.DebugDisplay()}, {this.length.DebugDisplay()}, {this.replacement.DebugDisplay()})";

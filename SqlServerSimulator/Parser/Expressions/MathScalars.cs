@@ -19,13 +19,31 @@ internal static class MathScalars
     /// <c>smallmoney</c> widens to <c>money</c>; <c>real</c> widens to
     /// <c>float</c>; <c>bit</c> widens to <c>float</c> (sic — same rule
     /// across <c>ABS</c> / <c>FLOOR</c> / <c>CEILING</c> / <c>SIGN</c> /
-    /// <c>ROUND</c>). Everything else preserves its input type.
+    /// <c>ROUND</c>). String inputs implicit-cast to <c>float</c>
+    /// (probe-confirmed 2026-05-22: <c>ABS('-5.5')</c> /
+    /// <c>CEILING('5.5')</c> / <c>FLOOR('5.5')</c> / <c>SIGN('-5')</c> all
+    /// emit float; the function result type is float regardless of the
+    /// source numeric form). Everything else preserves its input type.
     /// </summary>
     public static SqlType WidenForResult(SqlType input) =>
         input == SqlType.TinyInt || input == SqlType.SmallInt ? SqlType.Int32
         : input == SqlType.Bit || input == SqlType.Real ? SqlType.Float
         : input == SqlType.SmallMoney ? SqlType.Money
+        : SqlType.IsStringCategory(input) ? SqlType.Float
         : input;
+
+    /// <summary>
+    /// Applies SQL Server's implicit string-to-float cast for math scalar
+    /// inputs. String operands route through
+    /// <see cref="SqlValue.CoerceTo"/> targeting <c>float</c> (Msg 8114
+    /// from the string-to-float parser on bad strings); non-string
+    /// operands pass through unchanged. Probe-confirmed 2026-05-22 against
+    /// SQL Server 2025: <c>ABS('-5')</c>, <c>SQRT('16')</c>,
+    /// <c>DEGREES(N'1')</c>, <c>SIGN('0')</c>, etc. all accept varchar /
+    /// nvarchar / nchar / char input.
+    /// </summary>
+    public static SqlValue CoerceImplicit(SqlValue value) =>
+        SqlType.IsStringCategory(value.Type) ? value.CoerceTo(SqlType.Float) : value;
 
     /// <summary>
     /// Returns <paramref name="applied"/> typed at <paramref name="resultType"/>

@@ -50,8 +50,8 @@ internal abstract class DateDiff : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var startVal = CoerceStringToDateTime2(this.start.Run(runtime));
-        var endVal = CoerceStringToDateTime2(this.end.Run(runtime));
+        var startVal = DatePartKinds.CoerceDateArgumentImplicit(this.start.Run(runtime));
+        var endVal = DatePartKinds.CoerceDateArgumentImplicit(this.end.Run(runtime));
         if (startVal.IsNull || endVal.IsNull)
             return SqlValue.Null(this.resultType);
         DatePartKinds.RequireCompatibleForDiff(this.kind, this.keywordText, this.functionLowerName);
@@ -69,14 +69,6 @@ internal abstract class DateDiff : Expression
 
     internal override string DebugDisplay() =>
         $"{this.functionLowerName.ToUpperInvariant()}({this.keywordText}, {this.start.DebugDisplay()}, {this.end.DebugDisplay()})";
-
-    /// <summary>
-    /// Mirrors SQL Server's implicit-cast behavior: a bare string literal
-    /// (or string-typed expression) passed as a DATEDIFF argument gets
-    /// parsed as <c>datetime2(7)</c> before the boundary math runs.
-    /// </summary>
-    private static SqlValue CoerceStringToDateTime2(SqlValue v) =>
-        SqlType.IsStringCategory(v.Type) ? v.CoerceTo(SqlType.GetDateTime2(7)) : v;
 
     internal sealed class Standard(ParserContext context) : DateDiff(context, "datediff", SqlType.Int32)
     {

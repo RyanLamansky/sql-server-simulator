@@ -20,11 +20,10 @@ internal sealed class Reverse(ParserContext context) : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(runtime);
-        if (value.IsNull)
-            return SqlValue.Null(value.Type);
-        if (!SqlType.IsStringCategory(value.Type))
-            throw new NotSupportedException($"REVERSE expects a string operand; got {value.Type}.");
+        var raw = source.Run(runtime);
+        if (raw.IsNull)
+            return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
+        var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "reverse");
 
         var input = value.AsString;
         var reversed = value.Type.Collation?.IsSupplementaryCharacterAware == true
@@ -33,7 +32,8 @@ internal sealed class Reverse(ParserContext context) : Expression
         return SqlValue.FromString(value.Type, reversed);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        StringScalars.ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
 
     internal override string DebugDisplay() => $"REVERSE({source.DebugDisplay()})";
 }

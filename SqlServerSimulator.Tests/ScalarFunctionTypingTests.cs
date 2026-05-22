@@ -103,12 +103,14 @@ public sealed class ScalarFunctionTypingTests
             8116,
             "Argument data type int is invalid for argument 1 of charindex function.");
 
+    /// <summary>
+    /// Integer haystack implicit-coerces to varchar (probe-confirmed
+    /// against real 2026-05-22: CHARINDEX('2', 12345) = 2). Needle stays
+    /// strict — see Charindex_IntegerNeedle_RaisesMsg8116 above.
+    /// </summary>
     [TestMethod]
-    public void Charindex_IntegerHaystack_RaisesMsg8116OnArg2()
-        => new Simulation().AssertSqlError(
-            "select charindex('a', cast(1234 as int))",
-            8116,
-            "Argument data type int is invalid for argument 2 of charindex function.");
+    public void Charindex_IntegerHaystack_ImplicitCoercesToVarchar() =>
+        AreEqual(2, ExecuteScalar("select charindex('2', cast(12345 as int))"));
 
     // Note: LEN(text) / LEN(ntext) Msg 8116 — the existing CLAUDE.md "Not modeled"
     // entry covers this. The simulator's IsStringCategory treats text/ntext as

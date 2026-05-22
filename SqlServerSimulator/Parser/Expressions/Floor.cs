@@ -15,7 +15,7 @@ internal sealed class Floor(ParserContext context) : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.source.Run(runtime);
+        var v = MathScalars.CoerceImplicit(this.source.Run(runtime));
         var resultType = MathScalars.WidenForResult(v.Type);
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {

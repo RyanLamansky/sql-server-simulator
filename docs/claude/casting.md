@@ -25,6 +25,13 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 
 Decoders live next to `VarbinaryToGuid` in `Storage/SqlValue.Coerce.cs`. Reverse direction (date-family → varbinary) isn't modeled — no production scripts emit that direction; `bcp` and BACPAC do the encoding upstream.
 
+## String ↔ binary CAST
+
+Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):
+
+- **`varbinary`/`binary` → `varchar`/`nvarchar`** reinterprets each byte through the target's encoding (CP1252 for varchar/char, UTF-16 LE for nvarchar/nchar). Probe-confirmed 2026-05-22: `CAST(0x414243 AS varchar(10))` → `'ABC'`. `image` deliberately stays rejected to match real SQL Server's Msg 8116 on `LEN(image)` etc.
+- **`varchar`/`char`/`nvarchar`/`nchar` → `varbinary`/`binary`** encodes the string with the source's natural encoding (CP1252 for varchar/char/sysname, UTF-16 LE for nvarchar/nchar/ntext/text). `varbinary(N)` receives the raw bytes and the CAST-level path truncates to N. `binary(N)` routes through `FromBinary` for zero-pad-or-truncate. Probe-confirmed: `CAST('abc' AS varbinary(10))` → `0x616263`, `CAST('abc' AS binary(10))` → `0x61626300000000000000`, `CAST(N'abc' AS varbinary(10))` → `0x610062006300`. Hex-string CAST forms (`CONVERT(varbinary, '0x010203', 1)` / `style 2`) still route through `CoerceStringToBinaryWithStyle`.
+
 `VarcharSqlType`/`NVarcharSqlType`/`VarbinarySqlType` are per-length singletons via `Get(N)` (parallel to `CharSqlType`); `Unspecified` (length 0) is the runtime sentinel; `MaxForm` (length -1) is the LOB form. **Equality**: `value.Type == SqlType.Varchar` is true only for the unspecified form; "is any varchar" needs `is VarcharSqlType`. The encoder accepts any same-family pair regardless of length (write-time truncation enforced upstream).
 
 ## `TRY_CAST` / `TRY_CONVERT`

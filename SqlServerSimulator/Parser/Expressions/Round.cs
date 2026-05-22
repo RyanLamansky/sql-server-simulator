@@ -9,10 +9,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// the decimal point (<c>ROUND(127, -1)</c> → 130). Result type matches
 /// the input — a <c>decimal(p,s)</c> input produces a <c>decimal(p,s)</c>
 /// result with the same scale (the value's "rounded" portion is padded
-/// with zeros). Tinyint and smallint widen to int. Probe-confirmed
-/// against SQL Server 2025 (2026-05-09): rounding is half-away-from-zero
-/// for both decimal and float inputs (NOT banker's rounding). NULL on
-/// either argument propagates to NULL.
+/// with zeros). Tinyint and smallint widen to int; string-typed value
+/// implicit-casts to <c>float</c> via <see cref="MathScalars.CoerceImplicit"/>.
+/// Probe-confirmed against SQL Server 2025: rounding is half-away-from-zero
+/// for both decimal and float inputs (NOT banker's rounding); length /
+/// function args stay strict-int — Msg 8116 on string for either (the
+/// <c>InvalidArgumentDataType</c> paths below). NULL on any argument
+/// propagates to NULL.
 /// </summary>
 internal sealed class Round : Expression
 {
@@ -32,7 +35,7 @@ internal sealed class Round : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var v = this.value.Run(runtime);
+        var v = MathScalars.CoerceImplicit(this.value.Run(runtime));
         var resultType = MathScalars.WidenForResult(v.Type);
         if (v.IsNull) return SqlValue.Null(resultType);
 

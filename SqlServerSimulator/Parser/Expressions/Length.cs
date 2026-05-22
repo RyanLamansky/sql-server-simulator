@@ -23,14 +23,13 @@ internal sealed class Length(ParserContext context) : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(runtime);
+        var raw = source.Run(runtime);
         // NULL passes through any string function regardless of its underlying
         // type tag; the simulator's untyped NULL literal carries Type=Int32 so
         // the IsNull check has to come before the IsStringCategory check.
-        if (value.IsNull)
+        if (raw.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        if (!SqlType.IsStringCategory(value.Type))
-            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex: 1, "len");
+        var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "len");
         var trimmed = value.AsString.TrimEnd(' ');
         var length = value.Type.Collation?.IsSupplementaryCharacterAware == true
             ? SupplementaryCharacters.CodepointCount(trimmed)

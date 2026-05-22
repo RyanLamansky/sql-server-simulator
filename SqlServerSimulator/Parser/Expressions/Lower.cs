@@ -17,16 +17,16 @@ internal sealed class Lower(ParserContext context) : Expression
         Justification = "SQL LOWER lowercases user-facing data; the rule's normalization concern doesn't apply here.")]
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(runtime);
-        if (value.IsNull)
-            return SqlValue.Null(value.Type);
-        if (!SqlType.IsStringCategory(value.Type))
-            throw new NotSupportedException($"LOWER expects a string operand; got {value.Type}.");
+        var raw = source.Run(runtime);
+        if (raw.IsNull)
+            return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
+        var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "lower");
         var lowered = value.AsString.ToLower(CultureInfo.InvariantCulture);
         return SqlValue.FromString(value.Type, lowered);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        StringScalars.ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
 
     internal override string DebugDisplay() => $"LOWER({source.DebugDisplay()})";
 }

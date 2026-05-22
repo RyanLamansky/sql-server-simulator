@@ -393,6 +393,58 @@ public sealed class CastTests
         CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, result);
     }
 
+    /// <summary>
+    /// String → varbinary CAST encodes through CP1252 for varchar/char and
+    /// UTF-16 LE for nvarchar/nchar, then the CAST-level path truncates to
+    /// the declared length. <c>varbinary(N)</c> never pads. Probe-confirmed
+    /// against SQL Server 2025 (2026-05-22).
+    /// </summary>
+    [TestMethod]
+    public void Cast_VarcharToVarbinary_EncodesCp1252Bytes()
+    {
+        var result = ExecuteScalar("select cast('abc' as varbinary(10))") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual("abc"u8.ToArray(), result);
+    }
+
+    [TestMethod]
+    public void Cast_NarrowVarbinary_StringSource_Truncates()
+    {
+        var result = ExecuteScalar("select cast('abcdefghijklmn' as varbinary(5))") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual("abcde"u8.ToArray(), result);
+    }
+
+    [TestMethod]
+    public void Cast_NvarcharToVarbinary_EncodesUtf16LeBytes()
+    {
+        var result = ExecuteScalar("select cast(N'abc' as varbinary(10))") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual(new byte[] { 0x61, 0x00, 0x62, 0x00, 0x63, 0x00 }, result);
+    }
+
+    /// <summary>
+    /// <c>binary(N)</c> right-pads with zero bytes when the source encoding
+    /// is shorter than N (verified <c>CAST('abc' AS BINARY(10)) →
+    /// 0x61626300000000000000</c>). FromBinary applies the
+    /// pad-or-truncate normalization inside the CoerceTo path.
+    /// </summary>
+    [TestMethod]
+    public void Cast_VarcharToFixedBinary_PadsWithZeros()
+    {
+        var result = ExecuteScalar("select cast('abc' as binary(10))") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual(new byte[] { 0x61, 0x62, 0x63, 0, 0, 0, 0, 0, 0, 0 }, result);
+    }
+
+    [TestMethod]
+    public void Cast_VarcharToFixedBinary_LongerSourceTruncates()
+    {
+        var result = ExecuteScalar("select cast('abcdefghijklmn' as binary(5))") as byte[];
+        IsNotNull(result);
+        CollectionAssert.AreEqual("abcde"u8.ToArray(), result);
+    }
+
     [TestMethod]
     [DataRow("cast(123456 as varchar(3))", "*")]
     [DataRow("cast(123456 as varchar(5))", "*")]

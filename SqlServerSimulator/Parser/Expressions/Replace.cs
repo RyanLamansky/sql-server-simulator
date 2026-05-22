@@ -28,18 +28,20 @@ internal sealed class Replace : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var i = input.Run(runtime);
-        var o = oldValue.Run(runtime);
-        var n = newValue.Run(runtime);
-        if (i.IsNull || o.IsNull || n.IsNull)
-            return SqlValue.Null(i.Type);
-        if (!SqlType.IsStringCategory(i.Type))
-            throw new NotSupportedException($"REPLACE expects a string first argument; got {i.Type}.");
+        var rawInput = input.Run(runtime);
+        var rawOld = oldValue.Run(runtime);
+        var rawNew = newValue.Run(runtime);
+        if (rawInput.IsNull || rawOld.IsNull || rawNew.IsNull)
+            return SqlValue.Null(StringScalars.ResolveResultType(rawInput.Type, runtime.Batch));
+        var i = StringScalars.CoerceToVarchar(rawInput, runtime.Batch, "replace", argumentIndex: 1);
+        var o = StringScalars.CoerceToVarchar(rawOld, runtime.Batch, "replace", argumentIndex: 2);
+        var n = StringScalars.CoerceToVarchar(rawNew, runtime.Batch, "replace", argumentIndex: 3);
         var replaced = i.AsString.Replace(o.AsString, n.AsString, StringComparison.InvariantCultureIgnoreCase);
         return SqlValue.FromString(i.Type, replaced);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => input.GetSqlType(batch, resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        StringScalars.ResolveResultType(input.GetSqlType(batch, resolveColumnType), batch);
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
 }

@@ -22,12 +22,11 @@ internal sealed class Right : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var s = source.Run(runtime);
+        var rawSource = source.Run(runtime);
         var n = count.Run(runtime);
-        if (s.IsNull || n.IsNull)
-            return SqlValue.Null(s.Type);
-        if (!SqlType.IsStringCategory(s.Type))
-            throw new NotSupportedException($"RIGHT expects a string first argument; got {s.Type}.");
+        if (rawSource.IsNull || n.IsNull)
+            return SqlValue.Null(StringScalars.ResolveResultType(rawSource.Type, runtime.Batch));
+        var s = StringScalars.CoerceToVarchar(rawSource, runtime.Batch, "right");
 
         var len = n.CoerceTo(SqlType.Int32).AsInt32;
         if (len < 0)
@@ -40,7 +39,8 @@ internal sealed class Right : Expression
         return SqlValue.FromString(s.Type, result);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        StringScalars.ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
 
     internal override string DebugDisplay() => $"RIGHT({source.DebugDisplay()}, {count.DebugDisplay()})";
 }
