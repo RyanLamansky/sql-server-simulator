@@ -746,32 +746,46 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// responsibility (SQL's NULL-comparison semantics differ from .NET's
     /// IComparable convention, so we throw here rather than pick a side).
     /// </summary>
+    /// <remarks>
+    /// Dispatches on <see cref="SqlType.Category"/> so the hot path is a
+    /// jump-table-friendly switch rather than the linear type-test chain it
+    /// replaced. The single-arm collapse for Integer / DateTime / Money relies
+    /// on the invariant that each type in those categories stores its ordered
+    /// value directly in <see cref="primitive"/> — Bit's 0/1 sorts as long the
+    /// same way <see cref="bool.CompareTo(bool)"/> does, all DateTime variants
+    /// already used <see cref="primitive"/>, and Money/SmallMoney hold scaled
+    /// integers there. Approximate is the only category that can't unify
+    /// (the IEEE 754 bit pattern in <see cref="primitive"/> isn't monotonic
+    /// across the sign bit and mishandles NaN), so it splits Float vs Real.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">Either operand is NULL.</exception>
     /// <exception cref="NotSupportedException">The operands' types differ, or comparison for that type isn't implemented yet.</exception>
     public int CompareTo(SqlValue other) =>
-        this.IsNull || other.IsNull ? throw new InvalidOperationException("CompareTo on NULL is undefined; check IsNull before calling.")
-        : this.Type != other.Type ? throw new NotSupportedException($"Cross-type comparison isn't implemented: {this.Type} vs {other.Type}.")
-        : this.Type == SqlType.Int32 ? this.AsInt32.CompareTo(other.AsInt32)
-        : this.Type == SqlType.BigInt ? this.AsInt64.CompareTo(other.AsInt64)
-        : this.Type == SqlType.SmallInt ? this.AsInt16.CompareTo(other.AsInt16)
-        : this.Type == SqlType.TinyInt ? this.AsByte.CompareTo(other.AsByte)
-        : this.Type == SqlType.Bit ? this.AsBoolean.CompareTo(other.AsBoolean)
-        : IsStringTypeRef(this.Type) ? this.Type.Collation!.Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
-        : this.Type is RowVersionSqlType ? this.primitive.CompareTo(other.primitive)
-        : this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType ? this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes)
-        : this.Type == SqlType.Date ? this.primitive.CompareTo(other.primitive)
-        : this.Type == SqlType.DateTime ? this.primitive.CompareTo(other.primitive)
-        : this.Type == SqlType.SmallDateTime ? this.primitive.CompareTo(other.primitive)
-        : this.Type is DateTime2SqlType ? this.primitive.CompareTo(other.primitive)
-        : this.Type is TimeSqlType ? this.primitive.CompareTo(other.primitive)
-        : this.Type is DateTimeOffsetSqlType ? this.primitive.CompareTo(other.primitive)
-        : this.Type == SqlType.UniqueIdentifier ? new SqlGuid(this.AsGuid).CompareTo(new SqlGuid(other.AsGuid))
-        : this.Type == SqlType.HierarchyId ? HierarchyIdSqlType.ComparePaths(this.AsHierarchyId, other.AsHierarchyId)
-        : this.Type is DecimalSqlType ? this.AsDecimal.CompareTo(other.AsDecimal)
-        : this.Type == SqlType.Float ? this.AsDouble.CompareTo(other.AsDouble)
-        : this.Type == SqlType.Real ? this.AsSingle.CompareTo(other.AsSingle)
-        : this.Type == SqlType.Money || this.Type == SqlType.SmallMoney ? this.primitive.CompareTo(other.primitive)
-        : throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet.");
+        this.IsNull || other.IsNull
+            ? throw new InvalidOperationException("CompareTo on NULL is undefined; check IsNull before calling.")
+            : this.Type != other.Type
+            ? throw new NotSupportedException($"Cross-type comparison isn't implemented: {this.Type} vs {other.Type}.")
+            : this.Type.Category switch
+            {
+                SqlTypeCategory.Integer or SqlTypeCategory.DateTime or SqlTypeCategory.Money
+                    => this.primitive.CompareTo(other.primitive),
+                SqlTypeCategory.Decimal => this.AsDecimal.CompareTo(other.AsDecimal),
+                SqlTypeCategory.Approximate => this.Type == SqlType.Float
+                    ? this.AsDouble.CompareTo(other.AsDouble)
+                    : this.AsSingle.CompareTo(other.AsSingle),
+                SqlTypeCategory.String => this.Type.Collation!.Compare(
+                    TrimTrailing((string)this.reference!),
+                    TrimTrailing((string)other.reference!)),
+                SqlTypeCategory.UniqueIdentifier => new SqlGuid(this.AsGuid).CompareTo(new SqlGuid(other.AsGuid)),
+                SqlTypeCategory.Other => this.Type switch
+                {
+                    VarbinarySqlType or BinarySqlType or ImageSqlType => this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes),
+                    RowVersionSqlType => this.primitive.CompareTo(other.primitive),
+                    HierarchyIdSqlType => HierarchyIdSqlType.ComparePaths(this.AsHierarchyId, other.AsHierarchyId),
+                    _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
+                },
+                _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
+            };
 
     public override bool Equals(object? obj) => obj is SqlValue other && this.Equals(other);
 
