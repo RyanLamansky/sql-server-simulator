@@ -4,7 +4,7 @@ Pure metadata — no semantic effect on queries. The sproc trio, `sys.extended_p
 
 ## Storage
 
-`Database.ExtendedProperties` is a `ConcurrentDictionary<ExtendedPropertyKey, SqlValue>` keyed by `(byte class, int major_id, int minor_id, string name)`. `ExtendedPropertyKey` is a readonly struct overriding `Equals` / `GetHashCode` so the name comparison routes through `Collation.Default` (case-insensitive). Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape — not per-schema.
+`Database.ExtendedProperties` is a `ConcurrentDictionary<ExtendedPropertyKey, SqlValue>` keyed by `(byte class, int major_id, int minor_id, string name)`. `ExtendedPropertyKey` is a readonly struct overriding `Equals` / `GetHashCode` so the name comparison routes through `Collation.Baseline` (case-insensitive). Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape — not per-schema.
 
 ## Sproc trio
 

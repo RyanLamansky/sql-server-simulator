@@ -43,7 +43,7 @@ partial class Simulation
             yield break;
 
         string? name = null;
-        var value = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault));
+        var value = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var hasValueArg = false;
         string? level0Type = null;
         string? level0Name = null;
@@ -323,7 +323,7 @@ partial class Simulation
     private static string ExpectStringArg(SqlValue value) =>
         value.IsNull
             ? throw SimulatedSqlException.InvalidExtendedPropertyParameter("sp_addextendedproperty")
-            : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
+            : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
 
     /// <summary>
     /// Same as <see cref="ExpectStringArg"/> but returns null for a NULL
@@ -331,5 +331,5 @@ partial class Simulation
     /// legitimately be omitted (null climbs the target hierarchy).
     /// </summary>
     private static string? ExpectStringArgOrNull(SqlValue value) =>
-        value.IsNull ? null : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
+        value.IsNull ? null : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
 }

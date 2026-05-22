@@ -123,7 +123,7 @@ internal sealed class NVarcharSqlType : SqlType
 /// <summary>
 /// SQL Server's <c>sysname</c>: <c>nvarchar(128) NOT NULL</c> alias used by
 /// the system catalogs. Always carries the server-default collation
-/// (<see cref="Collation.Default"/>) at
+/// (<see cref="Collation.Baseline"/>) at
 /// <see cref="Coercibility.Implicit"/> rank — sysname
 /// columns don't accept a <c>COLLATE</c> clause and never coerce, so a
 /// single shared instance is sufficient.
@@ -134,7 +134,7 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 
     public override bool IsFixedLength => false;
 
-    public override Collation Collation => SqlServerSimulator.Collation.Default;
+    public override Collation Collation => SqlServerSimulator.Collation.Baseline;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
@@ -239,7 +239,7 @@ internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
 
     public override bool IsLob => true;
 
-    public override Collation Collation => SqlServerSimulator.Collation.Default;
+    public override Collation Collation => SqlServerSimulator.Collation.Baseline;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 
@@ -265,7 +265,7 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
 
     public override bool IsLob => true;
 
-    public override Collation Collation => SqlServerSimulator.Collation.Default;
+    public override Collation Collation => SqlServerSimulator.Collation.Baseline;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
 

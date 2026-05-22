@@ -9,7 +9,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// site that currently consults the override is <c>LIKE</c> (which reads
 /// <see cref="Collation.CaseSensitive"/> via <see cref="ResolvedCollation"/>
 /// to decide whether to flip <c>RegexOptions.IgnoreCase</c>). Other string
-/// operators continue to route through <see cref="Collation.Default"/>,
+/// operators continue to route through <see cref="Collation.Baseline"/>,
 /// matching the documented "COLLATE clause" caveat in
 /// <c>docs/claude/database-options.md</c>.
 /// </summary>

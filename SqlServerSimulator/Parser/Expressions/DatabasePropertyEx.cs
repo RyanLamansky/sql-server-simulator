@@ -40,8 +40,8 @@ internal sealed class DatabasePropertyEx : Expression
         if (dbNameValue.IsNull || propertyValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 
-        var dbName = dbNameValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
-        var property = propertyValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
+        var dbName = dbNameValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
+        var property = propertyValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
 
         // The simulator's database dictionary is keyed by name; only the
         // currently-attached databases resolve.

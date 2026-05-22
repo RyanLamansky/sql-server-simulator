@@ -70,31 +70,83 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// <c>SQL_Latin1_General_CP1_CI_AS</c>. Resolved once via
     /// <see cref="TryGet"/>. Two consumers:
     /// <list type="bullet">
-    /// <item>The default for
+    /// <item>The initial value of
     /// <see cref="Simulation.ServerCollation"/>, which in turn seeds every
     /// freshly-created <see cref="Database.Collation"/>. Apps that want a
-    /// non-default identifier collation set <see cref="Simulation.ServerCollation"/>
+    /// non-baseline identifier collation set <see cref="Simulation.ServerCollation"/>
     /// before the first <c>CreateDbConnection</c> / <c>ImportBacpac</c>;
     /// per-database divergence happens via <c>ALTER DATABASE COLLATE</c>.</item>
     /// <item>The storage-layer baseline for the
     /// <see cref="VarcharSqlType"/> / <see cref="NVarcharSqlType"/> /
-    /// <see cref="CharSqlType"/> / <see cref="NCharSqlType"/> singletons
-    /// (<c>Unspecified</c>, <c>MaxForm</c>, <c>Get(length)</c>). Those
+    /// <see cref="CharSqlType"/> / <see cref="NCharSqlType"/> singletons. Those
     /// caches are process-global and can't be per-simulation, so literal /
     /// parameter / CAST result types carry this collation regardless of
     /// the active database; per-column declared collation overrides at
     /// compare and sort time.</item>
     /// </list>
+    /// <para>
+    /// Real SQL Server has no analog of a "default collation" — every
+    /// collation-bearing surface is either an installation-time choice
+    /// (server collation), a database property, or a column property. This
+    /// property's name describes what it actually is in the simulator
+    /// (the startup-baked seed) rather than borrowing a SQL Server term
+    /// that doesn't exist.
+    /// </para>
     /// </summary>
-    internal static Collation Default => defaultLazy.Value;
+    internal static Collation Baseline => baselineLazy.Value;
 
-    // <see cref="Lazy{T}"/> wrapper defers the <see cref="TryGet"/> call
+    /// <summary>
+    /// The fixed catalog collation applied to system-metadata columns in
+    /// the simulator's catalog views (<c>sys.objects.type_desc</c>,
+    /// <c>sys.database_permissions.permission_name</c>, the various
+    /// <c>type</c> / <c>state</c> char(1) / char(2) enum codes, etc.).
+    /// Resolved once via <see cref="TryGet"/> to
+    /// <c>Latin1_General_100_CI_AS_KS_WS_SC</c> — the contained-database
+    /// catalog collation real SQL Server reports through
+    /// <c>sys.fn_helpcollations()</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Microsoft's "Contained Database Collations" reference describes
+    /// this as the catalog collation for contained databases (Windows
+    /// 100-series, accent + kanatype + width sensitive, supplementary-
+    /// character aware), fixed across every instance. That makes it the
+    /// authoritative anchor for "the catalog collation" even though the
+    /// simulator doesn't model containment as a database-level option.
+    /// </para>
+    /// <para>
+    /// The Microsoft doc spells the name <c>Latin1_General_100_CI_AS_WS_KS_SC</c>
+    /// (WS before KS) — a documentation typo. Probing real SQL Server's
+    /// <c>sys.fn_helpcollations()</c> confirms the canonical name has the
+    /// suffix tokens in the order <c>_CI_AS_KS_WS_SC</c> (KS before WS),
+    /// and the simulator's parser only accepts the canonical form.
+    /// </para>
+    /// <para>
+    /// Probing a non-contained SQL Server 2025 instance shows
+    /// <c>sys.system_columns.collation_name</c> reporting
+    /// <c>Latin1_General_CI_AS_KS_WS</c> (pre-100, no <c>_SC</c>) for
+    /// catalog <c>_desc</c> columns — a legacy carry-over rather than an
+    /// authoritative reference. The simulator picks the modern documented
+    /// value instead so apps that read catalog metadata see a forward-
+    /// looking collation; for the ASCII English identifiers that dominate
+    /// real catalog-view queries, both names give identical equality
+    /// results, and the modern value's <c>_SC</c> flag adds correct
+    /// supplementary-character handling if any catalog content ever
+    /// includes it.
+    /// </para>
+    /// </remarks>
+    internal static Collation Catalog => catalogLazy.Value;
+
+    // <see cref="Lazy{T}"/> wrappers defer the <see cref="TryGet"/> call
     // until first access — the alternative (eager field initialization)
     // races the parser-state fields across partial-class file boundaries
     // and the textual-order guarantee for static-field initializers
     // doesn't cross those.
-    private static readonly Lazy<Collation> defaultLazy =
+    private static readonly Lazy<Collation> baselineLazy =
         new(() => TryGet("SQL_Latin1_General_CP1_CI_AS")!);
+
+    private static readonly Lazy<Collation> catalogLazy =
+        new(() => TryGet("Latin1_General_100_CI_AS_KS_WS_SC")!);
 
     /// <summary>
     /// SQL Server's collation-coercibility resolution for two operands.
@@ -121,11 +173,11 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         var ca = a.Coercibility;
         var cb = b.Coercibility;
         if (ca > cb)
-            return (a.Collation ?? Default, ca);
+            return (a.Collation ?? Baseline, ca);
         if (cb > ca)
-            return (b.Collation ?? Default, cb);
-        var aCol = a.Collation ?? Default;
-        var bCol = b.Collation ?? Default;
+            return (b.Collation ?? Baseline, cb);
+        var aCol = a.Collation ?? Baseline;
+        var bCol = b.Collation ?? Baseline;
         return StringComparer.OrdinalIgnoreCase.Equals(aCol.Name, bCol.Name) ? (aCol, ca) : null;
     }
 

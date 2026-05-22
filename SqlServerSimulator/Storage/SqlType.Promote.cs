@@ -411,7 +411,7 @@ internal abstract partial class SqlType
         // error rendering with operator wording.
         var resolved = Collation.Resolve(a, b);
         var (resultCollation, resultCoercibility) = resolved
-            ?? (a.Collation ?? b.Collation ?? Collation.Default, Coercibility.CoercibleDefault);
+            ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
 
         if (a == Text || b == Text || a == NText || b == NText)
         {

@@ -17,7 +17,7 @@ namespace SqlServerSimulator;
 /// <remarks>
 /// <para>
 /// Properties: CI + IgnoreKanaType + IgnoreWidth. Behaviorally a subset of
-/// today's <see cref="Collation.Default"/> at the compare level, but
+/// today's <see cref="Collation.Baseline"/> at the compare level, but
 /// without any of the Collation-class machinery
 /// (<see cref="Collation.Name"/> / <see cref="Collation.Description"/> /
 /// <see cref="Collation.StorageEncoding"/> / coercibility-precedence /

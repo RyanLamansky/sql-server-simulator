@@ -4,7 +4,7 @@ Scalar alias types (also called UDDTs — user-defined data types) bind a name t
 
 ## Storage
 
-`AliasType` (`SqlServerSimulator/AliasType.cs`) carries the underlying `SqlType`, the alias's nullability default, name, schema, and `user_type_id`. `Schema.AliasTypes` is the per-schema `ConcurrentDictionary<string, AliasType>` keyed by name (case-insensitive via `Collation.Default`). Shares the type-name namespace with `TableTypes` — duplicate-name collision across either dict raises **Msg 219** verbatim.
+`AliasType` (`SqlServerSimulator/AliasType.cs`) carries the underlying `SqlType`, the alias's nullability default, name, schema, and `user_type_id`. `Schema.AliasTypes` is the per-schema `ConcurrentDictionary<string, AliasType>` keyed by name (case-insensitive via `Collation.Baseline`). Shares the type-name namespace with `TableTypes` — duplicate-name collision across either dict raises **Msg 219** verbatim.
 
 `user_type_id` allocation: per-database counter starting at 256, advanced by `Database.AllocateAliasTypeId`. The underlying built-in's `system_type_id` propagates through to `sys.types` (e.g. `nvarchar`-backed alias → `system_type_id=231`).
 

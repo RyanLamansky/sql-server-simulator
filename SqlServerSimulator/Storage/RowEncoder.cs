@@ -90,20 +90,27 @@ internal static class RowEncoder
         if (schema.Length != values.Length)
             throw new ArgumentException($"Schema has {schema.Length} columns but values has {values.Length}.", nameof(values));
 
-        // The variable-length string/binary families are length-bearing on the
-        // SqlType (varchar(N), nvarchar(N), varbinary(N) — each declared length
-        // is a distinct singleton). Runtime values built via FromVarchar /
-        // FromNVarchar / FromVarbinary always land on the length-unspecified
-        // form; the declared cap lives on the schema's HeapColumn. So when
-        // comparing value-vs-schema type identity, accept any same-family pair
-        // regardless of length — write-time truncation/overflow is enforced
-        // upstream by Simulation.EnforceMaxLength + Cast.EnforceTargetMaxLength
-        // before the value reaches the encoder.
+        // String/binary type instances are interned by (length, collation,
+        // coercibility), so two same-family types with different collation
+        // pinning are distinct references. Reference equality is too strict
+        // for value-vs-column matching: cells built via FromVarchar /
+        // FromNVarchar / FromVarbinary land on the length-unspecified
+        // baseline form (the declared cap lives on the schema's HeapColumn,
+        // not the cell type); catalog-view cells built via SqlType.GetChar /
+        // GetNChar carry the baseline collation while the catalog column
+        // pins Latin1_General_CI_AS_KS_WS. Both fall through to compatible
+        // encoding because the byte representation depends on character
+        // data and length, not on collation or coercibility tags. Var-family
+        // pairs accept any length (cap lives on HeapColumn); char/nchar
+        // pairs require matching length because the fixed-length encoder
+        // reads exactly that many bytes.
         static bool IsCompatibleColumnType(SqlType valueType, SqlType columnType) =>
             valueType == columnType
             || (valueType is VarcharSqlType && columnType is VarcharSqlType)
             || (valueType is NVarcharSqlType && columnType is NVarcharSqlType)
-            || (valueType is VarbinarySqlType && columnType is VarbinarySqlType);
+            || (valueType is VarbinarySqlType && columnType is VarbinarySqlType)
+            || (valueType is CharSqlType vCh && columnType is CharSqlType cCh && vCh.length == cCh.length)
+            || (valueType is NCharSqlType vNCh && columnType is NCharSqlType cNCh && vNCh.length == cNCh.length);
 
         var n = schema.Length;
         var fixedSectionLength = 0;

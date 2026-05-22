@@ -48,7 +48,7 @@ partial class Simulation
         if (sqlValue.IsNull)
             yield break; // dynamic SQL of NULL → no-op (matches real SQL Server's lenient handling)
 
-        var sqlText = sqlValue.CoerceTo(VarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
+        var sqlText = sqlValue.CoerceTo(VarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
         foreach (var outcome in ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null))
             yield return outcome;
 
@@ -90,7 +90,7 @@ partial class Simulation
 
         // Argument 1: SQL text (literal or @-variable, coerced to string).
         var (sqlRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
-        var sqlValue = sqlRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault));
+        var sqlValue = sqlRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var hasMoreArgs = context.Token is Operator { Character: ',' };
 
         // Argument 2 (optional): parameter-declaration string.
@@ -99,7 +99,7 @@ partial class Simulation
         {
             context.MoveNextRequired();
             var (paramDefsRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
-            var paramDefs = paramDefsRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault));
+            var paramDefs = paramDefsRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
             if (!paramDefs.IsNull)
                 declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefs.AsString, batch.Connection);
             hasMoreArgs = context.Token is Operator { Character: ',' };

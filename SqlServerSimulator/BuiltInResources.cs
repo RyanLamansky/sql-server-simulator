@@ -118,6 +118,14 @@ internal static class BuiltInResources
     /// </summary>
     private static Dictionary<string, CatalogView> BuildCatalogViews()
     {
+        // Catalog-pinned types reused across catalog views — Latin1_General_CI_AS_KS_WS
+        // at Implicit rank, matching what real SQL Server's catalog DDL pins
+        // for _desc enum columns, permission_name, and the char(1)/char(2)
+        // type/state code columns. See Collation.Catalog for empirical
+        // grounding and the contained-DB-vs-non-contained-DB distinction.
+        var nvarchar60Catalog = NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit);
+        var nvarchar128Catalog = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+
         // sys.schemas: (name sysname, schema_id int, principal_id int null)
         var schemasColumns = new HeapColumn[]
         {
@@ -139,7 +147,7 @@ internal static class BuiltInResources
         // Real SQL Server has many more columns; the shipped subset covers
         // the dominant query shapes. type is char(2) with trailing space
         // ('U ') — probe-confirmed.
-        var charTwo = CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault);
+        var charTwo = CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit);
         var tableType = SqlValue.FromChar(charTwo, "U ");
         var tableTypeDesc = SqlValue.FromNVarchar("USER_TABLE");
         var notMsShipped = SqlValue.FromBoolean(false);
@@ -157,12 +165,12 @@ internal static class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
             new("temporal_type", SqlType.TinyInt, null, true),
-            new("temporal_type_desc", SqlType.NVarchar, 60, true),
+            new("temporal_type_desc", nvarchar60Catalog, 60, true),
             new("history_table_id", SqlType.Int32, null, true),
         };
         var tablesView = new CatalogView("tables", tablesColumns, (batch, database) =>
@@ -216,7 +224,7 @@ internal static class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, true),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
@@ -381,7 +389,7 @@ internal static class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
@@ -531,10 +539,10 @@ internal static class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("parent_class", SqlType.TinyInt, null, false),
-            new("parent_class_desc", SqlType.NVarchar, 60, true),
+            new("parent_class_desc", nvarchar60Catalog, 60, true),
             new("parent_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_disabled", SqlType.Bit, null, false),
@@ -557,7 +565,7 @@ internal static class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, true),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
@@ -569,9 +577,9 @@ internal static class BuiltInResources
             new("is_not_for_replication", SqlType.Bit, null, false),
             new("is_not_trusted", SqlType.Bit, null, false),
             new("delete_referential_action", SqlType.TinyInt, null, false),
-            new("delete_referential_action_desc", SqlType.NVarchar, 60, true),
+            new("delete_referential_action_desc", nvarchar60Catalog, 60, true),
             new("update_referential_action", SqlType.TinyInt, null, false),
-            new("update_referential_action_desc", SqlType.NVarchar, 60, true),
+            new("update_referential_action_desc", nvarchar60Catalog, 60, true),
             new("is_system_named", SqlType.Bit, null, false),
         };
         var foreignKeysView = new CatalogView("foreign_keys", foreignKeysColumns, EnumerateSysForeignKeys);
@@ -617,7 +625,7 @@ internal static class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, true),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
@@ -643,7 +651,7 @@ internal static class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, true),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
@@ -665,7 +673,7 @@ internal static class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, true),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
@@ -691,7 +699,7 @@ internal static class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
             new("type", SqlType.TinyInt, null, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("is_unique", SqlType.Bit, null, false),
             new("data_space_id", SqlType.Int32, null, false),
             new("ignore_dup_key", SqlType.Bit, null, false),
@@ -826,7 +834,7 @@ internal static class BuiltInResources
             new("major_id", SqlType.Int32, null, false),
             new("minor_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-            new("value", NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("value", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
         };
         var extendedPropertiesView = new CatalogView("extended_properties", extendedPropertiesColumns, EnumerateSysExtendedProperties);
 
@@ -840,7 +848,7 @@ internal static class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("principal_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("default_schema_name", SqlType.SystemName, 128, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
@@ -848,7 +856,7 @@ internal static class BuiltInResources
             new("sid", SqlType.Varbinary, 85, true),
             new("is_fixed_role", SqlType.Bit, null, false),
             new("authentication_type", SqlType.TinyInt, null, true),
-            new("authentication_type_desc", SqlType.NVarchar, 60, true),
+            new("authentication_type_desc", nvarchar60Catalog, 60, true),
         };
         var databasePrincipalsView = new CatalogView("database_principals", databasePrincipalsColumns, EnumerateSysDatabasePrincipals);
 
@@ -856,19 +864,19 @@ internal static class BuiltInResources
         // Real SQL Server's row carries a few additional internal columns
         // (e.g. revert_audit_flag); the simulator surfaces the user-visible
         // set only.
-        var charOne = SqlType.GetChar(1);
+        var charOne = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
         var databasePermissionsColumns = new HeapColumn[]
         {
             new("class", SqlType.TinyInt, null, false),
-            new("class_desc", SqlType.NVarchar, 60, true),
+            new("class_desc", nvarchar60Catalog, 60, true),
             new("major_id", SqlType.Int32, null, false),
             new("minor_id", SqlType.Int32, null, false),
             new("grantee_principal_id", SqlType.Int32, null, false),
             new("grantor_principal_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
-            new("permission_name", NVarcharSqlType.Get(128, Collation.Default, Coercibility.CoercibleDefault), 128, true),
+            new("permission_name", nvarchar128Catalog, 128, true),
             new("state", charOne, 1, false),
-            new("state_desc", SqlType.NVarchar, 60, true),
+            new("state_desc", nvarchar60Catalog, 60, true),
         };
         var databasePermissionsView = new CatalogView("database_permissions", databasePermissionsColumns, EnumerateSysDatabasePermissions);
 
@@ -909,10 +917,10 @@ internal static class BuiltInResources
             new("fulltext_catalog_id", SqlType.Int32, null, false),
             new("is_enabled", SqlType.Bit, null, false),
             new("change_tracking_state", charOne, 1, false),
-            new("change_tracking_state_desc", SqlType.NVarchar, 60, true),
+            new("change_tracking_state_desc", nvarchar60Catalog, 60, true),
             new("has_crawl_completed", SqlType.Bit, null, false),
             new("crawl_type", charOne, 1, false),
-            new("crawl_type_desc", SqlType.NVarchar, 60, true),
+            new("crawl_type_desc", nvarchar60Catalog, 60, true),
             new("crawl_start_date", SqlType.DateTime, null, true),
             new("crawl_end_date", SqlType.DateTime, null, true),
             new("stoplist_id", SqlType.Int32, null, true),
@@ -961,10 +969,10 @@ internal static class BuiltInResources
             new("name", SqlType.SystemName, 128, true),
             new("index_id", SqlType.Int32, null, false),
             new("type", SqlType.TinyInt, null, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("using_xml_index_id", SqlType.Int32, null, true),
             new("secondary_type", charOne, 1, true),
-            new("secondary_type_desc", SqlType.NVarchar, 60, true),
+            new("secondary_type_desc", nvarchar60Catalog, 60, true),
             new("is_primary_key", SqlType.Bit, null, true),
         };
         var xmlIndexesView = new CatalogView("xml_indexes", xmlIndexesColumns, EnumerateSysXmlIndexes);
@@ -983,7 +991,7 @@ internal static class BuiltInResources
             new("name", SqlType.SystemName, 128, true),
             new("index_id", SqlType.Int32, null, false),
             new("type", SqlType.TinyInt, null, false),
-            new("type_desc", SqlType.NVarchar, 60, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("is_unique", SqlType.Bit, null, true),
             new("data_space_id", SqlType.Int32, null, false),
             new("ignore_dup_key", SqlType.Bit, null, true),
@@ -997,10 +1005,10 @@ internal static class BuiltInResources
             new("allow_row_locks", SqlType.Bit, null, true),
             new("allow_page_locks", SqlType.Bit, null, true),
             new("spatial_index_type", SqlType.Int32, null, false),
-            new("spatial_index_type_desc", SqlType.NVarchar, 60, true),
+            new("spatial_index_type_desc", nvarchar60Catalog, 60, true),
             new("tessellation_scheme", SqlType.NVarchar, 60, true),
             new("has_filter", SqlType.Bit, null, false),
-            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault), null, true),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), null, true),
             new("auto_created", SqlType.Bit, null, true),
         };
         var spatialIndexesView = new CatalogView("spatial_indexes", spatialIndexesColumns, EnumerateSysSpatialIndexes);
@@ -1058,10 +1066,10 @@ internal static class BuiltInResources
             new("compatibility_level", SqlType.TinyInt, null, true),
             new("collation_name", SqlType.SystemName, 128, true),
             new("snapshot_isolation_state", SqlType.TinyInt, null, false),
-            new("snapshot_isolation_state_desc", SqlType.NVarchar, 60, true),
+            new("snapshot_isolation_state_desc", nvarchar60Catalog, 60, true),
             new("is_read_committed_snapshot_on", SqlType.Bit, null, false),
             new("state", SqlType.TinyInt, null, false),
-            new("state_desc", SqlType.NVarchar, 60, true),
+            new("state_desc", nvarchar60Catalog, 60, true),
         };
         var databasesView = new CatalogView("databases", databasesColumns, EnumerateSysDatabases);
 
@@ -1249,7 +1257,7 @@ internal static class BuiltInResources
                 SqlValue.FromInt32(key.MajorId),
                 SqlValue.FromInt32(key.MinorId),
                 SqlValue.FromSystemName(key.Name),
-                kvp.Value.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)) : kvp.Value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)),
+                kvp.Value.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)) : kvp.Value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)),
             ];
         }
     }
@@ -1301,7 +1309,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var fkType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault), "F ");
+        var fkType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "F ");
         var fkTypeDesc = SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT");
         // key_index_id is the index id on the referenced table that satisfies
         // the FK — the simulator doesn't model indexes so report 1 (the
@@ -1395,7 +1403,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var ckType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault), "C ");
+        var ckType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "C ");
         var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var falseDbCollation = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
@@ -1454,7 +1462,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var charTwo = CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault);
+        var charTwo = CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit);
         var pkType = SqlValue.FromChar(charTwo, "PK");
         var uqType = SqlValue.FromChar(charTwo, "UQ");
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
@@ -1507,7 +1515,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var dfType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault), "D ");
+        var dfType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "D ");
         var dfTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
         foreach (var schema in database.Schemas.Values)
         {
@@ -1996,7 +2004,7 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch, Database database)
     {
-        var charOneType = CharSqlType.Get(1, Collation.Default, Coercibility.CoercibleDefault);
+        var charOneType = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
         var trueBit = SqlValue.FromBoolean(true);
         var autoCode = SqlValue.FromChar(charOneType, "A");
         var autoDesc = SqlValue.FromNVarchar("AUTO");
@@ -2094,7 +2102,7 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysXmlIndexes(Parser.BatchContext batch, Database database)
     {
-        var charOneType = CharSqlType.Get(1, Collation.Default, Coercibility.CoercibleDefault);
+        var charOneType = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
         var typeCode = SqlValue.FromByte(3);
         var typeDesc = SqlValue.FromNVarchar("XML");
         var falseBit = SqlValue.FromBoolean(false);
@@ -2168,7 +2176,7 @@ internal static class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
         var oneInt = SqlValue.FromInt32(1);
-        var nullDesc = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault));
+        var nullDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
         var geometryTypeDesc = SqlValue.FromNVarchar("GEOMETRY");
         var geographyTypeDesc = SqlValue.FromNVarchar("GEOGRAPHY");
         foreach (var schema in database.Schemas.Values)

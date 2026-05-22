@@ -4,9 +4,9 @@ Every string-categorized `SqlType` instance carries a `(Collation, Coercibility)
 
 ## Type-side wiring
 
-`VarcharSqlType` / `NVarcharSqlType` / `CharSqlType` / `NCharSqlType` intern per `(length, Collation, Coercibility)` trio via a 3-tuple `ConcurrentDictionary`. The existing length-only `Get(N)` overloads return the `(N, Collation.Default, CoercibleDefault)` variant — matching the literal / parameter / CAST-of-literal contexts that historically didn't pin collation. New `Get(length, collation, coercibility)` overloads return the column-pinned variant.
+`VarcharSqlType` / `NVarcharSqlType` / `CharSqlType` / `NCharSqlType` intern per `(length, Collation, Coercibility)` trio via a 3-tuple `ConcurrentDictionary`. The existing length-only `Get(N)` overloads return the `(N, Collation.Baseline, CoercibleDefault)` variant — matching the literal / parameter / CAST-of-literal contexts that historically didn't pin collation. New `Get(length, collation, coercibility)` overloads return the column-pinned variant.
 
-`SystemNameSqlType` / `TextSqlType` / `NTextSqlType` are single shared instances reporting `Collation.Default` at `Implicit` rank — sysname/text/ntext don't accept per-column COLLATE in the simulator (sysname rejects per grammar; text/ntext deferred as deprecated).
+`SystemNameSqlType` / `TextSqlType` / `NTextSqlType` are single shared instances reporting `Collation.Baseline` at `Implicit` rank — sysname/text/ntext don't accept per-column COLLATE in the simulator (sysname rejects per grammar; text/ntext deferred as deprecated).
 
 `SqlType.WithCollation(Collation, Coercibility)` is the virtual that rewraps a string type with new metadata; non-string types and the sysname/text/ntext singletons return `this`. Used by `CollateExpression` for the postfix override and by CREATE TABLE / ALTER COLUMN for the column declaration.
 
@@ -24,7 +24,7 @@ Every string-categorized `SqlType` instance carries a `(Collation, Coercibility)
 
 ## Value-side compare path
 
-`SqlValue.CompareTo` / `Equals` / `GetHashCode` route through `this.Type.Collation ?? Collation.Default`. Same-type pairs (which after the interning split are also same-collation pairs) take the fast path. Cross-type cases flow through `CompareValuesPromoted` (in `BooleanExpression.cs`), which:
+`SqlValue.CompareTo` / `Equals` / `GetHashCode` route through `this.Type.Collation ?? Collation.Baseline`. Same-type pairs (which after the interning split are also same-collation pairs) take the fast path. Cross-type cases flow through `CompareValuesPromoted` (in `BooleanExpression.cs`), which:
 
 1. Rejects LOB-typed operands (Msg 402 — unchanged).
 2. Runs `Collation.Resolve` for string-string pairs with different types; raises **Msg 468 State 9** on conflict (probe-confirmed wording: `Cannot resolve the collation conflict between "X" and "Y" in the <op> operation.`). The check fires before NULL short-circuits, matching real SQL Server (`NULL = NULL` across cross-collation columns also raises).
@@ -52,7 +52,7 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 
 ## Database default and `#temp` inheritance
 
-`Simulation.Create.cs`'s column wiring (shared by CREATE TABLE / ALTER TABLE ADD / DECLARE @t / CREATE TYPE AS TABLE / temp-table paths) resolves the column's pinned collation as: explicit `COLLATE` clause first, else the active database's `Database.CollationName`, else `Collation.Default`. So `#temp` tables created while a BACPAC-loaded non-default-collation database is active inherit that database's collation — avoiding the EF temp-join footgun (real SQL Server's tempdb is independent, but the common shape — tempdb matches server default which matches user DB — collapses to the same behavior).
+`Simulation.Create.cs`'s column wiring (shared by CREATE TABLE / ALTER TABLE ADD / DECLARE @t / CREATE TYPE AS TABLE / temp-table paths) resolves the column's pinned collation as: explicit `COLLATE` clause first, else the active database's `Database.CollationName`, else `Collation.Baseline`. So `#temp` tables created while a BACPAC-loaded non-default-collation database is active inherit that database's collation — avoiding the EF temp-join footgun (real SQL Server's tempdb is independent, but the common shape — tempdb matches server default which matches user DB — collapses to the same behavior).
 
 ## Server-level seed: `Simulation.ServerCollationName`
 
@@ -69,16 +69,29 @@ Sites routed through the active DB collation:
 - `hierarchyid.ToString()` and spatial / XML method calls that return string-typed values.
 - `MERGE … OUTPUT $action` (`Simulation.Merge.MergeActionReference`).
 - `sys.fn_listextendedproperty` `value` projection column (`Selection.ListExtendedProperty`).
-- `SqlType.PromoteForArithmetic`'s string-concat path derives the result collation via `Collation.Resolve(a, b)` from the operands' coercibility ranks rather than defaulting to `Collation.Default`.
+- `SqlType.PromoteForArithmetic`'s string-concat path derives the result collation via `Collation.Resolve(a, b)` from the operands' coercibility ranks rather than defaulting to `Collation.Baseline`.
 
 Probe-confirmed fidelity (real SQL Server CS database, 2026-05-22): `SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')` returns `'neq'` (literals don't case-fold under CS). The simulator now matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
 
-Sites that intentionally stay on `Collation.Default`:
-- System catalog schemas in `BuiltInResources.cs` — process-wide statics, no per-Simulation affinity.
+Sites that intentionally stay on `Collation.Baseline`:
 - `SqlType.Varchar` / `NVarchar` pseudo-singletons and `SqlType.GetChar` / `GetNChar` static bridges — type-identity placeholders.
-- `text` / `ntext` / `sysname` `Collation` overrides — server-default-only types.
+- `text` / `ntext` / `sysname` `Collation` overrides — server-default-only types. (Real SQL Server pins these per-database for text/ntext and per-server for sysname; a per-Simulation routing model is deferred.)
 - Error-message type placeholders, dynamic-SQL string extraction, PRINT formatting — collation irrelevant to the surfaced value.
+- User-supplied catalog content columns: `sys.extended_properties.value`, `sys.indexes.filter_definition` — real SQL Server tags these with the database collation; the process-wide catalog view declaration can't reach per-`Database` state, so these stay at Baseline until the per-Simulation catalog model lands.
 - `Simulation.ServerCollation` initializer — the deliberate anchor for "what does the simulator's hardcoded baseline resolve to."
+
+## Catalog views pin `_desc` / enum columns to `Collation.Catalog`
+
+`Collation.Catalog` resolves to `Latin1_General_100_CI_AS_KS_WS_SC` — the contained-database catalog collation real SQL Server reports through `sys.fn_helpcollations()`. Microsoft's "Contained Database Collations" doc names it as `Latin1_General_100_CI_AS_WS_KS_SC` (WS before KS — documentation typo); the canonical name confirmed via the live `fn_helpcollations` catalog is `_CI_AS_KS_WS_SC` (KS before WS), and the simulator's parser only accepts the canonical form. The simulator picks this as the catalog anchor even though it doesn't model containment, because the documented value is more authoritative than empirical probes of non-contained instances. A non-contained SQL Server 2025 probe surfaced `Latin1_General_CI_AS_KS_WS` for catalog `_desc` columns — a pre-100, no-`_SC` legacy carry-over rather than a reference value; both names give identical equality results for the ASCII English identifiers that dominate real catalog-view queries, and the documented `_SC` flag adds correct supplementary-character handling if catalog content ever includes any.
+
+`BuildCatalogViews` in `BuiltInResources.cs` defines two shared locals (`nvarchar60Catalog` / `nvarchar128Catalog`) plus per-view `charTwo` / `charOne` locals, all at `Collation.Catalog` + `Coercibility.Implicit`. Sites that pin to catalog:
+
+- 25 `_desc` columns (`type_desc`, `class_desc`, `state_desc`, `temporal_type_desc`, `delete_referential_action_desc`, etc.).
+- `sys.database_permissions.permission_name`.
+- The `type` / `state` char(1)/char(2) enum-code columns and matching cell-value sites (`fkType` 'F ', `ckType` 'C ', `dfType` 'D ', `pkType` 'PK', `uqType` 'UQ', etc.).
+- The null-`_desc` placeholder in `sys.spatial_indexes` (cell carries the catalog tag for visual consistency; row encode/decode routes through the column type anyway).
+
+`Coercibility.Implicit` matches real SQL Server's behavior for explicit-`COLLATE`-pinned columns: catalog-column-vs-literal comparisons resolve under the catalog collation rather than rank-ambiguously. `RowEncoder.IsCompatibleColumnType` accepts `CharSqlType` / `NCharSqlType` pairs with matching length but differing collation/coercibility (mirroring the existing var-family rule), so cells from `SqlType.GetChar(N)` bridges still flow through the catalog-pinned column types without false rejections.
 
 ## String literals carry the active DB collation
 
@@ -193,7 +206,7 @@ The pre-2005 `_BIN` (not `_BIN2`) variant has a different, real quirk: at positi
 
 - **Set ops (UNION / UNION ALL / INTERSECT / EXCEPT) don't apply collation-conflict checks at the column-pair level yet.** Probe showed UNION raises Msg 468, UNION ALL raises Msg 457 across cross-collation columns; the simulator's set-op type-promotion path doesn't call `Collation.Resolve`. Cross-collation set-op columns currently fall through to the legacy type-precedence resolution.
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.** Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default. Low impact (text/ntext deprecated since SQL Server 2005).
-- **Sysname's collation is always `Collation.Default`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
+- **Sysname's collation is always `Collation.Baseline`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
 - **`CAST(expr AS varchar(N)) COLLATE …UTF8` doesn't re-truncate under the postfix collation.** The CAST runs against the local default (CP1252, single-byte), so a 3-char input into `varchar(2)` truncates to 2 chars; the postfix COLLATE then rewraps as `varchar(2)` UTF-8 with that 2-char .NET string, which under UTF-8 may be more than 2 bytes. Probe-confirmed against SQL Server 2025: real SQL Server effectively applies the postfix collation's byte budget at CAST time — `CAST(N'AéB' AS varchar(2)) COLLATE Latin1_General_100_CI_AS_SC_UTF8` returns `'A'` (1 byte), the simulator returns `'Aé'` (3 bytes). The fixed-length sibling `CAST(... AS char(N))` doesn't have this gap because `CollateExpression.Run` re-normalizes char(N) values through `FromString` when the storage encoding changes (the char(N) destination buffer is fixed at N bytes, so the regression would manifest as an encoder overflow; varchar sizes dynamically and only the truncation cutoff disagrees). Workaround: pin the UTF-8 collation directly on the CAST target via the column's declared collation, rather than as a postfix on a CAST output.
 - **Pre-v100 collation sort divergence on supplementary chars at position 1+.** Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` (the default) and `Latin1_General_CI_AS` (pre-v100) sort `Z+emoji` BEFORE `Z+U+E000` — code-unit order (high surrogate D83D < E000). The v100 family (`Latin1_General_100_CI_AS` and its SC sibling) sort the other way (codepoint U+1F600 > U+E000 → `Z+E000` first). The simulator routes both pre-v100 and v100 through `CompareInfo`, which always does codepoint compare — so both ranges of collations behave like v100 in the simulator. Narrow gap (only supplementary chars at non-position-0); fixing requires per-collation Compare bodies that drop to code-unit ordinal at supplementary positions.
 

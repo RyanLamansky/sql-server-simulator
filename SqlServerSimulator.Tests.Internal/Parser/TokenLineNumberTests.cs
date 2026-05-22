@@ -77,7 +77,7 @@ public sealed class TokenLineNumberTests
     private static IEnumerable<Token> TokenizeMeaningful(string command)
     {
         var index = 0;
-        while (Tokenizer.NextToken(command, ref index, Collation.Default) is Token t)
+        while (Tokenizer.NextToken(command, ref index, Collation.Baseline) is Token t)
         {
             if (t is Whitespace or Comment)
                 continue;

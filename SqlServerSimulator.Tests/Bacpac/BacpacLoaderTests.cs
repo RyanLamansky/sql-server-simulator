@@ -696,7 +696,7 @@ public class BacpacLoaderTests
         // Whitelisted collation stored on Database.CollationName + surfaced
         // through sys.databases.collation_name and DATABASEPROPERTYEX.
         // Comparison semantics still route through the default per
-        // Collation.Default; the metadata is honest about the declaration.
+        // Collation.Baseline; the metadata is honest about the declaration.
         using var bacpac = BacpacBuilder.Create()
             .DatabaseOption("Collation", "Latin1_General_100_CI_AS")
             .Build();

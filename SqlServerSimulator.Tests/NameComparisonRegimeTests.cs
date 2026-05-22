@@ -314,7 +314,7 @@ public sealed class NameComparisonRegimeTests
 
     // ===== Scalar-function result types carry the active DB collation =====
     // CHAR(N) / NCHAR(N) result types pin the active database's collation
-    // rather than the storage-baseline Collation.Default, so a CS-DB
+    // rather than the storage-baseline Collation.Baseline, so a CS-DB
     // compare between two function-returned strings goes through the
     // CS comparer. Probe-confirmed against real SQL Server CS database
     // (2026-05-22): CHAR(65) = CHAR(97) returns 'neq' (literals don't
@@ -357,4 +357,21 @@ public sealed class NameComparisonRegimeTests
     [TestMethod]
     public void CiDatabase_TwoVarcharLiterals_StillEqualUnderCi()
         => AreEqual("eq", new Simulation().ExecuteScalar("SELECT IIF('A' = 'a', 'eq', 'neq')"));
+
+    // ===== Catalog views pin _desc columns to the catalog collation =====
+    // BuildCatalogViews declares _desc columns at Catalog (Latin1_General_CI_AS_KS_WS)
+    // + Implicit. Under a CS-server simulation, the literal carries CS at
+    // CoercibleDefault rank (via the tokenizer threading). Collation.Resolve
+    // picks the column's Implicit-rank Catalog collation (CI), so the user
+    // can still query catalog _desc values without case-matching the
+    // declared enum string — matching real SQL Server's behavior.
+
+    [TestMethod]
+    public void CsDatabase_CatalogTypeDescMatchesLowercaseUnderCatalogCollation()
+    {
+        var sim = new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" };
+        _ = sim.ExecuteNonQuery("create table dbo.catalog_t (id int)");
+        AreEqual(1, sim.ExecuteScalar(
+            "select count(*) from sys.objects where name = N'catalog_t' and type_desc = N'user_table'"));
+    }
 }

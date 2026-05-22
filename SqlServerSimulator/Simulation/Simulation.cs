@@ -130,7 +130,7 @@ public sealed partial class Simulation
     /// public callers go through the string-typed property to keep
     /// <see cref="Collation"/> off the public API surface.
     /// </summary>
-    internal Collation ServerCollation { get; private set; } = Collation.Default;
+    internal Collation ServerCollation { get; private set; } = Collation.Baseline;
 
     /// <summary>
     /// Per-database state hosted by this server instance, keyed by name.

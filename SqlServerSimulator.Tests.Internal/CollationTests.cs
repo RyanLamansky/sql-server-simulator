@@ -5,17 +5,17 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Algorithm-contract tests for the <see cref="Collation"/> implementations
 /// that aren't routed through public SQL today. The default collation's
-/// behavior (<see cref="Collation.Default"/>) and the parser-driven
+/// behavior (<see cref="Collation.Baseline"/>) and the parser-driven
 /// name-resolution surface (<see cref="Collation.TryGet"/> /
 /// <see cref="Collation.IsRecognized"/>) are exercised in the public
 /// <c>CollationBehaviorTests</c> / <c>CollationMetadataTests</c> /
 /// <c>LikeTests</c>; this file keeps the non-default-collation algorithm
 /// contracts and the internal-only null handling of
-/// <see cref="Collation.Default"/>'s <see cref="IComparer{T}"/> /
+/// <see cref="Collation.Baseline"/>'s <see cref="IComparer{T}"/> /
 /// <see cref="IEqualityComparer{T}"/> contracts. The non-default
 /// algorithms exist in the code but aren't called from any public SQL
 /// site (every string op outside the LIKE case-sensitivity flag still
-/// goes through <see cref="Collation.Default"/> — see
+/// goes through <see cref="Collation.Baseline"/> — see
 /// <c>docs/claude/database-options.md</c>); the tests pin the contract
 /// so the algorithms behave correctly once routing lands.
 /// </summary>
@@ -44,12 +44,12 @@ public sealed class CollationTests
     [TestMethod]
     public void Sql_NullHandling()
     {
-        IsTrue(Collation.Default.Equals(null, null));
-        IsFalse(Collation.Default.Equals(null, ""));
-        IsFalse(Collation.Default.Equals("", null));
-        AreEqual(0, Collation.Default.Compare(null, null));
-        IsLessThan(0, Collation.Default.Compare(null, "x"));
-        IsGreaterThan(0, Collation.Default.Compare("x", null));
+        IsTrue(Collation.Baseline.Equals(null, null));
+        IsFalse(Collation.Baseline.Equals(null, ""));
+        IsFalse(Collation.Baseline.Equals("", null));
+        AreEqual(0, Collation.Baseline.Compare(null, null));
+        IsLessThan(0, Collation.Baseline.Compare(null, "x"));
+        IsGreaterThan(0, Collation.Baseline.Compare("x", null));
     }
 
     // ---- Latin1_General_100_CI_AS (Windows-style v100) ----
@@ -155,6 +155,6 @@ public sealed class CollationTests
         const string nfc = "é";
         const string nfd = "é";
         IsFalse(Latin1GeneralBin.Equals(nfc, nfd));
-        IsTrue(Collation.Default.Equals(nfc, nfd));
+        IsTrue(Collation.Baseline.Equals(nfc, nfd));
     }
 }
