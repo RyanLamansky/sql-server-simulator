@@ -50,7 +50,7 @@ partial class Simulation
         if (Databases.ContainsKey(databaseName))
             throw new InvalidOperationException($"A database named '{databaseName}' already exists in this Simulation. Import is a create-only operation; choose a different name via BacpacImportOptions.DatabaseName.");
         result = new BacpacImportResult();
-        var database = new Database(databaseName);
+        var database = new Database(databaseName, this.ServerCollation);
         Databases.Add(databaseName, database);
         BacpacReader.Load(stream, this, database, maxDegreeOfParallelism, result);
     }

@@ -45,11 +45,6 @@ internal sealed class Database
     /// <summary>Conventional schema-id for <c>sys</c> (matches real SQL Server).</summary>
     public const int SysSchemaId = 4;
 
-    public Database(string name)
-        : this(name, Collation.Default)
-    {
-    }
-
     public Database(string name, Collation collation)
     {
         this.Name = name;
@@ -109,7 +104,8 @@ internal sealed class Database
     /// new collation, but the construction-time dict comparers don't
     /// rebuild (matches real SQL Server's behavior: existing objects keep
     /// their identifier registration, new ones bind under the new
-    /// collation). Defaults to <see cref="Collation.Default"/>.
+    /// collation). Seeded at construction from
+    /// <see cref="Simulation.ServerCollation"/>.
     /// </summary>
     public Collation Collation;
 

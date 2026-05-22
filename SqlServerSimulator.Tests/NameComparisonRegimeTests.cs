@@ -255,4 +255,61 @@ public sealed class NameComparisonRegimeTests
     public void CsDatabase_HierarchyIdTypePrefix_CanonicalCase_Resolves()
         => AreEqual("/", CsCollation().ExecuteScalar(
             "SELECT hierarchyid::GetRoot().ToString()"));
+
+    // ===== Simulation.ServerCollationName seeds new-database collation =====
+    // Mirrors SQL Server's model.collation role: setting it before the
+    // first CreateDbConnection / ImportBacpac makes the lazy-seeded
+    // "simulated" database (and any subsequent bacpac import that
+    // doesn't declare its own collation) inherit the value. Equivalent
+    // end state to ALTER DATABASE COLLATE for the simulated DB, but
+    // chosen up-front rather than as a post-hoc adjustment.
+
+    [TestMethod]
+    public void ServerCollationName_DefaultIsClassicCi()
+        => AreEqual("SQL_Latin1_General_CP1_CI_AS", new Simulation().ServerCollationName);
+
+    [TestMethod]
+    public void ServerCollationName_SetToRecognizedCs_Persists()
+    {
+        var sim = new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" };
+        AreEqual("SQL_Latin1_General_CP1_CS_AS", sim.ServerCollationName);
+    }
+
+    [TestMethod]
+    public void ServerCollationName_Unrecognized_Throws()
+    {
+        var ex = Throws<ArgumentException>(() => new Simulation { ServerCollationName = "Not_A_Real_Collation" });
+        Assert.Contains("not recognized", ex.Message);
+    }
+
+    [TestMethod]
+    public void ServerCollationName_Null_Throws()
+        => _ = Throws<ArgumentNullException>(() => new Simulation { ServerCollationName = null! });
+
+    [TestMethod]
+    public void ServerCollationName_SeedsLazySimulatedDatabase()
+    {
+        var sim = new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" };
+        AreEqual("SQL_Latin1_General_CP1_CS_AS",
+            sim.ExecuteScalar("SELECT collation_name FROM sys.databases WHERE name = N'simulated'"));
+    }
+
+    [TestMethod]
+    public void ServerCollationName_SeededDatabase_CreateSchemaDBO_CoexistsWithDbo()
+    {
+        // Probe-confirmed on real SQL Server CS database (2026-05-22):
+        // CREATE SCHEMA DBO succeeds on a CS-collation DB — both `dbo`
+        // and `DBO` end up in sys.schemas as distinct entries. The
+        // ALTER-DATABASE-COLLATE variant (CsDatabase_CreateSchemaUppercaseDBO_…)
+        // hits Msg 2714 instead because the Schemas dict's comparer
+        // was built CI at construction time and doesn't rebuild on
+        // ALTER (documented fidelity gap). With ServerCollationName
+        // seeded up-front, the dict is CS from the start and the gap
+        // doesn't apply — the simulator matches real SQL Server's
+        // coexistence behavior.
+        var sim = new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" };
+        _ = sim.ExecuteNonQuery("CREATE SCHEMA DBO");
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.schemas WHERE name IN (N'dbo', N'DBO')"));
+    }
+
 }

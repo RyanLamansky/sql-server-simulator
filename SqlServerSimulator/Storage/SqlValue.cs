@@ -701,7 +701,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         && this.IsNull == other.IsNull
         && (this.IsNull
             || (IsStringTypeRef(this.Type)
-                ? (this.Type.Collation ?? Collation.Default).Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
+                ? this.Type.Collation!.Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
                 : this.Type is DateTimeOffsetSqlType
                     ? this.primitive == other.primitive
                     : this.Type == SqlType.UniqueIdentifier
@@ -756,7 +756,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : this.Type == SqlType.SmallInt ? this.AsInt16.CompareTo(other.AsInt16)
         : this.Type == SqlType.TinyInt ? this.AsByte.CompareTo(other.AsByte)
         : this.Type == SqlType.Bit ? this.AsBoolean.CompareTo(other.AsBoolean)
-        : IsStringTypeRef(this.Type) ? (this.Type.Collation ?? Collation.Default).Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
+        : IsStringTypeRef(this.Type) ? this.Type.Collation!.Compare(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
         : this.Type is RowVersionSqlType ? this.primitive.CompareTo(other.primitive)
         : this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType ? this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes)
         : this.Type == SqlType.Date ? this.primitive.CompareTo(other.primitive)
@@ -787,7 +787,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         {
             // Trailing spaces and case folding are part of equality, so the
             // hash must agree.
-            hash.Add((this.Type.Collation ?? Collation.Default).GetHashCode(TrimTrailing((string)this.reference!)));
+            hash.Add(this.Type.Collation!.GetHashCode(TrimTrailing((string)this.reference!)));
         }
         else if (this.Type is DateTimeOffsetSqlType)
         {

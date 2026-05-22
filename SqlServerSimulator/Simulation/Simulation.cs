@@ -76,7 +76,7 @@ public sealed partial class Simulation
     /// by <c>sp_addlinkedserver</c>; cleared by <c>sp_dropserver</c>.
     /// Four-part-name FROM resolution consults this dict; <c>sys.servers</c>
     /// projects one row per entry plus the local-server row. Case-
-    /// insensitive keys (<see cref="Collation.Default"/>).
+    /// insensitive keys (<see cref="BuiltInToken"/>).
     /// </summary>
     internal readonly ConcurrentDictionary<string, LinkedServer> ActiveLinkedServers = new(BuiltInToken.Comparer);
 
@@ -88,6 +88,49 @@ public sealed partial class Simulation
     /// every freshly-constructed <see cref="Simulation"/> ships with.
     /// </summary>
     internal const string DefaultDatabaseName = "simulated";
+
+    /// <summary>
+    /// Server-wide default collation name. Used as the seed for every
+    /// <see cref="Database"/> created on this simulation — both the lazy
+    /// <c>"simulated"</c> seed picked up on first
+    /// <see cref="CreateDbConnection"/> and bacpac imports that don't carry
+    /// their own collation declaration. Defaults to
+    /// <c>SQL_Latin1_General_CP1_CI_AS</c>.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors SQL Server's <c>model.collation</c>: install-time choice,
+    /// immutable thereafter (the only way to change it on a real instance
+    /// is the <c>sqlservr -m -q</c> rebuild-master dance, and it's blocked
+    /// outright on Azure SQL). Hence <see langword="init"/>-only on this
+    /// API — set it in an object initializer
+    /// (<c>new Simulation { ServerCollationName = "…" }</c>) before the
+    /// first <see cref="CreateDbConnection"/> /
+    /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>.
+    /// Per-database divergence after construction goes through
+    /// <c>ALTER DATABASE COLLATE</c>, which only affects the targeted
+    /// database. An unrecognized collation name raises
+    /// <see cref="ArgumentException"/>.
+    /// </remarks>
+    public string ServerCollationName
+    {
+        get => this.ServerCollation.Name;
+        init
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            this.ServerCollation = Collation.TryGet(value)
+                ?? throw new ArgumentException($"Collation '{value}' is not recognized by the simulator.", nameof(value));
+        }
+    }
+
+    /// <summary>
+    /// Resolved <see cref="Collation"/> backing <see cref="ServerCollationName"/>.
+    /// Internal accessor used by <see cref="Database"/> seeding paths
+    /// (<c>SimulatedDbConnection.ResolveInitialDatabase</c>,
+    /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>);
+    /// public callers go through the string-typed property to keep
+    /// <see cref="Collation"/> off the public API surface.
+    /// </summary>
+    internal Collation ServerCollation { get; private set; } = Collation.Default;
 
     /// <summary>
     /// Per-database state hosted by this server instance, keyed by name.

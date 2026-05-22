@@ -55,7 +55,7 @@ public sealed class SimulatedDbConnection : DbConnection
                 return existing;
             if (simulation.Databases.Count == 0)
             {
-                var seeded = new Database(Simulation.DefaultDatabaseName);
+                var seeded = new Database(Simulation.DefaultDatabaseName, simulation.ServerCollation);
                 simulation.Databases.Add(Simulation.DefaultDatabaseName, seeded);
                 return seeded;
             }

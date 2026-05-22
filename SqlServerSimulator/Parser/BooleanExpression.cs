@@ -890,8 +890,8 @@ internal abstract class BooleanExpression
             // Probe-confirmed wording order: right operand's collation first,
             // left operand's collation second.
             throw SimulatedSqlException.CollationConflict(
-                (r.Type.Collation ?? Collation.Default).Name,
-                (l.Type.Collation ?? Collation.Default).Name,
+                r.Type.Collation!.Name,
+                l.Type.Collation!.Name,
                 operatorName);
         }
 
@@ -1000,8 +1000,8 @@ internal abstract class BooleanExpression
             // name); higher rank wins otherwise.
             var resolved = Collation.Resolve(l.Type, r.Type)
                 ?? throw SimulatedSqlException.CollationConflict(
-                    (r.Type.Collation ?? Collation.Default).Name,
-                    (l.Type.Collation ?? Collation.Default).Name,
+                    r.Type.Collation!.Name,
+                    l.Type.Collation!.Name,
                     "like");
 
             var matched = LikePatternBuilder.BuildAnchored(r.AsString, escapeChar, resolved.Collation.CaseSensitive).IsMatch(l.AsString);

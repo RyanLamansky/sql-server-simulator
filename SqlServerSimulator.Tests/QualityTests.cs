@@ -28,6 +28,7 @@ public class QualityTests
                 nameof(Simulation.CreateDbConnection),
                 nameof(Simulation.ImportBacpac),
                 nameof(Simulation.AddRemoteSimulation),
+                nameof(Simulation.ServerCollationName),
             ],
             [typeof(SimulatedDbConnection)] = [
                 nameof(SimulatedDbConnection.InfoMessage),

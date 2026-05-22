@@ -68,17 +68,23 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// <summary>
     /// The simulator's hardcoded baseline collation —
     /// <c>SQL_Latin1_General_CP1_CI_AS</c>. Resolved once via
-    /// <see cref="TryGet"/>. Used as the seed for new
-    /// <see cref="Database.Collation"/> instances, as the fallback for
-    /// string-typed values whose <see cref="SqlType.Collation"/> is
-    /// <see langword="null"/>, and as the default for the storage-layer
+    /// <see cref="TryGet"/>. Two consumers:
+    /// <list type="bullet">
+    /// <item>The default for
+    /// <see cref="Simulation.ServerCollation"/>, which in turn seeds every
+    /// freshly-created <see cref="Database.Collation"/>. Apps that want a
+    /// non-default identifier collation set <see cref="Simulation.ServerCollation"/>
+    /// before the first <c>CreateDbConnection</c> / <c>ImportBacpac</c>;
+    /// per-database divergence happens via <c>ALTER DATABASE COLLATE</c>.</item>
+    /// <item>The storage-layer baseline for the
     /// <see cref="VarcharSqlType"/> / <see cref="NVarcharSqlType"/> /
-    /// <see cref="CharSqlType"/> / <see cref="NCharSqlType"/> singletons.
-    /// Identifier-resolution sites should route through
-    /// <see cref="Database.Collation"/> (which defaults here but may
-    /// diverge under <c>ALTER DATABASE COLLATE</c>); only sites that
-    /// genuinely need "the simulator's baseline regardless of database"
-    /// belong on this property.
+    /// <see cref="CharSqlType"/> / <see cref="NCharSqlType"/> singletons
+    /// (<c>Unspecified</c>, <c>MaxForm</c>, <c>Get(length)</c>). Those
+    /// caches are process-global and can't be per-simulation, so literal /
+    /// parameter / CAST result types carry this collation regardless of
+    /// the active database; per-column declared collation overrides at
+    /// compare and sort time.</item>
+    /// </list>
     /// </summary>
     internal static Collation Default => defaultLazy.Value;
 
