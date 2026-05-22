@@ -363,11 +363,11 @@ partial class Simulation
 
         if (onOff == Keyword.On)
         {
-            if (context.Connection.IdentityInsertTable is string held && !Collation.Default.Equals(held, heapTable.Name))
+            if (context.Connection.IdentityInsertTable is string held && !context.Batch.CurrentDatabase.Collation.Equals(held, heapTable.Name))
                 throw SimulatedSqlException.IdentityInsertAlreadyOn(held, heapTable.Name);
             context.Connection.IdentityInsertTable = heapTable.Name;
         }
-        else if (Collation.Default.Equals(context.Connection.IdentityInsertTable, heapTable.Name))
+        else if (context.Batch.CurrentDatabase.Collation.Equals(context.Connection.IdentityInsertTable, heapTable.Name))
         {
             context.Connection.IdentityInsertTable = null;
         }

@@ -217,7 +217,7 @@ internal sealed partial class Selection
                     {
                         for (var j = 0; j < columnNames.Length; j++)
                         {
-                            if (Collation.Default.Equals(columnNames[j], name.Leaf))
+                            if (BuiltInToken.Equals(columnNames[j], name.Leaf))
                                 return values[j];
                         }
                         throw SimulatedSqlException.InvalidColumnName(name);

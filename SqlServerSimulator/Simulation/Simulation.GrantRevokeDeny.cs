@@ -194,7 +194,7 @@ partial class Simulation
                 {
                     _ = context.CurrentDatabase.Permissions.RemoveAll(p =>
                         p.GranteePrincipalId == grantee.PrincipalId
-                        && Collation.Default.Equals(p.PermissionName, permName)
+                        && context.Batch.CurrentDatabase.Collation.Equals(p.PermissionName, permName)
                         && p.Class == permClass
                         && p.MajorId == permMajorId);
                     continue;

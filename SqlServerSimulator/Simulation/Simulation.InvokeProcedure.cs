@@ -65,7 +65,7 @@ partial class Simulation
                 paramIndex = -1;
                 for (var i = 0; i < procedure.Parameters.Length; i++)
                 {
-                    if (Collation.Default.Equals(procedure.Parameters[i].Name, arg.Name))
+                    if (outerBatch.CurrentDatabase.Collation.Equals(procedure.Parameters[i].Name, arg.Name))
                     {
                         paramIndex = i;
                         break;

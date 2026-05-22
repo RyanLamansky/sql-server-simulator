@@ -80,7 +80,7 @@ partial class Simulation
         var colOrdinal = -1;
         for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, columnName))
             {
                 colOrdinal = i;
                 break;
@@ -102,7 +102,7 @@ partial class Simulation
 
         foreach (var existing in table.SpatialIndexes)
         {
-            if (Collation.Default.Equals(existing.Name, indexName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(indexName);
         }
 

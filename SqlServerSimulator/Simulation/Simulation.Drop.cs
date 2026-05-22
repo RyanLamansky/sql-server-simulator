@@ -537,13 +537,13 @@ partial class Simulation
         qualifiedTableName = FormatQualifiedTableName(tableName, table);
         foreach (var kc in table.KeyConstraints)
         {
-            if (Collation.Default.Equals(kc.Name, indexName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
                 throw SimulatedSqlException.ExplicitDropIndexNotAllowed(qualifiedTableName, indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE");
         }
 
         for (var i = 0; i < table.Indexes.Count; i++)
         {
-            if (Collation.Default.Equals(table.Indexes[i].Name, indexName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(table.Indexes[i].Name, indexName))
             {
                 table.Indexes.RemoveAt(i);
                 return;

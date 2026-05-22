@@ -170,7 +170,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>claude..#foo</c>) all resolve to the local session's table — the
     /// database qualifier is effectively ignored for <c>#</c> names.
     /// </remarks>
-    internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(Collation.Default);
+    internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(BuiltInToken.Comparer);
 
     /// <summary>
     /// The single active explicit transaction on this connection, or null if

@@ -163,7 +163,7 @@ partial class Simulation
                     idx = -1;
                     for (var i = 0; i < declaredParams.Count; i++)
                     {
-                        if (Collation.Default.Equals(declaredParams[i].Name, name))
+                        if (context.Batch.CurrentDatabase.Collation.Equals(declaredParams[i].Name, name))
                         {
                             idx = i;
                             break;

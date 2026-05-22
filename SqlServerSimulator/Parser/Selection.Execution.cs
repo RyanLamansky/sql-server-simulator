@@ -32,11 +32,11 @@ internal sealed partial class Selection
         {
             for (var s = 0; s < sources.Length; s++)
             {
-                if (sources[s].Qualifier is null || !Collation.Default.Equals(sources[s].Qualifier, qualifier))
+                if (sources[s].Qualifier is null || !BuiltInToken.Equals(sources[s].Qualifier, qualifier))
                     continue;
                 for (var c = 0; c < sources[s].ColumnNames.Length; c++)
                 {
-                    if (Collation.Default.Equals(sources[s].ColumnNames[c], name.Leaf))
+                    if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
                         return (s, c);
                 }
                 // Qualifier matched but the column doesn't exist in that
@@ -54,7 +54,7 @@ internal sealed partial class Selection
         {
             for (var c = 0; c < sources[s].ColumnNames.Length; c++)
             {
-                if (Collation.Default.Equals(sources[s].ColumnNames[c], name.Leaf))
+                if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
                 {
                     if (matches == 0)
                     {

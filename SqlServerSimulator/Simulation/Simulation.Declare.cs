@@ -313,7 +313,7 @@ partial class Simulation
         {
             for (var i = 0; i < heapColumns.Count; i++)
             {
-                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, reference.Leaf))
+                if (heapColumns[i] is { } existing && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, reference.Leaf))
                 {
                     return existing.Computed is not null
                         ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, fullName)
@@ -323,7 +323,7 @@ partial class Simulation
                 {
                     foreach (var pending in pendingComputed)
                     {
-                        if (pending.Index == i && Collation.Default.Equals(pending.Name, reference.Leaf))
+                        if (pending.Index == i && context.Batch.CurrentDatabase.Collation.Equals(pending.Name, reference.Leaf))
                             throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, fullName);
                     }
                 }
@@ -359,7 +359,7 @@ partial class Simulation
             pending.Predicate.VisitOperandExpressions(op =>
                 op.VisitColumnReferences(name =>
                 {
-                    if (!Collation.Default.Equals(name.Leaf, owningColumn))
+                    if (!context.Batch.CurrentDatabase.Collation.Equals(name.Leaf, owningColumn))
                         throw SimulatedSqlException.InlineCheckReferencesAnotherColumn(owningColumn, fullName);
                 }));
         }

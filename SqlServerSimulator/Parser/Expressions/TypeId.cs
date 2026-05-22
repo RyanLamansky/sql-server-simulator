@@ -56,7 +56,7 @@ internal sealed class TypeId : Expression
         // through the schema's TableTypes dict.
         foreach (var row in BuiltInResources.SystypesRowData)
         {
-            if (Collation.Default.Equals((string)row[0]!, leafPart))
+            if (BuiltInToken.Equals((string)row[0]!, leafPart))
                 return SqlValue.FromInt32(Convert.ToInt32(row[3]!, System.Globalization.CultureInfo.InvariantCulture));
         }
 

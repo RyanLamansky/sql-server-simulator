@@ -140,7 +140,7 @@ partial class Simulation
                     {
                         for (var v = 0; v < sourceView.OutputColumns.Length; v++)
                         {
-                            if (Collation.Default.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
+                            if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
                             {
                                 var baseOrd = sourceView.BaseColumnOrdinals[v];
                                 return baseOrd < 0
@@ -152,7 +152,7 @@ partial class Simulation
                     }
                     for (var k = 0; k < table.Columns.Length; k++)
                     {
-                        if (Collation.Default.Equals(table.Columns[k].Name, name.Leaf))
+                        if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, name.Leaf))
                             return localValues[k];
                     }
                     throw SimulatedSqlException.InvalidColumnName(name);
@@ -195,7 +195,7 @@ partial class Simulation
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
-        var targetIndex = FindMutationTargetIndex(sources, leadingIdent.Leaf, leadingTable);
+        var targetIndex = FindMutationTargetIndex(context.Batch.CurrentDatabase.Collation, sources, leadingIdent.Leaf, leadingTable);
         if (targetIndex < 0)
             throw SimulatedSqlException.InvalidObjectName(leadingIdent);
 

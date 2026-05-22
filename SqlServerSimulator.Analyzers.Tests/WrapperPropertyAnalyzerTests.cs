@@ -151,12 +151,15 @@ public sealed class WrapperPropertyAnalyzerTests
             }
             """);
 
+    // Static auto-properties on non-public types have the same overhead as
+    // instance ones — a backing field plus a getter method, no API-stability
+    // benefit. Convert to `public static readonly int Value = 42;`.
     [TestMethod]
-    public Task StaticProperty_DoesNotReport() =>
+    public Task StaticAutoProperty_Reports() =>
         RunAsync("""
             internal static class C
             {
-                public static int Value { get; } = 42;
+                public static int {|SSS001:Value|} { get; } = 42;
             }
             """);
 

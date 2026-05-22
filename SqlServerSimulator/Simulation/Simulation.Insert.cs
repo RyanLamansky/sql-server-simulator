@@ -95,7 +95,7 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 var columnName = column.Value;
-                var resolved = ResolveViewColumnForInsteadOf(columnName, viewColumns);
+                var resolved = ResolveViewColumnForInsteadOf(context.Batch.CurrentDatabase.Collation, columnName, viewColumns);
                 usedColumns.Add(resolved);
 
                 var separator = context.GetNextRequired();
@@ -164,11 +164,11 @@ partial class Simulation
     /// here — the trigger body, not the simulator's heap writer, decides
     /// what to do with them.
     /// </summary>
-    private static HeapColumn ResolveViewColumnForInsteadOf(string columnName, HeapColumn[] viewColumns)
+    private static HeapColumn ResolveViewColumnForInsteadOf(Collation collation, string columnName, HeapColumn[] viewColumns)
     {
         for (var i = 0; i < viewColumns.Length; i++)
         {
-            if (Collation.Default.Equals(viewColumns[i].Name, columnName))
+            if (collation.Equals(viewColumns[i].Name, columnName))
                 return viewColumns[i];
         }
         throw SimulatedSqlException.InvalidColumnName(columnName);
@@ -206,7 +206,7 @@ partial class Simulation
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
         var identityInsertOn = identityColumn is not null
             && context.Connection.IdentityInsertTable is string activeTable
-            && Collation.Default.Equals(activeTable, destinationTable.Name);
+            && context.Batch.CurrentDatabase.Collation.Equals(activeTable, destinationTable.Name);
 
         HeapColumn[] destinationColumns;
         if (context.Token is Operator { Character: '(' })
@@ -218,7 +218,7 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 var columnName = column.Value;
-                var tableColumn = ResolveInsertTargetColumn(columnName, destinationTable, destinationView);
+                var tableColumn = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, columnName, destinationTable, destinationView);
                 if (tableColumn.Computed is not null)
                     throw SimulatedSqlException.ColumnCannotBeModified(tableColumn.Name);
                 if (tableColumn.Type == SqlType.RowVersion)
@@ -548,16 +548,16 @@ partial class Simulation
     /// — the per-touched-column gate matching SQL Server's "INSERT through
     /// view with a derived field touched" rejection.
     /// </summary>
-    private static HeapColumn ResolveInsertTargetColumn(string columnName, HeapTable destinationTable, View? destinationView)
+    private static HeapColumn ResolveInsertTargetColumn(Collation collation, string columnName, HeapTable destinationTable, View? destinationView)
     {
         if (destinationView is null)
         {
-            return destinationTable.Columns.FirstOrDefault(c => Collation.Default.Equals(c.Name, columnName))
+            return destinationTable.Columns.FirstOrDefault(c => collation.Equals(c.Name, columnName))
                 ?? throw SimulatedSqlException.InvalidColumnName(columnName);
         }
         for (var i = 0; i < destinationView.OutputColumns.Length; i++)
         {
-            if (Collation.Default.Equals(destinationView.OutputColumns[i].Name, columnName))
+            if (collation.Equals(destinationView.OutputColumns[i].Name, columnName))
             {
                 var baseOrd = destinationView.BaseColumnOrdinals[i];
                 return baseOrd < 0

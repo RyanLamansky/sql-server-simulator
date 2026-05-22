@@ -224,7 +224,7 @@ partial class Simulation
             // 1-based column ordinal (real SQL Server's minor_id convention).
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, level2Name))
+                if (batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, level2Name))
                     return (new ExtendedPropertyKey(1, obj.ObjectId, i + 1, propertyName), $"{schema.Name}.{obj.Name}.{table.Columns[i].Name}");
             }
             throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
@@ -237,22 +237,22 @@ partial class Simulation
             // schema object — same wire shape real SQL Server uses.
             foreach (var k in table.KeyConstraints)
             {
-                if (Collation.Default.Equals(k.Name, level2Name))
+                if (batch.CurrentDatabase.Collation.Equals(k.Name, level2Name))
                     return (new ExtendedPropertyKey(1, k.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{k.Name}");
             }
             foreach (var c in table.CheckConstraints)
             {
-                if (Collation.Default.Equals(c.Name, level2Name))
+                if (batch.CurrentDatabase.Collation.Equals(c.Name, level2Name))
                     return (new ExtendedPropertyKey(1, c.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{c.Name}");
             }
             foreach (var fk in table.OutgoingForeignKeys)
             {
-                if (Collation.Default.Equals(fk.Name, level2Name))
+                if (batch.CurrentDatabase.Collation.Equals(fk.Name, level2Name))
                     return (new ExtendedPropertyKey(1, fk.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{fk.Name}");
             }
             foreach (var col in table.Columns)
             {
-                if (col.DefaultConstraint is { } dc && Collation.Default.Equals(dc.Name, level2Name))
+                if (col.DefaultConstraint is { } dc && batch.CurrentDatabase.Collation.Equals(dc.Name, level2Name))
                     return (new ExtendedPropertyKey(1, dc.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{dc.Name}");
             }
             throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
@@ -265,7 +265,7 @@ partial class Simulation
             // The index_id is derived the same way as sys.indexes: PK gets 1
             // (or HEAP-row 0 if no PK); other key constraints + indexes get
             // sequential ids in ObjectId order starting at 2 (or 1 if no PK).
-            var indexId = ComputeIndexId(table, level2Name);
+            var indexId = ComputeIndexId(batch.CurrentDatabase.Collation, table, level2Name);
             return indexId < 0
                 ? throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}")
                 : (new ExtendedPropertyKey(7, obj.ObjectId, indexId, propertyName), $"{schema.Name}.{obj.Name}.{level2Name}");
@@ -280,7 +280,7 @@ partial class Simulation
     /// <c>CREATE INDEX</c>-declared indexes get sequential ids in <c>ObjectId</c>
     /// order starting at the next slot). Returns -1 when no index matches.
     /// </summary>
-    private static int ComputeIndexId(HeapTable table, string indexName)
+    private static int ComputeIndexId(Collation collation, HeapTable table, string indexName)
     {
         KeyConstraint? primaryKey = null;
         foreach (var k in table.KeyConstraints)
@@ -291,7 +291,7 @@ partial class Simulation
                 break;
             }
         }
-        if (primaryKey is not null && Collation.Default.Equals(primaryKey.Name, indexName))
+        if (primaryKey is not null && collation.Equals(primaryKey.Name, indexName))
             return 1;
 
         var others = new List<(int ObjectId, string Name)>();
@@ -307,7 +307,7 @@ partial class Simulation
         var nextIndexId = primaryKey is null ? 1 : 2;
         foreach (var (_, name) in others)
         {
-            if (Collation.Default.Equals(name, indexName))
+            if (collation.Equals(name, indexName))
                 return nextIndexId;
             nextIndexId++;
         }

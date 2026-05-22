@@ -223,25 +223,31 @@ public sealed class NameComparisonRegimeTests
         _ = CsCollation().AssertSqlError("CREATE SCHEMA ｓys", 2760);
     }
 
+    /// <summary>
+    ///`SP_EXECUTESQL` doesn't case-equal `sp_executesql` under CS, so
+    ///the dispatch falls through to generic user-proc lookup which
+    ///also misses → Msg 2812 "Could not find stored procedure".
+    /// </summary>
     [TestMethod]
     public void CsDatabase_SystemProcSpExecuteSql_UppercaseCase_NotFound()
-        // `SP_EXECUTESQL` doesn't case-equal `sp_executesql` under CS, so
-        // the dispatch falls through to generic user-proc lookup which
-        // also misses → Msg 2812 "Could not find stored procedure".
         => _ = CsCollation().AssertSqlError("EXEC SP_EXECUTESQL N'select 1'", 2812);
 
+    /// <summary>
+    /// Probe-confirmed: ｓp_executesql width-folds to sp_executesql
+    /// under CS_AS (IgnoreWidth stays on), so dispatch still routes
+    /// through the simulator's sp_executesql handler.
+    /// </summary>
     [TestMethod]
     public void CsDatabase_SystemProcSpExecuteSql_FullwidthCase_Dispatches()
-        // Probe-confirmed: ｓp_executesql width-folds to sp_executesql
-        // under CS_AS (IgnoreWidth stays on), so dispatch still routes
-        // through the simulator's sp_executesql handler.
         => AreEqual(1, CsCollation().ExecuteScalar("EXEC ｓp_executesql N'select 1'"));
 
+    /// <summary>
+    /// hierarchyid:: is the canonical lowercase form; HIERARCHYID
+    /// doesn't case-equal it under CS, so the static-call dispatch
+    /// misses and the parser raises a syntax error.
+    /// </summary>
     [TestMethod]
     public void CsDatabase_HierarchyIdTypePrefix_UppercaseHIERARCHYID_NotResolved()
-        // hierarchyid:: is the canonical lowercase form; HIERARCHYID
-        // doesn't case-equal it under CS, so the static-call dispatch
-        // misses and the parser raises a syntax error.
         => _ = Throws<Exception>(() => CsCollation().ExecuteScalar(
             "SELECT HIERARCHYID::GetRoot()"));
 

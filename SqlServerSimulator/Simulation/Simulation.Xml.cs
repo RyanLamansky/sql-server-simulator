@@ -262,7 +262,7 @@ partial class Simulation
         var ordinal = -1;
         for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, columnName))
             {
                 ordinal = i;
                 break;
@@ -277,7 +277,7 @@ partial class Simulation
         // error factory exists yet).
         foreach (var existing in table.XmlIndexes)
         {
-            if (Collation.Default.Equals(existing.Name, indexName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(indexName);
         }
 

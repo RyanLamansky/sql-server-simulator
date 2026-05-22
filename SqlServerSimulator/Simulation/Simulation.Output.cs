@@ -159,7 +159,7 @@ partial class Simulation
 
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, reference.Leaf))
+                if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, reference.Leaf))
                     return table.Columns[i].Type;
             }
             throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
@@ -226,7 +226,7 @@ partial class Simulation
                 var matched = -1;
                 for (var i = 0; i < targetTable.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(targetTable.Columns[i].Name, columnNameTok.Value))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(targetTable.Columns[i].Name, columnNameTok.Value))
                     {
                         matched = i;
                         break;
@@ -363,7 +363,7 @@ partial class Simulation
                     ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
                 for (var i = 0; i < table.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(table.Columns[i].Name, reference.Leaf))
+                    if (batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, reference.Leaf))
                         return source[i];
                 }
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
@@ -405,15 +405,15 @@ partial class Simulation
             {
                 for (var i = 0; i < destinationTable.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
                         return destinationTable.Columns[i].Type;
                 }
             }
-            else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes) && Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes) && context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {
                 for (var i = 0; i < sourceCols.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceCols[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
                         return sourceTypes[i];
                 }
             }
@@ -503,15 +503,15 @@ partial class Simulation
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
-                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
                             return insertedRow[i];
                     }
                 }
-                else if (source is var (sourceAlias, sourceCols, _) && sourceRowValues is not null && Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+                else if (source is var (sourceAlias, sourceCols, _) && sourceRowValues is not null && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
                 {
                     for (var i = 0; i < sourceCols.Length; i++)
                     {
-                        if (Collation.Default.Equals(sourceCols[i], name.Leaf))
+                        if (batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
                             return sourceRowValues[i];
                     }
                 }

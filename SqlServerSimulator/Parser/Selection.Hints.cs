@@ -124,7 +124,7 @@ internal sealed partial class Selection
         /// <c>FORCESCAN</c> (those have their own nested syntax that the
         /// simulator parse-and-discards). The caller validates existence
         /// against the resolved <c>HeapTable</c> via
-        /// <see cref="ValidateIndexHintArguments(TableHintInfo, HeapTable, string)"/>.
+        /// <see cref="ValidateIndexHintArguments(Collation, TableHintInfo, HeapTable, string)"/>.
         /// </summary>
         public List<IndexHintArgument>? IndexArguments;
     }
@@ -276,7 +276,7 @@ internal sealed partial class Selection
     /// argument raises Msg 307 (id form) or Msg 308 (name form) verbatim;
     /// remaining arguments don't run.
     /// </summary>
-    internal static void ValidateIndexHintArguments(TableHintInfo info, HeapTable table, string qualifiedTableName)
+    internal static void ValidateIndexHintArguments(Collation collation, TableHintInfo info, HeapTable table, string qualifiedTableName)
     {
         if (info.IndexArguments is not { } args)
             return;
@@ -293,7 +293,7 @@ internal sealed partial class Selection
             var found = false;
             foreach (var kc in table.KeyConstraints)
             {
-                if (Collation.Default.Equals(kc.Name, name))
+                if (collation.Equals(kc.Name, name))
                 {
                     found = true;
                     break;
@@ -303,7 +303,7 @@ internal sealed partial class Selection
             {
                 foreach (var idx in table.Indexes)
                 {
-                    if (Collation.Default.Equals(idx.Name, name))
+                    if (collation.Equals(idx.Name, name))
                     {
                         found = true;
                         break;

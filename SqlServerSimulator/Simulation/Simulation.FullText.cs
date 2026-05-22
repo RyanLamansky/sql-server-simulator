@@ -355,7 +355,7 @@ partial class Simulation
             var found = false;
             for (var ki = 0; ki < table.KeyConstraints.Count; ki++)
             {
-                if (Collation.Default.Equals(table.KeyConstraints[ki].Name, keyIndexName))
+                if (context.Batch.CurrentDatabase.Collation.Equals(table.KeyConstraints[ki].Name, keyIndexName))
                 {
                     uniqueIndexId = ki + 1;
                     found = true;
@@ -366,7 +366,7 @@ partial class Simulation
             {
                 for (var ii = 0; ii < table.Indexes.Count; ii++)
                 {
-                    if (Collation.Default.Equals(table.Indexes[ii].Name, keyIndexName))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(table.Indexes[ii].Name, keyIndexName))
                     {
                         uniqueIndexId = table.KeyConstraints.Count + ii + 1;
                         found = true;
@@ -382,10 +382,10 @@ partial class Simulation
         var columns = new List<FullTextIndexColumn>(columnSpecs.Count);
         foreach (var (colName, typeColName, languageId) in columnSpecs)
         {
-            var ordinal = ResolveColumnOrdinalForFullText(table, colName);
+            var ordinal = ResolveColumnOrdinalForFullText(context.Batch.CurrentDatabase.Collation, table, colName);
             int? typeColumnId = null;
             if (typeColName is not null)
-                typeColumnId = ResolveColumnOrdinalForFullText(table, typeColName);
+                typeColumnId = ResolveColumnOrdinalForFullText(context.Batch.CurrentDatabase.Collation, table, typeColName);
             columns.Add(new FullTextIndexColumn(ordinal, languageId, typeColumnId));
         }
 
@@ -393,11 +393,11 @@ partial class Simulation
         return true;
     }
 
-    private static int ResolveColumnOrdinalForFullText(HeapTable table, string columnName)
+    private static int ResolveColumnOrdinalForFullText(Collation collation, HeapTable table, string columnName)
     {
         for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            if (collation.Equals(table.Columns[i].Name, columnName))
                 return i + 1;
         }
         throw SimulatedSqlException.InvalidColumnName(columnName);

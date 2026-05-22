@@ -159,7 +159,7 @@ partial class Simulation
             var found = -1;
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, childColumnNames[c]))
+                if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, childColumnNames[c]))
                 {
                     found = i;
                     break;
@@ -236,7 +236,7 @@ partial class Simulation
             var found = -1;
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, columnNames[c]))
+                if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, columnNames[c]))
                 {
                     found = i;
                     break;
@@ -323,7 +323,7 @@ partial class Simulation
         HeapColumn? targetColumn = null;
         foreach (var c in table.Columns)
         {
-            if (Collation.Default.Equals(c.Name, columnName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(c.Name, columnName))
             {
                 targetColumn = c;
                 break;
@@ -360,22 +360,22 @@ partial class Simulation
             {
                 foreach (var k in t.KeyConstraints)
                 {
-                    if (Collation.Default.Equals(k.Name, candidateName))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(k.Name, candidateName))
                         throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
                 }
                 foreach (var ck in t.CheckConstraints)
                 {
-                    if (Collation.Default.Equals(ck.Name, candidateName))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(ck.Name, candidateName))
                         throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
                 }
                 foreach (var fk in t.OutgoingForeignKeys)
                 {
-                    if (Collation.Default.Equals(fk.Name, candidateName))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(fk.Name, candidateName))
                         throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
                 }
                 foreach (var col in t.Columns)
                 {
-                    if (col.DefaultConstraint is { } df && Collation.Default.Equals(df.Name, candidateName))
+                    if (col.DefaultConstraint is { } df && context.Batch.CurrentDatabase.Collation.Equals(df.Name, candidateName))
                         throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
                 }
             }
@@ -448,7 +448,7 @@ partial class Simulation
             {
                 for (var k = 0; k < table.Columns.Length; k++)
                 {
-                    if (Collation.Default.Equals(table.Columns[k].Name, reference.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, reference.Leaf))
                         return rowValues[k];
                 }
                 throw SimulatedSqlException.InvalidColumnName(reference);
@@ -594,7 +594,7 @@ partial class Simulation
         var planned = new List<DropConstraintAction>();
         foreach (var name in names)
         {
-            var action = FindConstraintByName(table, name);
+            var action = FindConstraintByName(context.Batch.CurrentDatabase.Collation, table, name);
             if (action.Family == DropConstraintFamily.None)
             {
                 if (ifExists)
@@ -685,7 +685,7 @@ partial class Simulation
                 var matchedFk = false;
                 foreach (var fk in table.OutgoingForeignKeys)
                 {
-                    if (Collation.Default.Equals(fk.Name, name))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(fk.Name, name))
                     {
                         fkTargets.Add(fk);
                         matchedFk = true;
@@ -697,7 +697,7 @@ partial class Simulation
                 var matchedCk = false;
                 foreach (var ck in table.CheckConstraints)
                 {
-                    if (Collation.Default.Equals(ck.Name, name))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(ck.Name, name))
                     {
                         ckTargets.Add(ck);
                         matchedCk = true;
@@ -757,26 +757,26 @@ partial class Simulation
 
     private sealed record DropConstraintAction(DropConstraintFamily Family, KeyConstraint? Key, CheckConstraint? Check, ForeignKey? ForeignKey, HeapColumn? DefaultColumn);
 
-    private static DropConstraintAction FindConstraintByName(HeapTable table, string name)
+    private static DropConstraintAction FindConstraintByName(Collation collation, HeapTable table, string name)
     {
         foreach (var k in table.KeyConstraints)
         {
-            if (Collation.Default.Equals(k.Name, name))
+            if (collation.Equals(k.Name, name))
                 return new DropConstraintAction(DropConstraintFamily.Key, k, null, null, null);
         }
         foreach (var ck in table.CheckConstraints)
         {
-            if (Collation.Default.Equals(ck.Name, name))
+            if (collation.Equals(ck.Name, name))
                 return new DropConstraintAction(DropConstraintFamily.Check, null, ck, null, null);
         }
         foreach (var fk in table.OutgoingForeignKeys)
         {
-            if (Collation.Default.Equals(fk.Name, name))
+            if (collation.Equals(fk.Name, name))
                 return new DropConstraintAction(DropConstraintFamily.ForeignKey, null, null, fk, null);
         }
         foreach (var col in table.Columns)
         {
-            if (col.DefaultConstraint is { } df && Collation.Default.Equals(df.Name, name))
+            if (col.DefaultConstraint is { } df && collation.Equals(df.Name, name))
                 return new DropConstraintAction(DropConstraintFamily.Default, null, null, null, col);
         }
         return new DropConstraintAction(DropConstraintFamily.None, null, null, null, null);

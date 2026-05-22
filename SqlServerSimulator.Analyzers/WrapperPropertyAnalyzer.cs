@@ -24,7 +24,10 @@ namespace SqlServerSimulator.Analyzers;
 /// Public types are exempt — there the property provides genuine API-stability
 /// flexibility (the rationale behind CA2227 and similar guidance). Overrides and
 /// explicit interface implementations are also exempt: their API shape is
-/// dictated by the base type or interface and isn't optional.
+/// dictated by the base type or interface and isn't optional. Static
+/// auto-properties / wrappers are <em>not</em> exempt — they carry the same
+/// backing-field + getter-method overhead as instance ones with no compensating
+/// API-stability benefit on a non-public type.
 /// </para>
 /// </remarks>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
@@ -57,7 +60,7 @@ public sealed class WrapperPropertyAnalyzer : DiagnosticAnalyzer
         if (context.SemanticModel.GetDeclaredSymbol(propertyDecl, context.CancellationToken) is not IPropertySymbol property)
             return;
 
-        if (property.IsStatic || property.GetMethod is null)
+        if (property.GetMethod is null)
             return;
 
         // Overrides, abstract/extern declarations, explicit interface

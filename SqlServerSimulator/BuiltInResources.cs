@@ -86,7 +86,7 @@ internal static class BuiltInResources
             _ = systypes.Heap.Insert(RowEncoder.EncodeRow(systypes.Schema, values));
         }
 
-        return new(Collation.Default) { [systypes.Name] = systypes };
+        return new(BuiltInToken.Comparer) { [systypes.Name] = systypes };
     }
 
     private static SqlValue ObjectToSqlValue(object? value, SqlType type) =>
@@ -1096,7 +1096,7 @@ internal static class BuiltInResources
         };
         var serversView = new CatalogView("servers", serversColumns, EnumerateSysServers);
 
-        return new Dictionary<string, CatalogView>(Collation.Default)
+        return new Dictionary<string, CatalogView>(BuiltInToken.Comparer)
         {
             ["sys.databases"] = databasesView,
             ["sys.servers"] = serversView,
@@ -2116,7 +2116,7 @@ internal static class BuiltInResources
                 // Build a quick name→objectId map so secondary indexes can
                 // resolve their using_xml_index_id from the recorded
                 // UsingPrimaryIndexName.
-                var primaryIds = new Dictionary<string, int>(Collation.Default);
+                var primaryIds = new Dictionary<string, int>(database.Collation);
                 foreach (var ix in table.XmlIndexes)
                 {
                     if (ix.IsPrimary)

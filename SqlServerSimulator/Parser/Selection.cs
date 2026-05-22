@@ -584,7 +584,7 @@ internal sealed partial class Selection
                     ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
                     if (topCount is not null && fromClause.OffsetCount is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-                    ExpandStars(expressions, sources);
+                    ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
                     return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
 
                 // SELECT projection INTO target [FROM ...] — captures the
@@ -1156,7 +1156,7 @@ internal sealed partial class Selection
 
                 var heapAlias = ConsumeOptionalAlias(context);
                 var heapHints = ParseOptionalTableHints(context);
-                ValidateIndexHintArguments(heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
+                ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
                 // isolation level) and capture the per-row plan. Temporal
                 // FOR SYSTEM_TIME sources bypass the per-row probe (they
@@ -1870,7 +1870,7 @@ internal sealed partial class Selection
     /// source in source order; <c>&lt;qualifier&gt;.*</c> filters to the
     /// named source. An unbound qualifier raises Msg 4104.
     /// </summary>
-    private static void ExpandStars(List<Expression> expressions, List<FromSource> sources)
+    private static void ExpandStars(Collation collation, List<Expression> expressions, List<FromSource> sources)
     {
         for (var i = expressions.Count - 1; i >= 0; i--)
         {
@@ -1888,7 +1888,7 @@ internal sealed partial class Selection
                 FromSource? matched = null;
                 foreach (var source in sources)
                 {
-                    if (source.Qualifier is { } q && Collation.Default.Equals(q, star.Qualifier))
+                    if (source.Qualifier is { } q && collation.Equals(q, star.Qualifier))
                     {
                         matched = source;
                         break;

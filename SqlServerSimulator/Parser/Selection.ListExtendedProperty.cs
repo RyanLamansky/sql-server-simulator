@@ -214,7 +214,7 @@ partial class Selection
             {
                 for (var i = 0; i < table.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(table.Columns[i].Name, l2Name))
+                    if (BuiltInToken.Equals(table.Columns[i].Name, l2Name))
                     {
                         f.MinorIdFilter = i + 1;
                         return f;
@@ -323,7 +323,7 @@ partial class Selection
         public bool MinorIdMustBeNonZero;
 
         public bool Matches(ExtendedPropertyKey key) =>
-            (this.NameFilter is not { } n || Collation.Default.Equals(key.Name, n))
+            (this.NameFilter is not { } n || BuiltInToken.Equals(key.Name, n))
             && (this.ClassFilter is not { } c || key.Class == c)
             && (this.MajorIdFilter is not { } m || key.MajorId == m)
             && (this.MinorIdFilter is not { } mi || key.MinorId == mi)

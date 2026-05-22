@@ -143,10 +143,10 @@ partial class Simulation
         if (schema.HasNameInSharedNamespace(viewName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(viewName.Leaf);
 
-        var outputColumns = ComputeViewOutputColumns(bodySelection, renameList, viewName.Leaf);
+        var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 
         var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck) =
-            AnalyzeViewUpdatability(bodySelection, withCheckOption);
+            AnalyzeViewUpdatability(context.CurrentDatabase.Collation, bodySelection, withCheckOption);
 
         var objectId = context.CurrentDatabase.AllocateObjectId();
         var view = new View(
@@ -196,7 +196,7 @@ partial class Simulation
     /// (Msg 4506). Nullability is conservatively True — same fidelity gap
     /// as inline TVFs.
     /// </summary>
-    private static HeapColumn[] ComputeViewOutputColumns(Selection bodySelection, List<string>? renameList, string viewName)
+    private static HeapColumn[] ComputeViewOutputColumns(Collation collation, Selection bodySelection, List<string>? renameList, string viewName)
     {
         var projectionCount = bodySelection.Schema.Length;
         string[] columnNames;
@@ -215,7 +215,7 @@ partial class Simulation
             columnNames = bodySelection.ColumnNames;
         }
 
-        var seen = new HashSet<string>(Collation.Default);
+        var seen = new HashSet<string>(collation);
         var output = new HeapColumn[projectionCount];
         for (var i = 0; i < projectionCount; i++)
         {

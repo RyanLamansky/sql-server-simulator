@@ -67,9 +67,9 @@ public sealed partial class Simulation
     /// <see cref="Simulation"/>. A bare binding has no SQL-visible effect;
     /// <c>sp_addlinkedserver</c> reads from this dict to pick which
     /// <see cref="Simulation"/> backs the linked-server activation.
-    /// Case-insensitive keys (<see cref="Collation.Default"/>).
+    /// Case-insensitive keys (<see cref="BuiltInToken"/>).
     /// </summary>
-    internal readonly ConcurrentDictionary<string, Simulation> AvailableRemotes = new(Collation.Default);
+    internal readonly ConcurrentDictionary<string, Simulation> AvailableRemotes = new(BuiltInToken.Comparer);
 
     /// <summary>
     /// Active linked servers: name → <see cref="LinkedServer"/>. Populated
@@ -78,7 +78,7 @@ public sealed partial class Simulation
     /// projects one row per entry plus the local-server row. Case-
     /// insensitive keys (<see cref="Collation.Default"/>).
     /// </summary>
-    internal readonly ConcurrentDictionary<string, LinkedServer> ActiveLinkedServers = new(Collation.Default);
+    internal readonly ConcurrentDictionary<string, LinkedServer> ActiveLinkedServers = new(BuiltInToken.Comparer);
 
     /// <summary>
     /// The database name woven into error messages that include a fully
@@ -102,7 +102,7 @@ public sealed partial class Simulation
     /// else the alphabetically-first entry (see
     /// <see cref="SimulatedDbConnection"/>'s ResolveInitialDatabase).
     /// </summary>
-    internal readonly Dictionary<string, Database> Databases = new(Collation.Default);
+    internal readonly Dictionary<string, Database> Databases = new(BuiltInToken.Comparer);
 
     /// <summary>
     /// System tables (e.g. <c>systypes</c>). Materialized once per process and
@@ -129,7 +129,7 @@ public sealed partial class Simulation
     /// observes Msg 208 on its next reference to the table. No reference
     /// counting needed.
     /// </remarks>
-    internal readonly ConcurrentDictionary<string, HeapTable> GlobalTempTables = new(Collation.Default);
+    internal readonly ConcurrentDictionary<string, HeapTable> GlobalTempTables = new(BuiltInToken.Comparer);
 
     /// <summary>
     /// Virtual <c>sys.&lt;view&gt;</c> catalog views (<c>sys.schemas</c>,

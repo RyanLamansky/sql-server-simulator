@@ -535,7 +535,7 @@ partial class Simulation
         var selection = Selection.Parse(parser, depth: 0);
 
         var columns = new HeapColumn[selection.Schema.Length];
-        var seenNames = new HashSet<string>(Collation.Default);
+        var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);
         for (var i = 0; i < selection.Schema.Length; i++)
         {
             var name = selection.ColumnNames[i];

@@ -83,4 +83,20 @@ internal static class BuiltInToken
     /// </summary>
     public static int GetHashCode(string value) =>
         compareInfo.GetHashCode(value, Options);
+
+    /// <summary>
+    /// Singleton <see cref="IEqualityComparer{T}"/> wrapper for use as a
+    /// dictionary / hashset comparer. The wire-up routes through the
+    /// static <see cref="Equals(string?, string?)"/> /
+    /// <see cref="GetHashCode(string)"/> entry points, so dict-backed
+    /// state stays semantically identical to ad-hoc compares.
+    /// </summary>
+    internal static readonly ComparerImpl Comparer = new();
+
+    internal sealed class ComparerImpl : IEqualityComparer<string>
+    {
+        public bool Equals(string? x, string? y) => BuiltInToken.Equals(x, y);
+
+        public int GetHashCode(string obj) => BuiltInToken.GetHashCode(obj);
+    }
 }

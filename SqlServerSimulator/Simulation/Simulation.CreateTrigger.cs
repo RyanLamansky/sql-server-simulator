@@ -180,7 +180,7 @@ partial class Simulation
                 {
                     if (!ReferenceEquals(t.Parent, parent)) continue;
                     if (t.Timing != TriggerTiming.InsteadOf) continue;
-                    if (Collation.Default.Equals(t.Name, triggerName.Leaf)) continue;
+                    if (context.Batch.CurrentDatabase.Collation.Equals(t.Name, triggerName.Leaf)) continue;
                     var overlap = t.Actions & actions;
                     if (overlap == 0) continue;
                     throw SimulatedSqlException.InsteadOfTriggerAlreadyExists(

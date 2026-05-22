@@ -106,7 +106,7 @@ partial class Simulation
         {
             for (var i = 0; i < heapColumns.Count; i++)
             {
-                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, reference.Leaf))
+                if (heapColumns[i] is { } existing && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, reference.Leaf))
                 {
                     return existing.Computed is not null
                         ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, tableName.Leaf)
@@ -116,7 +116,7 @@ partial class Simulation
                 {
                     foreach (var pending in pendingComputed)
                     {
-                        if (pending.Index == i && Collation.Default.Equals(pending.Name, reference.Leaf))
+                        if (pending.Index == i && context.Batch.CurrentDatabase.Collation.Equals(pending.Name, reference.Leaf))
                             throw SimulatedSqlException.ComputedColumnReferencedInComputed(pending.Name, tableName.Leaf);
                     }
                 }
@@ -178,7 +178,7 @@ partial class Simulation
             pending.Predicate.VisitOperandExpressions(op =>
                 op.VisitColumnReferences(name =>
                 {
-                    if (!Collation.Default.Equals(name.Leaf, owningColumn))
+                    if (!context.Batch.CurrentDatabase.Collation.Equals(name.Leaf, owningColumn))
                         throw SimulatedSqlException.InlineCheckReferencesAnotherColumn(owningColumn, tableName.Leaf);
                 }));
         }
@@ -235,7 +235,7 @@ partial class Simulation
 
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase);
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase);
-        var resolvedPeriod = ResolvePeriodColumns(heapColumns!, pendingPeriod);
+        var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
 
         // History-table pre-validation when SYSTEM_VERSIONING = ON: must have
         // PeriodColumns on the parent, and the history table name's
@@ -725,8 +725,10 @@ partial class Simulation
                     // Column-level COLLATE clause. Validated against the
                     // recognized whitelist; the parsed name is stored as
                     // metadata on the HeapColumn for catalog-view round-trip
-                    // (sys.columns.collation_name). Comparison semantics
-                    // continue to use Collation.Default regardless.
+                    // (sys.columns.collation_name). The resolved Collation
+                    // pins per-column comparison / sort / LIKE; absent an
+                    // explicit COLLATE, the column inherits its owning
+                    // database's <see cref="Database.Collation"/>.
                     if (context.GetNextRequired() is not { } collationToken)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     var collationName = collationToken switch
@@ -874,8 +876,7 @@ partial class Simulation
             // when BACPAC-loaded databases declare a non-default collation.
             var resolvedCollation =
                 (columnCollation is not null ? Collation.TryGet(columnCollation) : null)
-                ?? Collation.TryGet(context.Batch.Connection.CurrentDatabase.CollationName)
-                ?? Collation.Default;
+                ?? context.Batch.Connection.CurrentDatabase.Collation;
             resolvedType = resolvedType.WithCollation(resolvedCollation, Coercibility.Implicit);
         }
 
@@ -1014,6 +1015,7 @@ partial class Simulation
     /// isn't generated-as-row-end".
     /// </remarks>
     private static (int StartOrdinal, int EndOrdinal)? ResolvePeriodColumns(
+        Collation collation,
         List<HeapColumn?> heapColumns,
         List<(string StartCol, string EndCol)> pendingPeriod)
     {
@@ -1047,9 +1049,9 @@ partial class Simulation
         if (generatedEndOrdinal < 0)
             throw SimulatedSqlException.TemporalRowEndMissing();
         var (declaredStart, declaredEnd) = pendingPeriod[0];
-        return !Collation.Default.Equals(declaredStart, heapColumns[generatedStartOrdinal]!.Name)
+        return !collation.Equals(declaredStart, heapColumns[generatedStartOrdinal]!.Name)
             ? throw SimulatedSqlException.TemporalPeriodStartNotMatching()
-            : !Collation.Default.Equals(declaredEnd, heapColumns[generatedEndOrdinal]!.Name)
+            : !collation.Equals(declaredEnd, heapColumns[generatedEndOrdinal]!.Name)
                 ? throw SimulatedSqlException.TemporalPeriodEndNotMatching()
                 : (generatedStartOrdinal, generatedEndOrdinal);
     }
@@ -1218,7 +1220,7 @@ partial class Simulation
             var found = -1;
             for (var i = 0; i < heapColumns.Count; i++)
             {
-                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, keyColumn.Value))
+                if (heapColumns[i] is { } existing && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, keyColumn.Value))
                 {
                     found = i;
                     break;
@@ -1227,7 +1229,7 @@ partial class Simulation
                 {
                     foreach (var pending in pendingComputed)
                     {
-                        if (pending.Index == i && Collation.Default.Equals(pending.Name, keyColumn.Value))
+                        if (pending.Index == i && context.Batch.CurrentDatabase.Collation.Equals(pending.Name, keyColumn.Value))
                         {
                             // Computed columns participate as key columns when
                             // PERSISTED — validated in ResolveKeyConstraints
@@ -1412,7 +1414,7 @@ partial class Simulation
             var found = -1;
             for (var i = 0; i < heapColumns.Count; i++)
             {
-                if (heapColumns[i] is { } existing && Collation.Default.Equals(existing.Name, childCol.Value))
+                if (heapColumns[i] is { } existing && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, childCol.Value))
                 {
                     found = i;
                     break;
@@ -1620,7 +1622,7 @@ partial class Simulation
                     var found = -1;
                     for (var c = 0; c < referencedTable.Columns.Length; c++)
                     {
-                        if (Collation.Default.Equals(referencedTable.Columns[c].Name, pf.ReferencedColumnNames[i]))
+                        if (context.Batch.CurrentDatabase.Collation.Equals(referencedTable.Columns[c].Name, pf.ReferencedColumnNames[i]))
                         {
                             found = c;
                             break;

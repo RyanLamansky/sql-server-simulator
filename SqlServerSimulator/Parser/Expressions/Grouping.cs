@@ -49,7 +49,7 @@ internal sealed class Grouping(ParserContext context) : Expression
         var leaf = reference.ReferencedName.Leaf;
         foreach (var entry in haystack)
         {
-            if (entry is Reference r && Collation.Default.Equals(r.ReferencedName.Leaf, leaf))
+            if (entry is Reference r && BuiltInToken.Equals(r.ReferencedName.Leaf, leaf))
                 return true;
         }
         return false;

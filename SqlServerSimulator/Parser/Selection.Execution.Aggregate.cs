@@ -165,7 +165,7 @@ internal sealed partial class Selection
                     for (var i = 0; i < capturedSet.Length; i++)
                     {
                         if (capturedSet[i] is Reference r
-                            && Collation.Default.Equals(r.Name, name.Leaf))
+                            && BuiltInToken.Equals(r.Name, name.Leaf))
                         {
                             return state.KeyValues[i];
                         }
@@ -176,7 +176,7 @@ internal sealed partial class Selection
                     foreach (var expr in fromClause.AllGroupingExpressions)
                     {
                         if (expr is Reference r
-                            && Collation.Default.Equals(r.Name, name.Leaf))
+                            && BuiltInToken.Equals(r.Name, name.Leaf))
                         {
                             return SqlValue.Null(expr.GetSqlType(resolveColumnType));
                         }

@@ -39,7 +39,7 @@ internal sealed partial class Selection
             {
                 for (var j = 0; j < outputColumnNames.Length; j++)
                 {
-                    if (Collation.Default.Equals(outputColumnNames[j], name.Leaf))
+                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
                         return projected[j];
                 }
                 return distinct

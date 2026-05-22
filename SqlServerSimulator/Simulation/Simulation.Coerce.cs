@@ -128,7 +128,7 @@ partial class Simulation
             {
                 for (var k = 0; k < destinationTable.Columns.Length; k++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[k].Name, reference.Leaf))
+                    if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[k].Name, reference.Leaf))
                         return rowValues[k];
                 }
                 throw SimulatedSqlException.InvalidColumnName(reference);
@@ -199,7 +199,7 @@ partial class Simulation
         {
             for (var k = 0; k < destinationTable.Columns.Length; k++)
             {
-                if (Collation.Default.Equals(destinationTable.Columns[k].Name, reference.Leaf))
+                if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[k].Name, reference.Leaf))
                     return rowValues[k];
             }
             throw SimulatedSqlException.InvalidColumnName(reference);

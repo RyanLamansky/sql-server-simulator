@@ -35,7 +35,7 @@ partial class Selection
         JoinSpec[] joins)
     {
         var destColumns = new HeapColumn[projections.Count];
-        var seenNames = new HashSet<string>(Collation.Default);
+        var seenNames = new HashSet<string>(BuiltInToken.Comparer);
         // Identity propagation: requires exactly one FromSource that's a real
         // heap table, no joins. Anything else (joins, derived tables, CTEs
         // backed by Selection, OPENJSON) drops identity even on direct refs.

@@ -36,7 +36,7 @@ partial class Simulation
     /// </para>
     /// </remarks>
     private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck)
-        AnalyzeViewUpdatability(Selection bodySelection, bool withCheckOption)
+        AnalyzeViewUpdatability(Collation collation, Selection bodySelection, bool withCheckOption)
     {
         if (bodySelection.UpdatabilityProfile is not { } profile)
             return (null, [], bodySelection.UpdatabilityRejection, null, null);
@@ -83,7 +83,7 @@ partial class Simulation
                 var sourceOrd = -1;
                 for (var j = 0; j < source.ColumnNames.Length; j++)
                 {
-                    if (Collation.Default.Equals(source.ColumnNames[j], refName.Leaf))
+                    if (collation.Equals(source.ColumnNames[j], refName.Leaf))
                     {
                         sourceOrd = j;
                         break;
@@ -101,7 +101,7 @@ partial class Simulation
         // resolution. Each WHERE excluder references columns by the upstream
         // view's OutputColumn names (or the base table's column names when
         // the source is a heap). Translation uses sourceColumnToBaseOrdinal.
-        var nameToBaseOrdinal = new Dictionary<string, int>(Collation.Default);
+        var nameToBaseOrdinal = new Dictionary<string, int>(collation);
         for (var j = 0; j < source.ColumnNames.Length; j++)
             nameToBaseOrdinal[source.ColumnNames[j]] = sourceColumnToBaseOrdinal[j];
 

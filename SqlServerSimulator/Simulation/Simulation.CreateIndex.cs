@@ -146,25 +146,25 @@ partial class Simulation
 
         foreach (var existing in table.Indexes)
         {
-            if (Collation.Default.Equals(existing.Name, indexName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
                 throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedTableName);
         }
         foreach (var kc in table.KeyConstraints)
         {
-            if (Collation.Default.Equals(kc.Name, indexName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
                 throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedTableName);
         }
 
         var resolvedKeyColumns = new IndexKeyColumn[keyColumns.Count];
         for (var i = 0; i < keyColumns.Count; i++)
         {
-            var fullOrdinal = ResolveColumnOrdinal(table, keyColumns[i].Name);
+            var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, keyColumns[i].Name);
             resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], keyColumns[i].IsDescending);
         }
         var resolvedIncludeColumns = new int[includeColumnNames.Count];
         for (var i = 0; i < includeColumnNames.Count; i++)
         {
-            var fullOrdinal = ResolveColumnOrdinal(table, includeColumnNames[i]);
+            var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, includeColumnNames[i]);
             resolvedIncludeColumns[i] = table.StorageOrdinals[fullOrdinal];
         }
 
@@ -185,11 +185,11 @@ partial class Simulation
         return true;
     }
 
-    private static int ResolveColumnOrdinal(HeapTable table, string columnName)
+    private static int ResolveColumnOrdinal(Collation collation, HeapTable table, string columnName)
     {
         for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            if (collation.Equals(table.Columns[i].Name, columnName))
                 return i;
         }
         throw SimulatedSqlException.IndexColumnMissing(columnName);
@@ -268,7 +268,7 @@ partial class Simulation
         {
             for (var k = 0; k < table.Columns.Length; k++)
             {
-                if (Collation.Default.Equals(table.Columns[k].Name, reference.Leaf))
+                if (batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, reference.Leaf))
                     return rowValues[k];
             }
             throw SimulatedSqlException.InvalidColumnName(reference);

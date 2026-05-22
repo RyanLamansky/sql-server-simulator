@@ -100,7 +100,7 @@ partial class Simulation
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        if (!Collation.Default.Equals(targetAlias, defaultTargetName))
+        if (!context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName))
             context.MoveNextRequired();
 
         // Target-side parse-time column shape: the view's projection when
@@ -124,20 +124,20 @@ partial class Simulation
 
         SqlType ResolveTypeBoth(MultiPartName name)
         {
-            if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
-                || Collation.Default.Equals(name.ImmediateQualifier, defaultTargetName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, targetAlias)
+                || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, defaultTargetName))
             {
                 for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
                         return targetColumns[i].Type;
                 }
             }
-            if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceSchema[i];
                 }
             }
@@ -146,12 +146,12 @@ partial class Simulation
             {
                 for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
                         return targetColumns[i].Type;
                 }
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceSchema[i];
                 }
             }
@@ -440,20 +440,20 @@ partial class Simulation
 
         SqlType ResolveType(MultiPartName name)
         {
-            if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
-                || Collation.Default.Equals(name.ImmediateQualifier, defaultTargetName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, targetAlias)
+                || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, defaultTargetName))
             {
                 for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
                         return targetColumns[i].Type;
                 }
             }
-            if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceSchema[i];
                 }
             }
@@ -461,12 +461,12 @@ partial class Simulation
             {
                 for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (Collation.Default.Equals(targetColumns[i].Name, name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
                         return targetColumns[i].Type;
                 }
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceSchema[i];
                 }
             }
@@ -601,7 +601,7 @@ partial class Simulation
                 // name against view.OutputColumns when applicable and
                 // translates to the base table column, rejecting writes
                 // to a derived projection (Msg 4406).
-                var col = ResolveInsertTargetColumn(colTok.Value, destinationTable, sourceView);
+                var col = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, colTok.Value, destinationTable, sourceView);
                 if (col.Computed is not null)
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
                 if (col.Type == SqlType.RowVersion)
@@ -729,7 +729,7 @@ partial class Simulation
                     var matched = -1;
                     for (var i = 0; i < sourceView.OutputColumns.Length; i++)
                     {
-                        if (Collation.Default.Equals(sourceView.OutputColumns[i].Name, columnName))
+                        if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[i].Name, columnName))
                         {
                             matched = i;
                             break;
@@ -747,7 +747,7 @@ partial class Simulation
                     ordinal = -1;
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
-                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, columnName))
+                        if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, columnName))
                         {
                             ordinal = i;
                             break;
@@ -818,15 +818,15 @@ partial class Simulation
             {
                 for (var i = 0; i < destinationTable.Columns.Length; i++)
                 {
-                    if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
                         return destinationTable.Columns[i].Type;
                 }
             }
-            else if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            else if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceSchema[i];
                 }
             }
@@ -867,7 +867,7 @@ partial class Simulation
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                         cols[i] = destinationTable.Columns[i].Name;
                 }
-                else if (Collation.Default.Equals(starQualifier, sourceAlias))
+                else if (context.Batch.CurrentDatabase.Collation.Equals(starQualifier, sourceAlias))
                 {
                     cols = sourceColumnNames;
                 }
@@ -920,13 +920,13 @@ partial class Simulation
     /// the appropriate column-reference error. For a table target, looks up
     /// directly in <see cref="HeapTable.Columns"/>.
     /// </summary>
-    private static bool TryLookupTargetColumn(string columnName, HeapTable destinationTable, View? sourceView, out int baseOrdinal, out SqlType type)
+    private static bool TryLookupTargetColumn(Collation collation, string columnName, HeapTable destinationTable, View? sourceView, out int baseOrdinal, out SqlType type)
     {
         if (sourceView is not null)
         {
             for (var i = 0; i < sourceView.OutputColumns.Length; i++)
             {
-                if (Collation.Default.Equals(sourceView.OutputColumns[i].Name, columnName))
+                if (collation.Equals(sourceView.OutputColumns[i].Name, columnName))
                 {
                     var baseOrd = sourceView.BaseColumnOrdinals[i];
                     if (baseOrd < 0)
@@ -941,7 +941,7 @@ partial class Simulation
         {
             for (var i = 0; i < destinationTable.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(destinationTable.Columns[i].Name, columnName))
+                if (collation.Equals(destinationTable.Columns[i].Name, columnName))
                 {
                     baseOrdinal = i;
                     type = destinationTable.Columns[i].Type;
@@ -981,27 +981,27 @@ partial class Simulation
         // Resolve target columns by qualifier; null-source means BY-SOURCE branch (everything in source resolver returns NULL).
         SqlValue ResolveCombined(SqlValue[]? targetValues, SqlValue[]? sourceValues, MultiPartName name)
         {
-            if (Collation.Default.Equals(name.ImmediateQualifier, targetAlias)
-                || Collation.Default.Equals(name.ImmediateQualifier, defaultTargetName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, targetAlias)
+                || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, defaultTargetName))
             {
-                if (TryLookupTargetColumn(name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
+                if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
                     return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
             }
-            if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
                 }
             }
             if (name.Count == 1)
             {
-                if (TryLookupTargetColumn(name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
+                if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
                     return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
-                    if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
                 }
             }
@@ -1180,7 +1180,7 @@ partial class Simulation
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
         var identityInsertOn = identityColumn is not null
             && context.Connection.IdentityInsertTable is string activeTable
-            && Collation.Default.Equals(activeTable, destinationTable.Name);
+            && context.Batch.CurrentDatabase.Collation.Equals(activeTable, destinationTable.Name);
 
         var identityListed = false;
         for (var i = 0; i < clause.InsertColumns!.Length; i++)
@@ -1672,7 +1672,7 @@ partial class Simulation
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
-                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
                             return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : insertedValues[i];
                     }
                 }
@@ -1680,15 +1680,15 @@ partial class Simulation
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
-                        if (Collation.Default.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                        if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
                             return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : deletedValues[i];
                     }
                 }
-                else if (Collation.Default.Equals(name.ImmediateQualifier, sourceAlias))
+                else if (batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
                 {
                     for (var i = 0; i < sourceColumnNames.Length; i++)
                     {
-                        if (Collation.Default.Equals(sourceColumnNames[i], name.Leaf))
+                        if (batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                             return sourceValues is null ? SqlValue.Null(this.Schema[0]) : sourceValues[i];
                     }
                 }

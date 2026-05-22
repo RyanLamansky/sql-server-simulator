@@ -93,7 +93,7 @@ partial class Simulation
         }
 
         if (pendingComputed.Count > 0)
-            ResolveComputedColumnsForAddColumn(table, heapColumns, pendingComputed);
+            ResolveComputedColumnsForAddColumn(context.Batch.CurrentDatabase.Collation, table, heapColumns, pendingComputed);
 
         var existingCount = table.Columns.Length;
         var newColumns = new HeapColumn[heapColumns.Count];
@@ -109,12 +109,12 @@ partial class Simulation
         {
             foreach (var existing in table.Columns)
             {
-                if (Collation.Default.Equals(existing.Name, newColumns[i].Name))
+                if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, newColumns[i].Name))
                     throw SimulatedSqlException.ColumnNamesMustBeUnique(newColumns[i].Name, qualifiedTableName);
             }
             for (var j = 0; j < i; j++)
             {
-                if (Collation.Default.Equals(newColumns[j].Name, newColumns[i].Name))
+                if (context.Batch.CurrentDatabase.Collation.Equals(newColumns[j].Name, newColumns[i].Name))
                     throw SimulatedSqlException.ColumnNamesMustBeUnique(newColumns[i].Name, qualifiedTableName);
             }
         }
@@ -205,6 +205,7 @@ partial class Simulation
     }
 
     private static void ResolveComputedColumnsForAddColumn(
+        Collation collation,
         HeapTable table,
         List<HeapColumn?> heapColumns,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed)
@@ -213,7 +214,7 @@ partial class Simulation
         {
             foreach (var existing in table.Columns)
             {
-                if (Collation.Default.Equals(existing.Name, reference.Leaf))
+                if (collation.Equals(existing.Name, reference.Leaf))
                 {
                     return existing.Computed is not null
                         ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(existing.Name, table.Name)
@@ -222,7 +223,7 @@ partial class Simulation
             }
             for (var i = 0; i < heapColumns.Count; i++)
             {
-                if (heapColumns[i] is { } sibling && Collation.Default.Equals(sibling.Name, reference.Leaf))
+                if (heapColumns[i] is { } sibling && collation.Equals(sibling.Name, reference.Leaf))
                 {
                     return sibling.Computed is not null
                         ? throw SimulatedSqlException.ComputedColumnReferencedInComputed(sibling.Name, table.Name)
@@ -389,7 +390,7 @@ partial class Simulation
             var ordinal = -1;
             for (var i = 0; i < table.Columns.Length; i++)
             {
-                if (Collation.Default.Equals(table.Columns[i].Name, name))
+                if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, name))
                 {
                     ordinal = i;
                     break;
@@ -415,7 +416,7 @@ partial class Simulation
         foreach (var ordinal in toDropOrdinals)
         {
             var col = table.Columns[ordinal];
-            var blockers = CollectColumnDependencies(table, ordinal, col);
+            var blockers = CollectColumnDependencies(context.Batch.CurrentDatabase.Collation, table, ordinal, col);
             if (blockers.Count > 0)
                 throw SimulatedSqlException.DropColumnHasDependenciesMixed(col.Name, blockers);
         }
@@ -499,7 +500,7 @@ partial class Simulation
     /// this column) → CHECK (inline by name, table-level by predicate
     /// walk) → DEFAULT → index.
     /// </summary>
-    private static List<(string Name, bool IsIndex)> CollectColumnDependencies(HeapTable table, int ordinal, HeapColumn col)
+    private static List<(string Name, bool IsIndex)> CollectColumnDependencies(Collation collation, HeapTable table, int ordinal, HeapColumn col)
     {
         var blockers = new List<(string, bool)>();
         var storageOrdinal = table.StorageOrdinals[ordinal];
@@ -542,12 +543,12 @@ partial class Simulation
         }
         foreach (var ck in table.CheckConstraints)
         {
-            if (ck.InlineColumn is not null && Collation.Default.Equals(ck.InlineColumn, col.Name))
+            if (ck.InlineColumn is not null && collation.Equals(ck.InlineColumn, col.Name))
             {
                 blockers.Add((ck.Name, false));
                 continue;
             }
-            if (CheckPredicateReferencesColumn(ck.Predicate, col.Name))
+            if (CheckPredicateReferencesColumn(collation, ck.Predicate, col.Name))
                 blockers.Add((ck.Name, false));
         }
         if (col.DefaultConstraint is { } df)
@@ -588,7 +589,7 @@ partial class Simulation
     /// by name. Walks the expression tree structurally — same shape the
     /// inline-CHECK peer-reference walker uses at CREATE TABLE.
     /// </summary>
-    private static bool CheckPredicateReferencesColumn(BooleanExpression predicate, string columnName)
+    private static bool CheckPredicateReferencesColumn(Collation collation, BooleanExpression predicate, string columnName)
     {
         var found = false;
         predicate.VisitOperandExpressions(operand =>
@@ -597,7 +598,7 @@ partial class Simulation
                 return;
             operand.VisitColumnReferences(reference =>
             {
-                if (!found && Collation.Default.Equals(reference.Leaf, columnName))
+                if (!found && collation.Equals(reference.Leaf, columnName))
                     found = true;
             });
         });
@@ -726,7 +727,7 @@ partial class Simulation
         var ordinal = -1;
         for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (Collation.Default.Equals(table.Columns[i].Name, columnName))
+            if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, columnName))
             {
                 ordinal = i;
                 break;
@@ -762,7 +763,7 @@ partial class Simulation
             var newCollation =
                 (newCollationName is not null ? Collation.TryGet(newCollationName) : null)
                 ?? existingCol.Type.Collation
-                ?? Collation.Default;
+                ?? context.Batch.CurrentDatabase.Collation;
             newType = newType.WithCollation(newCollation, Coercibility.Implicit);
             newCollationStored = newCollationName ?? existingCol.Collation;
         }
@@ -785,7 +786,7 @@ partial class Simulation
         // SqlType-subclass change (varchar(50)→varchar(100) widening passes
         // under an index, varchar→nvarchar doesn't).
         var isSubclassChange = existingCol.Type.GetType() != newType.GetType();
-        var blockers = CollectAlterColumnBlockers(table, ordinal, existingCol, isSubclassChange);
+        var blockers = CollectAlterColumnBlockers(context.Batch.CurrentDatabase.Collation, table, ordinal, existingCol, isSubclassChange);
         if (blockers.Count > 0)
             throw SimulatedSqlException.AlterColumnHasDependencies(columnName, blockers);
 
@@ -839,7 +840,7 @@ partial class Simulation
     /// subclass — probe-confirmed that pure length widening within the same
     /// SqlType family passes under an index).
     /// </summary>
-    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectAlterColumnBlockers(HeapTable table, int ordinal, HeapColumn col, bool includeIndexes)
+    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectAlterColumnBlockers(Collation collation, HeapTable table, int ordinal, HeapColumn col, bool includeIndexes)
     {
         var blockers = new List<(string, SimulatedSqlException.AlterColumnBlockerKind)>();
         var storageOrdinal = table.StorageOrdinals[ordinal];
@@ -884,7 +885,7 @@ partial class Simulation
 
         foreach (var c in table.Columns)
         {
-            if (c.Computed is { } expr && ComputedReferencesColumn(expr, col.Name))
+            if (c.Computed is { } expr && ComputedReferencesColumn(collation, expr, col.Name))
                 blockers.Add((c.Name, SimulatedSqlException.AlterColumnBlockerKind.Column));
         }
 
@@ -927,12 +928,12 @@ partial class Simulation
     /// column. Structural walk via <see cref="Expression.VisitColumnReferences"/>
     /// — same shape <see cref="CheckPredicateReferencesColumn"/> uses.
     /// </summary>
-    private static bool ComputedReferencesColumn(Expression computed, string columnName)
+    private static bool ComputedReferencesColumn(Collation collation, Expression computed, string columnName)
     {
         var found = false;
         computed.VisitColumnReferences(reference =>
         {
-            if (!found && Collation.Default.Equals(reference.Leaf, columnName))
+            if (!found && collation.Equals(reference.Leaf, columnName))
                 found = true;
         });
         return found;
