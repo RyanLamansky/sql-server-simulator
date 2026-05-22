@@ -21,7 +21,7 @@ internal sealed class Trim(ParserContext context) : Expression
         if (value.IsNull)
             return SqlValue.Null(value.Type);
         if (!SqlType.IsStringCategory(value.Type))
-            throw new NotSupportedException($"TRIM expects a string operand; got {value.Type}.");
+            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex: 1, "Trim");
         var trimmed = value.AsString.Trim(' ');
         return SqlValue.FromString(value.Type, trimmed);
     }

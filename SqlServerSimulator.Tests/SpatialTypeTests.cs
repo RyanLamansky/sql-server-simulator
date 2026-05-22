@@ -285,4 +285,11 @@ public sealed class SpatialTypeTests
             """);
         AreEqual(0, sim.ExecuteScalar("select count(*) from c1"));
     }
+
+    [TestMethod]
+    public void CreateSpatialIndex_NonSpatialColumn_RaisesMsg12002()
+        => new Simulation().AssertSqlError(
+            "create table dbo.np (id int); create spatial index six on dbo.np(id)",
+            12002,
+            "The requested spatial index on column 'id' of table 'np' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.");
 }

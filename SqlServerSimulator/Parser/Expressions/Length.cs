@@ -30,7 +30,7 @@ internal sealed class Length(ParserContext context) : Expression
         if (value.IsNull)
             return SqlValue.Null(SqlType.Int32);
         if (!SqlType.IsStringCategory(value.Type))
-            throw new NotSupportedException($"LEN expects a string operand; got {value.Type}.");
+            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex: 1, "len");
         var trimmed = value.AsString.TrimEnd(' ');
         var length = value.Type.Collation?.IsSupplementaryCharacterAware == true
             ? SupplementaryCharacters.CodepointCount(trimmed)

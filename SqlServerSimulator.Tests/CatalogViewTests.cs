@@ -280,13 +280,15 @@ public sealed class CatalogViewTests
 
     [TestMethod]
     public void CreateTable_CannotAddToSysSchema()
-        => Throws<NotSupportedException>(() =>
-            new Simulation().ExecuteNonQuery("create table sys.foo (id int)"));
+        => new Simulation().AssertSqlError(
+            "create table sys.foo (id int)", 2760,
+            "The specified schema name \"sys\" either does not exist or you do not have permission to use it.");
 
     [TestMethod]
     public void CreateTable_CannotAddToInformationSchema()
-        => Throws<NotSupportedException>(() =>
-            new Simulation().ExecuteNonQuery("create table INFORMATION_SCHEMA.foo (id int)"));
+        => new Simulation().AssertSqlError(
+            "create table INFORMATION_SCHEMA.foo (id int)", 2760,
+            "The specified schema name \"INFORMATION_SCHEMA\" either does not exist or you do not have permission to use it.");
 
     [TestMethod]
     public void SysSchemas_DropSchemaNotModeled()

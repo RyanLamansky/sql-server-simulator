@@ -196,4 +196,11 @@ public sealed class StringSplitTests
         var ex = Throws<DbException>(() => new Simulation().ExecuteScalar("select value from STRING_SPLIT('a,b', ',', '1')"));
         AreEqual("8116", ex.Data["HelpLink.EvtID"]);
     }
+
+    [TestMethod]
+    public void EnableOrdinal_NonConstantVariable_RaisesMsg8748()
+        => new Simulation().AssertSqlError(
+            "declare @e int = 1; select * from STRING_SPLIT('a,b', ',', @e)",
+            8748,
+            "The enable_ordinal argument for string_split only supports constant values (not variables or columns).");
 }

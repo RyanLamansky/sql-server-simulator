@@ -39,7 +39,7 @@ internal sealed class Substring : Expression
         if (s.IsNull || startValue.IsNull || lengthValue.IsNull)
             return SqlValue.Null(s.Type);
         if (!SqlType.IsStringCategory(s.Type))
-            throw new NotSupportedException($"SUBSTRING expects a string first argument; got {s.Type}.");
+            throw SimulatedSqlException.InvalidArgumentDataType(s.Type.SqlServerName, argumentIndex: 1, "substring");
 
         var startIndex = startValue.CoerceTo(SqlType.Int32).AsInt32;
         var len = lengthValue.CoerceTo(SqlType.Int32).AsInt32;

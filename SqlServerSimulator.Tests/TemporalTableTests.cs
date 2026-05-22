@@ -279,6 +279,38 @@ public sealed class TemporalTableTests
             () => simulation.ExecuteNonQuery("alter table Customers rebuild"));
     }
 
+    [TestMethod]
+    public void ForSystemTime_NonTemporal_RaisesMsg13544()
+        => new Simulation().AssertSqlError(
+            "create table dbo.NotTemp (id int); select * from dbo.NotTemp for system_time all",
+            13544,
+            "Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. 'simulated.dbo.NotTemp' is not a system-versioned table.");
+
+    [TestMethod]
+    public void ForSystemTime_NonTemporalTempTable_RaisesMsg13544()
+        => new Simulation().AssertSqlError(
+            "create table #nt (id int); select * from #nt for system_time as of '2020-01-01'",
+            13544,
+            "Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. 'tempdb.dbo.#nt' is not a system-versioned table.");
+
+    [TestMethod]
+    public void AlterColumn_PeriodColumn_RaisesMsg13599()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(CreateTemporalCustomers);
+        simulation.AssertSqlError(
+            "alter table Customers alter column Vf datetime2(3) not null",
+            13599,
+            "Period column 'Vf' in a system-versioned temporal table cannot be altered.");
+    }
+
+    [TestMethod]
+    public void CreateTable_SystemVersioningOnWithoutPeriod_RaisesMsg13510()
+        => new Simulation().AssertSqlError(
+            "create table dbo.NoPeriod (id int primary key) with (system_versioning = on (history_table = dbo.h))",
+            13510,
+            "Cannot set SYSTEM_VERSIONING to ON when SYSTEM_TIME period is not defined and the LEDGER=ON option is not specified.");
+
     // -- ALTER … SET (SYSTEM_VERSIONING = ON …) tests --
     // Inverse of the OFF tests above. SqlPackage emits this shape post-CREATE
     // for system-versioned tables; the loader's phase-5 wire-up step relies

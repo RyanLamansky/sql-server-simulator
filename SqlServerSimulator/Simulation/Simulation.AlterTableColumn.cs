@@ -743,7 +743,7 @@ partial class Simulation
         if (existingCol.Type == SqlType.RowVersion)
             throw SimulatedSqlException.CannotAlterColumnOfKind(columnName, "timestamp");
         if (existingCol.GeneratedAs != GeneratedAlwaysAsRow.None)
-            throw new NotSupportedException("ALTER COLUMN on a GENERATED ALWAYS AS ROW START/END column isn't modeled.");
+            throw SimulatedSqlException.PeriodColumnCannotBeAltered(columnName);
 
         var (newType, newMaxLength, aliasIsNullable) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
@@ -780,7 +780,7 @@ partial class Simulation
         // 156 from the parser), so we only need to validate that an existing
         // identity column targets an integer family.
         if (existingCol.Identity is not null && !SqlType.IsIntegerCategory(newType))
-            throw new NotSupportedException("ALTER COLUMN of an IDENTITY column to a non-integer type isn't modeled.");
+            throw SimulatedSqlException.IdentityColumnMustBeIntegerType(columnName);
 
         // Blocker detection. PK/UQ, FK (both directions), and computed-column
         // dependencies block unconditionally; indexes block only on actual

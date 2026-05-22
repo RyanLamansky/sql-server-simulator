@@ -156,7 +156,7 @@ internal sealed class AggregateExpression : Expression
         var t when t == SqlType.Money => SqlType.Money,
         var t when t == SqlType.SmallMoney => SqlType.Money,
         DecimalSqlType d => SqlType.GetDecimal(38, d.scale),
-        _ => throw new NotSupportedException($"SUM not supported for {operandType}."),
+        _ => throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "sum"),
     };
 
     /// <summary>
@@ -175,7 +175,7 @@ internal sealed class AggregateExpression : Expression
         var t when t == SqlType.Money => SqlType.Money,
         var t when t == SqlType.SmallMoney => SqlType.SmallMoney,
         DecimalSqlType d => SqlType.GetDecimal(38, (byte)Math.Max((int)d.scale, 6)),
-        _ => throw new NotSupportedException($"AVG not supported for {operandType}."),
+        _ => throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "avg"),
     };
 
     /// <summary>

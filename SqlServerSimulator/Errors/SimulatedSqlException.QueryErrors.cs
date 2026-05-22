@@ -39,10 +39,12 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's Msg 8161 — raised when an argument to
     /// <c>GROUPING()</c> or <c>GROUPING_ID()</c> doesn't match any
     /// expression in the surrounding query's GROUP BY clause (or when the
-    /// function is used outside a GROUP BY context entirely).
+    /// function is used outside a GROUP BY context entirely). The function
+    /// name appears verbatim in the message (probe-confirmed: <c>GROUPING</c>
+    /// uses uppercase, <c>GROUPING_ID</c> uses the underscored form).
     /// </summary>
-    internal static SimulatedSqlException GroupingArgumentNotInGroupBy(int argumentIndex) =>
-        new($"Argument {argumentIndex} of the GROUPING function does not match any of the expressions in the GROUP BY clause.", 8161, 16, 1);
+    internal static SimulatedSqlException GroupingArgumentNotInGroupBy(int argumentIndex, string functionName = "GROUPING") =>
+        new($"Argument {argumentIndex} of the {functionName} function does not match any of the expressions in the GROUP BY clause.", 8161, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 512 — fired when a scalar subquery (or one
@@ -463,4 +465,32 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException UnrecognizedTableHint(ReadOnlySpan<char> hintName) =>
         new($"\"{new string(hintName)}\" is not a recognized table hints option.", 321, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8748: the third <c>enable_ordinal</c> argument
+    /// to <c>STRING_SPLIT</c> isn't a parse-time constant (a variable or
+    /// column reference was used). Wording probe-confirmed against SQL Server
+    /// 2025.
+    /// </summary>
+    internal static SimulatedSqlException StringSplitEnableOrdinalMustBeConstant() =>
+        new($"The enable_ordinal argument for string_split only supports constant values (not variables or columns).", 8748, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13618: an <c>AS JSON</c> modifier in an
+    /// <c>OPENJSON ... WITH</c> column declaration appears on a column whose
+    /// declared type isn't <c>nvarchar(max)</c>. Wording probe-confirmed
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException OpenJsonAsJsonRequiresNVarcharMax() =>
+        new($"AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.", 13618, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13544: <c>FOR SYSTEM_TIME</c> clause targeted a
+    /// table that isn't system-versioned. Wording probe-confirmed against SQL
+    /// Server 2025 — the qualified table name appears between single quotes,
+    /// and real SQL Server pads temp-table names out to their internal
+    /// suffix-extended form.
+    /// </summary>
+    internal static SimulatedSqlException ForSystemTimeRequiresVersionedTable(string qualifiedTableName) =>
+        new($"Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. '{qualifiedTableName}' is not a system-versioned table.", 13544, 16, 2);
 }

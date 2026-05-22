@@ -92,7 +92,7 @@ partial class Simulation
         var col = table.Columns[colOrdinal];
         var kind = col.Type == SqlType.Geography ? SpatialIndexKind.Geography
             : col.Type == SqlType.Geometry ? SpatialIndexKind.Geometry
-            : throw new NotSupportedException($"CREATE SPATIAL INDEX requires a spatial column; '{columnName}' is {col.Type}.");
+            : throw SimulatedSqlException.SpatialIndexRequiresSpatialColumn(columnName, table.Name);
 
         tessellationScheme ??= kind == SpatialIndexKind.Geography ? "GEOGRAPHY_AUTO_GRID" : "GEOMETRY_AUTO_GRID";
 

@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -126,12 +127,18 @@ internal sealed partial class Selection
             var enableOrdinalExpr = Expression.Parse(context);
 
             // SQL Server requires the third arg to be a parse-time constant
-            // (the schema is fixed at compile time). The simulator enforces
-            // this by evaluating against an empty resolver — a column /
-            // parameter reference throws InvalidColumnName, which we
-            // translate into NotSupportedException so callers see a clear
-            // "this shape isn't modeled" signal rather than a silent
-            // misdetection.
+            // (the schema is fixed at compile time) and raises Msg 8748 for
+            // variable / column references. The simulator gates first on a
+            // bare-VariableReference check (the empty-resolver Run trick
+            // alone misses variables — VariableReference reads its slot
+            // directly without going through the column resolver), then
+            // evaluates the expression with an empty resolver to catch
+            // column references. Cast / parenthesized wrappers around a
+            // variable slip past this gate (a divergence from real SQL
+            // Server's broader rejection), but the common bare-`@v` shape
+            // surfaces correctly.
+            if (enableOrdinalExpr is VariableReference)
+                throw SimulatedSqlException.StringSplitEnableOrdinalMustBeConstant();
             SqlValue enableOrdinalValue;
             try
             {
@@ -142,7 +149,7 @@ internal sealed partial class Selection
             }
             catch (InvalidOperationException)
             {
-                throw new NotSupportedException("STRING_SPLIT's enable_ordinal argument must be a parse-time-constant integer literal.");
+                throw SimulatedSqlException.StringSplitEnableOrdinalMustBeConstant();
             }
 
             if (enableOrdinalValue.IsNull)

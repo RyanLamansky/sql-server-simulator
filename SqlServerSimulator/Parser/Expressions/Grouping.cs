@@ -15,9 +15,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// BY clause; SQL Server raises Msg 8161 otherwise (and also when GROUPING
 /// is used outside a GROUP BY context entirely). Matching here is by leaf-
 /// name equality for <see cref="Reference"/> arguments — the common case.
-/// More exotic argument shapes (constant expressions, function calls
-/// matching a GROUP BY expression by structure) raise
-/// <see cref="NotSupportedException"/>.
+/// Non-Reference arguments (e.g. <c>GROUPING(a+1)</c>) currently always
+/// raise Msg 8161 because the simulator doesn't yet do structural-equality
+/// matching against the GROUP BY expression list; real SQL Server returns
+/// 0 when the exact same expression appears in <c>GROUP BY</c>.
 /// </para>
 /// </remarks>
 internal sealed class Grouping(ParserContext context) : Expression
@@ -45,7 +46,7 @@ internal sealed class Grouping(ParserContext context) : Expression
     internal static bool FindArg(IReadOnlyList<Expression> haystack, Expression argument)
     {
         if (argument is not Reference reference)
-            throw new NotSupportedException("GROUPING / GROUPING_ID arguments other than direct column references aren't modeled.");
+            return false;
         var leaf = reference.ReferencedName.Leaf;
         foreach (var entry in haystack)
         {
@@ -85,13 +86,13 @@ internal sealed class GroupingId : Expression
         var currentSet = runtime.Batch.GroupingSetExpressions;
         var allSet = runtime.Batch.AllGroupingExpressions;
         if (currentSet is null || allSet is null)
-            throw SimulatedSqlException.GroupingArgumentNotInGroupBy(1);
+            throw SimulatedSqlException.GroupingArgumentNotInGroupBy(1, "GROUPING_ID");
 
         var bitmap = 0;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             if (!Grouping.FindArg(allSet, this.arguments[i]))
-                throw SimulatedSqlException.GroupingArgumentNotInGroupBy(i + 1);
+                throw SimulatedSqlException.GroupingArgumentNotInGroupBy(i + 1, "GROUPING_ID");
             // Leftmost arg (index 0) is the most-significant bit.
             var bitPosition = this.arguments.Length - 1 - i;
             if (!Grouping.FindArg(currentSet, this.arguments[i]))

@@ -177,6 +177,13 @@ public sealed class OpenJsonTests
         CollectionAssert.AreEqual(new[] { (1, 3), (2, 0), (3, 1) }, rows);
     }
 
+    [TestMethod]
+    public void OpenJson_AsJsonOnNonNVarcharMax_RaisesMsg13618()
+        => new Simulation().AssertSqlError(
+            "select * from openjson('[{\"a\":1}]') with (a int 'strict $.a' as json)",
+            13618,
+            "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.");
+
     // EF Core 10's primitive-collection .Any() shape: EXISTS over a
     // typed-OPENJSON subquery with a WHERE filter.
     [TestMethod]

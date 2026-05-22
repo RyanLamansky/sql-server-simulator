@@ -81,4 +81,44 @@ public sealed class ScalarFunctionTypingTests
     public void Parenthesized_InUnionBranch_TypePromotionRunsGetSqlType() =>
         _ = IsInstanceOfType<DBNull>(ExecuteScalar(
             "select cast(null as int) union all select (1 + 2)"));
+
+    [TestMethod]
+    public void Trim_IntegerOperand_RaisesMsg8116()
+        => new Simulation().AssertSqlError(
+            "select trim(cast(1 as int))",
+            8116,
+            "Argument data type int is invalid for argument 1 of Trim function.");
+
+    [TestMethod]
+    public void Substring_IntegerFirstArg_RaisesMsg8116()
+        => new Simulation().AssertSqlError(
+            "select substring(cast(12345 as int), 2, 2)",
+            8116,
+            "Argument data type int is invalid for argument 1 of substring function.");
+
+    [TestMethod]
+    public void Charindex_IntegerNeedle_RaisesMsg8116()
+        => new Simulation().AssertSqlError(
+            "select charindex(cast(2 as int), 'abc')",
+            8116,
+            "Argument data type int is invalid for argument 1 of charindex function.");
+
+    [TestMethod]
+    public void Charindex_IntegerHaystack_RaisesMsg8116OnArg2()
+        => new Simulation().AssertSqlError(
+            "select charindex('a', cast(1234 as int))",
+            8116,
+            "Argument data type int is invalid for argument 2 of charindex function.");
+
+    // Note: LEN(text) / LEN(ntext) Msg 8116 — the existing CLAUDE.md "Not modeled"
+    // entry covers this. The simulator's IsStringCategory treats text/ntext as
+    // strings so they slip past the LEN gate and return a length. Adding a
+    // dedicated reject-list there is a separate bundle; this test exercises
+    // the binary / image path that does flow through the elevation.
+    [TestMethod]
+    public void Len_ImageOperand_RaisesMsg8116()
+        => new Simulation().AssertSqlError(
+            "select len(cast(0x010203 as image))",
+            8116,
+            "Argument data type image is invalid for argument 1 of len function.");
 }

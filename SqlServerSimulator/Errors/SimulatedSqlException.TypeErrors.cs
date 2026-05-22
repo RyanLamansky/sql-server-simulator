@@ -491,6 +491,8 @@ partial class SimulatedSqlException
         DateTime2SqlType => "datetime2",
         TimeSqlType => "time",
         DateTimeOffsetSqlType => "datetimeoffset",
+        VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType
+            or VarbinarySqlType or BinarySqlType or DecimalSqlType => type.SqlServerName,
         _ => type.ToString()!,
     };
 }

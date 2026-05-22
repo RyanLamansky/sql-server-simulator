@@ -732,6 +732,13 @@ public sealed class AlterTableColumnTests
     }
 
     [TestMethod]
+    public void AlterColumn_IdentityToVarchar_RaisesMsg2749()
+        => new Simulation().AssertSqlError(
+            "create table t (id int identity, v varchar(20)); alter table t alter column id varchar(20)",
+            2749,
+            "Identity column 'id' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, unencrypted, and constrained to be nonnullable.");
+
+    [TestMethod]
     public void AlterColumn_CollateClause_ParseAccepted()
     {
         var sim = new Simulation();

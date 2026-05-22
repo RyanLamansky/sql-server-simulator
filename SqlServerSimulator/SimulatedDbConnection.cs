@@ -160,7 +160,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// (the mangling is invisible at the SQL surface) and isolates by giving
     /// each connection its own dictionary. Cleared in <see cref="Dispose"/>,
     /// matching the real-server rule that <c>#foo</c> auto-drops at session
-    /// close. <c>##foo</c> globals aren't modeled.
+    /// close. Global temp tables (<c>##foo</c>) are modeled separately on
+    /// <see cref="Simulation.GlobalTempTables"/> (instance-wide).
     /// </summary>
     /// <remarks>
     /// Probe-confirmed against SQL Server 2025: <c>#foo</c> persists across

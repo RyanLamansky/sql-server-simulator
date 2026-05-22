@@ -4,13 +4,13 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Tests for local temp tables (<c>#foo</c>). Covers session-scoped storage,
-/// cross-batch persistence within a connection, cross-connection isolation,
-/// auto-drop at connection close, DROP TABLE semantics (regular + temp,
-/// IF EXISTS, Msg 3701), three-part-name acceptance in DROP, identity /
-/// SCOPE_IDENTITY across DML, transactional CREATE / DROP undo, and the
-/// not-modeled <c>##</c> globals raising <see cref="NotSupportedException"/>.
-/// Behavior probed against SQL Server 2025 (2026-05-11).
+/// Tests for local temp tables (<c>#foo</c>) and global temp tables (<c>##foo</c>).
+/// Covers session-scoped storage for local temps, instance-wide visibility for
+/// global temps, cross-batch persistence within a connection, cross-connection
+/// isolation (local) / sharing (global), auto-drop at connection close, DROP
+/// TABLE semantics (regular + temp, IF EXISTS, Msg 3701), three-part-name
+/// acceptance in DROP, identity / SCOPE_IDENTITY across DML, transactional
+/// CREATE / DROP undo. Behavior probed against SQL Server 2025 (2026-05-11).
 /// </summary>
 [TestClass]
 public sealed class TempTableTests

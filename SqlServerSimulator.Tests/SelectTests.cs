@@ -396,4 +396,8 @@ public class SelectTests
         var ex = Throws<DbException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
         AreEqual("The multi-part identifier \"notbound.*\" could not be bound.", ex.Message);
     }
+
+    [TestMethod]
+    public void Select_StarInArithmetic_RaisesMsg102()
+        => new Simulation().AssertSqlError("select 1 + *", 102, "Incorrect syntax near '*'.");
 }

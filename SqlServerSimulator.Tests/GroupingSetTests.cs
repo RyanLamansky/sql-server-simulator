@@ -237,6 +237,21 @@ public sealed class GroupingSetTests
     }
 
     [TestMethod]
+    public void GroupingOfNonReferenceExpression_RaisesMsg8161()
+    {
+        // Real SQL Server returns 0 for GROUPING(a+1) when GROUP BY a+1
+        // matches exactly. The simulator doesn't do structural equality on
+        // GROUP BY expressions yet, so non-Reference args always raise
+        // Msg 8161 — the right Msg, the wrong row count. Documented as a
+        // known divergence.
+        using var conn = SeededSales();
+        using var cmd = conn.CreateCommand(
+            "select grouping(amount + 1) from sales group by amount + 1");
+        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
+        AreEqual("8161", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
     public void SimpleGroupBy_StillWorksAfterRefactor()
     {
         // Regression: the FromClause.GroupBy → GroupingSets refactor must

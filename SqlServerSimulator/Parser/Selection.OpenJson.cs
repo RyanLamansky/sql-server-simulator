@@ -320,10 +320,18 @@ internal sealed partial class Selection
                 path = JsonPath.Parse("$." + columnName);
             }
 
-            // AS JSON modifier — not modeled; EF Core 10 doesn't emit it.
+            // AS JSON modifier — real SQL Server only accepts it on
+            // nvarchar(max) columns and raises Msg 13618 for any other type
+            // (probe-confirmed). The simulator emits the matching rejection
+            // for non-nvarchar(max) types but still raises NotSupportedException
+            // for the accepted nvarchar(max) shape, which the simulator hasn't
+            // built the surrounding sub-tree extraction for. EF Core 10 doesn't
+            // emit the AS JSON modifier.
             if (context.Token is ReservedKeyword { Keyword: Keyword.As })
             {
-                throw new NotSupportedException("OPENJSON column-level AS JSON modifier is not modeled.");
+                if (resolvedType is not NVarcharSqlType { length: SqlType.MaxLengthSentinel })
+                    throw SimulatedSqlException.OpenJsonAsJsonRequiresNVarcharMax();
+                throw new NotSupportedException("OPENJSON column-level AS JSON modifier on nvarchar(max) isn't modeled.");
             }
 
             columns.Add(new OpenJsonColumn(columnName, resolvedType, path));

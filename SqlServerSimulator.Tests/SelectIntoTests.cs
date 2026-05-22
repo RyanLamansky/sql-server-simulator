@@ -337,9 +337,21 @@ public sealed class SelectIntoTests
             """));
 
     [TestMethod]
-    public void GlobalTempTarget_NotSupported()
-        => _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery($"""
+    public void GlobalTempTarget_LandsInGlobalTempDict_RoundTrips()
+    {
+        // SELECT INTO ##g goes to Simulation.GlobalTempTables (instance-wide,
+        // owned by the connection that ran the SELECT INTO) — same routing
+        // as CREATE TABLE ##g. Probe-confirmed that real SQL Server accepts
+        // this shape.
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand($"""
             {Seed}
-            select id into ##g from src
-            """));
+            select a into ##g from src
+            """).ExecuteNonQuery();
+        AreEqual(2, conn.CreateCommand("select count(*) from ##g").ExecuteScalar());
+        // Visible from another session on the same Simulation.
+        using var other = sim.CreateOpenConnection();
+        AreEqual(2, other.CreateCommand("select count(*) from ##g").ExecuteScalar());
+    }
 }

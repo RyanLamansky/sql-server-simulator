@@ -1931,9 +1931,9 @@ internal sealed partial class Selection
     /// Only <c>ALL</c> and <c>AS OF</c> ship; <c>FROM … TO …</c>,
     /// <c>BETWEEN … AND …</c>, and <c>CONTAINED IN (…, …)</c> raise
     /// <see cref="NotSupportedException"/> until an application emission
-    /// requires them. Non-temporal target raises Msg 102 here (real SQL
-    /// Server raises Msg 13510 with a specific wording the simulator
-    /// doesn't carry yet — the rejection point is the same).
+    /// requires them. Non-temporal target raises Msg 13544 here
+    /// (probe-confirmed wording, qualified-name form approximated — real
+    /// SQL Server pads temp-table names with their internal suffix).
     /// </remarks>
     private static IEnumerable<byte[]>? ParseOptionalForSystemTime(ParserContext context, HeapTable heapTable)
     {
@@ -1954,10 +1954,10 @@ internal sealed partial class Selection
             return null;
         }
         if (heapTable.SystemVersioning is null)
-            throw new NotSupportedException($"FOR SYSTEM_TIME on a non-temporal table '{heapTable.Name}' isn't allowed. The target must be system-versioned.");
+            throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(QualifiedNameFor(context, heapTable));
         var historyTable = heapTable.SystemVersioning;
         if (heapTable.PeriodColumns is not { } pc)
-            throw new NotSupportedException($"FOR SYSTEM_TIME target '{heapTable.Name}' is missing its period columns.");
+            throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(QualifiedNameFor(context, heapTable));
 
         context.MoveNextRequired();
         switch (context.Token)
@@ -1977,6 +1977,23 @@ internal sealed partial class Selection
             default:
                 throw new NotSupportedException("Only FOR SYSTEM_TIME ALL and FOR SYSTEM_TIME AS OF <expr> are modeled. BETWEEN / FROM … TO / CONTAINED IN are deferred.");
         }
+    }
+
+    /// <summary>
+    /// Builds the <c>database.schema.table</c> qualified name a Msg 13544 /
+    /// 13599 rejection message wants. Temp tables aren't tracked under
+    /// <c>Database.Schemas</c>, so the schema lookup falls back to
+    /// <c>dbo</c> with the host database name <c>tempdb</c> — real SQL
+    /// Server pads temp-table names with their internal allocation suffix
+    /// (<c>#X____...___…000000000148</c>) which the simulator doesn't carry.
+    /// </summary>
+    private static string QualifiedNameFor(ParserContext context, HeapTable heapTable)
+    {
+        if (heapTable.Name.StartsWith('#'))
+            return $"tempdb.dbo.{heapTable.Name}";
+        var db = context.Batch.CurrentDatabase;
+        var schemaName = db.Schemas.Values.FirstOrDefault(s => s.SchemaId == heapTable.SchemaId)?.Name ?? Database.DefaultSchemaName;
+        return $"{db.Name}.{schemaName}.{heapTable.Name}";
     }
 }
 

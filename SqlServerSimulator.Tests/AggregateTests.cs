@@ -460,4 +460,32 @@ public sealed class AggregateTests
             """)!;
         AreEqual(1.500000m, result);
     }
+
+    [TestMethod]
+    public void Sum_VarcharOperand_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "create table t (v varchar(5)); insert t values ('a'); select sum(v) from t",
+            8117,
+            "Operand data type varchar is invalid for sum operator.");
+
+    [TestMethod]
+    public void Avg_DateOperand_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "create table t (v date); insert t values ('2020-01-01'); select avg(v) from t",
+            8117,
+            "Operand data type date is invalid for avg operator.");
+
+    [TestMethod]
+    public void Sum_BitOperand_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "create table t (v bit); insert t values (1); select sum(v) from t",
+            8117,
+            "Operand data type bit is invalid for sum operator.");
+
+    [TestMethod]
+    public void Avg_Datetime2Operand_RaisesMsg8117FamilyRoot()
+        => new Simulation().AssertSqlError(
+            "create table t (v datetime2(7)); insert t values (getdate()); select avg(v) from t",
+            8117,
+            "Operand data type datetime2 is invalid for avg operator.");
 }

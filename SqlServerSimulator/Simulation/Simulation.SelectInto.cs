@@ -48,25 +48,26 @@ partial class Simulation
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        // Global temp tables aren't modeled — surface explicitly rather than
-        // letting it land as a regular table.
-        if (leaf.Length >= 2 && leaf[0] == '#' && leaf[1] == '#')
-            throw new NotSupportedException($"Global temp tables (##{leaf[2..]}) aren't modeled. Use a local temp table (#{leaf[2..]}) or a permanent table.");
-
         var destTable = new HeapTable(leaf, destColumns, batch.CurrentDatabase.AllocateObjectId());
-        var isTempTable = BatchContext.IsLocalTempName(leaf);
-        var destination = isTempTable
+        var isLocalTemp = BatchContext.IsLocalTempName(leaf);
+        var isGlobalTemp = !isLocalTemp && BatchContext.IsGlobalTempName(leaf);
+        var destination = isLocalTemp
             ? batch.Connection.TempTables
-            : batch.TryResolveSchema(targetName, out var schema) ? schema.HeapTables
-                : throw SimulatedSqlException.InvalidObjectName(targetName);
+            : isGlobalTemp
+                ? batch.Connection.Simulation.GlobalTempTables
+                : batch.TryResolveSchema(targetName, out var schema) ? schema.HeapTables
+                    : throw SimulatedSqlException.InvalidObjectName(targetName);
+        if (isGlobalTemp)
+            destTable.OwnerConnection = batch.Connection;
         if (!destination.TryAdd(leaf, destTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
 
-        // Temp-table SELECT INTO participates in transactional CREATE undo
-        // (same rule as CREATE TABLE #foo). Regular SELECT INTO doesn't —
-        // matches the asymmetry already documented for CREATE TABLE.
-        if (isTempTable && batch.Connection.CurrentTransaction is { } tx)
-            tx.UndoLog.RecordTempTableCreation(batch.Connection.TempTables, leaf);
+        // Temp-table SELECT INTO participates in transactional CREATE undo —
+        // probe-confirmed that ROLLBACK undoes both local and global temp-table
+        // CREATEs on real SQL Server, matching the asymmetry already documented
+        // for regular CREATE TABLE which isn't logged.
+        if ((isLocalTemp || isGlobalTemp) && batch.Connection.CurrentTransaction is { } tx)
+            tx.UndoLog.RecordTempTableCreation(destination, leaf);
 
         // Execute the SELECT and stream each row into the destination. The
         // row bytes are encoded per Selection.Schema; decode to SqlValue[]

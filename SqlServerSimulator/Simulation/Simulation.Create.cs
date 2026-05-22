@@ -217,12 +217,11 @@ partial class Simulation
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.Count >= 2 ? tableName.ImmediateQualifier! : Database.DefaultSchemaName);
             // sys and INFORMATION_SCHEMA exist in Database.Schemas to carry
             // their conventional schema_ids and host catalog views — they
-            // aren't writable namespaces. Real SQL Server rejects user
-            // CREATE TABLE in either via a permission error; the simulator
-            // surfaces NotSupportedException with the schema name so the
-            // diagnostic is clear.
+            // aren't writable namespaces. Real SQL Server reports Msg 2760
+            // for any CREATE TABLE that targets either, with the "does not
+            // exist or you do not have permission" framing — probe-confirmed.
             if (schema.SchemaId is Database.SysSchemaId or Database.InformationSchemaId)
-                throw new NotSupportedException($"Cannot CREATE TABLE in the built-in '{schema.Name}' schema. Use 'dbo' or a user-created schema.");
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
             destination = schema.HeapTables;
             schemaId = schema.SchemaId;
         }
@@ -246,7 +245,7 @@ partial class Simulation
         if (historyTableName is { } hn)
         {
             if (resolvedPeriod is null)
-                throw new NotSupportedException("SYSTEM_VERSIONING = ON requires a PERIOD FOR SYSTEM_TIME declaration with matching GENERATED ALWAYS AS ROW START / END columns.");
+                throw SimulatedSqlException.SystemVersioningRequiresPeriod();
             if (!context.Batch.TryResolveSchema(hn, out historySchema))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.Count >= 2 ? hn.ImmediateQualifier! : Database.DefaultSchemaName);
             if (historySchema.HasNameInSharedNamespace(hn.Leaf))

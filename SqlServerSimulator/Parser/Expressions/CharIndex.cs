@@ -31,8 +31,10 @@ internal sealed class CharIndex : Expression
         var h = haystack.Run(runtime);
         if (n.IsNull || h.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        if (!SqlType.IsStringCategory(n.Type) || !SqlType.IsStringCategory(h.Type))
-            throw new NotSupportedException("CHARINDEX expects string operands.");
+        if (!SqlType.IsStringCategory(n.Type))
+            throw SimulatedSqlException.InvalidArgumentDataType(n.Type.SqlServerName, argumentIndex: 1, "charindex");
+        if (!SqlType.IsStringCategory(h.Type))
+            throw SimulatedSqlException.InvalidArgumentDataType(h.Type.SqlServerName, argumentIndex: 2, "charindex");
 
         var needleStr = n.AsString;
         var haystackStr = h.AsString;

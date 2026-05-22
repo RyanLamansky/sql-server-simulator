@@ -1032,4 +1032,40 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException PrincipalAlreadyExists(string name) =>
         new($"User, group, or role '{name}' already exists in the current database.", 15023, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2749: an <c>ALTER COLUMN</c> on an IDENTITY
+    /// column tried to change the underlying type to something outside the
+    /// integer / decimal-scale-0 family. Probe-confirmed wording against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException IdentityColumnMustBeIntegerType(string columnName) =>
+        new($"Identity column '{columnName}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, unencrypted, and constrained to be nonnullable.", 2749, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 13599: <c>ALTER COLUMN</c> targeted a column
+    /// declared <c>GENERATED ALWAYS AS ROW START / END</c> on a
+    /// system-versioned temporal table. Probe-confirmed wording against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException PeriodColumnCannotBeAltered(string columnName) =>
+        new($"Period column '{columnName}' in a system-versioned temporal table cannot be altered.", 13599, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13510: <c>CREATE TABLE ... WITH (SYSTEM_VERSIONING = ON)</c>
+    /// was issued without an accompanying <c>PERIOD FOR SYSTEM_TIME</c> declaration
+    /// (and with no <c>LEDGER=ON</c> option). Probe-confirmed wording against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException SystemVersioningRequiresPeriod() =>
+        new($"Cannot set SYSTEM_VERSIONING to ON when SYSTEM_TIME period is not defined and the LEDGER=ON option is not specified.", 13510, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 12002: <c>CREATE SPATIAL INDEX</c> referenced a
+    /// column whose type isn't <c>geometry</c> or <c>geography</c>. Probe-
+    /// confirmed wording against SQL Server 2025 (note the trailing space
+    /// before the period in `or geography .`, which the real server emits).
+    /// </summary>
+    internal static SimulatedSqlException SpatialIndexRequiresSpatialColumn(string columnName, string tableName) =>
+        new($"The requested spatial index on column '{columnName}' of table '{tableName}' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.", 12002, 16, 1);
 }
