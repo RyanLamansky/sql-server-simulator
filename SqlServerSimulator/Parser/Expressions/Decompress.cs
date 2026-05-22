@@ -51,7 +51,7 @@ internal sealed class Decompress(ParserContext context) : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 
     internal override string DebugDisplay() => $"DECOMPRESS({this.operand.DebugDisplay()})";
 }

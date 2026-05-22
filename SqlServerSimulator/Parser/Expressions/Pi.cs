@@ -19,7 +19,7 @@ internal sealed class Pi : Expression
 
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromDouble(Math.PI);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => "PI()";
 }

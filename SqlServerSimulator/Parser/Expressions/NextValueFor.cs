@@ -65,7 +65,7 @@ internal sealed class NextValueFor : Expression
         return value;
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.sequence.DeclaredType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.sequence.DeclaredType;
 
     internal override string DebugDisplay() => $"NEXT VALUE FOR {this.sequence.FullName}";
 }

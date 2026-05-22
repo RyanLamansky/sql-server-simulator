@@ -172,12 +172,12 @@ internal sealed class WindowExpression : Expression
             ? this.cachedResult
             : throw new InvalidOperationException("WindowExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as a window function.");
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank => SqlType.BigInt,
         WindowKind.NTile => SqlType.Int32,
-        WindowKind.Aggregate => this.AggregateInfo!.GetSqlType(resolveColumnType),
-        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.GetSqlType(resolveColumnType),
+        WindowKind.Aggregate => this.AggregateInfo!.GetSqlType(batch, resolveColumnType),
+        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.GetSqlType(batch, resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown window kind {this.Kind}."),
     };
 

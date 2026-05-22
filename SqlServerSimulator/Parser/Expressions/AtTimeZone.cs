@@ -45,8 +45,8 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
     private readonly Expression source = source;
     private readonly Expression zoneNameExpression = zoneNameExpression;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.source.GetSqlType(resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResolveResultType(this.source.GetSqlType(batch, resolveColumnType));
 
     public override SqlValue Run(RuntimeContext runtime)
     {

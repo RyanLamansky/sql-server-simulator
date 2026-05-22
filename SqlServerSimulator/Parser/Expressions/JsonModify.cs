@@ -157,7 +157,7 @@ internal sealed class JsonModify : Expression
         : type == SqlType.Int32 ? value.AsInt32
         : value.AsInt64;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";
 }

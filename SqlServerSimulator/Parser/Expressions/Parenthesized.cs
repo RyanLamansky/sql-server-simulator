@@ -14,7 +14,7 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     public override Storage.SqlValue Run(RuntimeContext runtime) => this.Wrapped.Run(runtime);
 
-    public override Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Wrapped.GetSqlType(resolveColumnType);
+    public override Storage.SqlType GetSqlType(BatchContext batch, Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Wrapped.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"( {this.Wrapped.DebugDisplay()} )";
 

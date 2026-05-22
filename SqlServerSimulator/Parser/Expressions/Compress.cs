@@ -51,7 +51,7 @@ internal sealed class Compress(ParserContext context) : Expression
         return System.Text.Encoding.Unicode.GetBytes(value.AsString);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 
     internal override string DebugDisplay() => $"COMPRESS({this.operand.DebugDisplay()})";
 }

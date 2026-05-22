@@ -585,7 +585,7 @@ internal sealed partial class Selection
                     if (topCount is not null && fromClause.OffsetCount is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
-                    return BuildSqlProjection([.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
+                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
 
                 // SELECT projection INTO target [FROM ...] — captures the
                 // destination table name. Real SQL Server requires every
@@ -1822,7 +1822,7 @@ internal sealed partial class Selection
         for (var i = 0; i < expressions.Count; i++)
         {
             var raw = expressions[i].Run(parseRuntime);
-            schema[i] = expressions[i].GetSqlType(column => throw SimulatedSqlException.InvalidColumnName(column));
+            schema[i] = expressions[i].GetSqlType(parseBatch, column => throw SimulatedSqlException.InvalidColumnName(column));
             columnNames[i] = expressions[i].Name;
             values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
         }

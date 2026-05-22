@@ -100,7 +100,7 @@ partial class Simulation
 
         foreach (var pending in pendingComputed)
         {
-            var resolvedType = pending.Expression.GetSqlType(ResolveComputedReference);
+            var resolvedType = pending.Expression.GetSqlType(context.Batch, ResolveComputedReference);
             int? computedMaxLength = resolvedType switch
             {
                 VarcharSqlType v when v.length > 0 => v.length,

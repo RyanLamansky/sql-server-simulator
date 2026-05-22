@@ -33,7 +33,7 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
         return coerced;
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Slot.DeclaredType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Slot.DeclaredType;
 
     internal override string DebugDisplay() => $"@{this.Slot.DeclaredType} = {this.Source.DebugDisplay()}";
 }

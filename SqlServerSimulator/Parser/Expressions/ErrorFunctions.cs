@@ -32,7 +32,7 @@ internal sealed class ErrorNumberFunction : Expression
             ? SqlValue.FromInt32(err.Number)
             : SqlValue.Null(SqlType.Int32);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_NUMBER()";
 }
@@ -46,7 +46,7 @@ internal sealed class ErrorMessageFunction : Expression
             ? SqlValue.FromNVarchar(err.Message)
             : SqlValue.Null(SqlType.NVarchar);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => "ERROR_MESSAGE()";
 }
@@ -60,7 +60,7 @@ internal sealed class ErrorSeverityFunction : Expression
             ? SqlValue.FromInt32(err.Severity)
             : SqlValue.Null(SqlType.Int32);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_SEVERITY()";
 }
@@ -74,7 +74,7 @@ internal sealed class ErrorStateFunction : Expression
             ? SqlValue.FromInt32(err.State)
             : SqlValue.Null(SqlType.Int32);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_STATE()";
 }
@@ -88,7 +88,7 @@ internal sealed class ErrorLineFunction : Expression
             ? SqlValue.FromInt32(err.Line)
             : SqlValue.Null(SqlType.Int32);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_LINE()";
 }
@@ -102,7 +102,7 @@ internal sealed class ErrorProcedureFunction : Expression
             ? SqlValue.FromNVarchar(err.Procedure)
             : SqlValue.Null(SqlType.NVarchar);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => "ERROR_PROCEDURE()";
 }

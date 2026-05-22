@@ -68,7 +68,7 @@ internal sealed class Format : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     /// <summary>
     /// Picks the CLR culture for the formatter. A non-string argument

@@ -31,7 +31,7 @@ internal sealed class Value : Expression
 
     public override SqlValue Run(RuntimeContext runtime) => this.Constant;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Constant.Type;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Constant.Type;
 
     internal override string DebugDisplay() => this.Constant.DebugDisplay();
 

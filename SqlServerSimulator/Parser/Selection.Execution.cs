@@ -97,6 +97,7 @@ internal sealed partial class Selection
     /// and projected through <see cref="Expression.Run(RuntimeContext)"/>.
     /// </summary>
     private static Selection BuildSqlProjection(
+        BatchContext parseBatch,
         FromSource[] sources,
         JoinSpec[] joins,
         List<Expression> expressions,
@@ -119,7 +120,7 @@ internal sealed partial class Selection
 
         for (var i = 0; i < expressions.Count; i++)
         {
-            outputSchema[i] = expressions[i].GetSqlType(ResolveColumnType);
+            outputSchema[i] = expressions[i].GetSqlType(parseBatch, ResolveColumnType);
             outputColumnNames[i] = expressions[i].Name;
         }
 
@@ -145,7 +146,7 @@ internal sealed partial class Selection
         {
             var keyType = orderBy[i].IsOrdinal
                 ? outputSchema[orderBy[i].Ordinal - 1]
-                : orderBy[i].Expr!.GetSqlType(ResolveColumnType);
+                : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveColumnType);
             if (keyType.IsLob)
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
@@ -164,8 +165,8 @@ internal sealed partial class Selection
             if (windows[i].Kind == WindowKind.Aggregate)
             {
                 var aggregate = windows[i].AggregateInfo!;
-                windowOperandTypes[i] = aggregate.Operand?.GetSqlType(ResolveColumnType) ?? SqlType.Int32;
-                windowResultTypes[i] = windows[i].GetSqlType(ResolveColumnType);
+                windowOperandTypes[i] = aggregate.Operand?.GetSqlType(parseBatch, ResolveColumnType) ?? SqlType.Int32;
+                windowResultTypes[i] = windows[i].GetSqlType(parseBatch, ResolveColumnType);
             }
         }
 

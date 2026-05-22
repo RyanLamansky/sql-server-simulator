@@ -228,7 +228,7 @@ partial class Simulation
             var tuples = ParseValuesTuples(context);
             sourceSchema = new SqlType[tuples[0].Length];
             for (var i = 0; i < tuples[0].Length; i++)
-                sourceSchema[i] = tuples[0][i].GetSqlType(name => throw SimulatedSqlException.InvalidColumnName(name));
+                sourceSchema[i] = tuples[0][i].GetSqlType(context.Batch, name => throw SimulatedSqlException.InvalidColumnName(name));
             selectionColumnNames = new string[tuples[0].Length];
             materialize = batch =>
             {
@@ -896,7 +896,7 @@ partial class Simulation
 
         var schema = new SqlType[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
-            schema[i] = IsMergeActionRef(expressions[i]) ? NVarcharSqlType.Get(10) : expressions[i].GetSqlType(ResolveOutputType);
+            schema[i] = IsMergeActionRef(expressions[i]) ? NVarcharSqlType.Get(10, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault) : expressions[i].GetSqlType(context.Batch, ResolveOutputType);
 
         return new MergeOutputProjection(
             [.. expressions], [.. columnNames], schema,
@@ -1627,8 +1627,8 @@ partial class Simulation
     /// </summary>
     private sealed class MergeActionReference : Expression
     {
-        public override SqlType GetSqlType(Func<MultiPartName, SqlType>? resolver) => NVarcharSqlType.Get(10);
-        public override SqlValue Run(RuntimeContext runtime) => SqlValue.Null(NVarcharSqlType.Get(10));
+        public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType>? resolver) => NVarcharSqlType.Get(10, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+        public override SqlValue Run(RuntimeContext runtime) => SqlValue.Null(NVarcharSqlType.Get(10, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault));
         internal override string DebugDisplay() => "$action";
     }
 

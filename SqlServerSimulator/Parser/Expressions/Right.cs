@@ -40,7 +40,7 @@ internal sealed class Right : Expression
         return SqlValue.FromString(s.Type, result);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"RIGHT({source.DebugDisplay()}, {count.DebugDisplay()})";
 }

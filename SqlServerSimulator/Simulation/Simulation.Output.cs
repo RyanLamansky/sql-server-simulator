@@ -167,7 +167,7 @@ partial class Simulation
 
         var schema = new SqlType[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
-            schema[i] = expressions[i].GetSqlType(ResolveOutputType);
+            schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
 
         return new MutationOutputProjection(table, [.. expressions], [.. names], schema, context.Batch, outputTarget);
     }
@@ -460,7 +460,7 @@ partial class Simulation
 
         var schema = new SqlType[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
-            schema[i] = expressions[i].GetSqlType(ResolveOutputType);
+            schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
 
         return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget);
     }

@@ -29,7 +29,7 @@ internal sealed class EOMonth : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Date;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Date;
 
     public override SqlValue Run(RuntimeContext runtime)
     {

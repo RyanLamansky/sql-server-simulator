@@ -33,7 +33,7 @@ internal sealed class Grouping(ParserContext context) : Expression
             : SqlValue.FromByte(FindArg(currentSet, this.argument) ? (byte)0 : (byte)1);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.TinyInt;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.TinyInt;
 
     /// <summary>
     /// Looks for <paramref name="argument"/> in <paramref name="haystack"/>.
@@ -100,7 +100,7 @@ internal sealed class GroupingId : Expression
         return SqlValue.FromInt32(bitmap);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() =>
         $"GROUPING_ID({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";

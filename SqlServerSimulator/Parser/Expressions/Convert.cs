@@ -121,7 +121,7 @@ internal sealed class ConvertExpression : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.targetType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.targetType;
 
     internal override string DebugDisplay() =>
         this.style is null

@@ -39,7 +39,7 @@ internal sealed class Replace : Expression
         return SqlValue.FromString(i.Type, replaced);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => input.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => input.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
 }

@@ -18,21 +18,24 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class NCharFromCode(ParserContext context) : Expression
 {
-    private static readonly NCharSqlType NChar1 = NCharSqlType.Get(1);
     private readonly Expression code = Parse(context);
+
+    private static NCharSqlType NChar1For(BatchContext batch) =>
+        NCharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        var nchar1 = NChar1For(runtime.Batch);
         var v = code.Run(runtime);
         if (v.IsNull)
-            return SqlValue.Null(NChar1);
+            return SqlValue.Null(nchar1);
         var n = v.CoerceTo(SqlType.Int32).AsInt32;
         return n is < 0 or > 65535
-            ? SqlValue.Null(NChar1)
-            : SqlValue.FromNChar(NChar1, ((char)n).ToString());
+            ? SqlValue.Null(nchar1)
+            : SqlValue.FromNChar(nchar1, ((char)n).ToString());
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => NChar1;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => NChar1For(batch);
 
     internal override string DebugDisplay() => $"NCHAR({this.code.DebugDisplay()})";
 }

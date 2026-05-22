@@ -69,7 +69,7 @@ internal sealed class TypeId : Expression
     private static string StripBrackets(string s) =>
         s.Length >= 2 && s[0] == '[' && s[^1] == ']' ? s[1..^1] : s;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumn) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumn) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"TYPE_ID({this.nameArg.DebugDisplay()})";
 }

@@ -30,7 +30,7 @@ internal sealed class Space(ParserContext context) : Expression
         return SqlValue.FromVarchar(new string(' ', times));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varchar;
 
     internal override string DebugDisplay() => $"SPACE({this.count.DebugDisplay()})";
 }

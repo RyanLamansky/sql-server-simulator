@@ -146,7 +146,7 @@ internal sealed class SpatialMethodCall : Expression
         {
             var value = this.target.Run(runtime);
             return value.IsNull
-                ? SqlValue.Null(NVarcharSqlType.MaxForm)
+                ? SqlValue.Null(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault))
                 : SqlValue.FromNVarchar(value.AsString);
         }
         throw new NotSupportedException(
@@ -162,14 +162,15 @@ internal sealed class SpatialMethodCall : Expression
     /// projection planner can still compute schema even though Run never
     /// succeeds.
     /// </summary>
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        return IsStringResult(this.methodName) ? NVarcharSqlType.MaxForm
+        var nvarcharMax = NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+        return IsStringResult(this.methodName) ? nvarcharMax
             : IsBinaryResult(this.methodName) ? VarbinarySqlType.MaxForm
             : IsBooleanResult(this.methodName) ? SqlType.Bit
             : IsNumericResult(this.methodName) ? SqlType.Float
             : IsIntegerResult(this.methodName) ? SqlType.Int32
-            : this.target.GetSqlType(resolveColumnType) is SpatialSqlType spatial ? spatial : NVarcharSqlType.MaxForm;
+            : this.target.GetSqlType(batch, resolveColumnType) is SpatialSqlType spatial ? spatial : nvarcharMax;
     }
 
     private static bool IsStringResult(string name) =>

@@ -126,7 +126,7 @@ partial class Simulation
 
         foreach (var pending in pendingComputed)
         {
-            var resolvedType = pending.Expression.GetSqlType(ResolveComputedReference);
+            var resolvedType = pending.Expression.GetSqlType(context.Batch, ResolveComputedReference);
             // Pull the declared length off the resolved type for the var-length
             // string/binary families so EnforceMaxLength sees the same cap that
             // GetSqlType inferred. Char/binary fixed-length types report their

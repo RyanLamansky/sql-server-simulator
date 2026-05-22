@@ -17,7 +17,7 @@ internal sealed class NewId : Expression
 
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromGuid(Guid.NewGuid());
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 
     internal override string DebugDisplay() => "NEWID()";
 }

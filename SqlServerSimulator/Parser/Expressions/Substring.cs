@@ -66,7 +66,7 @@ internal sealed class Substring : Expression
         return SqlValue.FromString(s.Type, input[startCu..endCu]);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()}, {length.DebugDisplay()})";
 }

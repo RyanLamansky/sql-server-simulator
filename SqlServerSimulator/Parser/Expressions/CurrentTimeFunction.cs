@@ -87,7 +87,7 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
         };
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         CurrentTimeKind.GetDate or CurrentTimeKind.GetUtcDate or CurrentTimeKind.CurrentTimestamp => SqlType.DateTime,
         CurrentTimeKind.SysDateTime or CurrentTimeKind.SysUtcDateTime => DateTime2_7,

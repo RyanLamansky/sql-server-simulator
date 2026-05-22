@@ -19,7 +19,7 @@ internal sealed class DataLength(ParserContext context) : Expression
                 : SqlValue.FromInt32(value.Type.GetVariableByteCount(value));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"DATALENGTH({source.DebugDisplay()})";
 }

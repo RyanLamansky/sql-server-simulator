@@ -40,7 +40,7 @@ internal sealed class SchemaName : Expression
         return SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() =>
         this.idArg is null ? "SCHEMA_NAME()" : $"SCHEMA_NAME({this.idArg.DebugDisplay()})";

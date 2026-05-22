@@ -65,7 +65,7 @@ internal abstract class DateDiff : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.resultType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.resultType;
 
     internal override string DebugDisplay() =>
         $"{this.functionLowerName.ToUpperInvariant()}({this.keywordText}, {this.start.DebugDisplay()}, {this.end.DebugDisplay()})";

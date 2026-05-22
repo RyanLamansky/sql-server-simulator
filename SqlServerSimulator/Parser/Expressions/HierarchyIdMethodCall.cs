@@ -88,10 +88,10 @@ internal sealed class HierarchyIdMethodCall : Expression
         // spatial stance in SpatialMethodCall).
         if (this.method == HierarchyIdMethod.ToStringMethod && receiver.Type is SpatialSqlType)
         {
-            return receiver.IsNull ? SqlValue.Null(NVarcharSqlType.MaxForm) : SqlValue.FromNVarchar(receiver.AsString);
+            return receiver.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)) : SqlValue.FromNVarchar(receiver.AsString);
         }
         if (receiver.IsNull)
-            return SqlValue.Null(this.ResultType());
+            return SqlValue.Null(this.ResultType(runtime.Batch));
         if (receiver.Type != SqlType.HierarchyId)
             throw SimulatedSqlException.InvalidHierarchyIdInput($"receiver is {receiver.Type}, not hierarchyid");
 
@@ -259,13 +259,13 @@ internal sealed class HierarchyIdMethodCall : Expression
         _ => throw SimulatedSqlException.InvalidHierarchyIdInput($"{context} requires an integer, got {value.Type}"),
     };
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.ResultType();
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.ResultType(batch);
 
-    private SqlType ResultType() => this.method switch
+    private SqlType ResultType(BatchContext batch) => this.method switch
     {
         HierarchyIdMethod.GetLevel => SqlType.SmallInt,
         HierarchyIdMethod.IsDescendantOf => SqlType.Bit,
-        HierarchyIdMethod.ToStringMethod => NVarcharSqlType.Get(4000),
+        HierarchyIdMethod.ToStringMethod => NVarcharSqlType.Get(4000, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault),
         _ => SqlType.HierarchyId,
     };
 

@@ -32,7 +32,7 @@ internal sealed class IsNumeric(ParserContext context) : Expression
             : SqlValue.FromInt32(LooksNumeric(v.AsString) ? 1 : 0);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     /// <summary>
     /// Hand-rolled scanner matching the probed real-server acceptances. The

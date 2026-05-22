@@ -47,7 +47,7 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
     /// </summary>
     private readonly Expression?[] arguments = arguments;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.function.ReturnType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.function.ReturnType;
 
     public override SqlValue Run(RuntimeContext runtime)
     {

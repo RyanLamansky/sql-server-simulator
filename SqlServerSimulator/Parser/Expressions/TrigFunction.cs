@@ -83,7 +83,7 @@ internal sealed class TrigFunction : Expression
         };
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     private static SqlValue Square(double d)
     {

@@ -34,9 +34,9 @@ internal sealed class NullIf : Expression
         return equal == true ? SqlValue.Null(this.cachedResultType ?? av.Type) : av;
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.a.GetSqlType(resolveColumnType);
+        var t = this.a.GetSqlType(batch, resolveColumnType);
         this.cachedResultType = t;
         return t;
     }

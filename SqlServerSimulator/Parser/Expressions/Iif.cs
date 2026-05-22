@@ -44,11 +44,11 @@ internal sealed class Iif : Expression
         return this.cachedResultType is { } target && !picked.IsNull && picked.Type != target ? picked.CoerceTo(target) : picked;
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var t = SqlType.Promote(
-            this.trueValue.GetSqlType(resolveColumnType),
-            this.falseValue.GetSqlType(resolveColumnType));
+            this.trueValue.GetSqlType(batch, resolveColumnType),
+            this.falseValue.GetSqlType(batch, resolveColumnType));
         this.cachedResultType = t;
         return t;
     }

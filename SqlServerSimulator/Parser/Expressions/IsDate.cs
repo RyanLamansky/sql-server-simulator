@@ -53,7 +53,7 @@ internal sealed class IsDate(ParserContext context) : Expression
         return SqlValue.FromInt32(0);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     /// <summary>
     /// Bridges to <see cref="SqlValue.TryParseLegacyDateTime"/> with the

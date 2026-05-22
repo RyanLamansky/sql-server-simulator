@@ -84,13 +84,13 @@ internal sealed class CaseExpression : Expression
         return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(runtime);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.thens[0].GetSqlType(resolveColumnType);
+        var t = this.thens[0].GetSqlType(batch, resolveColumnType);
         for (var i = 1; i < this.thens.Length; i++)
-            t = SqlType.Promote(t, this.thens[i].GetSqlType(resolveColumnType));
+            t = SqlType.Promote(t, this.thens[i].GetSqlType(batch, resolveColumnType));
         if (this.elseBranch is not null)
-            t = SqlType.Promote(t, this.elseBranch.GetSqlType(resolveColumnType));
+            t = SqlType.Promote(t, this.elseBranch.GetSqlType(batch, resolveColumnType));
         this.cachedResultType = t;
         return t;
     }

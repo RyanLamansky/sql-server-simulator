@@ -34,7 +34,7 @@ The fast path uses `SqlValue.WithType` to re-tag a value with a different `SqlTy
 
 ## Decode preserves column type instance
 
-`VarcharSqlType.Decode` and `NVarcharSqlType.Decode` now thread `this` (the actual interned instance) into `SqlValue.FromVarchar(VarcharSqlType, string)` / `FromNVarchar(NVarcharSqlType, string)`. Previously they hit the singleton `FromVarchar(string)` overload and lost the column's collation/coercibility — same latent bug also affected `SqlValue.FromString(type, value)` which used to drop the target type during cross-string coercion. Both fixed in this bundle.
+`VarcharSqlType.Decode` and `NVarcharSqlType.Decode` thread `this` (the actual interned instance) into `SqlValue.FromVarchar(VarcharSqlType, string)` / `FromNVarchar(NVarcharSqlType, string)` rather than the singleton `FromVarchar(string)` overload, so the column's collation/coercibility survives the decode. The parallel `SqlValue.FromString(type, value)` similarly preserves the target type during cross-string coercion.
 
 `CharSqlType.Decode` / `NCharSqlType.Decode` already passed `this` (via `FromChar` / `FromNChar`); collation came along free once the type-side wiring landed.
 
@@ -59,6 +59,27 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 `Simulation.ServerCollationName` (string-typed `init`-only property, defaults to `SQL_Latin1_General_CP1_CI_AS`) is the seed for every freshly-created `Database`: both the lazy `"simulated"` seed picked up on first `CreateDbConnection` and bacpac imports that don't carry their own collation declaration. Mirrors SQL Server's `model.collation` role; `init`-only reflects real SQL Server's install-time immutability (the only way to change it on a real instance is the `sqlservr -m -q` rebuild-master dance, blocked outright on Azure SQL). Setter validates against `Collation.TryGet` and raises `ArgumentException` on an unrecognized name.
 
 Important fidelity edge — the seed knob closes a documented identifier-dict-comparer gap. Per-database dict comparers (`Database.Schemas`, `Schema.HeapTables`, etc.) are built at `Database` construction time from the seeded collation; `ALTER DATABASE COLLATE` updates `Database.Collation` for future identifier compares but doesn't rebuild the existing dict comparers. Setting `ServerCollationName` at construction means the dict comparer is right from the start: e.g., `CREATE SCHEMA DBO` on a CS-seeded DB succeeds (both `dbo` and `DBO` coexist as distinct schemas, probe-confirmed verbatim on real SQL Server 2025), whereas the post-hoc `ALTER DATABASE simulated COLLATE SQL_Latin1_General_CP1_CS_AS` path raises Msg 2714 because the stale CI dict comparer still treats `DBO == dbo`. Coverage: the `ServerCollationName_*` region in `NameComparisonRegimeTests.cs`.
+
+## Result-type collation routing through the active database
+
+`Expression.GetSqlType` takes a `BatchContext batch` parameter (paired with `Expression.Run`'s `RuntimeContext.Batch`), so result types that depend on the active database — notably string-typed scalar function returns and the MERGE `$action` pseudo-column — pin the per-DB collation at both parse-time schema computation and runtime value construction. The parity contract is preserved: both sides resolve from the same `batch.CurrentDatabase.Collation`.
+
+Sites routed through the active DB collation:
+- `CHAR(N)` / `NCHAR(N)` result type (`CharFromCode` / `NCharFromCode`).
+- `hierarchyid.ToString()` and spatial / XML method calls that return string-typed values.
+- `MERGE … OUTPUT $action` (`Simulation.Merge.MergeActionReference`).
+- `sys.fn_listextendedproperty` `value` projection column (`Selection.ListExtendedProperty`).
+- `SqlType.PromoteForArithmetic`'s string-concat path derives the result collation via `Collation.Resolve(a, b)` from the operands' coercibility ranks rather than defaulting to `Collation.Default`.
+
+Probe-confirmed fidelity (real SQL Server CS database, 2026-05-22): `SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')` returns `'neq'` (literals don't case-fold under CS). The simulator now matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
+
+Sites that intentionally stay on `Collation.Default` (~34 references):
+- System catalog schemas in `BuiltInResources.cs` — process-wide statics, no per-Simulation affinity.
+- `SqlType.Varchar` / `NVarchar` pseudo-singletons and `SqlType.GetChar` / `GetNChar` static bridges — type-identity placeholders.
+- `text` / `ntext` / `sysname` `Collation` overrides — server-default-only types.
+- Error-message type placeholders, dynamic-SQL string extraction, PRINT formatting — collation irrelevant to the surfaced value.
+- `Simulation.ServerCollation` initializer — the deliberate anchor for "what does the simulator's hardcoded baseline resolve to."
+- **String literals via the tokenizer** (`Value` / `Literal`) — literals like `'A'` and `N'foo'` still carry `Collation.Default` because the tokenizer materializes the `SqlValue` without batch context. Closing this would require threading `BatchContext` through `Tokenizer.NextToken` — deferred. The gap surfaces as: `SELECT 'A' = 'a'` on a CS database returns `1` (CI compare) instead of `0` (CS compare). Real workloads typically have a column on at least one side, and the column's `Implicit`-rank collation wins via `Collation.Resolve`, so this gap is unobservable in EF Core workloads.
 
 `ALTER COLUMN` without an explicit `COLLATE` clause preserves the existing column's collation (probe-aligned). With an explicit `COLLATE`, the new collation pins at `Implicit` rank.
 

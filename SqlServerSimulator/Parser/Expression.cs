@@ -393,12 +393,19 @@ internal abstract class Expression
 
     /// <summary>
     /// Static type-of resolver for projection planning: returns the
-    /// <see cref="SqlType"/> this expression will produce, given a
-    /// resolver that maps column-name parts to their declared types. Lets a
-    /// SELECT plan its output schema before any rows are read.
+    /// <see cref="SqlType"/> this expression will produce, given the active
+    /// batch (for database-affine state — in particular the database
+    /// collation that result-type defaults should carry) and a resolver that
+    /// maps column-name parts to their declared types. Lets a SELECT plan
+    /// its output schema before any rows are read; the batch parameter must
+    /// agree with the one passed to <see cref="Run"/> so the
+    /// projection-schema type and the produced value's <see cref="SqlValue.Type"/>
+    /// stay in parity (drift breaks union / CASE / coalesce schema and the
+    /// row-encoder's type validation).
     /// </summary>
+    /// <param name="batch">The active batch context, used to resolve database-affine defaults like the active collation.</param>
     /// <param name="resolveColumnType">Callback that, given a multi-part column name, returns its declared type or throws if unresolvable.</param>
-    public abstract SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType);
+    public abstract SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType);
 
     /// <summary>
     /// Diagnostic-only string rendering, surfaced to debuggers via

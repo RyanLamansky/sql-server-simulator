@@ -312,4 +312,27 @@ public sealed class NameComparisonRegimeTests
         AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.schemas WHERE name IN (N'dbo', N'DBO')"));
     }
 
+    // ===== Scalar-function result types carry the active DB collation =====
+    // CHAR(N) / NCHAR(N) result types pin the active database's collation
+    // rather than the storage-baseline Collation.Default, so a CS-DB
+    // compare between two function-returned strings goes through the
+    // CS comparer. Probe-confirmed against real SQL Server CS database
+    // (2026-05-22): CHAR(65) = CHAR(97) returns 'neq' (literals don't
+    // case-fold under CS).
+
+    [TestMethod]
+    public void CsDatabase_CharFunctionResultUsesActiveCollation()
+        => AreEqual("neq",
+            new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" }
+                .ExecuteScalar("SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')"));
+
+    [TestMethod]
+    public void CsDatabase_NCharFunctionResultUsesActiveCollation()
+        => AreEqual("neq",
+            new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" }
+                .ExecuteScalar("SELECT IIF(NCHAR(65) = NCHAR(97), 'eq', 'neq')"));
+
+    [TestMethod]
+    public void CiDatabase_CharFunctionResult_StillEqualsUnderCi()
+        => AreEqual("eq", new Simulation().ExecuteScalar("SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')"));
 }

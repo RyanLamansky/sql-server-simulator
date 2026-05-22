@@ -78,11 +78,11 @@ internal sealed class XmlMethodCall : Expression
     /// surfaces as xml here for static-typing safety since it can't be
     /// reached at execute anyway.
     /// </summary>
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         this.methodName.Equals("exist", StringComparison.Ordinal)
             ? SqlType.Bit
             : this.methodName.Equals("value", StringComparison.Ordinal)
-                ? NVarcharSqlType.MaxForm
+                ? NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)
                 : SqlType.Xml;
 
     internal override string DebugDisplay() => $"({this.target.DebugDisplay()}).{this.methodName}(…)";

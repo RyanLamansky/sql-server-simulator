@@ -307,13 +307,13 @@ internal abstract partial class SqlType
     /// UTF-8-enabled collations (introduced in SQL Server 2019) are an opt-in
     /// feature and aren't modeled today.
     /// </remarks>
-    public static readonly VarcharSqlType Varchar = VarcharSqlType.Unspecified;
+    public static readonly VarcharSqlType Varchar = VarcharSqlType.Get(0, Collation.Default, Coercibility.CoercibleDefault);
 
     /// <remarks>
     /// Stored as UTF-16 LE bytes (2 bytes per BMP code unit, surrogate pairs for
     /// supplementary characters), matching SQL Server's on-disk nvarchar layout.
     /// </remarks>
-    public static readonly NVarcharSqlType NVarchar = NVarcharSqlType.Unspecified;
+    public static readonly NVarcharSqlType NVarchar = NVarcharSqlType.Get(0, Collation.Default, Coercibility.CoercibleDefault);
 
     /// <remarks>
     /// SQL Server's <c>sysname</c> — historically <c>varchar(30)</c> in 6.5,
@@ -504,13 +504,13 @@ internal abstract partial class SqlType
     /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string. Each declared
     /// length is a distinct singleton reachable through this accessor.
     /// </remarks>
-    public static SqlType GetChar(int length) => CharSqlType.Get(length);
+    public static SqlType GetChar(int length) => CharSqlType.Get(length, Collation.Default, Coercibility.CoercibleDefault);
 
     /// <remarks>
     /// SQL Server's <c>nchar(N)</c>: fixed-length UTF-16 string. Each declared
     /// length is a distinct singleton reachable through this accessor.
     /// </remarks>
-    public static SqlType GetNChar(int length) => NCharSqlType.Get(length);
+    public static SqlType GetNChar(int length) => NCharSqlType.Get(length, Collation.Default, Coercibility.CoercibleDefault);
 
     /// <remarks>
     /// SQL Server's <c>binary(N)</c>: fixed-length raw bytes. Each declared
@@ -755,10 +755,10 @@ internal abstract partial class SqlType
         }
 
         // varchar(MAX) / nvarchar(MAX) / varbinary(MAX): the LOB-eligible form
-        // of the same SqlType family. The Type now carries the MAX-form length
-        // (-1) directly via VarcharSqlType.MaxForm / NVarcharSqlType.MaxForm /
-        // VarbinarySqlType.MaxForm; HeapColumn.MaxLength duplicates the same
-        // sentinel for the row-level encoder's LOB-routing path.
+        // of the same SqlType family. The Type carries the MAX-form length
+        // (-1) directly via the per-type Get(-1, …) factory; HeapColumn.MaxLength
+        // duplicates the same sentinel for the row-level encoder's LOB-routing
+        // path.
         if (declaredMaxLength == MaxLengthSentinel)
             return (ResolveVarFamilyForLength(resolved, MaxLengthSentinel), MaxLengthSentinel);
 
@@ -810,8 +810,8 @@ internal abstract partial class SqlType
     /// </summary>
     private static SqlType ResolveVarFamilyForLength(SqlType resolved, int length) => resolved switch
     {
-        VarcharSqlType => VarcharSqlType.Get(length),
-        NVarcharSqlType => NVarcharSqlType.Get(length),
+        VarcharSqlType v => VarcharSqlType.Get(length, v.Collation, v.Coercibility),
+        NVarcharSqlType nv => NVarcharSqlType.Get(length, nv.Collation, nv.Coercibility),
         VarbinarySqlType => VarbinarySqlType.Get(length),
         _ => resolved,
     };

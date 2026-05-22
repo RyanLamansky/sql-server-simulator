@@ -40,11 +40,11 @@ internal sealed class Coalesce : Expression
         return value; // all NULL — return the last (typed-NULL) result
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.arguments[0].GetSqlType(resolveColumnType);
+        var t = this.arguments[0].GetSqlType(batch, resolveColumnType);
         for (var i = 1; i < this.arguments.Length; i++)
-            t = SqlType.Promote(t, this.arguments[i].GetSqlType(resolveColumnType));
+            t = SqlType.Promote(t, this.arguments[i].GetSqlType(batch, resolveColumnType));
         this.cachedResultType = t;
         return t;
     }

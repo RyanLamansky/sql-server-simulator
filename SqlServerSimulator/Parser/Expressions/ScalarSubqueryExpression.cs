@@ -37,7 +37,7 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
             : RowDecoder.DecodeColumn(resultSet.Schema, firstRow, 0);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => inner.Schema[0];
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => inner.Schema[0];
 
     internal override string DebugDisplay() => "(SELECT ...)";
 }

@@ -54,7 +54,7 @@ internal sealed class ObjectName : Expression
         return SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => $"OBJECT_NAME({this.idArg.DebugDisplay()})";
 }

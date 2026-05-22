@@ -51,7 +51,14 @@ partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        var ucNVarchar = NVarcharSqlType.MaxForm;
+        // Schema's 4th column (`value`) carries the active database's
+        // collation. Parse-time schema is materialized with the parse-time
+        // batch's collation; the runtime path re-derives the same shape
+        // from its own batch so a connection that swapped databases between
+        // parse and execute still gets matching schema + values. The
+        // parse-time form is what surfaces in the consumer-visible
+        // SqlServerDataReader schema.
+        var ucNVarchar = NVarcharSqlType.Get(-1, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
         SqlType[] schema = [SqlType.SystemName, SqlType.SystemName, SqlType.SystemName, ucNVarchar];
         string[] columnNames = ["objtype", "objname", "name", "value"];
 
@@ -100,7 +107,7 @@ partial class Selection
         if (filter is null)
             yield break;
 
-        var nvMax = NVarcharSqlType.MaxForm;
+        var nvMax = NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
         foreach (var kvp in batch.CurrentDatabase.ExtendedProperties)
         {
             var key = kvp.Key;
@@ -128,7 +135,7 @@ partial class Selection
     private static string? EvalNullableString(Expression expr, RuntimeContext runtime)
     {
         var value = expr.Run(runtime);
-        return value.IsNull ? null : value.CoerceTo(NVarcharSqlType.MaxForm).AsString;
+        return value.IsNull ? null : value.CoerceTo(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)).AsString;
     }
 
     /// <summary>

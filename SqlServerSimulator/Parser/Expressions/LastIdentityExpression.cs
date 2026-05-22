@@ -35,7 +35,7 @@ internal sealed class LastIdentityExpression : Expression
             ? SqlValue.FromDecimal(ResultType, v)
             : SqlValue.Null(ResultType);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => "SCOPE_IDENTITY()";
 }

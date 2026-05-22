@@ -18,7 +18,7 @@ internal sealed class Log10(ParserContext context) : Expression
         return d <= 0 ? throw SimulatedSqlException.InvalidFloatingPointOperation() : SqlValue.FromDouble(Math.Log10(d));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => $"LOG10({this.source.DebugDisplay()})";
 }

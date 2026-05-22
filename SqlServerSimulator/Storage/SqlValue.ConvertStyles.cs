@@ -466,17 +466,17 @@ internal readonly partial struct SqlValue
     {
         var hasPrefix = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
         if (requirePrefix != hasPrefix)
-            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Unspecified, "varbinary");
+            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Get(0, Collation.Default, Coercibility.CoercibleDefault), "varbinary");
         var hex = hasPrefix ? s[2..] : s;
         if (hex.Length % 2 != 0)
-            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Unspecified, "varbinary");
+            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Get(0, Collation.Default, Coercibility.CoercibleDefault), "varbinary");
         try
         {
             return Convert.FromHexString(hex);
         }
         catch (FormatException)
         {
-            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Unspecified, "varbinary");
+            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Get(0, Collation.Default, Coercibility.CoercibleDefault), "varbinary");
         }
     }
 

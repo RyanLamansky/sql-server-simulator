@@ -71,7 +71,7 @@ internal sealed class JsonQuery : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
 }

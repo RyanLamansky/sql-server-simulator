@@ -45,8 +45,8 @@ internal sealed partial class Selection
         var aggregateResultTypes = new SqlType[aggregates.Count];
         for (var i = 0; i < aggregates.Count; i++)
         {
-            aggregateOperandTypes[i] = aggregates[i].Operand?.GetSqlType(resolveColumnType) ?? SqlType.Int32;
-            aggregateResultTypes[i] = aggregates[i].GetSqlType(resolveColumnType);
+            aggregateOperandTypes[i] = aggregates[i].Operand?.GetSqlType(batch, resolveColumnType) ?? SqlType.Int32;
+            aggregateResultTypes[i] = aggregates[i].GetSqlType(batch, resolveColumnType);
         }
 
         GroupState NewGroup(int keyArity)
@@ -178,7 +178,7 @@ internal sealed partial class Selection
                         if (expr is Reference r
                             && BuiltInToken.Equals(r.Name, name.Leaf))
                         {
-                            return SqlValue.Null(expr.GetSqlType(resolveColumnType));
+                            return SqlValue.Null(expr.GetSqlType(batch, resolveColumnType));
                         }
                     }
                     return outerResolver is not null

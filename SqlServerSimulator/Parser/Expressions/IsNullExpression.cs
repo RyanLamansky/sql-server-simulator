@@ -40,9 +40,9 @@ internal sealed class IsNullExpression : Expression
         return this.cachedResultType is { } target && fallback.Type != target ? fallback.CoerceTo(target) : fallback;
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.check.GetSqlType(resolveColumnType);
+        var t = this.check.GetSqlType(batch, resolveColumnType);
         this.cachedResultType = t;
         return t;
     }

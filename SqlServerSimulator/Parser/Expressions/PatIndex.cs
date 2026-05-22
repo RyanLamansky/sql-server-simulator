@@ -68,9 +68,9 @@ internal sealed class PatIndex : Expression
         return isBig ? SqlValue.FromInt64(position) : SqlValue.FromInt32((int)position);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        SqlType resultType = IsBigResult(this.subject.GetSqlType(resolveColumnType)) ? SqlType.BigInt : SqlType.Int32;
+        SqlType resultType = IsBigResult(this.subject.GetSqlType(batch, resolveColumnType)) ? SqlType.BigInt : SqlType.Int32;
         return resultType;
     }
 

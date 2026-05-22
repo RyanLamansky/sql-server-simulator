@@ -93,7 +93,7 @@ partial class Simulation
         }
 
         if (pendingComputed.Count > 0)
-            ResolveComputedColumnsForAddColumn(context.Batch.CurrentDatabase.Collation, table, heapColumns, pendingComputed);
+            ResolveComputedColumnsForAddColumn(context.Batch, context.Batch.CurrentDatabase.Collation, table, heapColumns, pendingComputed);
 
         var existingCount = table.Columns.Length;
         var newColumns = new HeapColumn[heapColumns.Count];
@@ -205,6 +205,7 @@ partial class Simulation
     }
 
     private static void ResolveComputedColumnsForAddColumn(
+        BatchContext batch,
         Collation collation,
         HeapTable table,
         List<HeapColumn?> heapColumns,
@@ -235,7 +236,7 @@ partial class Simulation
 
         foreach (var pc in pendingComputed)
         {
-            var computedType = pc.Expression.GetSqlType(ResolveReference);
+            var computedType = pc.Expression.GetSqlType(batch, ResolveReference);
             heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable, computedExpression: pc.Expression, isPersisted: pc.Persisted);
         }
     }

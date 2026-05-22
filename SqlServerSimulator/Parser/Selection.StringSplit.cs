@@ -173,7 +173,7 @@ internal sealed partial class Selection
         // (varchar → varchar; nvarchar → nvarchar). Non-string input maps
         // to nvarchar — SQL Server's behavior is to silently CONVERT the
         // first arg to nvarchar; the simulator follows the same routing.
-        var inputType = input.GetSqlType(outerTypeResolver ?? (_ => SqlType.NVarchar));
+        var inputType = input.GetSqlType(context.Batch, outerTypeResolver ?? (_ => SqlType.NVarchar));
         var valueColumnType = SqlType.IsStringCategory(inputType) ? inputType : SqlType.NVarchar;
         return FromStringSplit(input, separator, emitOrdinal, valueColumnType);
     }

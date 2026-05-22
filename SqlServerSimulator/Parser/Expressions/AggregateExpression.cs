@@ -126,15 +126,15 @@ internal sealed class AggregateExpression : Expression
     public override SqlValue Run(RuntimeContext runtime) =>
         this.resultBound ? this.cachedResult : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         AggregateKind.Count => SqlType.Int32,
         AggregateKind.CountBig or AggregateKind.ApproxCountDistinct => SqlType.BigInt,
         AggregateKind.ChecksumAgg => SqlType.Int32,
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => SqlType.Float,
-        AggregateKind.Max or AggregateKind.Min or AggregateKind.StringAgg => this.Operand!.GetSqlType(resolveColumnType),
-        AggregateKind.Sum => DeriveSumResultType(this.Operand!.GetSqlType(resolveColumnType)),
-        AggregateKind.Avg => DeriveAvgResultType(this.Operand!.GetSqlType(resolveColumnType)),
+        AggregateKind.Max or AggregateKind.Min or AggregateKind.StringAgg => this.Operand!.GetSqlType(batch, resolveColumnType),
+        AggregateKind.Sum => DeriveSumResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
+        AggregateKind.Avg => DeriveAvgResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
 

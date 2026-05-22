@@ -41,8 +41,8 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
         };
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(this.source.GetSqlType(resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        => MathScalars.WidenForResult(this.source.GetSqlType(batch, resolveColumnType));
 
     /// <remarks>
     /// .NET's <c>Math.Abs(long)</c> throws <c>OverflowException</c> on

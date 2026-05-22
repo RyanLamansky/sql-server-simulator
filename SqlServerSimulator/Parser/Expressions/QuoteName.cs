@@ -75,7 +75,7 @@ internal sealed class QuoteName : Expression
         return SqlValue.FromNVarchar($"{open}{doubled}{close}");
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     /// <summary>
     /// Maps the user-supplied delimiter character to the <c>(open, close)</c>

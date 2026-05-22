@@ -36,7 +36,7 @@ internal sealed class Log : Expression
         return bd is <= 0 or 1 ? throw SimulatedSqlException.InvalidFloatingPointOperation() : SqlValue.FromDouble(Math.Log(d, bd));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay()
         => this.logBase is null ? $"LOG({this.value.DebugDisplay()})" : $"LOG({this.value.DebugDisplay()}, {this.logBase.DebugDisplay()})";

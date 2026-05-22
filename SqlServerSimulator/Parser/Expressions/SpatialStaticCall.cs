@@ -89,7 +89,7 @@ internal sealed class SpatialStaticCall : Expression
         throw new NotSupportedException($"{this.type}::{this.method} is not modeled.");
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.type;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.type;
 
     internal override string DebugDisplay()
     {

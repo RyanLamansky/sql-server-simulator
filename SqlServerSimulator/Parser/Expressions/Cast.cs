@@ -60,7 +60,7 @@ internal sealed class Cast : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => targetType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => targetType;
 
     internal override string DebugDisplay() =>
         $"{(this.tryMode ? "TRY_CAST" : "CAST")}({source.DebugDisplay()} AS {targetType})";

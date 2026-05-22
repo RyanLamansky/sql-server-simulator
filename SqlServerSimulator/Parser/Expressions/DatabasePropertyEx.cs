@@ -40,8 +40,8 @@ internal sealed class DatabasePropertyEx : Expression
         if (dbNameValue.IsNull || propertyValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 
-        var dbName = dbNameValue.CoerceTo(NVarcharSqlType.MaxForm).AsString;
-        var property = propertyValue.CoerceTo(NVarcharSqlType.MaxForm).AsString;
+        var dbName = dbNameValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
+        var property = propertyValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)).AsString;
 
         // The simulator's database dictionary is keyed by name; only the
         // currently-attached databases resolve.
@@ -67,7 +67,7 @@ internal sealed class DatabasePropertyEx : Expression
         };
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"DATABASEPROPERTYEX({this.dbNameArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
 }

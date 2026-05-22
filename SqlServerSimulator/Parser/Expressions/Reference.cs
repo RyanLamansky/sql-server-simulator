@@ -48,7 +48,7 @@ internal sealed class Reference : Expression
 
     public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.ReferencedName);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.ReferencedName);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.ReferencedName);
 
     internal override string DebugDisplay() => this.ReferencedName.ToString();
 

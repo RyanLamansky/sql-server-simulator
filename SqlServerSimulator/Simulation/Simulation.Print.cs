@@ -54,5 +54,5 @@ partial class Simulation
     private static string FormatPrintValue(SqlValue value) =>
         value.IsNull ? " "
         : SqlType.IsStringCategory(value.Type) ? value.AsString
-        : value.CoerceTo(VarcharSqlType.Get(8000)).AsString;
+        : value.CoerceTo(VarcharSqlType.Get(8000, Collation.Default, Coercibility.CoercibleDefault)).AsString;
 }

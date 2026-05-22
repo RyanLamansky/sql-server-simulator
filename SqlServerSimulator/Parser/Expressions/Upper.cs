@@ -24,7 +24,7 @@ internal sealed class Upper(ParserContext context) : Expression
         return SqlValue.FromString(value.Type, uppered);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"UPPER({source.DebugDisplay()})";
 }

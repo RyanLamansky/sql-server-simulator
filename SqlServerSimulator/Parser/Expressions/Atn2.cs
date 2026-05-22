@@ -45,7 +45,7 @@ internal sealed class Atn2 : Expression
             : SqlValue.FromDouble(Math.Atan2(yd, xd));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => $"ATN2({this.first.DebugDisplay()}, {this.second.DebugDisplay()})";
 }

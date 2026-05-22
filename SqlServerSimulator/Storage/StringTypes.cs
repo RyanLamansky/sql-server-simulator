@@ -8,13 +8,9 @@ namespace SqlServerSimulator.Storage;
 /// SQL Server's <c>varchar(N)</c>: variable-length CP1252 string, declared
 /// length 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is
 /// a distinct interned singleton via <see cref="Get(int, SqlServerSimulator.Collation, SqlServerSimulator.Coercibility)"/>;
-/// the length-only <see cref="Get(int)"/> overload returns the
-/// (length, <see cref="Collation.Default"/>, <see cref="Coercibility.CoercibleDefault"/>)
-/// variant used by literal / CAST / parameter contexts that haven't pinned a
-/// collation. <see cref="Unspecified"/> (length 0) is the length-unspecified
-/// sentinel returned from arithmetic / column resolution paths that haven't
-/// pinned a length, and <see cref="MaxForm"/> (length -1) is the LOB
-/// <c>varchar(MAX)</c> form.
+/// the length-unspecified sentinel is <c>Get(0, …)</c> (returned from
+/// arithmetic / column resolution paths that haven't pinned a length) and the
+/// LOB <c>varchar(MAX)</c> form is <c>Get(-1, …)</c>.
 /// </summary>
 internal sealed class VarcharSqlType : SqlType
 {
@@ -61,26 +57,17 @@ internal sealed class VarcharSqlType : SqlType
 
     private static readonly ConcurrentDictionary<(short Length, Collation Collation, Coercibility Coercibility), VarcharSqlType> cache = new();
 
-    internal static readonly VarcharSqlType Unspecified = Intern(0, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
-
-    internal static readonly VarcharSqlType MaxForm = Intern(-1, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
-
-    public static VarcharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
-
     public static VarcharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is not (0 or SqlType.MaxLengthSentinel) and (< 1 or > 8000)
             ? throw new ArgumentOutOfRangeException(nameof(length), $"varchar length must be 1-8000, 0 (unspecified), or -1 (MAX); got {length}.")
-            : Intern((short)length, collation, coercibility);
-
-    private static VarcharSqlType Intern(short length, Collation collation, Coercibility coercibility) =>
-        cache.GetOrAdd((length, collation, coercibility), static key => new VarcharSqlType(key.Length, key.Collation, key.Coercibility));
+            : cache.GetOrAdd(((short)length, collation, coercibility), static key => new VarcharSqlType(key.Length, key.Collation, key.Coercibility));
 }
 
 /// <summary>
 /// SQL Server's <c>nvarchar(N)</c>: variable-length UTF-16 LE string,
 /// declared length 1-4000 code units. Same intern / singleton convention as
-/// <see cref="VarcharSqlType"/>; <see cref="Unspecified"/> = length 0,
-/// <see cref="MaxForm"/> = length -1.
+/// <see cref="VarcharSqlType"/>; length 0 is the unspecified sentinel and
+/// length -1 is the LOB <c>nvarchar(MAX)</c> form.
 /// </summary>
 internal sealed class NVarcharSqlType : SqlType
 {
@@ -127,19 +114,10 @@ internal sealed class NVarcharSqlType : SqlType
 
     private static readonly ConcurrentDictionary<(short Length, Collation Collation, Coercibility Coercibility), NVarcharSqlType> cache = new();
 
-    internal static readonly NVarcharSqlType Unspecified = Intern(0, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
-
-    internal static readonly NVarcharSqlType MaxForm = Intern(-1, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
-
-    public static NVarcharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
-
     public static NVarcharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is not (0 or SqlType.MaxLengthSentinel) and (< 1 or > 4000)
             ? throw new ArgumentOutOfRangeException(nameof(length), $"nvarchar length must be 1-4000, 0 (unspecified), or -1 (MAX); got {length}.")
-            : Intern((short)length, collation, coercibility);
-
-    private static NVarcharSqlType Intern(short length, Collation collation, Coercibility coercibility) =>
-        cache.GetOrAdd((length, collation, coercibility), static key => new NVarcharSqlType(key.Length, key.Collation, key.Coercibility));
+            : cache.GetOrAdd(((short)length, collation, coercibility), static key => new NVarcharSqlType(key.Length, key.Collation, key.Coercibility));
 }
 
 /// <summary>
@@ -330,12 +308,10 @@ internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
 /// <summary>
 /// SQL Server's <c>char(N)</c>: fixed-length CP1252 string, declared length
 /// 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is a
-/// distinct interned singleton; the length-only <see cref="Get(int)"/> picks
-/// the (length, <see cref="Collation.Default"/>, <see cref="Coercibility.CoercibleDefault"/>)
-/// variant. Stored values are right-padded with U+0020 to the declared
-/// length, both in memory and on disk; comparison and equality strip
-/// trailing spaces via the type's collation so <c>char(5) 'abc  '</c> equals
-/// <c>varchar 'abc'</c>.
+/// distinct interned singleton. Stored values are right-padded with U+0020
+/// to the declared length, both in memory and on disk; comparison and
+/// equality strip trailing spaces via the type's collation so
+/// <c>char(5) 'abc  '</c> equals <c>varchar 'abc'</c>.
 /// </summary>
 internal sealed class CharSqlType : SqlType
 {
@@ -372,8 +348,6 @@ internal sealed class CharSqlType : SqlType
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromChar(this, this.collation.StorageEncoding.GetString(source));
 
     public override string ToString() => $"char({this.length})";
-
-    public static CharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
     public static CharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is < 1 or > 8000
@@ -437,8 +411,6 @@ internal sealed class NCharSqlType : SqlType
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNChar(this, SystemNameSqlType.Utf16LeDecode(source));
 
     public override string ToString() => $"nchar({this.length})";
-
-    public static NCharSqlType Get(int length) => Get(length, SqlServerSimulator.Collation.Default, Coercibility.CoercibleDefault);
 
     public static NCharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is < 1 or > 4000

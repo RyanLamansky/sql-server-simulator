@@ -12,7 +12,7 @@ internal sealed class SpidExpression(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime) =>
         SqlValue.FromInt16((short)context.Connection.Spid);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => "@@SPID";
 }

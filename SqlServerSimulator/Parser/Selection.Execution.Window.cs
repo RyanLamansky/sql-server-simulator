@@ -203,7 +203,7 @@ internal sealed partial class Selection
                         var lagOffset = win.OffsetArg is null
                             ? 1
                             : (int)EvaluateScalarArg(win.OffsetArg, buffered, sources, batch, outerResolver).CoerceTo(SqlType.BigInt).AsInt64;
-                        var operandType = win.Operand!.GetSqlType(name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
+                        var operandType = win.Operand!.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>
@@ -249,7 +249,7 @@ internal sealed partial class Selection
                         // emits typed NULL — probe-confirmed against SQL Server
                         // for both with explicit frames outside partition.
                         var isLast = win.Kind == WindowKind.LastValue;
-                        var operandType = win.Operand!.GetSqlType(name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
+                        var operandType = win.Operand!.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>

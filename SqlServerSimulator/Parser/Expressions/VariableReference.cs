@@ -17,7 +17,7 @@ internal sealed class VariableReference(AtPrefixedString atPrefixed, ParserConte
 
     public override SqlValue Run(RuntimeContext runtime) => this.slot.Value;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.slot.DeclaredType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.slot.DeclaredType;
 
     internal override string DebugDisplay() => $"@{this.debugName}";
 }

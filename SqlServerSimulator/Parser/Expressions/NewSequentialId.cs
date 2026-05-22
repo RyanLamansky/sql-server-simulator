@@ -36,7 +36,7 @@ internal sealed class NewSequentialId : Expression
     public override SqlValue Run(RuntimeContext runtime) =>
         SqlValue.FromGuid(this.simulation.GenerateNewSequentialId());
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 
     internal override string DebugDisplay() => "NEWSEQUENTIALID()";
 }

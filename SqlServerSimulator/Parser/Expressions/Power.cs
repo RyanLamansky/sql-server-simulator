@@ -59,8 +59,8 @@ internal sealed class Power : Expression
             ? throw SimulatedSqlException.ArithmeticOverflowForType("int", raw.ToString("F6", System.Globalization.CultureInfo.InvariantCulture))
             : SqlValue.FromInt32((int)raw);
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(this.baseExpr.GetSqlType(resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        => MathScalars.WidenForResult(this.baseExpr.GetSqlType(batch, resolveColumnType));
 
     internal override string DebugDisplay() => $"POWER({this.baseExpr.DebugDisplay()}, {this.exponent.DebugDisplay()})";
 }

@@ -36,8 +36,8 @@ internal sealed class Degrees(ParserContext context) : Expression
         };
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
-        => ResolveResultType(this.source.GetSqlType(resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        => ResolveResultType(this.source.GetSqlType(batch, resolveColumnType));
 
     private static SqlType ResolveResultType(SqlType input) =>
         input is DecimalSqlType d

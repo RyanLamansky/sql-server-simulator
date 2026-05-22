@@ -37,8 +37,8 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     /// <summary>The collation named by the postfix. <c>LIKE</c> reads <see cref="Collation.CaseSensitive"/> off this to choose the regex's case-folding behavior.</summary>
     public readonly Collation ResolvedCollation = collation;
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.Inner.GetSqlType(resolveColumnType).WithCollation(this.ResolvedCollation, Coercibility.Explicit);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        this.Inner.GetSqlType(batch, resolveColumnType).WithCollation(this.ResolvedCollation, Coercibility.Explicit);
 
     public override SqlValue Run(RuntimeContext runtime)
     {

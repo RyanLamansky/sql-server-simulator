@@ -72,11 +72,11 @@ internal sealed class StringConcat : Expression
         this.arguments = [.. args];
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         for (var i = 0; i < this.arguments.Length; i++)
         {
-            if (IsNationalString(this.arguments[i].GetSqlType(resolveColumnType)))
+            if (IsNationalString(this.arguments[i].GetSqlType(batch, resolveColumnType)))
                 return SqlType.NVarchar;
         }
         return SqlType.Varchar;

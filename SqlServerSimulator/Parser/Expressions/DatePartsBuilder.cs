@@ -119,7 +119,7 @@ internal sealed class DatePartsBuilder : Expression
         }
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => this.resultType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.resultType;
 
     public override SqlValue Run(RuntimeContext runtime)
     {

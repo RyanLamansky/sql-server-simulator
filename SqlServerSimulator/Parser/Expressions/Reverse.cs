@@ -33,7 +33,7 @@ internal sealed class Reverse(ParserContext context) : Expression
         return SqlValue.FromString(value.Type, reversed);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"REVERSE({source.DebugDisplay()})";
 }

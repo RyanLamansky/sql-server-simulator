@@ -72,7 +72,7 @@ internal sealed class HierarchyIdStaticCall : Expression
         return SqlValue.FromHierarchyId(HierarchyIdSqlType.ParsePath(str));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.HierarchyId;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.HierarchyId;
 
     internal override string DebugDisplay() => $"hierarchyid::{this.method}({this.argument?.DebugDisplay() ?? ""})";
 

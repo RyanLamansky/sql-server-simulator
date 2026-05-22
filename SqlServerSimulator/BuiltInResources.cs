@@ -139,7 +139,7 @@ internal static class BuiltInResources
         // Real SQL Server has many more columns; the shipped subset covers
         // the dominant query shapes. type is char(2) with trailing space
         // ('U ') — probe-confirmed.
-        var charTwo = CharSqlType.Get(2);
+        var charTwo = CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault);
         var tableType = SqlValue.FromChar(charTwo, "U ");
         var tableTypeDesc = SqlValue.FromNVarchar("USER_TABLE");
         var notMsShipped = SqlValue.FromBoolean(false);
@@ -826,7 +826,7 @@ internal static class BuiltInResources
             new("major_id", SqlType.Int32, null, false),
             new("minor_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-            new("value", NVarcharSqlType.MaxForm, SqlType.MaxLengthSentinel, true),
+            new("value", NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
         };
         var extendedPropertiesView = new CatalogView("extended_properties", extendedPropertiesColumns, EnumerateSysExtendedProperties);
 
@@ -866,7 +866,7 @@ internal static class BuiltInResources
             new("grantee_principal_id", SqlType.Int32, null, false),
             new("grantor_principal_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
-            new("permission_name", NVarcharSqlType.Get(128), 128, true),
+            new("permission_name", NVarcharSqlType.Get(128, Collation.Default, Coercibility.CoercibleDefault), 128, true),
             new("state", charOne, 1, false),
             new("state_desc", SqlType.NVarchar, 60, true),
         };
@@ -1000,7 +1000,7 @@ internal static class BuiltInResources
             new("spatial_index_type_desc", SqlType.NVarchar, 60, true),
             new("tessellation_scheme", SqlType.NVarchar, 60, true),
             new("has_filter", SqlType.Bit, null, false),
-            new("filter_definition", NVarcharSqlType.MaxForm, null, true),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault), null, true),
             new("auto_created", SqlType.Bit, null, true),
         };
         var spatialIndexesView = new CatalogView("spatial_indexes", spatialIndexesColumns, EnumerateSysSpatialIndexes);
@@ -1249,7 +1249,7 @@ internal static class BuiltInResources
                 SqlValue.FromInt32(key.MajorId),
                 SqlValue.FromInt32(key.MinorId),
                 SqlValue.FromSystemName(key.Name),
-                kvp.Value.IsNull ? SqlValue.Null(NVarcharSqlType.MaxForm) : kvp.Value.CoerceTo(NVarcharSqlType.MaxForm),
+                kvp.Value.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)) : kvp.Value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault)),
             ];
         }
     }
@@ -1301,7 +1301,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var fkType = SqlValue.FromChar(CharSqlType.Get(2), "F ");
+        var fkType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault), "F ");
         var fkTypeDesc = SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT");
         // key_index_id is the index id on the referenced table that satisfies
         // the FK — the simulator doesn't model indexes so report 1 (the
@@ -1395,7 +1395,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var ckType = SqlValue.FromChar(CharSqlType.Get(2), "C ");
+        var ckType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault), "C ");
         var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var falseDbCollation = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
@@ -1454,7 +1454,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var charTwo = CharSqlType.Get(2);
+        var charTwo = CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault);
         var pkType = SqlValue.FromChar(charTwo, "PK");
         var uqType = SqlValue.FromChar(charTwo, "UQ");
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
@@ -1507,7 +1507,7 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
-        var dfType = SqlValue.FromChar(CharSqlType.Get(2), "D ");
+        var dfType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Default, Coercibility.CoercibleDefault), "D ");
         var dfTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
         foreach (var schema in database.Schemas.Values)
         {
@@ -1996,7 +1996,7 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch, Database database)
     {
-        var charOneType = CharSqlType.Get(1);
+        var charOneType = CharSqlType.Get(1, Collation.Default, Coercibility.CoercibleDefault);
         var trueBit = SqlValue.FromBoolean(true);
         var autoCode = SqlValue.FromChar(charOneType, "A");
         var autoDesc = SqlValue.FromNVarchar("AUTO");
@@ -2094,7 +2094,7 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysXmlIndexes(Parser.BatchContext batch, Database database)
     {
-        var charOneType = CharSqlType.Get(1);
+        var charOneType = CharSqlType.Get(1, Collation.Default, Coercibility.CoercibleDefault);
         var typeCode = SqlValue.FromByte(3);
         var typeDesc = SqlValue.FromNVarchar("XML");
         var falseBit = SqlValue.FromBoolean(false);
@@ -2168,7 +2168,7 @@ internal static class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
         var oneInt = SqlValue.FromInt32(1);
-        var nullDesc = SqlValue.Null(NVarcharSqlType.MaxForm);
+        var nullDesc = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Default, Coercibility.CoercibleDefault));
         var geometryTypeDesc = SqlValue.FromNVarchar("GEOMETRY");
         var geographyTypeDesc = SqlValue.FromNVarchar("GEOGRAPHY");
         foreach (var schema in database.Schemas.Values)

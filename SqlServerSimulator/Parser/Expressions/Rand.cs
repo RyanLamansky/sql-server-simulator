@@ -82,7 +82,7 @@ internal sealed class Rand : Expression
         return result;
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => this.seed is null
         ? "RAND()"

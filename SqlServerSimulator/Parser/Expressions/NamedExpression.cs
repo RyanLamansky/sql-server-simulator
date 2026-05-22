@@ -23,7 +23,7 @@ internal sealed class NamedExpression(Expression expression, string name) : Expr
 
     public override Storage.SqlValue Run(RuntimeContext runtime) => this.Inner.Run(runtime);
 
-    public override Storage.SqlType GetSqlType(Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Inner.GetSqlType(resolveColumnType);
+    public override Storage.SqlType GetSqlType(BatchContext batch, Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Inner.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} {this.name}";
 

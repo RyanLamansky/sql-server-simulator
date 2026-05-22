@@ -74,8 +74,8 @@ internal sealed class Stuff : Expression
         return SqlValue.FromString(resultType, result);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.input.GetSqlType(resolveColumnType), this.replacement.GetSqlType(resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), this.replacement.GetSqlType(batch, resolveColumnType));
 
     /// <summary>
     /// Promotes input + replacement string types to the result type. <c>nvarchar</c>

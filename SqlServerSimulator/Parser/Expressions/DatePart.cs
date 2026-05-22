@@ -54,7 +54,7 @@ internal sealed class DatePart : Expression
         return SqlValue.FromInt32(DatePartKinds.Extract(this.kind, value));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"DATEPART({this.keywordText}, {source.DebugDisplay()})";
 }

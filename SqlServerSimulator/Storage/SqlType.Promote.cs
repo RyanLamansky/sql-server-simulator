@@ -402,17 +402,38 @@ internal abstract partial class SqlType
             || b is NVarcharSqlType or NCharSqlType
             || a == NText || b == NText;
 
+        // Resolve the result collation via SQL Server's collation-coercibility
+        // resolution over the input operands; mismatched same-rank operands
+        // hand back null (resolved later by the operator's runtime path,
+        // which raises Msg 468). For static-typing here we fall back to
+        // the higher-rank input's collation when Resolve returns null so the
+        // schema still computes; the runtime side gets the authoritative
+        // error rendering with operator wording.
+        var resolved = Collation.Resolve(a, b);
+        var (resultCollation, resultCoercibility) = resolved
+            ?? (a.Collation ?? b.Collation ?? Collation.Default, Coercibility.CoercibleDefault);
+
         if (a == Text || b == Text || a == NText || b == NText)
-            return national ? NVarchar : Varchar;
+        {
+            return national
+                ? NVarcharSqlType.Get(0, resultCollation, resultCoercibility)
+                : VarcharSqlType.Get(0, resultCollation, resultCoercibility);
+        }
 
         var aLen = StringLengthForConcat(a);
         var bLen = StringLengthForConcat(b);
         if (aLen == 0 || bLen == 0)
-            return national ? NVarchar : Varchar;
+        {
+            return national
+                ? NVarcharSqlType.Get(0, resultCollation, resultCoercibility)
+                : VarcharSqlType.Get(0, resultCollation, resultCoercibility);
+        }
 
         var max = national ? 4000 : 8000;
         var summed = Math.Min(max, aLen + bLen);
-        return national ? NVarcharSqlType.Get(summed) : VarcharSqlType.Get(summed);
+        return national
+            ? NVarcharSqlType.Get(summed, resultCollation, resultCoercibility)
+            : VarcharSqlType.Get(summed, resultCollation, resultCoercibility);
     }
 
     /// <summary>

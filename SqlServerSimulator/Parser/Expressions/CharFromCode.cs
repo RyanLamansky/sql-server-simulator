@@ -18,22 +18,25 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class CharFromCode(ParserContext context) : Expression
 {
-    private static readonly CharSqlType Char1 = CharSqlType.Get(1);
     private readonly Expression code = Parse(context);
+
+    private static CharSqlType Char1For(BatchContext batch) =>
+        CharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        var char1 = Char1For(runtime.Batch);
         var v = code.Run(runtime);
         if (v.IsNull)
-            return SqlValue.Null(Char1);
+            return SqlValue.Null(char1);
         var n = v.CoerceTo(SqlType.Int32).AsInt32;
         if (n is < 0 or > 255)
-            return SqlValue.Null(Char1);
+            return SqlValue.Null(char1);
         ReadOnlySpan<byte> oneByte = [(byte)n];
-        return SqlValue.FromChar(Char1, CharSqlType.Cp1252Encoder.GetString(oneByte));
+        return SqlValue.FromChar(char1, CharSqlType.Cp1252Encoder.GetString(oneByte));
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) => Char1;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Char1For(batch);
 
     internal override string DebugDisplay() => $"CHAR({this.code.DebugDisplay()})";
 }

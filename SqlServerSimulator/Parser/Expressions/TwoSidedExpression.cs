@@ -52,10 +52,10 @@ internal abstract class TwoSidedExpression : Expression
 
     protected abstract SqlValue Run(SqlValue left, SqlValue right);
 
-    public sealed override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType)
+    public sealed override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var leftType = left.GetSqlType(resolveColumnType);
-        var rightType = right.GetSqlType(resolveColumnType);
+        var leftType = left.GetSqlType(batch, resolveColumnType);
+        var rightType = right.GetSqlType(batch, resolveColumnType);
         var result = SqlType.PromoteForArithmetic(leftType, rightType, this.Operator);
         if (result.Category == SqlTypeCategory.String
             && leftType.Category == SqlTypeCategory.String

@@ -48,7 +48,7 @@ internal sealed class Replicate : Expression
         // strings, so this covers the practical surface.
         try
         {
-            var staticType = this.input.GetSqlType(context.OuterTypeResolver ?? NoResolver);
+            var staticType = this.input.GetSqlType(context.Batch, context.OuterTypeResolver ?? NoResolver);
             this.inputIsMaxForm = staticType.IsLob
                 || (staticType is VarcharSqlType v && v.length == SqlType.MaxLengthSentinel)
                 || (staticType is NVarcharSqlType n && n.length == SqlType.MaxLengthSentinel);
@@ -101,8 +101,8 @@ internal sealed class Replicate : Expression
         return SqlValue.FromString(resultType, result);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.input.GetSqlType(resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResolveResultType(this.input.GetSqlType(batch, resolveColumnType));
 
     private static SqlType ResolveResultType(SqlType inputType) =>
         SqlType.IsStringCategory(inputType) ? inputType : SqlType.NVarchar;

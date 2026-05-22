@@ -41,8 +41,8 @@ internal sealed class DateAdd : Expression
         return DatePartKinds.Add(this.kind, value, nInt);
     }
 
-    public override SqlType GetSqlType(Func<MultiPartName, SqlType> resolveColumnType) =>
-        source.GetSqlType(resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        source.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"DATEADD({this.keywordText}, {number.DebugDisplay()}, {source.DebugDisplay()})";
 }
