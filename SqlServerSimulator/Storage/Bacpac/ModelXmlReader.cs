@@ -248,12 +248,14 @@ internal static class ModelXmlReader
         using var command = connection.CreateCommand();
 
         // Collation: emit ALTER DATABASE COLLATE when the name is on the
-        // recognized whitelist; the simulator stores it as metadata on
-        // Database.CollationName for catalog-view round-trip. Comparison /
-        // sort / LIKE still route through Collation.Default — see
-        // docs/claude/database-options.md COLLATE-clause caveat. An
-        // unrecognized name lands on Warnings rather than aborting the load
-        // (the loader's best-effort contract).
+        // recognized catalog. The statement lands on Database.Collation, so
+        // subsequent column declarations without their own COLLATE clause
+        // inherit it and route compare / sort / hash through the chosen
+        // collation. An unrecognized name lands on Warnings rather than
+        // aborting the load (the loader's best-effort contract); the
+        // database keeps its construction-time server collation, and any
+        // columns the bacpac declares with explicit COLLATE clauses still
+        // pin those collations independently.
         var collation = element.Elements(Ns + "Property")
             .FirstOrDefault(p => p.Attribute("Name")?.Value == "Collation")
             ?.Attribute("Value")?.Value;
@@ -268,7 +270,7 @@ internal static class ModelXmlReader
             }
             else
             {
-                result.AddWarning($"Database declares Collation '{collation}' which isn't on the simulator's recognized list — stored as metadata, but comparison semantics fall back to the default. Add it to Collation.Recognized to surface in catalog views.");
+                result.AddWarning($"Database declares Collation '{collation}' which the simulator's catalog doesn't recognize — the database keeps its server-default collation; columns declared with their own COLLATE clauses still pin those collations.");
             }
         }
 

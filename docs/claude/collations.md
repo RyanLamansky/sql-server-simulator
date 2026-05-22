@@ -73,13 +73,18 @@ Sites routed through the active DB collation:
 
 Probe-confirmed fidelity (real SQL Server CS database, 2026-05-22): `SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')` returns `'neq'` (literals don't case-fold under CS). The simulator now matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
 
-Sites that intentionally stay on `Collation.Default` (~34 references):
+Sites that intentionally stay on `Collation.Default`:
 - System catalog schemas in `BuiltInResources.cs` — process-wide statics, no per-Simulation affinity.
 - `SqlType.Varchar` / `NVarchar` pseudo-singletons and `SqlType.GetChar` / `GetNChar` static bridges — type-identity placeholders.
 - `text` / `ntext` / `sysname` `Collation` overrides — server-default-only types.
 - Error-message type placeholders, dynamic-SQL string extraction, PRINT formatting — collation irrelevant to the surfaced value.
 - `Simulation.ServerCollation` initializer — the deliberate anchor for "what does the simulator's hardcoded baseline resolve to."
-- **String literals via the tokenizer** (`Value` / `Literal`) — literals like `'A'` and `N'foo'` still carry `Collation.Default` because the tokenizer materializes the `SqlValue` without batch context. Closing this would require threading `BatchContext` through `Tokenizer.NextToken` — deferred. The gap surfaces as: `SELECT 'A' = 'a'` on a CS database returns `1` (CI compare) instead of `0` (CS compare). Real workloads typically have a column on at least one side, and the column's `Implicit`-rank collation wins via `Collation.Resolve`, so this gap is unobservable in EF Core workloads.
+
+## String literals carry the active DB collation
+
+`Tokenizer.NextToken` takes a `Collation activeCollation` parameter; `ParserContext.MoveNext` threads `context.CurrentDatabase.Collation` in. The two string-literal entry points (`ParseStringLiteral` for `'foo'`, `ParseNPrefixedStringLiteral` for `N'foo'`) construct `VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault)` / `NVarcharSqlType` and tag the resulting `SqlValue` with it. Other literal kinds (varbinary `0xHEX`, currency `$1.23`) don't carry collation and ignore the parameter.
+
+Effect: `SELECT IIF('A' = 'a', 'eq', 'neq')` on a CS database returns `'neq'` (case-sensitive), matching real SQL Server. The `CsDatabase_TwoVarcharLiteralsCompareCaseSensitively` / `CsDatabase_TwoNVarcharLiteralsCompareCaseSensitively` tests in `NameComparisonRegimeTests.cs` lock the behavior in. The earlier deferral framing (literal pairs falling through to the CI baseline because the tokenizer was stateless) is closed.
 
 `ALTER COLUMN` without an explicit `COLLATE` clause preserves the existing column's collation (probe-aligned). With an explicit `COLLATE`, the new collation pins at `Implicit` rank.
 

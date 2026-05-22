@@ -22,6 +22,15 @@ namespace SqlServerSimulator.Parser;
 /// while characters match, stop at the first that doesn't, return — the
 /// natural exit position of that loop is already correct.
 /// </para>
+/// <para>
+/// <b>Active collation.</b> String literals (<c>'foo'</c>, <c>N'foo'</c>)
+/// produce <see cref="SqlValue"/>s tagged with the active database
+/// collation at <see cref="Coercibility.CoercibleDefault"/>, matching
+/// real SQL Server's rule that a string literal inherits the executing
+/// database's collation. Callers thread <see cref="ParserContext.CurrentDatabase"/>'s
+/// collation into <see cref="NextToken"/>; other literal kinds (varbinary,
+/// money) don't carry collation and ignore the parameter.
+/// </para>
 /// </remarks>
 static class Tokenizer
 {
@@ -30,17 +39,18 @@ static class Tokenizer
     /// </summary>
     /// <param name="command">The command from which a token is produced.</param>
     /// <param name="index">The position of the next un-read character (0 to begin); updated to the next un-read position past the returned token.</param>
+    /// <param name="activeCollation">Collation tagged onto string-literal <see cref="SqlValue"/>s; supplied by the caller's active <see cref="Database"/>.</param>
     /// <returns>The next token, or null if the end of <paramref name="command"/> has been reached.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect or unsupported syntax.</exception>
-    public static Token? NextToken(string command, ref int index) =>
+    public static Token? NextToken(string command, ref int index, Collation activeCollation) =>
         index >= command.Length ? null : command[index] switch
         {
             ' ' or '\r' or '\n' or '\t' => ParseWhitespace(command, ref index),
-            'N' or 'n' when index + 1 < command.Length && command[index + 1] == '\'' => ParseNPrefixedStringLiteral(command, ref index),
+            'N' or 'n' when index + 1 < command.Length && command[index + 1] == '\'' => ParseNPrefixedStringLiteral(command, ref index, activeCollation),
             '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') => ParseUnquotedStringOrReservedKeyword(command, ref index),
             '0' when index + 1 < command.Length && (command[index + 1] == 'x' || command[index + 1] == 'X') => ParseHexLiteral(command, ref index),
             >= '0' and <= '9' => ParseNumeric(command, ref index),
-            '\'' => ParseStringLiteral(command, ref index),
+            '\'' => ParseStringLiteral(command, ref index, activeCollation),
             '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
             '#' => ParseHashPrefixedName(command, ref index),
             '-' => ParseMinusOrComment(command, ref index),
@@ -195,9 +205,11 @@ static class Tokenizer
     /// <summary>
     /// Parses a SQL string literal: <c>'foo'</c>, with <c>''</c> as the
     /// embedded-apostrophe escape. The opening quote is at <paramref name="index"/>;
-    /// returns a <see cref="Literal"/> typed as <see cref="SqlType.Varchar"/>.
+    /// returns a <see cref="Literal"/> typed as <see cref="SqlType.Varchar"/>
+    /// tagged with <paramref name="activeCollation"/> at
+    /// <see cref="Coercibility.CoercibleDefault"/>.
     /// </summary>
-    private static Literal ParseStringLiteral(string command, ref int index)
+    private static Literal ParseStringLiteral(string command, ref int index, Collation activeCollation)
     {
         var start = index;
         var builder = new StringBuilder();
@@ -217,7 +229,8 @@ static class Tokenizer
                 continue;
             }
 
-            return new Literal(SqlValue.FromVarchar(builder.ToString()), command, start, ++index - start);
+            var literalType = VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+            return new Literal(SqlValue.FromVarchar(literalType, builder.ToString()), command, start, ++index - start);
         }
 
         throw SimulatedSqlException.UnclosedStringLiteral();
@@ -227,9 +240,11 @@ static class Tokenizer
     /// Parses an N-prefixed Unicode string literal: <c>N'foo'</c>. The leading
     /// N (or n) is at <paramref name="index"/>; the body uses the same
     /// <c>''</c>-escape rules as a plain string literal but the result is
-    /// typed as <see cref="SqlType.NVarchar"/>.
+    /// typed as <see cref="SqlType.NVarchar"/> tagged with
+    /// <paramref name="activeCollation"/> at
+    /// <see cref="Coercibility.CoercibleDefault"/>.
     /// </summary>
-    private static Literal ParseNPrefixedStringLiteral(string command, ref int index)
+    private static Literal ParseNPrefixedStringLiteral(string command, ref int index, Collation activeCollation)
     {
         var start = index;
         index++; // skip the N
@@ -250,7 +265,8 @@ static class Tokenizer
                 continue;
             }
 
-            return new Literal(SqlValue.FromNVarchar(builder.ToString()), command, start, ++index - start);
+            var literalType = NVarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+            return new Literal(SqlValue.FromNVarchar(literalType, builder.ToString()), command, start, ++index - start);
         }
 
         throw SimulatedSqlException.UnclosedStringLiteral();

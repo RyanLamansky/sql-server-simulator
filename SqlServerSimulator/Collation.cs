@@ -172,7 +172,7 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
     /// <summary>
     /// Generic culture-driven collation. Pins a
-    /// <see cref="System.Globalization.CompareInfo"/> and a flag-derived
+    /// <see cref="CompareInfo"/> and a flag-derived
     /// <see cref="CompareOptions"/> set; routes <see cref="Compare"/> /
     /// <see cref="Equals"/> / <see cref="GetHashCode"/> through them.
     /// Sort options layer <see cref="CompareOptions.IgnoreSymbols"/> on

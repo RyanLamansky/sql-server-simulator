@@ -335,4 +335,26 @@ public sealed class NameComparisonRegimeTests
     [TestMethod]
     public void CiDatabase_CharFunctionResult_StillEqualsUnderCi()
         => AreEqual("eq", new Simulation().ExecuteScalar("SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')"));
+
+    // ===== String literals carry the active DB collation =====
+    // Tokenizer.NextToken receives the executing database's collation and
+    // tags every 'foo' / N'foo' literal with it at CoercibleDefault, so
+    // literal-vs-literal comparisons in a CS database evaluate
+    // case-sensitively without needing a column to anchor the rank.
+
+    [TestMethod]
+    public void CsDatabase_TwoVarcharLiteralsCompareCaseSensitively()
+        => AreEqual("neq",
+            new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" }
+                .ExecuteScalar("SELECT IIF('A' = 'a', 'eq', 'neq')"));
+
+    [TestMethod]
+    public void CsDatabase_TwoNVarcharLiteralsCompareCaseSensitively()
+        => AreEqual("neq",
+            new Simulation { ServerCollationName = "SQL_Latin1_General_CP1_CS_AS" }
+                .ExecuteScalar("SELECT IIF(N'A' = N'a', 'eq', 'neq')"));
+
+    [TestMethod]
+    public void CiDatabase_TwoVarcharLiterals_StillEqualUnderCi()
+        => AreEqual("eq", new Simulation().ExecuteScalar("SELECT IIF('A' = 'a', 'eq', 'neq')"));
 }

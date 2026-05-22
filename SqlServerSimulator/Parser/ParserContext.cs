@@ -266,7 +266,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     [MemberNotNullWhen(true, nameof(Token))]
     public bool MoveNext()
     {
-        while (Tokenizer.NextToken(commandText, ref index) is Token token)
+        while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation) is Token token)
         {
             if (token is Whitespace or Comment)
                 continue;
