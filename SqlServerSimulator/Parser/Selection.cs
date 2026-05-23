@@ -132,6 +132,16 @@ internal sealed partial class Selection
     /// </summary>
     internal readonly ViewUpdatabilityRejection UpdatabilityRejection;
 
+    /// <summary>
+    /// The SELECT's ORDER BY items, captured for the updatable-cursor
+    /// enumeration path (<see cref="EnumerateForCursor"/>) so KEYSET / DYNAMIC
+    /// cursors and positioned DML can order rows the same way a read would.
+    /// Non-null only when <see cref="UpdatabilityProfile"/> is set (single
+    /// base table, no set-op chain); empty when the cursor's SELECT has no
+    /// ORDER BY. Set post-construction by <see cref="BuildSqlProjection"/>.
+    /// </summary>
+    internal List<OrderBySpec>? CursorOrderBy;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
 
     private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, MultiPartName? intoTarget = null, HeapColumn[]? destColumnSchema = null, ViewUpdatabilityProfile? updatabilityProfile = null, ViewUpdatabilityRejection updatabilityRejection = ViewUpdatabilityRejection.UnsupportedShape)

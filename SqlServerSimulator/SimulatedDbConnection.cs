@@ -258,6 +258,31 @@ public sealed class SimulatedDbConnection : DbConnection
     internal decimal? LastIdentity;
 
     /// <summary>
+    /// T-SQL cursors declared on this session, keyed case-insensitively by
+    /// name (cursor names are identifiers, not <c>@</c>-prefixed). Populated
+    /// by <c>DECLARE … CURSOR</c>, removed by <c>DEALLOCATE</c>; cleared on
+    /// <see cref="Dispose"/> (cursors are session-scoped). The simulator
+    /// collapses SQL Server's GLOBAL/LOCAL cursor-scope distinction into this
+    /// single per-connection map.
+    /// </summary>
+    internal readonly Dictionary<string, Cursor> Cursors = new(BuiltInToken.Comparer);
+
+    /// <summary>
+    /// Backs <c>@@FETCH_STATUS</c>: the status of the most recent <c>FETCH</c>
+    /// on this connection (0 success, -1 past end / no row, -2 keyset member
+    /// deleted). Session-global across all cursors, matching SQL Server.
+    /// </summary>
+    internal int LastFetchStatus;
+
+    /// <summary>
+    /// Backs <c>@@CURSOR_ROWS</c>: row count of the most recently OPENed cursor
+    /// (count for STATIC / KEYSET, <c>-1</c> for DYNAMIC). Real SQL Server may
+    /// transiently report a positive count for a freshly-opened dynamic cursor
+    /// (asynchronous population); the simulator reports <c>-1</c> throughout.
+    /// </summary>
+    internal int LastCursorRows;
+
+    /// <summary>
     /// Name of the table currently under <c>SET IDENTITY_INSERT ... ON</c>
     /// for this connection, or <c>null</c> when no table is in that mode.
     /// SQL Server allows only one table at a time per session; the simulator
@@ -354,6 +379,8 @@ public sealed class SimulatedDbConnection : DbConnection
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
             this.TempTables.Clear();
+            // Cursors are session-scoped and auto-deallocate at close.
+            this.Cursors.Clear();
             // Global temp tables: drop every ##foo owned by this connection.
             // Probe-confirmed against SQL Server 2025 (pooling disabled) that
             // owner-disconnect drops ##foo unconditionally, regardless of

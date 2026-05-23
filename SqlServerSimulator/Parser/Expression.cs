@@ -75,6 +75,8 @@ internal abstract class Expression
                 AtAtKeyword.NestLevel => new NestLevelExpression(),
                 AtAtKeyword.Dbts => new DbTsExpression(),
                 AtAtKeyword.ProcId => new ProcIdExpression(),
+                AtAtKeyword.FetchStatus => new FetchStatusExpression(),
+                AtAtKeyword.CursorRows => new CursorRowsExpression(),
                 _ => new Value(doubleAtPrefixedString),
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
@@ -729,6 +731,7 @@ internal abstract class Expression
             },
             13 => uppercaseName switch
             {
+                "CURSOR_STATUS" => new CursorStatusFunction(context),
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),

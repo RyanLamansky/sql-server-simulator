@@ -3,9 +3,11 @@
 enum AtAtKeyword
 {
     _ = 0, // "Default" value for the enum, indicating not a keyword.
+    CursorRows,
     DateFirst,
     Dbts,
     Error,
+    FetchStatus,
     Identity,
     LangId,
     Language,

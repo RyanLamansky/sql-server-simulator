@@ -192,10 +192,14 @@ partial class Simulation
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
 
         BooleanExpression? where = null;
+        Cursor? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
-            where = BooleanExpression.Parse(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
+                positionedCursor = ParseWhereCurrentOf(context, table);
+            else
+                where = BooleanExpression.Parse(context);
         }
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -204,6 +208,11 @@ partial class Simulation
 
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
+            // Positioned UPDATE (WHERE CURRENT OF): target only the row the
+            // cursor is sitting on, identified by its unique key.
+            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, rowBytes))
+                continue;
+
             var fullValues = DecodeFullRow(table, rowBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
 
@@ -269,8 +278,10 @@ partial class Simulation
         // Msg 3960 fires before any heap mutation; auto-rolls back the SI
         // tx. Probe-confirmed against SQL Server 2025: UPDATE / DELETE on
         // an RC-deleted row that matches our snapshot raises 3960 even
-        // though the live row is tombstoned.
-        CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+        // though the live row is tombstoned. Skipped for positioned updates —
+        // the cursor already fixed a single live row.
+        if (positionedCursor is null)
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
         return CommitUpdate(context, table, affected, output, sourceView);
     }

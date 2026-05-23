@@ -849,11 +849,50 @@ public sealed partial class Simulation
                 break;
             case ReservedKeyword { Keyword: Keyword.Declare }:
                 {
-                    var initRowCount = TryParseDeclare(context);
-                    if (!batch.IsSkipping && initRowCount is int n)
-                        connection.LastStatementRowCount = n;
-                    // No initializer → @@ROWCOUNT preserved (probe-confirmed).
+                    // Cursor declaration (`DECLARE <name> CURSOR …`) is the
+                    // only DECLARE form whose first token after the keyword
+                    // isn't an `@`-prefixed variable name. Peek to route.
+                    var declCheckpoint = context.SaveCheckpoint();
+                    context.MoveNextRequired();
+                    var isCursorDeclaration = context.Token is not AtPrefixedString;
+                    context.RestoreCheckpoint(declCheckpoint);
+                    if (isCursorDeclaration)
+                    {
+                        ParseDeclareCursor(batch);
+                        if (!batch.IsSkipping)
+                            connection.LastStatementRowCount = 0;
+                    }
+                    else
+                    {
+                        var initRowCount = TryParseDeclare(context);
+                        if (!batch.IsSkipping && initRowCount is int n)
+                            connection.LastStatementRowCount = n;
+                        // No initializer → @@ROWCOUNT preserved (probe-confirmed).
+                    }
                 }
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Open }:
+                ParseOpenCursor(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Fetch }:
+                foreach (var o in ParseFetchCursor(batch))
+                    yield return o;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Close }:
+                ParseCloseCursor(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Deallocate }:
+                ParseDeallocateCursor(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
                 break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -886,6 +925,7 @@ public sealed partial class Simulation
                 or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
                 or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
                 or Keyword.Truncate or Keyword.Use or Keyword.Grant or Keyword.Revoke or Keyword.Deny
+                or Keyword.Open or Keyword.Fetch or Keyword.Close or Keyword.Deallocate
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.

@@ -187,7 +187,7 @@ internal sealed partial class Selection
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
             sources, joins, expressions, fromClause, distinct, aggregates, windows);
 
-        return new Selection(outputSchema, outputColumnNames,
+        var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
             (batch, outerResolver) =>
@@ -201,6 +201,11 @@ internal sealed partial class Selection
             destColumnSchema,
             updatabilityProfile,
             updatabilityRejection);
+        // Capture ORDER BY for the updatable-cursor enumeration path; only
+        // meaningful when the shape is updatable (single base table).
+        if (updatabilityProfile is not null)
+            selection.CursorOrderBy = orderBy;
+        return selection;
     }
 
     /// <summary>

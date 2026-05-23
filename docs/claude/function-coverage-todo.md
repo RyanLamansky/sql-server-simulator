@@ -87,8 +87,8 @@ Need new aggregators, large property tables, or principal-model wiring.
 
 Real applications use these. Each family graduates when its parent feature lands; until then they sit as markers. Ticking an item here implies the parent feature is also done.
 
-### Cursors (DECLARE CURSOR / OPEN / FETCH / CLOSE not modeled)
-- [ ] **@@CURSOR_ROWS / @@FETCH_STATUS / CURSOR_STATUS**
+### Cursors
+- [x] **@@CURSOR_ROWS / @@FETCH_STATUS / CURSOR_STATUS** — landed with the cursor bundle (DECLARE CURSOR / OPEN / FETCH / CLOSE / DEALLOCATE, STATIC / KEYSET / DYNAMIC sensitivity, scroll fetches, WHERE CURRENT OF). See [`cursors.md`](cursors.md).
 
 ### Graph (node/edge tables not modeled)
 - [ ] **EDGE_ID_FROM_PARTS / GRAPH_ID_FROM_EDGE_ID / GRAPH_ID_FROM_NODE_ID / NODE_ID_FROM_PARTS / OBJECT_ID_FROM_EDGE_ID / OBJECT_ID_FROM_NODE_ID**

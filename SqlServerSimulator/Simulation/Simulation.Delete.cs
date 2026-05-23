@@ -101,10 +101,14 @@ partial class Simulation
         View? sourceView = null)
     {
         BooleanExpression? where = null;
+        Cursor? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
-            where = BooleanExpression.Parse(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
+                positionedCursor = ParseWhereCurrentOf(context, table);
+            else
+                where = BooleanExpression.Parse(context);
         }
 
         var storedColumns = table.StoredColumns;
@@ -119,6 +123,10 @@ partial class Simulation
         var needsFullForFk = table.IncomingForeignKeys.Count > 0;
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
+            // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
+            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, rowBytes))
+                continue;
+
             SqlValue[]? fullValues = null;
             if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory || needsFullForFk)
             {
@@ -171,7 +179,9 @@ partial class Simulation
         // Msg 3960 with auto-rollback (probe-confirmed against SQL Server
         // 2025; mirrors the SI UPDATE-on-RC-deleted case). Helper lives
         // in Simulation.Update.cs and the partial-class scope shares it.
-        CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+        // Skipped for positioned deletes — the cursor fixed a single live row.
+        if (positionedCursor is null)
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
         return CommitDelete(context, table, deleted, output, sourceView);
     }

@@ -49,22 +49,28 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.As })
                 context.MoveNextRequired();
 
-            // Table variable form: `DECLARE @t TABLE (cols)`. Only one
-            // table-variable declaration per statement (probe-confirmed:
-            // `DECLARE @t1 TABLE (...), @t2 TABLE (...)` raises Msg 102, and
-            // mixing scalar + table in one DECLARE raises Msg 156). The
-            // table form must be the only declaration in the statement —
-            // a leading scalar (sawScalar = true) means we already passed
-            // a `,`, so reject. A trailing `,` after the column list also
-            // raises Msg 102.
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Table })
+            switch (context.Token)
             {
-                if (sawScalar)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                ParseDeclareTableVariable(context, variableName);
-                return context.Token is Operator { Character: ',' }
-                    ? throw SimulatedSqlException.SyntaxErrorNear(context)
-                    : null;
+                // Cursor variables (`DECLARE @c CURSOR`) aren't modeled — named
+                // cursors only.
+                case ReservedKeyword { Keyword: Keyword.Cursor }:
+                    throw new NotSupportedException("Cursor variables (DECLARE @c CURSOR / cursor-typed parameters) aren't modeled; use a named cursor.");
+
+                // Table variable form: `DECLARE @t TABLE (cols)`. Only one
+                // table-variable declaration per statement (probe-confirmed:
+                // `DECLARE @t1 TABLE (...), @t2 TABLE (...)` raises Msg 102, and
+                // mixing scalar + table in one DECLARE raises Msg 156). The
+                // table form must be the only declaration in the statement —
+                // a leading scalar (sawScalar = true) means we already passed
+                // a `,`, so reject. A trailing `,` after the column list also
+                // raises Msg 102.
+                case ReservedKeyword { Keyword: Keyword.Table }:
+                    if (sawScalar)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    ParseDeclareTableVariable(context, variableName);
+                    return context.Token is Operator { Character: ',' }
+                        ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                        : null;
             }
 
             // User-defined table type form: `DECLARE @t [schema.]MyType`.
