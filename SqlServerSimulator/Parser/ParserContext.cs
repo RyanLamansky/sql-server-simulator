@@ -109,6 +109,20 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool RejectNextValueFor;
 
     /// <summary>
+    /// When true, <see cref="Expression.Parse(ParserContext)"/>'s postfix
+    /// loop treats a bare <c>:</c> (not followed by a second <c>:</c>) as
+    /// end-of-expression rather than a syntax error. Lets the
+    /// <c>JSON_OBJECT(key : value, ...)</c> grammar parse a key expression
+    /// that stops at the <c>:</c> separator. Callers save the prior value
+    /// and restore in a <c>finally</c> so nested key parses (e.g. a
+    /// JSON_OBJECT used as a value inside another JSON_OBJECT's key) don't
+    /// leak the flag outside their immediate scope. The <c>::</c>
+    /// type-prefix postfix (<c>hierarchyid::Parse(...)</c> etc.) still
+    /// resolves normally — only single-colon shapes are affected.
+    /// </summary>
+    public bool StopExpressionAtBareColon;
+
+    /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
     /// the output schema of a correlated subquery whose projection references
     /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s

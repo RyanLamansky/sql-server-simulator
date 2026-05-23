@@ -84,6 +84,30 @@ In `BuiltInResources.cs`:
 
 Both probe-confirmed against SQL Server 2025.
 
+## Principal scalars
+
+The simulator doesn't enforce permissions, so these return values that let permission-checking code paths fall through cleanly rather than authoritatively reflecting the (un-modeled) ACL state. Probed against SQL Server 2025 (2026-05-11 / 2026-05-22) for shape + return type.
+
+**Current-principal placeholders** (parens-less when reserved, parens-bearing otherwise) — all return `'dbo'` since the simulator's only modeled login is the dbo user:
+- `CURRENT_USER` — reserved keyword, no parens (dispatched directly from `Expression.Parse`'s expression-start switch, NOT through `ResolveBuiltIn`).
+- `SESSION_USER` — same shape, reserved + no parens.
+- `SYSTEM_USER` — same shape, reserved + no parens.
+- `USER` — same shape, reserved + no parens.
+- `USER_NAME([id])` — zero-arg returns `'dbo'`; with an arg, looks up `Database.Principals` by id (matching `DatabasePrincipal.PrincipalId`) and returns the name or NULL.
+- `SUSER_NAME([id])` / `SUSER_SNAME([sid])` — both return `'dbo'` for the no-arg form. `SUSER_NAME(id)` resolves through `Database.Principals` by principal_id; `SUSER_SNAME(sid)` accepts a binary SID arg but the simulator has no SID model, so it always returns `'dbo'` for non-NULL input and NULL for NULL input.
+- `ORIGINAL_LOGIN()` — returns `'dbo'`.
+
+**Principal-id scalars** (`Parser/Expressions/PrincipalIdScalars.cs`):
+- `USER_ID([name])` — zero-arg returns `Database.DboPrincipalId` (=1); with an arg, walks `Database.Principals` for a name match.
+- `SUSER_ID([login_name])` — same lookup walk as `USER_ID`; the simulator doesn't separate database principals from server logins in its model. Result type `int`.
+- `DATABASE_PRINCIPAL_ID([name])` — alias of `USER_ID` with the same lookup behavior; real SQL Server exposes both names against the same backing lookup.
+
+**Permission-check placeholders**:
+- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, sub-securable, sub-securable-class])` returns `1` for any non-NULL `permission` argument and NULL for NULL — the simulator doesn't enforce permissions, so any check passes. Real SQL Server returns 1 / 0 based on the actual grant; the always-1 stance lets code paths gated on this scalar fall through naturally.
+- `IS_MEMBER('public')` returns 1; `IS_MEMBER('<other-role>')` returns 0; NULL → NULL. Same pattern as real SQL Server's behavior for the default dbo principal (public membership is universal).
+- `IS_ROLEMEMBER(role [, principal])` — same `public → 1` / other → 0 / NULL → NULL shape as `IS_MEMBER`. The 2-arg form accepts a principal name; the simulator's single-principal model returns the same result regardless.
+- `IS_SRVROLEMEMBER(role [, login])` — returns 0 for any role (the simulator has no server-role model); NULL → NULL.
+
 ## Known gaps
 
 - **Server-scope grants** (`GRANT … ON SERVER`), schema-scope grants, column-scope grants — not modeled.

@@ -159,6 +159,8 @@ Selection-side capture is `Selection.UpdatabilityProfile` (set in `BuildSqlProje
 
 **Recursion**: each proc call increments `SimulatedDbConnection.NestingLevel`; entering a body at the cap raises Msg 217 (verbatim same wording as scalar UDFs / views). `@@NESTLEVEL` reads the counter as int.
 
+**`@@PROCID`**: returns the current procedure's / function's `object_id` as `int` when inside a `ProcFrame` / `UdfFrame`, else `0`. Reads `BatchContext.ProcFrame?.Procedure.ObjectId ?? BatchContext.UdfFrame?.Function.ObjectId ?? 0`. Used by tooling that introspects the calling proc from inside its own body (e.g. logging procs that record their own `OBJECT_NAME(@@procid)`).
+
 **`CommandType.StoredProcedure` entrypoint**: `SimulatedDbCommand.CommandType` accepts `StoredProcedure`; on execute, `CreateResultSetsForCommand` short-circuits the parser path and routes directly to `InvokeProcedure` with arguments translated from `DbParameterCollection`. Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped if present); `ParameterDirection.Output` / `InputOutput` writeback paths and the optional `ParameterDirection.ReturnValue` capture mirror the EXEC-text behavior.
 
 **Catalog surface**:

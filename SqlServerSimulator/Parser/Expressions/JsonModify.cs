@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using SqlServerSimulator.Storage;
 using StjValue = System.Text.Json.Nodes.JsonValue;
+using StjArray = System.Text.Json.Nodes.JsonArray;
+using StjObject = System.Text.Json.Nodes.JsonObject;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -71,7 +73,7 @@ internal sealed class JsonModify : Expression
         var newNode = SqlValueToJsonNode(newSqlValue);
         if (leaf.IsIndex)
         {
-            if (parent is not JsonArray array)
+            if (parent is not StjArray array)
             {
                 return path.Mode == JsonPathMode.Strict
                     ? throw SimulatedSqlException.JsonStrictPathNotFound()
@@ -92,7 +94,7 @@ internal sealed class JsonModify : Expression
         }
         else
         {
-            if (parent is not JsonObject obj)
+            if (parent is not StjObject obj)
             {
                 return path.Mode == JsonPathMode.Strict
                     ? throw SimulatedSqlException.JsonStrictPathNotFound()

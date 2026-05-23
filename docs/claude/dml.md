@@ -12,6 +12,16 @@
 ## `rowversion` (legacy synonym `timestamp`)
 8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one. Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration. Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738. Outbound CAST: `varbinary(N)`/`binary(N)` copy 8 bytes; `bigint` reads big-endian. `Promote(RowVersion, Varbinary) → Varbinary` so EF's `WHERE [rv] = @originalRv` parameter works directly. EF `[Timestamp]` SaveChanges round-trips end-to-end.
 
+**`MIN_ACTIVE_ROWVERSION()`** returns the rowversion counter's current next-allocated value as `binary(8)` big-endian. Real SQL Server returns the minimum *active transaction's* lowest rowversion, which over-approximates to "current next-to-allocate" when no transactions are open; the simulator returns the current next-to-allocate value unconditionally — semantically equivalent for the common consumer (incremental-sync watermarks) since rowversion writes within an open transaction wouldn't be visible to readers anyway.
+
+**`@@DBTS`** returns the last-allocated rowversion value as `binary(8)` big-endian — the value `MIN_ACTIVE_ROWVERSION` reports as next-allocated, minus one. Implementation calls `Database.AllocateRowVersion() - 1`, which bumps the counter as a side effect (rowversion values are advisory and monotonic, so the spurious bump is harmless to the contract but is a fidelity gap from real SQL Server's non-bumping read). Used by tooling watermarking via the "current high water" pattern (sync delta from `WHERE rv > @lastDbts`).
+
+## Identity helpers (`@@IDENTITY` / `SCOPE_IDENTITY` / `IDENT_CURRENT` / `IDENT_INCR` / `IDENT_SEED`)
+Per-column identity allocation routes through `HeapTable.IdentityState`. The session-state scalars (`@@IDENTITY`, `SCOPE_IDENTITY()`) read from `SimulatedDbConnection.LastIdentity`; `IDENT_CURRENT(name)` reads the named table's last-allocated value directly. `IDENT_INCR(name)` / `IDENT_SEED(name)` (`Parser/Expressions/IdentSeedIncrement.cs`) return the declared step / start of the named table's identity column, or NULL when the table lacks one or the name doesn't resolve. All three name-arg scalars accept a 1-/2-/3-part dotted runtime string via the same `TryParseObjectName` helper `OBJECT_ID` uses. Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly).
+
+## `@@ROWCOUNT` / `ROWCOUNT_BIG()`
+Both expose the row count of the most-recently-completed statement on the session via `SimulatedDbConnection.LastStatementRowCount`. `@@ROWCOUNT` projects as `int`; `ROWCOUNT_BIG()` (`Parser/Expressions/TransactionScalarFunctions.cs`) is its `bigint` sibling — same source, wider projection. Same set + reset rules: every DML statement updates the count; control-flow statements (IF / WHILE / SET / DECLARE) leave it unchanged on the failure path but set it to the result on success; SELECT inside a `set @v = (select ...)` reports the inner-SELECT's affected row count.
+
 ## INSERT … SELECT
 `INSERT [INTO] target [(cols)] SELECT …` accepts the full Selection grammar — WHERE/JOIN/GROUP BY/aggregates/ORDER BY/TOP/OFFSET-FETCH/UNION/INTERSECT/EXCEPT all work source-side.
 

@@ -26,4 +26,12 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException JsonInvalidText() =>
         new("JSON text is not properly formatted. Unexpected character is found.", 13609, 16, 1);
+
+    /// <summary>
+    /// Msg 13638: <c>JSON_OBJECT</c> rejects a NULL key at runtime
+    /// regardless of the active null clause. Probe-confirmed wording
+    /// against SQL Server 2025 (2026-05-23).
+    /// </summary>
+    internal static SimulatedSqlException JsonObjectNullKey() =>
+        new("User error : Name parameter value in 'json_object' cannot be null", 13638, 16, 1);
 }

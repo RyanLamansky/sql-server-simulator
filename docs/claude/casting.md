@@ -12,6 +12,14 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 
 **CAST/CONVERT context defaults missing length to 30** for `varchar`/`nvarchar`/`varbinary` (column-context default is 1).
 
+## `PARSE` / `TRY_PARSE` (culture-aware conversion)
+
+`PARSE(string AS type [USING culture])` / `TRY_PARSE(...)` — culture-aware Convert.NET surface (`Parser/Expressions/ParseFunction.cs`). The string argument routes through .NET's `<Type>.Parse(string, CultureInfo)` rather than the simulator's existing CAST machinery, so the accepted formats follow the CLR's culture rules (commas vs dots, locale-specific date orderings) rather than SQL Server's CAST grammar. Culture defaults to `en-US` when the USING clause is omitted; unknown culture name raises Msg 9819 (probe-confirmed) via a dedicated `ParseConversionFailed` factory. `PARSE` re-raises any `FormatException` / `OverflowException` as Msg 9819 with the source value embedded; `TRY_PARSE` catches the same set and returns NULL.
+
+Accepted target types: `int` / `bigint` / `smallint` / `tinyint` / `decimal(p, s)` / `numeric(p, s)` / `float` / `real` / `money` / `smallmoney` / `bit` / `date` / `datetime` / `datetime2(N)` / `smalldatetime` / `datetimeoffset(N)` / `time(N)` / `uniqueidentifier`. String targets (`varchar` / `nvarchar` / `char` / `nchar`) raise Msg 9819 since PARSE only handles parsing INTO a non-string type — matches real SQL Server's rejection.
+
+NULL input → NULL (both forms). Result type: the requested target type with declared precision / scale preserved.
+
 ## `varbinary` → date-time family (SSMS wire format)
 
 `CAST(0x… AS date | time | datetime | datetime2 | datetimeoffset | smalldatetime)` decodes the byte payload via SQL Server's documented wire format. SSMS bulk-INSERT exports emit every date column literal this way (e.g. `CAST(0x07A00627C0A5173D0B0000 AS DateTimeOffset)`), so this path is load-bearing for BACPAC-style seed-data scripts. Layouts probed against SQL Server 2025:

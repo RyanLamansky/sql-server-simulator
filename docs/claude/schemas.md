@@ -49,11 +49,23 @@ Every `HeapTable` carries a stable per-database `int ObjectId` assigned at CREAT
 - **Bracket-handling fidelity gap**: the runtime-string name parser strips bracket pairs at segment level (`'[dbo].[foo]'` → `dbo`+`foo`) and decodes `]]` → `]` inside brackets — but bracketed segments containing a literal `.` (`'[a.b].[c]'`, the literal-dot case) don't parse correctly (split on `.` happens before bracket-aware tokenization). Rare in practice; revisit if a real app hits it.
 - **Arity**: too-few-args (`OBJECT_ID()`) currently surfaces as Msg 102 (the inner Parse failure path) rather than Msg 174 — same pattern as other built-ins; the simulator doesn't enforce min-args. Too-many-args raises Msg 174 verbatim.
 
+## Database name / id scalars
+
+**`DB_ID([name])`** / **`DB_NAME([id])`** (`Parser/Expressions/DatabaseScalarFunctions.cs`): round-trip the connection's view of `Simulation.Databases` by name and ordinal-position id. Id allocation is the alphabetical-position scheme (`DbId.OrderedDatabases(simulation)` enumerates `Simulation.Databases.Values.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase)`); the same enumeration backs `OBJECT_NAME(id, db_id)` and the `sys.databases.database_id` column. Zero-arg `DB_ID()` returns the current database's id, zero-arg `DB_NAME()` returns its name. Unknown name / out-of-range id → NULL. NULL arg → NULL. Result types: `DB_ID` → `smallint`; `DB_NAME` → `sysname`.
+
+## Three-part-name reach for metadata scalars
+
+Probe-confirmed against SQL Server 2025 (2026-05-23):
+- **`OBJECT_ID('db.schema.tbl')`** — the name argument's 3-part form routes to the named database through `TryResolveSchema → Simulation.Databases`. Bracketed (`'[db].[schema].[tbl]'`) and `db..tbl` shorthand (substituting `dbo` for the empty middle) both work; missing database returns NULL silently.
+- **`OBJECT_NAME(id, db_id)`** — second arg routes by id (see the OBJECT_NAME entry above).
+- **`SCHEMA_ID(name)` / `SCHEMA_NAME(id)`** are strictly leaf-name / current-DB-scoped — real SQL Server returns NULL for any multi-part input. No 3-part-name reach exists.
+- Built-in scalars **cannot** be invoked through a 2- or 3-part call-site name (`claude.sys.OBJECT_ID('...')` raises "cannot find user-defined function" on real SQL Server). The simulator inherits this naturally from its 1-part-only built-in dispatch.
+
 ## Id → name scalars
 
 **`SCHEMA_NAME([id])`** (`Parser/Expressions/SchemaName.cs`): the `int → name` inverse of `SCHEMA_ID`. With an int `schema_id` argument, walks `Database.Schemas.Values` for the matching `Schema.SchemaId` and returns its `Name`. No-arg returns `Database.DefaultSchemaName` (`"dbo"`) — matches real SQL Server's "default schema for the current user" behavior (single-principal simulator). NULL arg / missing id / negative id → NULL. Result type: `sysname` (nvarchar(128)).
 
-**`OBJECT_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectName.cs`): walks every `Schema.SchemaObjects()` (the shared object-name namespace: heap tables / views / functions / procedures / sequences / triggers) plus `Schema.TableTypes` and returns the matching object's leaf `Name`. The optional `database_id` argument is parsed and ignored (single-database simulator — real SQL Server uses it to scope across attached DBs). NULL arg / missing id → NULL. Result type: `sysname`.
+**`OBJECT_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectName.cs`): walks every `Schema.SchemaObjects()` (the shared object-name namespace: heap tables / views / functions / procedures / sequences / triggers) plus `Schema.TableTypes` and returns the matching object's leaf `Name`. The optional `database_id` argument is **load-bearing** (probe-confirmed against SQL Server 2025 — 2026-05-23): without it, the walk is scoped to `BatchContext.CurrentDatabase`; with it, the walk is scoped to the database at that id under `DbId`'s alphabetical-position scheme (`OrderedDatabases(Simulation)` — same enumeration as `DB_ID` / `DB_NAME`). Different DBs allocate their own `object_id` namespaces, so the second arg disambiguates id collisions across databases. NULL `object_id` / missing id → NULL; NULL `database_id` / out-of-range `database_id` → NULL. Result type: `sysname`.
 
 **`OBJECT_SCHEMA_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectSchemaName.cs`): same lookup walk as `OBJECT_NAME`; returns the owning `Schema.Name` instead of the object leaf. Same NULL / ignored-db_id semantics. Result type: `sysname`.
 

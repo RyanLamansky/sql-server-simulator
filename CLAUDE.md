@@ -140,17 +140,17 @@ Full `DbDataReader` contract. Typed accessors read `SqlValue` directly via the c
 
 Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger: read the linked file on demand when working in the matching area.
 
-- **Built-in scalars** (math, date, current-time, `*FROMPARTS`, AT TIME ZONE, CONCAT, char-code, FORMAT, RAND, STRING_SPLIT, COMPRESS/DECOMPRESS) → [`scalars.md`](docs/claude/scalars.md).
+- **Built-in scalars** (math, date incl. DATETRUNC / DATE_BUCKET / SWITCHOFFSET / TODATETIMEOFFSET, current-time, `*FROMPARTS`, AT TIME ZONE, CONCAT, char-code, SOUNDEX / STR / TRANSLATE / STRING_ESCAPE / DIFFERENCE, CHOOSE / IIF, bit manipulation (BIT_COUNT / GET_BIT / SET_BIT / LEFT_SHIFT / RIGHT_SHIFT), CHECKSUM / BINARY_CHECKSUM, FORMAT, RAND, STRING_SPLIT, COMPRESS/DECOMPRESS, session/server `@@`-constants + HOST_NAME / APP_NAME / GETANSINULL / ORIGINAL_DB_NAME) → [`scalars.md`](docs/claude/scalars.md).
 - **`SqlType.Promote` / `PromoteForArithmetic` / decimal precision-scale / int↔string promotion** → [`arithmetic.md`](docs/claude/arithmetic.md).
-- **`Cast` / coercion error paths** (CAST/CONVERT narrow targets, TRY_CAST/TRY_CONVERT swallow set) → [`casting.md`](docs/claude/casting.md).
+- **`Cast` / coercion error paths** (CAST/CONVERT narrow targets, TRY_CAST/TRY_CONVERT swallow set, PARSE/TRY_PARSE culture-aware parsing) → [`casting.md`](docs/claude/casting.md).
 - **`Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH** → [`query.md`](docs/claude/query.md).
-- **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / rowversion / OUTPUT / MERGE** → [`dml.md`](docs/claude/dml.md).
-- **Variables, control flow (IF/WHILE/BREAK/CONTINUE/RETURN), TRY/CATCH+THROW+ERROR_*, PRINT, WAITFOR** → [`control-flow.md`](docs/claude/control-flow.md).
+- **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / rowversion (incl. `@@DBTS` / `MIN_ACTIVE_ROWVERSION`) / identity helpers (`@@IDENTITY` / `SCOPE_IDENTITY` / `IDENT_CURRENT` / `IDENT_INCR` / `IDENT_SEED`) / `@@ROWCOUNT` / `ROWCOUNT_BIG` / OUTPUT / MERGE** → [`dml.md`](docs/claude/dml.md).
+- **Variables, control flow (IF/WHILE/BREAK/CONTINUE/RETURN), TRY/CATCH+THROW+ERROR_*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, PRINT, WAITFOR** → [`control-flow.md`](docs/claude/control-flow.md).
 - **CTE shapes / recursive-CTE error handling** → [`ctes.md`](docs/claude/ctes.md).
-- **JSON_VALUE / JSON_QUERY / JSON_MODIFY / OPENJSON** → [`json.md`](docs/claude/json.md).
-- **Name resolution, schema lookup, CREATE / DROP / ALTER SCHEMA TRANSFER, OBJECT_ID** → [`schemas.md`](docs/claude/schemas.md).
-- **System metadata surfaces** (sys.* / INFORMATION_SCHEMA.*) → [`catalog-views.md`](docs/claude/catalog-views.md).
-- **Scalar UDFs / TVFs / views / stored procs / dynamic SQL** → [`programmable.md`](docs/claude/programmable.md).
+- **JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / JSON_PATH_EXISTS / ISJSON / OPENJSON** → [`json.md`](docs/claude/json.md).
+- **Name resolution, schema lookup, CREATE / DROP / ALTER SCHEMA TRANSFER, `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` / `SCHEMA_ID` / `SCHEMA_NAME` / `DB_ID` / `DB_NAME`, cross-DB read routing** → [`schemas.md`](docs/claude/schemas.md).
+- **System metadata surfaces** (sys.* / INFORMATION_SCHEMA.*, function-form lookups: `OBJECTPROPERTY` / `SERVERPROPERTY` / `COL_LENGTH` / `COL_NAME` / `TYPE_NAME` / `TYPE_ID` / `PARSENAME`) → [`catalog-views.md`](docs/claude/catalog-views.md).
+- **Scalar UDFs / TVFs / views / stored procs / dynamic SQL / `@@NESTLEVEL` / `@@PROCID`** → [`programmable.md`](docs/claude/programmable.md).
 - **`#foo` / `##foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** → [`table-variables.md`](docs/claude/table-variables.md).
 - **`CREATE TYPE … AS TABLE`, TVP params + `READONLY`, ADO.NET TVP** → [`table-valued-parameters.md`](docs/claude/table-valued-parameters.md).
@@ -165,7 +165,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Table hints (`WITH (NOLOCK …)`) + statement `OPTION (…)` hints** → [`query-hints.md`](docs/claude/query-hints.md).
 - **Locking, MVCC, SNAPSHOT/RCSI, deadlock/timeout, lock-related DMVs** → [`locking.md`](docs/claude/locking.md).
 - **`hierarchyid` data type** (incl. deferred byte-identical CAST research notes) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
-- **`GRANT` / `REVOKE` / `DENY`, principal DDL, fixed-principal seed** → [`permissions.md`](docs/claude/permissions.md).
+- **`GRANT` / `REVOKE` / `DENY`, principal DDL, fixed-principal seed, principal scalars (`USER_ID` / `SUSER_ID` / `DATABASE_PRINCIPAL_ID` / `USER_NAME` / `SUSER_NAME` / `SUSER_SNAME` / `CURRENT_USER` / `SESSION_USER` / `SYSTEM_USER` / `ORIGINAL_LOGIN` / `HAS_PERMS_BY_NAME` / `IS_MEMBER` / `IS_ROLEMEMBER` / `IS_SRVROLEMEMBER`)** → [`permissions.md`](docs/claude/permissions.md).
 - **`CREATE FULLTEXT CATALOG`/`INDEX`, `CONTAINS`/`FREETEXT` rejection** → [`full-text.md`](docs/claude/full-text.md).
 - **`xml` data type, XML schema collections, XML method dispatch, XML indexes** → [`xml.md`](docs/claude/xml.md).
 - **`geography` / `geometry` types, spatial methods, spatial indexes** → [`spatial.md`](docs/claude/spatial.md).

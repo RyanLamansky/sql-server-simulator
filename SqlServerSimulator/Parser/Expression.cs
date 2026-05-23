@@ -219,14 +219,25 @@ internal abstract class Expression
                         // `hierarchyid::` (Parse / GetRoot), `geography::` /
                         // `geometry::` (Parse / STGeomFromText / Point / ...,
                         // see SpatialStaticCall). First ':' already consumed
-                        // by GetNextOptional; require a second to confirm the
-                        // `::` shape.
+                        // by GetNextOptional; peek to confirm the `::` shape.
+                        // When the surrounding context has set
+                        // StopExpressionAtBareColon (currently JSON_OBJECT's
+                        // key parse), a single ':' rewinds and breaks out so
+                        // the caller can consume it as a separator.
+                        var beforeSecond = context.SaveCheckpoint();
+                        var secondColon = context.GetNextOptional();
+                        if (secondColon is not Operator { Character: ':' })
+                        {
+                            if (context.StopExpressionAtBareColon)
+                            {
+                                context.RestoreCheckpoint(beforeSecond);
+                                break;
+                            }
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
                         if (expression is not Reference colonRef || colonRef.ReferencedName.Count != 1)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         var typeName = colonRef.ReferencedName.Leaf;
-                        var secondColon = context.GetNextRequired();
-                        if (secondColon is not Operator { Character: ':' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
                         context.MoveNextRequired();
                         var typePrefixCollation = context.Batch.CurrentDatabase.Collation;
                         expression = typePrefixCollation.Equals(typeName, "hierarchyid")
@@ -676,6 +687,7 @@ internal abstract class Expression
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
                 "IDENT_INCR" => new IdentSeedIncrement(context, isSeed: false),
                 "IDENT_SEED" => new IdentSeedIncrement(context, isSeed: true),
+                "JSON_ARRAY" => new JsonArray(context),
                 "JSON_QUERY" => new JsonQuery(context),
                 "JSON_VALUE" => new JsonValue(context),
                 "LAST_VALUE" => WindowExpression.ParseLastValue(context),
@@ -694,6 +706,7 @@ internal abstract class Expression
                 "GETANSINULL" => new GetAnsiNull(context),
                 "GROUPING_ID" => new GroupingId(context),
                 "JSON_MODIFY" => new JsonModify(context),
+                "JSON_OBJECT" => new JsonObject(context),
                 "OBJECT_NAME" => new ObjectName(context),
                 "RIGHT_SHIFT" => new BitShift(context, isLeftShift: false),
                 "SCHEMA_NAME" => new SchemaName(context),

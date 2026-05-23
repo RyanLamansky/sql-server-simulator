@@ -13,6 +13,15 @@ Errors: `SQRT(neg)` / `LOG(<= 0)` / `LOG10(<= 0)` / `LOG(x, 1)` / `POWER(neg, fr
 
 **`DEGREES`/`RADIANS`** are type-preserving with one tweak: `decimal(p, s)` widens to `decimal(38, max(s, 18))` rather than preserving. Integer arm truncates toward zero; out-of-range integer results raise Msg 8115 with the family name. Decimal arm uses a 28-digit `DecimalPi` constant in evaluation order `(input * 180m) / DecimalPi` for trailing-digit fidelity. .NET decimal's 28-digit precision cap means scale > 28 results land at scale 28.
 
+## Additional date scalars: `DATENAME` / `DATETRUNC` / `SWITCHOFFSET` / `TODATETIMEOFFSET` / `DATE_BUCKET` / `CURRENT_DATE`
+
+- **`DATENAME(part, date)`** — sibling of `DATEPART` but returns the localized string for the matched part (`'January'` / `'Sunday'` / `'12'` / etc.) as `nvarchar`. Reuses `DATEPART`'s keyword tables for part validation and per-type compatibility (same Msg 9810 rejection set). Localized names follow .NET's `CultureInfo.InvariantCulture` — month names in English, weekday names in English, numeric parts as base-10 strings.
+- **`DATETRUNC(part, date)`** (`Parser/Expressions/DateTimeAdjustments.cs`) — floor to start of the named part. Supported parts: `year`/`quarter`/`month`/`week`/`day`/`hour`/`minute`/`second` plus the millisecond/microsecond/nanosecond family. Result preserves the input's type (`datetime` → `datetime`, `datetime2(N)` → `datetime2(N)`); `date` source rejects time-bearing parts via Msg 9810 (reused factory).
+- **`SWITCHOFFSET(dto, offset)`** — adjust a `datetimeoffset`'s offset while preserving the UTC instant; both offset (numeric `±N` minutes or string `'±HH:MM'`) forms accepted. Result type = input precision preserved (`datetimeoffset(N)`).
+- **`TODATETIMEOFFSET(dt, offset)`** — attach an offset to a `datetime` / `datetime2` value, treating the input wall-clock as already in the named zone. Result `datetimeoffset(N)` matching input precision.
+- **`DATE_BUCKET(part, bucket_width, date [, origin])`** (`Parser/Expressions/DateBucket.cs`) — bucket-aligned floor. `origin` defaults to `1900-01-01` for date/datetime inputs and `1900-01-01 00:00:00` for time-bearing types; `bucket_width` must be positive. Returns the same type as `date`.
+- **`CURRENT_DATE`** — parens-less, dispatched directly from `Expression.Parse`'s expression-start switch (same shape as `CURRENT_TIMESTAMP`). Returns `date`. Equivalent to `CAST(SYSDATETIME() AS DATE)` — uses the same per-statement freeze.
+
 ## Date scalar functions: `DATEPART` / `DATEADD` / `DATEDIFF` / `DATEDIFF_BIG`
 All take a bare datepart keyword. Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` → int; `DATEDIFF_BIG` → bigint.
 
@@ -88,6 +97,55 @@ Bundle that fills out the raw-SQL string surface that EF's `FromSqlInterpolated`
 - **`ISNUMERIC(expression)`** returns `int` (1 / 0); NULL → 0 (not NULL). Famously lossy on real SQL Server: a bare sign / decimal point / comma / currency symbol returns 1, hex prefixes return 0, internal whitespace breaks the match. The simulator's hand-rolled scanner consumes (in order: optional sign and currency in either order; digit / decimal / comma run; optional `e`/`E`/`d`/`D` exponent requiring a leading digit AND a trailing digit after optional sign). At least one of {digit, decimal/comma, sign, currency} must have been consumed for the result to be true. Bit-typed input returns 0 even though bit lives in the Integer category (probe-confirmed). Anything that doesn't fully consume after trimming whitespace returns 0.
 - **`ISDATE(expression)`** returns `int` (1 / 0) and validates against the legacy `datetime` range (1753-9999). Empty string short-circuits to 0 (the shared `TryParseLegacyDateTime` treats `""` as datetime base-date for CAST support, but ISDATE specifically rejects). Modern `date` / `time` / `datetimeoffset` raise Msg 8116 — ISDATE intentionally lives in the legacy datetime domain. Integer input is implicitly stringified and re-parsed (so `ISDATE(20260512)` = 1 via `'20260512'` matching `yyyyMMdd`; `ISDATE(1)` = 0 because `'1'` parses to year 1 < 1753). Float / decimal / non-integer-non-string types always return 0.
 - **`RAND([seed])`** returns `float`. The defining behavior is the **runtime-constant** rule: a given `RAND(...)` call site produces ONE value reused across every row of the query — distinct call sites in the same projection each get their own constant. The simulator implements this by caching the first-evaluation result on the `Rand` expression instance; a fresh parse (each batch / statement) gets a fresh cache. Seeded form: any numeric / string-convertible seed coerces to `float`; the int passed to `new Random(int)` is XOR-folded from the 64-bit double's bits so small integer seeds (`1` vs `999999`) don't collapse to the same hash (their mantissas live in the high bits which a naive int cast would discard). Determinism per seed is preserved but the values aren't byte-identical to SQL Server's undocumented seed algorithm. NULL seed → NULL output.
+
+## SOUNDEX-family + STR + TRANSLATE + STRING_ESCAPE
+
+- **`SOUNDEX(s)`** (`Parser/Expressions/SoundexStrAdditions.cs`) — returns a 4-character `varchar` SOUNDEX code under the standard algorithm (first letter uppercased, then the consonant-digit map B/F/P/V=1, C/G/J/K/Q/S/X/Z=2, D/T=3, L=4, M/N=5, R=6, vowels/H/W skipped, runs of identical-code letters collapsed, padded with `0` or truncated to length 4). Empty input → `'0000'`. NULL → NULL.
+- **`DIFFERENCE(s1, s2)`** — counts matching positions (0–4) between the two strings' SOUNDEX codes. Result `int`; NULL on either side → NULL.
+- **`STR(float [, length [, decimals]])`** — right-aligned fixed-width numeric-to-string. Defaults: length 10, decimals 0 (rounds half-away-from-zero, doesn't truncate). Overflow (formatted value exceeds `length`) returns a string of `*` characters of length `length`. NULL → NULL. Always projects `varchar`.
+- **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution. The `chars` and `translations` arguments must have equal length; mismatch raises Msg 9819 via a dedicated `TranslateUnequalChars` factory. NULL on any operand → NULL. Result `nvarchar`.
+- **`STRING_ESCAPE(text, 'json')`** — JSON-string escape pass on `text` (escapes `"` `\` `\b` `\f` `\n` `\r` `\t`, `/`, control chars as `\uXXXX`). Documentation says only `'json'` is a valid mode; the simulator accepts any string for the mode and treats it as `'json'` (real SQL Server raises Msg 9806 on unknown mode — minor divergence). NULL `text` → NULL. Result `nvarchar`.
+
+## CHOOSE / IIF
+
+- **`CHOOSE(index, val1, val2, ...)`** (`Parser/Expressions/Choose.cs`) — 1-based index into the trailing value list. Out-of-range (negative / zero / above the value count) → NULL. NULL `index` → NULL. Result type follows the standard CASE-style promotion across the value list (`SqlType.Promote` over all values). Sibling of `IIF`; both translate two-branch / multi-branch conditionals.
+
+## Bit manipulation: `BIT_COUNT` / `GET_BIT` / `SET_BIT` / `LEFT_SHIFT` / `RIGHT_SHIFT`
+
+Five integer scalars sharing one dispatch file (`Parser/Expressions/BitManipulation.cs`). All operate on `tinyint` / `smallint` / `int` / `bigint` input (bit-width 8 / 16 / 32 / 64) and either preserve the input type or return a fixed scalar. Bit positions are 0-based from the LSB. Out-of-range bit position raises **Msg 8120** (`BitFunctionPositionOutOfRange` factory). Non-integer input raises **Msg 8116** (`ArgumentDataTypeInvalidForBitFunction`).
+
+- **`BIT_COUNT(num)`** — popcount, returns `int`.
+- **`GET_BIT(num, index)`** — returns `bit` (0 / 1). NULL on either operand → NULL.
+- **`SET_BIT(num, index [, value])`** — returns the input type with the bit at `index` set to `value` (defaults to 1). NULL on `num` / `index` → NULL.
+- **`LEFT_SHIFT(num, n)`** — arithmetic left shift; high bits truncated when they overflow the input bit-width.
+- **`RIGHT_SHIFT(num, n)`** — **logical** right shift (high bits zero-filled, probe-confirmed against SQL Server 2025 — diverges from C#'s `>>` on signed types which is arithmetic). Result type preserves input.
+
+## CHECKSUM family
+
+- **`CHECKSUM(args...)` / `BINARY_CHECKSUM(args...)`** (`Parser/Expressions/ChecksumAndRowVersion.cs`) — fast 32-bit fold over the argument list. Implementation uses FNV-1a; semantic guarantee matches SQL Server (same inputs → same checksum, deterministically). **Bit-pattern divergence**: real SQL Server uses an undocumented byte-mix; the simulator's FNV-1a output won't match real SQL Server bit-for-bit. Same-value-same-checksum invariant holds; same-multiset-same-checksum doesn't (CHECKSUM is order-sensitive, unlike CHECKSUM_AGG). Result `int`.
+- **`CHECKSUM_AGG(expr)`** uses an order-independent XOR fold for the aggregate form — same multiset → same checksum, bit pattern won't match real SQL Server. Documented in CLAUDE.md's Quirks.
+
+## Session / connection placeholders
+
+Constants whose values don't carry real session/server identity in the simulator — they exist for SQL emitted by tooling that reads them (DACFx / EF Core / migration scripts) to receive a sensible non-NULL response.
+
+- **`HOST_NAME()`** — returns `''`.
+- **`APP_NAME()`** — returns `''`.
+- **`ORIGINAL_DB_NAME()`** — returns `Simulation.DefaultDatabaseName` (`"simulated"`).
+- **`GETANSINULL([db])`** — returns 1 (the simulator's ANSI-NULL behavior matches `SET ANSI_NULLS ON`, which is the only modeled mode).
+- **`@@DATEFIRST`** — constant 7 (Sunday). `SET DATEFIRST` parses-and-discards.
+- **`@@MAX_PRECISION`** — constant 38.
+- **`@@MAX_CONNECTIONS`** — constant 32767.
+- **`@@SERVERNAME`** — `"SIMULATED"`.
+- **`@@SERVICENAME`** — `"MSSQLSERVER"`.
+- **`@@LANGID`** — 0.
+- **`@@LANGUAGE`** — `"us_english"`.
+- **`@@TEXTSIZE`** — -1 (matches SQL Server's documented default).
+- **`@@OPTIONS`** — 5432 (composite of ANSI/ARITHABORT/QUOTED_IDENTIFIER/CONCAT_NULL_YIELDS_NULL flags matching the simulator's defaults).
+- **`@@VERSION`** — `"SQL Server Simulator"`.
+- **`@@REMSERVER`** — NULL (deprecated in SQL Server proper too).
+
+Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catalog-views.md`](catalog-views.md).
 
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution. Yields one row per substring split on the single-character separator.
