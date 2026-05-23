@@ -137,22 +137,36 @@ internal sealed class ObjectId : Expression
     /// <summary>
     /// Splits a runtime-string object name into a <see cref="MultiPartName"/>.
     /// Honors bracket quoting (<c>[dbo].[foo]</c>) on a per-segment basis;
-    /// trims surrounding whitespace; compresses empty middle segments (so
-    /// <c>'tempdb..#foo'</c> yields a 2-part name, same rule the SQL-level
-    /// <see cref="BatchContext.ParseObjectName"/> applies). 4+ segments,
-    /// 0 segments, or unterminated brackets in any segment return false.
+    /// trims surrounding whitespace; an empty middle segment substitutes
+    /// <see cref="Database.DefaultSchemaName"/> (so <c>'db..table'</c>
+    /// resolves identically to <c>'db.dbo.table'</c>, matching the
+    /// SQL-grammar <see cref="BatchContext.ParseObjectName"/> rule). 4+
+    /// segments, 0 segments, or unterminated brackets in any segment return
+    /// false.
     /// </summary>
     private static bool TryParseObjectName(string input, out MultiPartName result)
     {
         result = default;
         if (string.IsNullOrEmpty(input))
             return false;
-        var segments = new List<string>();
-        foreach (var raw in input.Split('.'))
+        var rawSegments = input.Split('.');
+        var segments = new List<string>(rawSegments.Length);
+        for (var i = 0; i < rawSegments.Length; i++)
         {
-            var segment = raw.Trim();
+            var segment = rawSegments[i].Trim();
             if (segment.Length == 0)
-                continue; // empty middle segment (tempdb..#foo)
+            {
+                // Empty middle segment is the `db..table` shorthand for
+                // `db.dbo.table` — substitute the default schema so the
+                // first segment routes to a database, not a current-DB
+                // schema. Leading / trailing empties (`.foo`, `foo.`) drop
+                // through to the count check.
+                var isLeadingOrTrailing = i == 0 || i == rawSegments.Length - 1;
+                if (isLeadingOrTrailing)
+                    continue;
+                segments.Add(Database.DefaultSchemaName);
+                continue;
+            }
             if (segment.Length >= 2 && segment[0] == '[' && segment[^1] == ']')
             {
                 var inner = segment[1..^1];

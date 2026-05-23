@@ -33,7 +33,7 @@ Existing infrastructure plus a small lookup, property table, or splitter.
 - [x] **GETANSINULL([db])** — usually 1; one-line.
 - [x] **ORIGINAL_DB_NAME()** — returns `Simulation.DefaultDatabaseName`.
 - [x] **COL_LENGTH(table, col) / COL_NAME(table_id, col_id)** — heap-column metadata lookup using sys.columns max_length conventions.
-- [ ] Verify three-part-name reach of **SCHEMA_ID / SCHEMA_NAME / OBJECT_ID / OBJECT_NAME** across the `dbA.sys`-style cross-DB read path (the catalog-view reads ship; confirm scalar lookups do too).
+- [x] Verify three-part-name reach of **SCHEMA_ID / SCHEMA_NAME / OBJECT_ID / OBJECT_NAME** across the cross-DB read path. Probed against SQL Server 2025 (2026-05-23): `SCHEMA_ID` / `SCHEMA_NAME` are leaf-name-only / current-DB-scoped (multi-part input returns NULL — no 3-part-name reach exists for these); `OBJECT_ID`'s name-arg 3-part form (`'db.schema.tbl'`, `'[db].[schema].[tbl]'`, `'db..tbl'`) routes to the named DB; `OBJECT_NAME(id, db_id)`'s second arg is load-bearing — routes the lookup to the named DB by id. Fixed two divergences along the way: `OBJECT_ID('db..tbl')` was dropping the empty middle segment (now substitutes `dbo` like `BatchContext.ParseObjectName`); `OBJECT_NAME(id, db_id)` was ignoring the second arg (now routes via the same alphabetical-position id scheme as `DB_ID` / `DB_NAME`). Tests in `CrossDatabaseTests`.
 
 ## Tier 3 — Modest effort, popular surface
 

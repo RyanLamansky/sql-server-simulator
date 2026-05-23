@@ -5,26 +5,29 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>OBJECT_NAME(object_id [, database_id])</c>: returns the leaf
 /// name of the object with the given <c>object_id</c>, or NULL when not
-/// found. The optional database-id argument is accepted and ignored —
-/// the simulator hosts one database per <see cref="Simulation"/> instance.
-/// Walks <see cref="Database.Schemas"/> → <see cref="Schema.SchemaObjects"/>
+/// found. Walks <see cref="Database.Schemas"/> → <see cref="Schema.SchemaObjects"/>
 /// (the shared object-name namespace: tables / views / functions /
 /// procedures / sequences / triggers) plus <see cref="Schema.TableTypes"/>.
-/// Probe-confirmed against SQL Server 2025 (2026-05-13): NULL argument
-/// returns NULL; missing / negative id returns NULL; result type is
-/// <see cref="SqlType.SystemName"/>.
+/// Probe-confirmed against SQL Server 2025 (2026-05-23): the
+/// <c>database_id</c> argument is load-bearing — without it the lookup is
+/// scoped to the connection's current database; with it the lookup is
+/// scoped to the named database (NULL / unknown / out-of-range id →
+/// NULL). NULL <c>object_id</c> returns NULL; missing / negative id
+/// returns NULL; result type is <see cref="SqlType.SystemName"/>.
+/// Database-id allocation matches <see cref="DbId"/>'s
+/// alphabetical-position scheme.
 /// </summary>
 internal sealed class ObjectName : Expression
 {
     private readonly Expression idArg;
+    private readonly Expression? dbIdArg;
 
     public ObjectName(ParserContext context)
     {
         this.idArg = Parse(context);
         if (context.Token is Tokens.Operator { Character: ',' })
         {
-            // database_id arg: accepted and ignored (single-DB simulator).
-            _ = Parse(context.MoveNextRequiredReturnSelf());
+            this.dbIdArg = Parse(context.MoveNextRequiredReturnSelf());
             if (context.Token is Tokens.Operator { Character: ',' })
                 throw SimulatedSqlException.FunctionRequiresNArguments("object_name", 2);
         }
@@ -38,7 +41,24 @@ internal sealed class ObjectName : Expression
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
         var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
-        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+
+        Database? targetDb;
+        if (this.dbIdArg is null)
+        {
+            targetDb = runtime.Batch.CurrentDatabase;
+        }
+        else
+        {
+            var dbIdValue = this.dbIdArg.Run(runtime);
+            if (dbIdValue.IsNull)
+                return SqlValue.Null(SqlType.SystemName);
+            var dbIdInt = dbIdValue.CoerceTo(SqlType.Int32).AsInt32;
+            targetDb = LookupDatabaseById(runtime.Batch.Connection.Simulation, dbIdInt);
+            if (targetDb is null)
+                return SqlValue.Null(SqlType.SystemName);
+        }
+
+        foreach (var schema in targetDb.Schemas.Values)
         {
             foreach (var obj in schema.SchemaObjects())
             {
@@ -54,7 +74,22 @@ internal sealed class ObjectName : Expression
         return SqlValue.Null(SqlType.SystemName);
     }
 
+    private static Database? LookupDatabaseById(Simulation simulation, int requested)
+    {
+        short id = 1;
+        foreach (var db in DbId.OrderedDatabases(simulation))
+        {
+            if (id == requested)
+                return db;
+            id++;
+        }
+        return null;
+    }
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
-    internal override string DebugDisplay() => $"OBJECT_NAME({this.idArg.DebugDisplay()})";
+    internal override string DebugDisplay() =>
+        this.dbIdArg is null
+            ? $"OBJECT_NAME({this.idArg.DebugDisplay()})"
+            : $"OBJECT_NAME({this.idArg.DebugDisplay()}, {this.dbIdArg.DebugDisplay()})";
 }
