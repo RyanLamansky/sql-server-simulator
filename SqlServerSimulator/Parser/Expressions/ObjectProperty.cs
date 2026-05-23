@@ -42,7 +42,7 @@ internal sealed class ObjectProperty : Expression
                 : SqlValue.Null(SqlType.Int32);
     }
 
-    private static SchemaObject? FindObject(Database database, int id)
+    internal static SchemaObject? FindObject(Database database, int id)
     {
         foreach (var schema in database.Schemas.Values)
         {
@@ -62,7 +62,36 @@ internal sealed class ObjectProperty : Expression
         return null;
     }
 
-    private static int? EvaluateProperty(SchemaObject obj, string property)
+    /// <summary>
+    /// Finds the schema that owns <paramref name="obj"/>, or returns
+    /// <c>null</c> if the object isn't reachable through the database's
+    /// per-schema dictionaries. Used by OBJECTPROPERTYEX's <c>SchemaId</c>
+    /// property; the lookup is linear (no back-pointer on <see cref="SchemaObject"/>).
+    /// </summary>
+    internal static Schema? FindOwningSchema(Database database, SchemaObject obj)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            if (schema.HeapTables.Values.Contains(obj)
+                || schema.Views.Values.Contains(obj)
+                || schema.Procedures.Values.Contains(obj)
+                || schema.Functions.Values.Contains(obj)
+                || schema.Triggers.Values.Contains(obj)
+                || schema.Sequences.Values.Contains(obj))
+            {
+                return schema;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Boolean Is-X property dispatch shared with <c>OBJECTPROPERTYEX</c>.
+    /// Returns <c>1</c> / <c>0</c> for the recognized properties, <c>null</c>
+    /// for unknown names. Property-name comparison is case-insensitive via
+    /// the SSS003-friendly <see cref="ReadOnlySpan{T}"/> overload.
+    /// </summary>
+    internal static int? EvaluateProperty(SchemaObject obj, string property)
     {
         // Boolean Is-X checks based on concrete type. Returns 1 if true,
         // 0 if false, NULL for unknown property names (matching real

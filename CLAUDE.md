@@ -149,7 +149,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **CTE shapes / recursive-CTE error handling** → [`ctes.md`](docs/claude/ctes.md).
 - **JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / JSON_PATH_EXISTS / ISJSON / OPENJSON** → [`json.md`](docs/claude/json.md).
 - **Name resolution, schema lookup, CREATE / DROP / ALTER SCHEMA TRANSFER, `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` / `SCHEMA_ID` / `SCHEMA_NAME` / `DB_ID` / `DB_NAME`, cross-DB read routing** → [`schemas.md`](docs/claude/schemas.md).
-- **System metadata surfaces** (sys.* / INFORMATION_SCHEMA.*, function-form lookups: `OBJECTPROPERTY` / `SERVERPROPERTY` / `COL_LENGTH` / `COL_NAME` / `TYPE_NAME` / `TYPE_ID` / `PARSENAME`) → [`catalog-views.md`](docs/claude/catalog-views.md).
+- **System metadata surfaces** (sys.* / INFORMATION_SCHEMA.*, function-form lookups: `OBJECTPROPERTY` / `OBJECTPROPERTYEX` / `COLUMNPROPERTY` / `INDEXPROPERTY` / `TYPEPROPERTY` / `SERVERPROPERTY` / `COL_LENGTH` / `COL_NAME` / `TYPE_NAME` / `TYPE_ID` / `PARSENAME`) → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL / `@@NESTLEVEL` / `@@PROCID`** → [`programmable.md`](docs/claude/programmable.md).
 - **`#foo` / `##foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** → [`table-variables.md`](docs/claude/table-variables.md).

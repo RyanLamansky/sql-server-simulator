@@ -722,6 +722,7 @@ internal abstract class Expression
                 "ERROR_NUMBER" => new ErrorNumberFunction(context),
                 "ROWCOUNT_BIG" => new RowCountBig(context),
                 "SWITCHOFFSET" => new SwitchOffset(context),
+                "TYPEPROPERTY" => new TypeProperty(context),
                 _ => null
             },
             13 => uppercaseName switch
@@ -729,6 +730,7 @@ internal abstract class Expression
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),
+                "INDEXPROPERTY" => new IndexProperty(context),
                 "IS_ROLEMEMBER" => new RoleMemberCheck(context),
                 "STRING_ESCAPE" => new StringEscape(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
@@ -736,6 +738,7 @@ internal abstract class Expression
             },
             14 => uppercaseName switch
             {
+                "COLUMNPROPERTY" => new ColumnProperty(context),
                 "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
                 "OBJECTPROPERTY" => new ObjectProperty(context),
                 "ORIGINAL_LOGIN" => new OriginalLogin(context),
@@ -755,6 +758,7 @@ internal abstract class Expression
             {
                 "IS_SRVROLEMEMBER" => new RoleMemberCheck(context),
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
+                "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
                 "ORIGINAL_DB_NAME" => new OriginalDbName(context),
                 "TODATETIMEOFFSET" => new ToDateTimeOffset(context),
                 _ => null

@@ -69,11 +69,13 @@ Need new aggregators, large property tables, or principal-model wiring.
 - [x] **SOUNDEX(s)** — English phonetic encoding (4-character code, standard algorithm). 🎯 closes **String (31/31)** with STR, STRING_ESCAPE, TRANSLATE, DIFFERENCE.
 - [ ] **SESSION_CONTEXT(key)** + **sp_set_session_context** — per-session key/value store.
 - [ ] **CONTEXT_INFO()** + **SET CONTEXT_INFO** — single 128-byte binary slot.
-- [x] **OBJECTPROPERTY(id, prop)** — 10 common Is-X boolean checks (IsTable/IsView/IsProcedure/IsTrigger/IsScalarFunction/IsTableFunction/IsInlineFunction/IsMSShipped/IsDeterministic/IsSchemaBound); unknown property → NULL. **OBJECTPROPERTYEX** still pending.
-- [ ] **COLUMNPROPERTY(table_id, col, prop)** — column property switch.
-- [ ] **INDEXPROPERTY / INDEX_COL / INDEXKEY_PROPERTY / STATS_DATE** — index introspection.
+- [x] **OBJECTPROPERTY(id, prop)** — 10 common Is-X boolean checks (IsTable/IsView/IsProcedure/IsTrigger/IsScalarFunction/IsTableFunction/IsInlineFunction/IsMSShipped/IsDeterministic/IsSchemaBound); unknown property → NULL.
+- [x] **OBJECTPROPERTYEX(id, prop)** — Is-X (delegates to OBJECTPROPERTY) + BaseType / SchemaId / Cardinality / TableHas* extended properties; returns nvarchar (sql_variant proxy).
+- [x] **COLUMNPROPERTY(table_id, col, prop)** — AllowsNull / IsIdentity / IsComputed / IsRowGuidCol / Precision / Scale / CharMaxLen / ColumnId / UsesAnsiTrim.
+- [ ] **INDEX_COL / INDEXKEY_PROPERTY / STATS_DATE** — physical-storage index introspection (need B-tree / stats history not modeled).
+- [x] **INDEXPROPERTY(object_id, index, prop)** — IsClustered / IsUnique + always-0 physical-stat props (IsAutoStatistics / IndexDepth / etc.).
 - [x] **SERVERPROPERTY(name)** — 35-property switch returning placeholder constants; values surface as nvarchar (real returns sql_variant).
-- [ ] **TYPEPROPERTY(type, prop)** — type property switch.
+- [x] **TYPEPROPERTY(type, prop)** — Precision / Scale / AllowsNull / UsesAnsiTrim against a 25-entry system-type lookup table.
 - [ ] **OBJECT_DEFINITION(id)** — requires storing source text for procs/views/triggers/UDFs.
 - [ ] **CONNECTIONPROPERTY(name) / SESSION_ID() / CURRENT_REQUEST_ID() / CURRENT_TRANSACTION_ID()** — session/request identity scalars.
 - [x] **HAS_PERMS_BY_NAME / IS_MEMBER / IS_ROLEMEMBER / IS_SRVROLEMEMBER** — placeholder permission checks (simulator doesn't enforce permissions; HAS_PERMS_BY_NAME returns 1 for any non-NULL input; IS_MEMBER('public') returns 1, other roles return 0).
