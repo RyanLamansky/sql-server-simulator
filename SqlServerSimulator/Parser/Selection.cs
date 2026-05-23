@@ -820,12 +820,14 @@ internal sealed partial class Selection
             SqlType ChainedResolverForName(MultiPartName name) =>
                 ResolveColumnTypeAcrossSources(leftSnapshotForName, name, surroundingOuter);
 
-            // Built-in rowset functions (OPENJSON, STRING_SPLIT) share the
-            // same APPLY-friendly shape as user-defined inline TVFs — route
-            // them back through ParseSingleFromSource. Case-insensitive
-            // match to mirror real SQL Server's grammar.
+            // Built-in rowset functions (OPENJSON, STRING_SPLIT,
+            // GENERATE_SERIES) share the same APPLY-friendly shape as user-
+            // defined inline TVFs — route them back through
+            // ParseSingleFromSource. Case-insensitive match to mirror real
+            // SQL Server's grammar.
             if (string.Equals(nextName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(nextName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(nextName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(nextName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
             {
                 context.RestoreCheckpoint(checkpoint);
                 return ParseSingleFromSource(context, depth, ChainedResolverForName);
@@ -939,6 +941,28 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: stringSplitPlan);
+                }
+
+                // GENERATE_SERIES dispatch: sibling of STRING_SPLIT — built-in
+                // TVF (SQL Server 2022+) that synthesizes a single-column
+                // (`value`) Selection plan. Same 1-part-name grammar as
+                // STRING_SPLIT / OPENJSON.
+                if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
+                {
+                    var genSeriesPlan = ParseGenerateSeries(context, outerTypeResolver);
+                    var genSeriesColumns = new HeapColumn[genSeriesPlan.Schema.Length];
+                    for (var ci = 0; ci < genSeriesColumns.Length; ci++)
+                        genSeriesColumns[ci] = new HeapColumn(genSeriesPlan.ColumnNames[ci], genSeriesPlan.Schema[ci], maxLength: null, nullable: true);
+                    var genSeriesAlias = ConsumeOptionalAliasInPlace(context);
+                    return new FromSource(
+                        qualifier: genSeriesAlias,
+                        columnNames: genSeriesPlan.ColumnNames,
+                        columns: genSeriesColumns,
+                        storedSchema: genSeriesColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: genSeriesPlan);
                 }
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the

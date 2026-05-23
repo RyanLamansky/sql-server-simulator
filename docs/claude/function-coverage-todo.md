@@ -53,7 +53,7 @@ Existing infrastructure plus a small lookup, property table, or splitter.
 - [x] **GET_BIT(num, index)** — test bit.
 - [x] **SET_BIT(num, index [, value])** — set/clear bit.
 - [x] **LEFT_SHIFT(num, n) / RIGHT_SHIFT(num, n)** — shift operators (logical right shift, probe-confirmed). 🎯 closes **Bit Manipulation (5/5)** with the three above.
-- [ ] **GENERATE_SERIES(start, stop [, step])** — bigint TVF; popular for ad-hoc SQL and tests.
+- [x] **GENERATE_SERIES(start, stop [, step])** — bigint TVF; popular for ad-hoc SQL and tests.
 
 ## Tier 4 — Higher effort or narrower popularity
 

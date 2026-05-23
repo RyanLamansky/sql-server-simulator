@@ -476,6 +476,25 @@ partial class SimulatedSqlException
         new($"The enable_ordinal argument for string_split only supports constant values (not variables or columns).", 8748, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 5373 — fired by <c>GENERATE_SERIES</c> when the
+    /// three argument types don't all match. Wording probe-confirmed against
+    /// SQL Server 2025: the suffix lists the supported types verbatim
+    /// (<c>tinyint, smallint, int, bigint, decimal and numeric</c>) and the
+    /// State / Class are 1 / 16.
+    /// </summary>
+    internal static SimulatedSqlException GenerateSeriesArgsMustShareType() =>
+        new("All the input parameters should be of the same type. Supported types are tinyint, smallint, int, bigint, decimal and numeric.", 5373, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4199 — fired by <c>GENERATE_SERIES</c> when the
+    /// optional third argument (<c>step</c>) is zero. Same Msg-number as
+    /// <see cref="StringSplitInvalidEnableOrdinal"/>; only the function name in
+    /// the message differs (<c>generate_series</c> here).
+    /// </summary>
+    internal static SimulatedSqlException GenerateSeriesStepZero() =>
+        new("Argument value 0 is invalid for argument 3 of generate_series function.", 4199, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 13618: an <c>AS JSON</c> modifier in an
     /// <c>OPENJSON ... WITH</c> column declaration appears on a column whose
     /// declared type isn't <c>nvarchar(max)</c>. Wording probe-confirmed

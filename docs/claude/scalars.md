@@ -156,3 +156,15 @@ Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catal
 - Non-int third argument → Msg 8116; `enable_ordinal` literal outside {0, 1, NULL} → Msg 4199.
 - Composes with `CROSS APPLY` / `OUTER APPLY` via the lateral-dispatch fast path: `ParseLateralFromSource` recognizes `STRING_SPLIT` (and `OPENJSON`) by name and routes back through `ParseSingleFromSource` with the chained outer-type resolver that includes left-side sources (so `STRING_SPLIT(t.col, ',')` correctly resolves `t.col` against the APPLY's left side).
 - Input column type determines the `value` column's string family at parse time (`varchar` → `varchar`; `nvarchar` → `nvarchar`); non-string input maps to `nvarchar`. The value column inherits MAX-ness through the same parse-time-resolver mechanism `REPLICATE` uses.
+
+## Built-in TVF: `GENERATE_SERIES`
+`GENERATE_SERIES(start, stop [, step])` (SQL Server 2022+) — third sibling of `STRING_SPLIT` / `OPENJSON` in the `ParseSingleFromSource` dispatch (and the `ParseLateralFromSource` allowlist, so `CROSS APPLY GENERATE_SERIES(1, t.n)` lateral-correlates correctly). Projects a single column named `value`. Probe-confirmed against SQL Server 2025 (2026-05-23).
+
+- Allowed arg types: `tinyint`, `smallint`, `int`, `bigint`, `decimal` / `numeric`. Anything else (`float`, `real`, `money`, `varchar`, `date`, …) raises **Msg 8116** at parse, with verbatim wording `Argument data type <type> is invalid for argument <N> of generate_series function`.
+- All three args must share the same type. Integer subtypes are distinct (`int` + `bigint` raises **Msg 5373**); `decimal` / `numeric` collapse to one family and tolerate differing precision / scale (unified via `SqlType.Promote`, so DECIMAL(10,1) + DECIMAL(10,2) projects DECIMAL with the wider scale).
+- Output column type tracks the input type — `tinyint` args project `tinyint`, decimal args project decimal with the unified precision / scale.
+- Step omitted: defaults to `-1` when `start > stop`, else `1` — so `GENERATE_SERIES(5, 1)` yields the descending sequence `5, 4, 3, 2, 1` (probe-confirmed; matches Microsoft's docs).
+- Wrong-direction step (positive step with `start > stop`, or negative step with `start < stop`) → empty rowset, no error. Step `= 0` → **Msg 4199** (`Argument value 0 is invalid for argument 3 of generate_series function`).
+- Any NULL arg → empty rowset (no error, no row). Bare untyped `NULL` is also accepted — the column type is inferred from the non-NULL siblings.
+- Fewer than 2 args → **Msg 313**; more than 3 → **Msg 8144**. (Real server raises the procedure-shaped error numbers even though `GENERATE_SERIES` is a TVF; verbatim wording probed.)
+- Internal generation uses `long` arithmetic for integer types and `decimal` for the decimal family. `bigint` near `MAX_INT64` terminates via the overflow-edge check (`cur > long.MaxValue - step`) before the addition would wrap, so `GENERATE_SERIES(MAX_INT-7, MAX_INT, 3)` yields three rows just like real SQL Server.
