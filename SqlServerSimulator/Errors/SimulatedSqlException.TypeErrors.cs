@@ -481,6 +481,40 @@ partial class SimulatedSqlException
         new($"Implicit conversion of {type.SqlServerName} value to {type.SqlServerName} cannot be performed because the collation of the value is unresolved due to a collation conflict.", 457, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8116 — the bit-manipulation family
+    /// (<c>BIT_COUNT</c> / <c>GET_BIT</c> / <c>SET_BIT</c> / <c>LEFT_SHIFT</c> /
+    /// <c>RIGHT_SHIFT</c>) raises this when argument 1 isn't an integer
+    /// or binary type. Verified wording against SQL Server 2025
+    /// (2026-05-22).
+    /// </summary>
+    internal static SimulatedSqlException ArgumentDataTypeInvalidForBitFunction(string typeName, int argumentIndex, string functionName) =>
+        new($"Argument data type {typeName} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8120 — the bit-manipulation family raises
+    /// this when a position / value argument falls outside its allowed
+    /// range (e.g. <c>GET_BIT(int, 32)</c> exceeds the int bit-width).
+    /// </summary>
+    internal static SimulatedSqlException BitFunctionPositionOutOfRange(string functionName, int argumentIndex, int min, int max) =>
+        new($"Parameter {argumentIndex} in function '{functionName}' is out of range {min} to {max}.", 8120, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 9819 — <c>TRANSLATE(input, chars, translations)</c>
+    /// raises this when <c>chars</c> and <c>translations</c> have unequal
+    /// length. Verbatim wording verified against SQL Server 2025 (2026-05-22).
+    /// </summary>
+    internal static SimulatedSqlException TranslateUnequalChars() =>
+        new("The second and third arguments of the TRANSLATE built-in function must contain an equal number of characters.", 9819, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 9819 (variant used by <c>PARSE</c>) — fires
+    /// when the source string can't be converted into the target type
+    /// under the given culture.
+    /// </summary>
+    internal static SimulatedSqlException ParseConversionFailed(string value, string targetTypeName, string cultureName) =>
+        new($"Error converting string value '{value}' into data type {targetTypeName} using culture '{cultureName}'.", 9819, 16, 1);
+
+    /// <summary>
     /// Returns the type name SQL Server uses in Msg 402 / 206 / 529 for a
     /// date/time type: the family root (e.g. <c>datetime2</c>,
     /// <c>datetimeoffset</c>) without a precision suffix, matching

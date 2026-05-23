@@ -10,7 +10,7 @@ Auto-loaded orientation. `README.md` is for humans.
 
 ## Operating goal
 
-High-fidelity emulation. Authenticity over desirability — when SQL Server's behavior is quirky or lossy (CP1252 `?` replacement, ANSI trailing-space `=` padding, `LEN` excluding trailing spaces), mirror it. Current fidelity bar: EF Core trusts the simulator end-to-end. `*.Tests.EFCore` is the regression oracle. Priority is opportunistic — pick the lowest-effort path that unlocks the most application compatibility next.
+High-fidelity emulation. Authenticity over desirability — when SQL Server's behavior is quirky or lossy (CP1252 `?` replacement, ANSI trailing-space `=` padding, `LEN` excluding trailing spaces), mirror it. EF Core trusts the simulator end-to-end (`*.Tests.EFCore` is the regression oracle and must stay green). Beyond that floor, priority is broad SQL Server coverage weighted by popularity (user wins) and ease (thoroughness wins). The function-coverage backlog at [`docs/claude/function-coverage-todo.md`](docs/claude/function-coverage-todo.md) is sorted by that weighting and tracks category-completion milestones — read it before pitching a new built-in function.
 
 ## Feature-bundle workflow
 

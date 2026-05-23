@@ -72,6 +72,9 @@ internal abstract class Expression
                 AtAtKeyword.RowCount => new RowCountExpression(),
                 AtAtKeyword.LockTimeout => new LockTimeoutExpression(context),
                 AtAtKeyword.SpId => new SpidExpression(context),
+                AtAtKeyword.NestLevel => new NestLevelExpression(),
+                AtAtKeyword.Dbts => new DbTsExpression(),
+                AtAtKeyword.ProcId => new ProcIdExpression(),
                 _ => new Value(doubleAtPrefixedString),
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
@@ -83,6 +86,11 @@ internal abstract class Expression
             // inherits the same Msg-102 path from the surrounding parser
             // catching the unexpected `(`.
             ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp),
+            ReservedKeyword { Keyword: Keyword.Current_Date } => new CurrentTimeFunction(CurrentTimeKind.CurrentDate),
+            ReservedKeyword { Keyword: Keyword.Current_User } => new CurrentPrincipalKeyword("CURRENT_USER"),
+            ReservedKeyword { Keyword: Keyword.Session_User } => new CurrentPrincipalKeyword("SESSION_USER"),
+            ReservedKeyword { Keyword: Keyword.System_user } => new CurrentPrincipalKeyword("SYSTEM_USER"),
+            ReservedKeyword { Keyword: Keyword.User } => new CurrentPrincipalKeyword("USER"),
             // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
             // reserved keywords but dispatch as function calls when followed
             // by '(' — the surrounding loop hands the call shape off to
@@ -525,6 +533,7 @@ internal abstract class Expression
             3 => uppercaseName switch
             {
                 "ABS" => new AbsoluteValue(context),
+                "STR" => new Str(context),
                 "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
                 "COS" => new TrigFunction(context, TrigKind.Cos),
                 "COT" => new TrigFunction(context, TrigKind.Cot),
@@ -565,6 +574,8 @@ internal abstract class Expression
             {
                 "ASCII" => new Ascii(context),
                 "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
+                "DB_ID" => new DbId(context),
+                "PARSE" => new ParseFunction(context, tryMode: false),
                 "FLOOR" => new Floor(context),
                 "LOG10" => new Log10(context),
                 "LOWER" => new Lower(context),
@@ -585,6 +596,7 @@ internal abstract class Expression
             },
             6 => uppercaseName switch
             {
+                "CHOOSE" => new Choose(context),
                 "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
                 "FORMAT" => new Format(context),
                 "ISDATE" => new IsDate(context),
@@ -598,23 +610,33 @@ internal abstract class Expression
             7 => uppercaseName switch
             {
                 "CEILING" => new Ceiling(context),
+                "SOUNDEX" => new Soundex(context),
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "DATEADD" => new DateAdd(context),
+                "DB_NAME" => new DbName(context),
                 "DEGREES" => new Degrees(context),
                 "EOMONTH" => new EOMonth(context),
+                "GET_BIT" => new GetBit(context),
                 "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
                 "RADIANS" => new Radians(context),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),
+                "SET_BIT" => new SetBit(context),
                 "TYPE_ID" => new TypeId(context),
                 "UNICODE" => new UnicodeCodepoint(context),
+                "USER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.UserId),
                 _ => null
             },
             8 => uppercaseName switch
             {
+                "APP_NAME" => new AppName(context),
+                "SUSER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.SUserId),
+                "CHECKSUM" => new Checksum(context, isBinary: false),
                 "COALESCE" => new Coalesce(context),
+                "COL_NAME" => new ColName(context),
                 "COMPRESS" => new Compress(context),
                 "DATEDIFF" => new DateDiff.Standard(context),
+                "DATENAME" => new DateName(context),
                 "DATEPART" => new DatePart(context),
                 "GROUPING" => new Grouping(context),
                 "PATINDEX" => new PatIndex(context),
@@ -623,39 +645,59 @@ internal abstract class Expression
             },
             9 => uppercaseName switch
             {
+                "BIT_COUNT" => new BitCount(context),
                 "CHARINDEX" => new CharIndex(context),
+                "DATETRUNC" => new DateTrunc(context),
+                "IS_MEMBER" => new RoleMemberCheck(context),
                 "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
+                "HOST_NAME" => new HostName(context),
                 "ISNUMERIC" => new IsNumeric(context),
                 "OBJECT_ID" => new ObjectId(context),
+                "PARSENAME" => new ParseName(context),
                 "QUOTENAME" => new QuoteName(context),
                 "REPLICATE" => new Replicate(context),
                 "SCHEMA_ID" => new SchemaId(context),
                 "SUBSTRING" => new Substring(context),
+                "TRANSLATE" => new Translate(context),
+                "TRY_PARSE" => new ParseFunction(context, tryMode: true),
+                "TYPE_NAME" => new TypeName(context),
+                "USER_NAME" => new UserName(context),
                 _ => null
             },
             10 => uppercaseName switch
             {
+                "COL_LENGTH" => new ColLength(context),
                 "DATALENGTH" => new DataLength(context),
                 "DECOMPRESS" => new Decompress(context),
                 "DENSE_RANK" => WindowExpression.ParseDenseRank(context),
+                "DIFFERENCE" => new Difference(context),
                 "ERROR_LINE" => new ErrorLineFunction(context),
                 "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
+                "IDENT_INCR" => new IdentSeedIncrement(context, isSeed: false),
+                "IDENT_SEED" => new IdentSeedIncrement(context, isSeed: true),
                 "JSON_QUERY" => new JsonQuery(context),
                 "JSON_VALUE" => new JsonValue(context),
                 "LAST_VALUE" => WindowExpression.ParseLastValue(context),
+                "LEFT_SHIFT" => new BitShift(context, isLeftShift: true),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
+                "SUSER_NAME" => new SUserName(context, isSidVariant: false),
+                "XACT_STATE" => new XactState(context),
                 _ => null
             },
             11 => uppercaseName switch
             {
+                "DATE_BUCKET" => new DateBucket(context),
                 "ERROR_STATE" => new ErrorStateFunction(context),
                 "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
+                "GETANSINULL" => new GetAnsiNull(context),
                 "GROUPING_ID" => new GroupingId(context),
                 "JSON_MODIFY" => new JsonModify(context),
                 "OBJECT_NAME" => new ObjectName(context),
+                "RIGHT_SHIFT" => new BitShift(context, isLeftShift: false),
                 "SCHEMA_NAME" => new SchemaName(context),
+                "SUSER_SNAME" => new SUserName(context, isSidVariant: true),
                 "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
                 _ => null
@@ -665,6 +707,8 @@ internal abstract class Expression
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),
                 "ERROR_NUMBER" => new ErrorNumberFunction(context),
+                "ROWCOUNT_BIG" => new RowCountBig(context),
+                "SWITCHOFFSET" => new SwitchOffset(context),
                 _ => null
             },
             13 => uppercaseName switch
@@ -672,25 +716,40 @@ internal abstract class Expression
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),
+                "IS_ROLEMEMBER" => new RoleMemberCheck(context),
+                "STRING_ESCAPE" => new StringEscape(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null
             },
             14 => uppercaseName switch
             {
                 "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
+                "OBJECTPROPERTY" => new ObjectProperty(context),
+                "ORIGINAL_LOGIN" => new OriginalLogin(context),
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
+                "SERVERPROPERTY" => new ServerProperty(context),
                 "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
                 _ => null
             },
             15 => uppercaseName switch
             {
+                "BINARY_CHECKSUM" => new Checksum(context, isBinary: true),
                 "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
+                _ => null
+            },
+            16 => uppercaseName switch
+            {
+                "IS_SRVROLEMEMBER" => new RoleMemberCheck(context),
+                "JSON_PATH_EXISTS" => new JsonPathExists(context),
+                "ORIGINAL_DB_NAME" => new OriginalDbName(context),
+                "TODATETIMEOFFSET" => new ToDateTimeOffset(context),
                 _ => null
             },
             17 => uppercaseName switch
             {
                 "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
+                "HAS_PERMS_BY_NAME" => new HasPermsByName(context),
                 "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
                 "TRIGGER_NESTLEVEL" => new TriggerNestLevelFunction(context),
                 _ => null
@@ -705,6 +764,8 @@ internal abstract class Expression
             21 => uppercaseName switch
             {
                 "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct),
+                "DATABASE_PRINCIPAL_ID" => new PrincipalIdLookup(context, PrincipalIdKind.DatabasePrincipalId),
+                "MIN_ACTIVE_ROWVERSION" => new MinActiveRowVersion(context),
                 _ => null
             },
             22 => uppercaseName switch

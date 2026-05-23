@@ -14,6 +14,7 @@ internal enum CurrentTimeKind
     SysUtcDateTime,
     SysDateTimeOffset,
     CurrentTimestamp,
+    CurrentDate,
 }
 
 /// <summary>
@@ -83,6 +84,7 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
                 SqlValue.FromDateTime2(DateTime2_7, utcNow),
             CurrentTimeKind.SysDateTimeOffset =>
                 SqlValue.FromDateTimeOffset(DateTimeOffset_7, new DateTimeOffset(utcNow, TimeSpan.Zero)),
+            CurrentTimeKind.CurrentDate => SqlValue.FromDate(DateOnly.FromDateTime(utcNow)),
             _ => throw new InvalidOperationException($"Unknown current-time kind {this.Kind}."),
         };
     }
@@ -92,6 +94,7 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
         CurrentTimeKind.GetDate or CurrentTimeKind.GetUtcDate or CurrentTimeKind.CurrentTimestamp => SqlType.DateTime,
         CurrentTimeKind.SysDateTime or CurrentTimeKind.SysUtcDateTime => DateTime2_7,
         CurrentTimeKind.SysDateTimeOffset => DateTimeOffset_7,
+        CurrentTimeKind.CurrentDate => SqlType.Date,
         _ => throw new InvalidOperationException($"Unknown current-time kind {this.Kind}."),
     };
 
@@ -103,6 +106,7 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
         CurrentTimeKind.SysUtcDateTime => "SYSUTCDATETIME()",
         CurrentTimeKind.SysDateTimeOffset => "SYSDATETIMEOFFSET()",
         CurrentTimeKind.CurrentTimestamp => "CURRENT_TIMESTAMP",
+        CurrentTimeKind.CurrentDate => "CURRENT_DATE",
         _ => throw new InvalidOperationException($"Unknown current-time kind {this.Kind}."),
     };
 }

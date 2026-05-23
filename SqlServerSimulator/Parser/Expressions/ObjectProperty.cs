@@ -1,0 +1,108 @@
+using SqlServerSimulator.Schemas;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator.Parser.Expressions;
+
+/// <summary>
+/// SQL <c>OBJECTPROPERTY(object_id, 'property')</c>: returns metadata
+/// flags / values for a schema object. Property values come back as
+/// <c>int</c> in real SQL Server; the simulator returns <c>int</c> for
+/// the boolean Is-X properties and falls through to NULL for unknown
+/// properties. The most common boolean checks (IsTable, IsView,
+/// IsProcedure, IsTrigger, IsScalarFunction, IsTableFunction) are
+/// supported.
+/// </summary>
+internal sealed class ObjectProperty : Expression
+{
+    private readonly Expression idArg;
+    private readonly Expression propertyArg;
+
+    public ObjectProperty(ParserContext context)
+    {
+        this.idArg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        this.propertyArg = Parse(context.MoveNextRequiredReturnSelf());
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var idValue = this.idArg.Run(runtime);
+        var propValue = this.propertyArg.Run(runtime);
+        if (idValue.IsNull || propValue.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
+        var obj = FindObject(runtime.Batch.CurrentDatabase, id);
+        return obj is null ? SqlValue.Null(SqlType.Int32)
+            : EvaluateProperty(obj, prop) is int result
+                ? SqlValue.FromInt32(result)
+                : SqlValue.Null(SqlType.Int32);
+    }
+
+    private static SchemaObject? FindObject(Database database, int id)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var t in schema.HeapTables.Values)
+                if (t.ObjectId == id) return t;
+            foreach (var v in schema.Views.Values)
+                if (v.ObjectId == id) return v;
+            foreach (var p in schema.Procedures.Values)
+                if (p.ObjectId == id) return p;
+            foreach (var f in schema.Functions.Values)
+                if (f.ObjectId == id) return f;
+            foreach (var tr in schema.Triggers.Values)
+                if (tr.ObjectId == id) return tr;
+            foreach (var s in schema.Sequences.Values)
+                if (s.ObjectId == id) return s;
+        }
+        return null;
+    }
+
+    private static int? EvaluateProperty(SchemaObject obj, string property)
+    {
+        // Boolean Is-X checks based on concrete type. Returns 1 if true,
+        // 0 if false, NULL for unknown property names (matching real
+        // SQL Server's convention). SSS003: use the Span<char> overload
+        // to avoid the temp-string alloc in the switch.
+        Span<char> upper = stackalloc char[property.Length];
+        return property.AsSpan().ToUpperInvariant(upper) switch
+        {
+            6 => upper switch { "ISVIEW" => obj is View ? 1 : 0, _ => null },
+            7 => upper switch { "ISTABLE" => obj is HeapTable ? 1 : 0, _ => null },
+            9 => upper switch
+            {
+                "ISTRIGGER" => obj is Trigger ? 1 : 0,
+                _ => null,
+            },
+            11 => upper switch
+            {
+                "ISUSERTABLE" => obj is HeapTable ? 1 : 0,
+                "ISPROCEDURE" => obj is Procedure ? 1 : 0,
+                "ISMSSHIPPED" => 0,
+                _ => null,
+            },
+            15 => upper switch
+            {
+                "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
+                "ISDETERMINISTIC" => obj is ScalarFunction ? 1 : 0,
+                "ISSCHEMABOUND" => 0,
+                _ => null,
+            },
+            16 => upper switch
+            {
+                "ISSCALARFUNCTION" => obj is ScalarFunction ? 1 : 0,
+                "ISINLINEFUNCTION" => obj is InlineTableValuedFunction ? 1 : 0,
+                _ => null,
+            },
+            _ => null,
+        };
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override string DebugDisplay() => $"OBJECTPROPERTY({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+}

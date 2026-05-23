@@ -3,6 +3,7 @@
 enum AtAtKeyword
 {
     _ = 0, // "Default" value for the enum, indicating not a keyword.
+    DateFirst,
     Dbts,
     Error,
     Identity,
@@ -13,6 +14,7 @@ enum AtAtKeyword
     MaxPrecision,
     NestLevel,
     Options,
+    ProcId,
     RemServer,
     RowCount,
     ServerName,

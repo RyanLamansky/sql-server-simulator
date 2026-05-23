@@ -429,7 +429,7 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.Into }:
                     break;
 
-                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp }:
+                case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp or Keyword.Current_Date or Keyword.Current_User or Keyword.Session_User or Keyword.System_user or Keyword.User }:
                     // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, NULLIF are
                     // reserved keywords but valid as function-call heads
                     // inside a SELECT projection. CASE introduces an inline
