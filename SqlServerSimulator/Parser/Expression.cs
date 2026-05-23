@@ -663,6 +663,7 @@ internal abstract class Expression
                 "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
                 "HOST_NAME" => new HostName(context),
+                "INDEX_COL" => new IndexCol(context),
                 "ISNUMERIC" => new IsNumeric(context),
                 "OBJECT_ID" => new ObjectId(context),
                 "PARSENAME" => new ParseName(context),
@@ -693,6 +694,7 @@ internal abstract class Expression
                 "LAST_VALUE" => WindowExpression.ParseLastValue(context),
                 "LEFT_SHIFT" => new BitShift(context, isLeftShift: true),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
+                "STATS_DATE" => new StatsDate(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 "SUSER_NAME" => new SUserName(context, isSidVariant: false),
                 "XACT_STATE" => new XactState(context),
@@ -767,6 +769,7 @@ internal abstract class Expression
             {
                 "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
                 "HAS_PERMS_BY_NAME" => new HasPermsByName(context),
+                "INDEXKEY_PROPERTY" => new IndexKeyProperty(context),
                 "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
                 "TRIGGER_NESTLEVEL" => new TriggerNestLevelFunction(context),
                 _ => null

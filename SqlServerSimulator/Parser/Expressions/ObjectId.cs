@@ -144,7 +144,7 @@ internal sealed class ObjectId : Expression
     /// segments, 0 segments, or unterminated brackets in any segment return
     /// false.
     /// </summary>
-    private static bool TryParseObjectName(string input, out MultiPartName result)
+    internal static bool TryParseObjectName(string input, out MultiPartName result)
     {
         result = default;
         if (string.IsNullOrEmpty(input))

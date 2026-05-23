@@ -72,7 +72,7 @@ Need new aggregators, large property tables, or principal-model wiring.
 - [x] **OBJECTPROPERTY(id, prop)** — 10 common Is-X boolean checks (IsTable/IsView/IsProcedure/IsTrigger/IsScalarFunction/IsTableFunction/IsInlineFunction/IsMSShipped/IsDeterministic/IsSchemaBound); unknown property → NULL.
 - [x] **OBJECTPROPERTYEX(id, prop)** — Is-X (delegates to OBJECTPROPERTY) + BaseType / SchemaId / Cardinality / TableHas* extended properties; returns nvarchar (sql_variant proxy).
 - [x] **COLUMNPROPERTY(table_id, col, prop)** — AllowsNull / IsIdentity / IsComputed / IsRowGuidCol / Precision / Scale / CharMaxLen / ColumnId / UsesAnsiTrim.
-- [ ] **INDEX_COL / INDEXKEY_PROPERTY / STATS_DATE** — physical-storage index introspection (need B-tree / stats history not modeled).
+- [x] **INDEX_COL / INDEXKEY_PROPERTY / STATS_DATE** — index introspection. INDEX_COL and INDEXKEY_PROPERTY use the shared `IndexLookup` helper to resolve `index_id` against `HeapTable.Indexes` + PK/UQ constraints (no B-tree needed; the metadata is enough). STATS_DATE intentionally diverges from real by returning `HeapTable.CreateDate` instead of NULL — fake-but-realistic since the simulator has no stats lifecycle.
 - [x] **INDEXPROPERTY(object_id, index, prop)** — IsClustered / IsUnique + always-0 physical-stat props (IsAutoStatistics / IndexDepth / etc.).
 - [x] **SERVERPROPERTY(name)** — 35-property switch returning placeholder constants; values surface as nvarchar (real returns sql_variant).
 - [x] **TYPEPROPERTY(type, prop)** — Precision / Scale / AllowsNull / UsesAnsiTrim against a 25-entry system-type lookup table.
