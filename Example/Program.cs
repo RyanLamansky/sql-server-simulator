@@ -2,7 +2,7 @@
 using SqlServerSimulator;
 
 var simulation = new Simulation();
-// If you have a bacpac file, you can import it with smulation.ImportBacpac.
+// If you have a bacpac file, you can import it with simulation.ImportBacpac.
 
 // Commands can be run directly against the simulation, used here to create a table.
 using (var connection = simulation.CreateDbConnection())

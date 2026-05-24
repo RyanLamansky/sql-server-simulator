@@ -7,7 +7,7 @@
     <Description>A simulated SQL Server that runs inside your .NET application.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
-    <PackageReleaseNotes>SQL Server feature compatiblity is limited, see the README for more information.</PackageReleaseNotes>
+    <PackageReleaseNotes>SQL Server feature compatibility is rich but imperfect, see the README for more information.</PackageReleaseNotes>
     <PackageProjectUrl>https://github.com/RyanLamansky/sql-server-simulator</PackageProjectUrl>
     <Copyright>Copyright © Ryan Lamansky. All rights reserved.</Copyright>
     <PackageTags>SqlServer SQL</PackageTags>
@@ -22,7 +22,6 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <DebugType>embedded</DebugType>
     <DebugSymbols>true</DebugSymbols>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsTrimmable>true</IsTrimmable>
     <AnalysisMode>All</AnalysisMode>

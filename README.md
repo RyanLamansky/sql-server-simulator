@@ -1,6 +1,6 @@
 # SQL Server Simulator for .NET
 
-An in-process, _zero-dependency_ .NET 10 stand-in for `Microsoft.Data.SqlClient`. Consumers create a `Simulation`, get a `DbConnection` from `CreateDbConnection()`, and use it with Entity Framework Core (or raw ADO.NET) the same way they would with a real SQL Server.
+An in-process, _zero-dependency_ stand-in for `Microsoft.Data.SqlClient` and SQL Server. Consumers create a `Simulation`, get a `DbConnection` from `CreateDbConnection()`, and use it with Entity Framework Core or raw ADO.NET the same way they would with a real SQL Server.
 
 Intended for fast unit testing of SQL Server-backed applications. Can create and discard thousands of databases every second, enabling test scenarios with conflicting data dependencies to run concurrently.
 
@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore;
 using SqlServerSimulator;
 
 var simulation = new Simulation();
-// If you have a bacpac file, you can import it with smulation.ImportBacpac.
+// If you have a bacpac file, you can import it with simulation.ImportBacpac.
 
 // Commands can be run directly against the simulation, used here to create a table.
 using (var connection = simulation.CreateDbConnection())
@@ -67,7 +67,7 @@ Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations,
 
 ## Capabilities
 
-The simulator is feature-rich with more than 5,000 test cases covering a variety of capabilities:
+The simulator is feature-rich with more than 6,000 test cases covering a variety of capabilities:
 
 - **Type system.** All base scalar families: `int`/`bigint`/`smallint`/`tinyint`, `decimal`/`numeric`, `float`/`real`, `money`/`smallmoney`, `bit`, `char`/`varchar`/`text`, `nchar`/`nvarchar`/`ntext`, `binary`/`varbinary`/`image`, `date`/`time`/`datetime`/`datetime2`/`datetimeoffset`/`smalldatetime`, `uniqueidentifier`, `rowversion`/`timestamp`, `xml`, `hierarchyid`, `geography`, `geometry`. MAX-typed strings and binaries flow through an 8KB LOB page chain.
 - **Storage.** Real 8KB pages, byte-encoded rows navigated column-by-column without rehydrating, off-row LOB pushing to keep rows within the 8060-byte limit.
@@ -95,14 +95,17 @@ Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 
 ## Not modeled
 
-The simulator raises `NotSupportedException` (naming the missing feature) for known valid SQL Server features it hasn't built. Write a bug report if you're blocked. Some examples:
+SQL Server's surface is enormous, and while coverage is broad it is not complete: you may encounter a feature that hasn't been modeled.
+In general, when that happens the simulator raises `NotSupportedException` naming the missing feature, so gaps fail loudly rather than returning wrong results.
+Write a bug report if you're blocked.
+A few examples:
 
 - Cross-database DML - writes through a 3-part name targeting a different database. Cross-database reads work; issue `USE <db>` to switch first for writes.
 - `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `GOTO`/labels.
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset windows (`ROWS` numeric-offset ships).
 - CLR functions, logon triggers, natively-compiled procedures beyond parser fidelity.
 - A few `ALTER TABLE` shapes: `DROP PERIOD FOR SYSTEM_TIME`, `REBUILD`, `SWITCH PARTITION`, identity-type changes.
-- Byte-identical CAST encoding for `hierarchyid` / `geography` / `geometry` - simulator-native encoding is used internally; cross-engine byte transfer is deferred.
+- Byte-identical CAST encoding for `hierarchyid` / `geography` / `geometry` - simulator-native encoding is used internally.
 
 ## Limitations
 
