@@ -229,23 +229,23 @@ internal abstract partial class Collation
             case 2:
                 switch (upper)
                 {
-                    case "CI": flags |= CollationFlags.CaseInsensitive; return true;
-                    case "CS": flags |= CollationFlags.CaseSensitive; return true;
                     case "AI": flags |= CollationFlags.AccentInsensitive; return true;
                     case "AS": flags |= CollationFlags.AccentSensitive; return true;
+                    case "CI": flags |= CollationFlags.CaseInsensitive; return true;
+                    case "CS": flags |= CollationFlags.CaseSensitive; return true;
                     case "KS": flags |= CollationFlags.KanaSensitive; return true;
-                    case "WS": flags |= CollationFlags.WidthSensitive; return true;
                     case "SC": flags |= CollationFlags.SupplementaryCharacters; return true;
+                    case "WS": flags |= CollationFlags.WidthSensitive; return true;
                 }
                 break;
             case 3:
                 switch (upper)
                 {
                     case "BIN": flags |= CollationFlags.Binary; return true;
-                    case "VSS": flags |= CollationFlags.VariationSelectorSensitive; return true;
                     case "CP1":
                         codePage = 1252;
                         return true;
+                    case "VSS": flags |= CollationFlags.VariationSelectorSensitive; return true;
                 }
                 break;
             case 4:

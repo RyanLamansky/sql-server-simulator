@@ -189,11 +189,11 @@ partial class Selection
             _ = l1Type.ToUpperInvariant(l1Kind);
             l1Obj = l1Kind switch
             {
-                "TABLE" => schema.HeapTables.TryGetValue(l1Name, out var t) ? t : null,
-                "VIEW" => schema.Views.TryGetValue(l1Name, out var v) ? v : null,
-                "PROCEDURE" => schema.Procedures.TryGetValue(l1Name, out var p) ? p : null,
                 "FUNCTION" => schema.Functions.TryGetValue(l1Name, out var fn) ? fn : null,
+                "PROCEDURE" => schema.Procedures.TryGetValue(l1Name, out var p) ? p : null,
+                "TABLE" => schema.HeapTables.TryGetValue(l1Name, out var t) ? t : null,
                 "TYPE" => schema.TableTypes.TryGetValue(l1Name, out var tt) ? tt : null,
+                "VIEW" => schema.Views.TryGetValue(l1Name, out var v) ? v : null,
                 _ => throw new NotSupportedException($"fn_listextendedproperty level1type '{l1Type}' isn't modeled (only TABLE / VIEW / PROCEDURE / FUNCTION / TYPE)."),
             };
             if (l1Obj is null)
@@ -254,17 +254,6 @@ partial class Selection
                 objtype = "DATABASE";
                 objname = Database.DefaultSchemaName;
                 return true;
-            case 3:
-                foreach (var s in batch.CurrentDatabase.Schemas.Values)
-                {
-                    if (s.SchemaId == key.MajorId)
-                    {
-                        objtype = "SCHEMA";
-                        objname = s.Name;
-                        return true;
-                    }
-                }
-                return false;
             case 1:
                 foreach (var s in batch.CurrentDatabase.Schemas.Values)
                 {
@@ -313,6 +302,17 @@ partial class Selection
                             objname = fn.Name;
                             return true;
                         }
+                    }
+                }
+                return false;
+            case 3:
+                foreach (var s in batch.CurrentDatabase.Schemas.Values)
+                {
+                    if (s.SchemaId == key.MajorId)
+                    {
+                        objtype = "SCHEMA";
+                        objname = s.Name;
+                        return true;
                     }
                 }
                 return false;

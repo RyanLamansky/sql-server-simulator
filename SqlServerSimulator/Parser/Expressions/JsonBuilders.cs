@@ -78,9 +78,7 @@ internal static class JsonValueRender
         }
         if (type is BinarySqlType or VarbinarySqlType)
         {
-            _ = sb.Append('"');
-            _ = sb.Append(Convert.ToBase64String(value.AsBytes));
-            _ = sb.Append('"');
+            _ = sb.Append('"').Append(Convert.ToBase64String(value.AsBytes)).Append('"');
             return;
         }
         if (type is DateTime2SqlType dt2)
@@ -122,9 +120,7 @@ internal static class JsonValueRender
         var format = precision == 0
             ? "yyyy-MM-ddTHH:mm:ss"
             : "yyyy-MM-ddTHH:mm:ss." + new string('f', precision);
-        _ = sb.Append('"');
-        _ = sb.Append(dt.ToString(format, CultureInfo.InvariantCulture));
-        _ = sb.Append('"');
+        _ = sb.Append('"').Append(dt.ToString(format, CultureInfo.InvariantCulture)).Append('"');
     }
 
     private static string IntegerAsString(SqlType type, SqlValue value)

@@ -50,8 +50,8 @@ internal sealed class VarcharSqlType : SqlType
 
     public override string ToString() => this.length switch
     {
-        0 => "varchar",
         -1 => "varchar(MAX)",
+        0 => "varchar",
         _ => $"varchar({this.length})",
     };
 
@@ -107,8 +107,8 @@ internal sealed class NVarcharSqlType : SqlType
 
     public override string ToString() => this.length switch
     {
-        0 => "nvarchar",
         -1 => "nvarchar(MAX)",
+        0 => "nvarchar",
         _ => $"nvarchar({this.length})",
     };
 
@@ -200,8 +200,8 @@ internal sealed class VarbinarySqlType : SqlType
 
     public override string ToString() => this.length switch
     {
-        0 => "varbinary",
         -1 => "varbinary(MAX)",
+        0 => "varbinary",
         _ => $"varbinary({this.length})",
     };
 

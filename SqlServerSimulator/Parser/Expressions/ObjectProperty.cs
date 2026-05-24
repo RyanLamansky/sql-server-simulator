@@ -109,22 +109,22 @@ internal sealed class ObjectProperty : Expression
             },
             11 => upper switch
             {
-                "ISUSERTABLE" => obj is HeapTable ? 1 : 0,
-                "ISPROCEDURE" => obj is Procedure ? 1 : 0,
                 "ISMSSHIPPED" => 0,
+                "ISPROCEDURE" => obj is Procedure ? 1 : 0,
+                "ISUSERTABLE" => obj is HeapTable ? 1 : 0,
                 _ => null,
             },
             15 => upper switch
             {
-                "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
                 "ISDETERMINISTIC" => obj is ScalarFunction ? 1 : 0,
                 "ISSCHEMABOUND" => 0,
+                "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
                 _ => null,
             },
             16 => upper switch
             {
-                "ISSCALARFUNCTION" => obj is ScalarFunction ? 1 : 0,
                 "ISINLINEFUNCTION" => obj is InlineTableValuedFunction ? 1 : 0,
+                "ISSCALARFUNCTION" => obj is ScalarFunction ? 1 : 0,
                 _ => null,
             },
             _ => null,

@@ -70,8 +70,8 @@ internal sealed class TypeProperty : Expression
         {
             3 => upper switch
             {
-                "INT" => new(10, 0, true, false),
                 "BIT" => new(1, 0, true, false),
+                "INT" => new(10, 0, true, false),
                 "XML" => new(2147483647, 0, true, false),
                 _ => null,
             },

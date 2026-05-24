@@ -1931,10 +1931,10 @@ internal static class BuiltInResources
             };
             var stateDesc = perm.State switch
             {
-                "G" => "GRANT",
-                "W" => "GRANT_WITH_GRANT_OPTION",
                 "D" => "DENY",
+                "G" => "GRANT",
                 "R" => "REVOKE",
+                "W" => "GRANT_WITH_GRANT_OPTION",
                 _ => "GRANT",
             };
             yield return [
@@ -2928,7 +2928,7 @@ internal static class BuiltInResources
                         charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
                         octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
                         numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
-                        numericRadix switch { 10 => radix10, 2 => radix2, _ => nullInt16 },
+                        numericRadix switch { 2 => radix2, 10 => radix10, _ => nullInt16 },
                         numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
                         dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
                         nullSysName,
@@ -2992,8 +2992,8 @@ internal static class BuiltInResources
             NVarcharSqlType nv => (
                 nv.length switch
                 {
-                    0 => (short)((col.MaxLength ?? 1) * 2),
                     -1 => -1,
+                    0 => (short)((col.MaxLength ?? 1) * 2),
                     _ => (short)(nv.length * 2),
                 },
                 0, 0),

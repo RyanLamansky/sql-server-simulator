@@ -301,6 +301,10 @@ internal static class ModelXmlReader
     /// <c>QueryStoreIntervalLength</c> which is a sub-option of QUERY_STORE
     /// and only emits as part of a block.
     /// </summary>
+    // SSS005 disabled: arms are grouped by option family (ANSI toggles, enum-shaped
+    // options, QUERY_STORE sub-options) with explanatory comments per group; sorting
+    // by name would scatter the groups and orphan the comments.
+#pragma warning disable SSS005
     private static string? TranslateDatabaseOption(string name, string value, string bracketedDb) => name switch
     {
         "IsAnsiNullsOn" => $"ALTER DATABASE {bracketedDb} SET ANSI_NULLS {OnOff(value)};",
@@ -349,6 +353,7 @@ internal static class ModelXmlReader
         // simply don't bother re-emitting it from the loader.
         _ => null,
     };
+#pragma warning restore SSS005
 
     private static string OnOff(string value) => IsTrue(value) ? "ON" : "OFF";
 
@@ -610,6 +615,9 @@ internal static class ModelXmlReader
         {
             var columnType = columnElement.Attribute("Type")?.Value;
             var columnName = columnElement.Attribute("Name")?.Value;
+            // SSS005 disabled: cases are ordered by bacpac processing semantics with
+            // per-case explanatory comments, not by name.
+#pragma warning disable SSS005
             switch (columnType)
             {
                 case "SqlSimpleColumn":
@@ -643,6 +651,7 @@ internal static class ModelXmlReader
                         $"Unrecognized column element on '{qualifiedName}'."));
                     break;
             }
+#pragma warning restore SSS005
         }
 
         if (columnDdls.Count == 0)
@@ -1142,6 +1151,9 @@ internal static class ModelXmlReader
 
         // Resolve to sp_addextendedproperty's @levelNtype / @levelNname pairs.
         string? l0type = null, l0name = null, l1type = null, l1name = null, l2type = null, l2name = null;
+        // SSS005 disabled: cases are ordered by extended-property host level (database →
+        // schema → table → column → index → constraint) with per-case comments, not by name.
+#pragma warning disable SSS005
         switch (hostKind)
         {
             case "SqlDatabaseOptions":
@@ -1225,6 +1237,7 @@ internal static class ModelXmlReader
                 result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"Host kind '{hostKind}' not modeled for sp_addextendedproperty."));
                 return;
         }
+#pragma warning restore SSS005
 
         // Assemble the EXEC. Value is already wrapped (N'…' or numeric); other
         // args are bare identifiers quoted as N-strings here.

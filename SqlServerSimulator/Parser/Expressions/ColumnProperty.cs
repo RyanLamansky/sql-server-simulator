@@ -107,9 +107,9 @@ internal sealed class ColumnProperty : Expression
             10 => upper switch
             {
                 "ALLOWSNULL" => column.Nullable ? 1 : 0,
+                "CHARMAXLEN" => GetCharMaxLen(column),
                 "ISCOMPUTED" => column.Computed is null ? 0 : 1,
                 "ISIDENTITY" => column.Identity is null ? 0 : 1,
-                "CHARMAXLEN" => GetCharMaxLen(column),
                 _ => null,
             },
             12 => upper switch

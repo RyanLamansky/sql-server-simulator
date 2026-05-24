@@ -49,6 +49,10 @@ internal static class DatePartKinds
     private static DatePartKind? Resolve(string keyword)
     {
         Span<char> upper = stackalloc char[keyword.Length];
+        // SSS005 disabled: inner-length arms run by descending time-unit magnitude
+        // (quarter → month → … → second), matching how the units are conceptualized,
+        // not alphabetically.
+#pragma warning disable SSS005
         return keyword.AsSpan().ToUpperInvariant(upper) switch
         {
             1 => upper switch
@@ -134,6 +138,7 @@ internal static class DatePartKinds
             },
             _ => null,
         };
+#pragma warning restore SSS005
     }
 
     private static bool IsTimePart(DatePartKind k) => k is DatePartKind.Hour

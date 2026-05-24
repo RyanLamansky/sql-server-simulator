@@ -873,9 +873,9 @@ internal abstract partial class SqlType
         },
         5 => upper switch
         {
+            "IMAGE" => Image,
             "MONEY" => Money,
             "NTEXT" => NText,
-            "IMAGE" => Image,
             _ => null,
         },
         6 => upper switch
@@ -885,24 +885,24 @@ internal abstract partial class SqlType
         },
         7 => upper switch
         {
+            "SYSNAME" => SystemName,
             "TINYINT" => TinyInt,
             "VARCHAR" => Varchar,
-            "SYSNAME" => SystemName,
             _ => null,
         },
         8 => upper switch
         {
-            "SMALLINT" => SmallInt,
-            "NVARCHAR" => NVarchar,
             "DATETIME" => DateTime,
             "GEOMETRY" => Geometry,
+            "NVARCHAR" => NVarchar,
+            "SMALLINT" => SmallInt,
             _ => null,
         },
         9 => upper switch
         {
+            "GEOGRAPHY" => Geography,
             "TIMESTAMP" => RowVersion,
             "VARBINARY" => Varbinary,
-            "GEOGRAPHY" => Geography,
             _ => null,
         },
         10 => upper switch
@@ -911,14 +911,14 @@ internal abstract partial class SqlType
             "SMALLMONEY" => SmallMoney,
             _ => null,
         },
-        13 => upper switch
-        {
-            "SMALLDATETIME" => SmallDateTime,
-            _ => null,
-        },
         11 => upper switch
         {
             "HIERARCHYID" => HierarchyId,
+            _ => null,
+        },
+        13 => upper switch
+        {
+            "SMALLDATETIME" => SmallDateTime,
             _ => null,
         },
         16 => upper switch
