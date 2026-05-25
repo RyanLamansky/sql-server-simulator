@@ -22,13 +22,13 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class CollationTests
 {
-    private static readonly Collation Latin1General100CiAs = Collation.TryGet("Latin1_General_100_CI_AS")!;
+    private static readonly Collation Latin1General100CiAs = Collation.Get("Latin1_General_100_CI_AS");
 
-    private static readonly Collation Latin1GeneralCiAs = Collation.TryGet("Latin1_General_CI_AS")!;
+    private static readonly Collation Latin1GeneralCiAs = Collation.Get("Latin1_General_CI_AS");
 
-    private static readonly Collation Latin1GeneralCsAs = Collation.TryGet("Latin1_General_CS_AS")!;
+    private static readonly Collation Latin1GeneralCsAs = Collation.Get("Latin1_General_CS_AS");
 
-    private static readonly Collation Latin1GeneralBin = Collation.TryGet("Latin1_General_BIN")!;
+    private static readonly Collation Latin1GeneralBin = Collation.Get("Latin1_General_BIN");
 
     // ---- SQL_Latin1_General_CP1_CI_AS — internal-only contracts ----
 

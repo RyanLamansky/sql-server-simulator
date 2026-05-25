@@ -139,6 +139,8 @@ Why a bespoke body instead of `CompareInfo`: real SQL Server sorts this collatio
 
 One hand-adjustment in the data: the legacy varchar CI_AI form classifies cedilla (`Ç`/`ç`) as a distinct primary letter, but its CI_AS *sort* folds it onto `c` (probe-confirmed `'Çm' < 'cn'`), so those two primary entries are pinned to `c`'s rank. Strings containing a **non-CP1252** character fall back to the inner `CultureCollation`'s `CompareInfo` two-pass (below) — close for arbitrary Unicode, exact for the CP1252 universe.
 
+Implementation: this is the engine's hottest string path (it backs `Baseline`), so `Compare` / `GetHashCode` stream each operand's weights through a `WeightCursor` `ref struct` — one element per `MoveNext`, ignorables skipped and ligatures expanded inline — rather than materializing weight lists. A comparison walks the cursors at the primary level, dropping to a second walk only on a primary tie and a third only on a secondary tie; the common case resolves in one pass with **zero allocation**. Keep the `AllCp1252` gate ahead of the streaming path: the "any non-CP1252 char ⇒ `CompareInfo` fallback for the whole pair" contract requires scanning both operands before choosing the repertoire path, which a bail-mid-walk detector would break.
+
 ## Symbol sort weighting (other SQL_\* / Windows / locale families)
 
 `CultureCollation.Compare` (the `CompareInfo`-routed comparer behind every collation **other than the default**) gives hyphen (`-`) and apostrophe (`'`) the **minimal-weight** treatment SQL Server applies, while every other symbol keeps a real primary weight:

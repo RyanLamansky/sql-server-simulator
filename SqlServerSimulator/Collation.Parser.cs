@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
@@ -64,6 +65,21 @@ internal abstract partial class Collation
             : interned.TryGetValue(name, out var hit)
                 ? hit
                 : TryParse(name, out var parsed) ? interned.GetOrAdd(parsed.Name, parsed) : null;
+
+    /// <summary>
+    /// Resolves a collation name guaranteed valid at the call site — a
+    /// compile-time constant naming a collation real SQL Server ships. The
+    /// <c>Debug.Assert</c> is a refactoring tripwire: a regression in the
+    /// parser tables fails loud and early under the (Debug-built) test
+    /// suite, where collation resolution is among the hottest paths. Use
+    /// <see cref="TryGet"/> for any name that originates from SQL text.
+    /// </summary>
+    internal static Collation Get(string name)
+    {
+        var collation = TryGet(name);
+        Debug.Assert(collation is not null, $"Collation '{name}' is expected to always resolve but did not.");
+        return collation;
+    }
 
     /// <summary>
     /// True if <paramref name="name"/> is a recognized SQL Server collation

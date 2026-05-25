@@ -247,24 +247,28 @@ internal abstract partial class Collation
         {
             if (!AllCp1252(obj))
                 return this.inner.GetHashCode(obj);
-            var (primary, secondary, _) = this.BuildKey(obj);
+
+            // Hash the primary weight run, a separator, then the secondary run —
+            // mirrors the order Compare consults them, so Compare-equal strings
+            // (equal at both levels) always hash equal. Streamed through the
+            // cursor so no weight lists are materialized.
             var hash = new HashCode();
-            foreach (var weight in primary)
-                hash.Add(weight);
+            var primary = this.NewCursor(obj);
+            while (primary.MoveNext())
+                hash.Add(primary.Primary);
             hash.Add(-1);
-            foreach (var weight in secondary)
-                hash.Add(weight);
+            var secondary = this.NewCursor(obj);
+            while (secondary.MoveNext())
+                hash.Add(secondary.Secondary);
             return hash.ToHashCode();
         }
 
         private int CompareInRepertoire(string x, string y)
         {
-            var (px, sx, tx) = this.BuildKey(x);
-            var (py, sy, ty) = this.BuildKey(y);
-            var primary = LexCompare(px, py);
+            var primary = this.CompareLevel(x, y, Level.Primary);
             if (primary != 0)
                 return primary;
-            var secondary = LexCompare(sx, sy);
+            var secondary = this.CompareLevel(x, y, Level.Secondary);
             if (secondary != 0)
                 return secondary;
 
@@ -273,58 +277,117 @@ internal abstract partial class Collation
             // it has no minimal-weight characters. nvarchar treats a ligature as
             // equal to its expansion and instead breaks the tie on its
             // minimal-weight characters.
-            return this.varcharStorage ? LexCompare(tx, ty) : NvarcharIgnorableTiebreak(x, y);
+            return this.varcharStorage ? this.CompareLevel(x, y, Level.Tertiary) : NvarcharIgnorableTiebreak(x, y);
         }
 
-        // Builds the primary, secondary, and tertiary weight sequences (all
-        // parallel). Ignorable characters (nvarchar only) contribute to none;
-        // ligatures expand to their base letters' weights, and each expansion
-        // element carries tertiary weight 1 (plain characters carry 0) so a
-        // ligature outranks the identical run of plain letters.
-        private (List<int> Primary, List<int> Secondary, List<int> Tertiary) BuildKey(string s)
+        private enum Level
         {
-            var weights = this.varcharStorage ? varcharWeights : nvarcharWeights;
-            var expansions = this.varcharStorage ? varcharExpansion : nvarcharExpansion;
-            var primary = new List<int>(s.Length);
-            var secondary = new List<int>(s.Length);
-            var tertiary = new List<int>(s.Length);
-            foreach (var ch in s)
-            {
-                if (!this.varcharStorage && nvarcharIgnorable.Contains(ch))
-                    continue;
-                if (expansions.TryGetValue(ch, out var expansion))
-                {
-                    foreach (var baseChar in expansion)
-                    {
-                        var (basePrimary, baseSecondary) = weights[baseChar];
-                        primary.Add(basePrimary);
-                        secondary.Add(baseSecondary);
-                        tertiary.Add(1);
-                    }
+            Primary,
+            Secondary,
+            Tertiary,
+        }
 
-                    continue;
+        // Walks both operands through parallel weight cursors, comparing one
+        // level at a time. The shorter weight run sorts first once a shared
+        // prefix ties (matching the old list-length tie-break). The cursors are
+        // ref structs over the source strings — no weight lists are allocated,
+        // so the common single-pass primary comparison is allocation-free.
+        private int CompareLevel(string x, string y, Level level)
+        {
+            var cx = this.NewCursor(x);
+            var cy = this.NewCursor(y);
+            while (true)
+            {
+                var hasX = cx.MoveNext();
+                var hasY = cy.MoveNext();
+                if (!hasX || !hasY)
+                    return (hasX ? 1 : 0) - (hasY ? 1 : 0);
+                var wx = level switch { Level.Primary => cx.Primary, Level.Secondary => cx.Secondary, _ => cx.Tertiary };
+                var wy = level switch { Level.Primary => cy.Primary, Level.Secondary => cy.Secondary, _ => cy.Tertiary };
+                if (wx != wy)
+                    return wx < wy ? -1 : 1;
+            }
+        }
+
+        private WeightCursor NewCursor(string s) =>
+            this.varcharStorage
+                ? new WeightCursor(s, varcharWeights, varcharExpansion, skipIgnorable: false)
+                : new WeightCursor(s, nvarcharWeights, nvarcharExpansion, skipIgnorable: true);
+
+        // Yields the (primary, secondary, tertiary) weight of each collation
+        // element of a string in order: ignorables (nvarchar) are skipped,
+        // ligatures expand to their base letters with tertiary 1, plain
+        // characters carry tertiary 0. One element per MoveNext; the expansion
+        // of a ligature surfaces as consecutive elements.
+        private ref struct WeightCursor
+        {
+            private readonly string s;
+
+            private readonly FrozenDictionary<char, (int Primary, int Secondary)> weights;
+
+            private readonly FrozenDictionary<char, string> expansions;
+
+            private readonly bool skipIgnorable;
+
+            private int index;
+
+            private string? expansion;
+
+            private int expansionPos;
+
+            internal int Primary;
+
+            internal int Secondary;
+
+            internal int Tertiary;
+
+            internal WeightCursor(string s, FrozenDictionary<char, (int Primary, int Secondary)> weights, FrozenDictionary<char, string> expansions, bool skipIgnorable)
+            {
+                this.s = s;
+                this.weights = weights;
+                this.expansions = expansions;
+                this.skipIgnorable = skipIgnorable;
+            }
+
+            internal bool MoveNext()
+            {
+                if (this.expansion is not null)
+                {
+                    this.Emit(this.expansion[this.expansionPos++], tertiary: 1);
+                    if (this.expansionPos >= this.expansion.Length)
+                        this.expansion = null;
+                    return true;
                 }
 
-                var (charPrimary, charSecondary) = weights[ch];
-                primary.Add(charPrimary);
-                secondary.Add(charSecondary);
-                tertiary.Add(0);
+                while (this.index < this.s.Length)
+                {
+                    var ch = this.s[this.index++];
+                    if (this.skipIgnorable && nvarcharIgnorable.Contains(ch))
+                        continue;
+                    if (this.expansions.TryGetValue(ch, out var exp))
+                    {
+                        this.expansion = exp;
+                        this.expansionPos = 0;
+                        this.Emit(exp[this.expansionPos++], tertiary: 1);
+                        if (this.expansionPos >= exp.Length)
+                            this.expansion = null;
+                        return true;
+                    }
+
+                    this.Emit(ch, tertiary: 0);
+                    return true;
+                }
+
+                return false;
             }
 
-            return (primary, secondary, tertiary);
-        }
-
-        private static int LexCompare(List<int> a, List<int> b)
-        {
-            var shared = Math.Min(a.Count, b.Count);
-            for (var i = 0; i < shared; i++)
+            private void Emit(char ch, int tertiary)
             {
-                var delta = a[i] - b[i];
-                if (delta != 0)
-                    return delta < 0 ? -1 : 1;
+                var (primary, secondary) = this.weights[ch];
+                this.Primary = primary;
+                this.Secondary = secondary;
+                this.Tertiary = tertiary;
             }
-
-            return a.Count.CompareTo(b.Count);
         }
 
         // Reached only when the primary and secondary keys are equal: the two
