@@ -143,10 +143,10 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     // and the textual-order guarantee for static-field initializers
     // doesn't cross those.
     private static readonly Lazy<Collation> baselineLazy =
-        new(() => TryGet("SQL_Latin1_General_CP1_CI_AS")!);
+        new(() => TryGet("SQL_Latin1_General_CP1_CI_AS") ?? throw new InvalidOperationException("Default collation failed to resolve."));
 
     private static readonly Lazy<Collation> catalogLazy =
-        new(() => TryGet("Latin1_General_100_CI_AS_KS_WS_SC")!);
+        new(() => TryGet("Latin1_General_100_CI_AS_KS_WS_SC") ?? throw new InvalidOperationException("Catalog collation failed to resolve."));
 
     /// <summary>
     /// SQL Server's collation-coercibility resolution for two operands.

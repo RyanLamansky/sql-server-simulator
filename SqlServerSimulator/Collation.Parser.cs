@@ -42,17 +42,6 @@ internal abstract partial class Collation
     }
 
     /// <summary>
-    /// Per-name override registry. Populated by <see cref="RegisterOverride"/>
-    /// at static-init time. Names in this map bypass <see cref="TryParse"/>
-    /// and return the registered instance directly — the extension point
-    /// for hand-tuned bodies with quirky semantics that the parser's
-    /// generic <see cref="CultureCollation"/> / <see cref="BinaryCollationBody"/>
-    /// constructions don't capture.
-    /// </summary>
-    private static readonly ConcurrentDictionary<string, Collation> overrides =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>
     /// Interning cache for parser-derived collation instances. Keyed by the
     /// canonical (uppercase) name; <see cref="TryGet"/> inserts on first
     /// successful parse. Concurrent dictionary because <see cref="TryGet"/>
@@ -64,41 +53,29 @@ internal abstract partial class Collation
     /// <summary>
     /// Returns the recognized <see cref="Collation"/> for <paramref name="name"/>,
     /// or <see langword="null"/> if the name isn't grammatically valid +
-    /// doesn't carry a known prefix. Override-registry entries take
-    /// precedence over the parser; subsequent calls with the same name
-    /// return the same reference (interned).
+    /// doesn't carry a known prefix. Subsequent calls with the same name
+    /// return the same reference (interned). The default collation name is
+    /// special-cased inside <see cref="CreateInstance"/> to wrap its comparer
+    /// in the byte-exact <see cref="SqlLatin1Cp1CiAsCollation"/>.
     /// </summary>
     internal static Collation? TryGet(string name) =>
         string.IsNullOrEmpty(name)
             ? null
-            : overrides.TryGetValue(name, out var ov)
-                ? ov
-                : interned.TryGetValue(name, out var hit)
-                    ? hit
-                    : TryParse(name, out var parsed) ? interned.GetOrAdd(parsed.Name, parsed) : null;
-
-    /// <summary>
-    /// Adds <paramref name="specialized"/> to the override registry under
-    /// its <see cref="Name"/>. Overrides take precedence over parser-derived
-    /// instances; the slot supports per-name behavior tuning when the
-    /// parser's generic body doesn't match real SQL Server's quirks for
-    /// that specific collation.
-    /// </summary>
-    private static void RegisterOverride(Collation specialized) =>
-        overrides[specialized.Name] = specialized;
+            : interned.TryGetValue(name, out var hit)
+                ? hit
+                : TryParse(name, out var parsed) ? interned.GetOrAdd(parsed.Name, parsed) : null;
 
     /// <summary>
     /// True if <paramref name="name"/> is a recognized SQL Server collation
-    /// name — either in the override registry or grammatically parseable
-    /// with a known prefix. Replaces the legacy whitelist check.
+    /// name — grammatically parseable with a known prefix. Replaces the legacy
+    /// whitelist check.
     /// </summary>
     internal static bool IsRecognized(string name) => TryGet(name) is not null;
 
     /// <summary>
     /// Enumerates every recognized collation name with its description
     /// (the form <c>sys.fn_helpcollations()</c> exposes). Crosses the
-    /// SQL_* sort-order table, the per-prefix tail-set patterns, and any
-    /// override-registry entries that fall outside those (rare). Ordering
+    /// SQL_* sort-order table and the per-prefix tail-set patterns. Ordering
     /// is the caller's responsibility.
     /// </summary>
     internal static IEnumerable<(string Name, string Description)> EnumerateRecognized()
@@ -121,33 +98,6 @@ internal abstract partial class Collation
                     yield return (name, c.Description);
             }
         }
-
-        // Override entries whose names don't appear in either slice.
-        foreach (var (name, c) in overrides)
-        {
-            if (!SqlServerSortOrders.ContainsKey(name) && !IsInPatternCatalog(name))
-                yield return (name, c.Description);
-        }
-    }
-
-    /// <summary>
-    /// Tests whether <paramref name="name"/> falls in the per-prefix tail
-    /// catalog — used to avoid double-emitting an override that the
-    /// pattern enumeration would also produce.
-    /// </summary>
-    private static bool IsInPatternCatalog(string name)
-    {
-        foreach (var (prefix, patternIdx) in PrefixToPattern)
-        {
-            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                && name.Length > prefix.Length
-                && name[prefix.Length] == '_'
-                && GetPatternTails(patternIdx).Contains(name[prefix.Length..]))
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     /// <summary>
@@ -338,7 +288,14 @@ internal abstract partial class Collation
         // SC behavior is engaged when the _SC_ flag is set explicitly or
         // when the version is v140+ (where SC is implicit / default).
         var scAware = flags.HasFlag(CollationFlags.SupplementaryCharacters) || version is >= 140;
-        return new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, kanaSensitive, widthSensitive, storageEncoding, scAware);
+        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, kanaSensitive, widthSensitive, storageEncoding, scAware);
+
+        // The default collation gets a byte-exact sort body wrapping the
+        // generic culture comparer (which still supplies metadata + the
+        // non-CP1252 fallback). See Collation.SqlLatin1Sort.cs.
+        return name.Equals(SqlLatin1Cp1CiAsCollation.CollationName, StringComparison.OrdinalIgnoreCase)
+            ? new SqlLatin1Cp1CiAsCollation(cultureBody)
+            : cultureBody;
     }
 
     /// <summary>

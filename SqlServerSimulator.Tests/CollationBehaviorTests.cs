@@ -142,6 +142,49 @@ public sealed class CollationBehaviorTests
         AreEqual(2, sim.ExecuteScalar("select count(*) from (select distinct v from accent) d"));
     }
 
+    /// <summary>
+    /// The default collation sorts at two levels: primary (accent-folded base
+    /// letter) then a secondary accent tie-break. So <c>'à'</c> orders before
+    /// <c>'Ao'</c> (base <c>a</c> precedes <c>Ao</c>) even though the accented
+    /// letter sorts after its plain form within a tie (<c>'az'</c> &lt;
+    /// <c>'àz'</c>). Probe-confirmed against SQL Server 2025; this is the level
+    /// a single-rank table can't express.
+    /// </summary>
+    [TestMethod]
+    public void DefaultCollation_OrderBy_AccentIsSecondaryWeight()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table t (v nvarchar(20)); insert t values ('Ao'), ('à'), ('az'), ('àz')");
+        using var reader = sim.CreateCommand("select v from t order by v").ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "à", "Ao", "az", "àz" }, rows);
+    }
+
+    /// <summary>
+    /// nvarchar expands the Latin ligatures to their base letters (probe-
+    /// confirmed <c>'æ' = 'ae'</c>, <c>'ß' = 'ss'</c>); varchar's legacy sort
+    /// order expands only <c>æ</c>/<c>Æ</c> and treats <c>œ</c>/<c>ß</c> as
+    /// distinct single-weight letters. Here MIN under nvarchar collapses
+    /// <c>'æ'</c> against <c>'ae'</c> and orders it between <c>'ad'</c> and
+    /// <c>'af'</c>.
+    /// </summary>
+    [TestMethod]
+    public void DefaultCollation_OrderBy_NvarcharExpandsLigatures()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table t (v nvarchar(20)); insert t values ('ad'), ('af'), ('æx')");
+        using var reader = sim.CreateCommand("select v from t order by v").ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(reader.GetString(0));
+        // 'æx' expands to 'aex', which sorts between 'ad' and 'af'.
+        CollectionAssert.AreEqual(new[] { "ad", "æx", "af" }, rows);
+    }
+
     [TestMethod]
     public void CollationName_LookupIsCaseInsensitive()
     {

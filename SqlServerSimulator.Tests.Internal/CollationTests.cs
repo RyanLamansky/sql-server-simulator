@@ -52,6 +52,40 @@ public sealed class CollationTests
         IsGreaterThan(0, Collation.Baseline.Compare("x", null));
     }
 
+    /// <summary>
+    /// The default collation routes through the byte-exact
+    /// <c>SqlLatin1Cp1CiAsCollation</c> override, which sorts varchar and
+    /// nvarchar through different probe-extracted weight tables. The two
+    /// storage families disagree on symbol order (varchar <c>'+'</c> &lt;
+    /// <c>'/'</c>; nvarchar <c>'/'</c> &lt; <c>'+'</c>) and on ligature
+    /// expansion (both expand <c>æ</c>, but only nvarchar expands <c>ß</c> to
+    /// <c>ss</c> — varchar keeps it a single letter). <c>ForVarcharStorage</c>
+    /// returns the varchar-flavored body. Probe-confirmed on SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void Sql_VarcharAndNvarcharSortThroughDistinctTables()
+    {
+        var nvarchar = Collation.Baseline;
+        var varchar = Collation.Baseline.ForVarcharStorage();
+
+        IsLessThan(0, varchar.Compare("+", "/"));
+        IsGreaterThan(0, nvarchar.Compare("+", "/"));
+
+        // æ expands to "ae" in both: 'æx' (=> 'aex') sorts between 'ad' and 'af'.
+        IsGreaterThan(0, nvarchar.Compare("æx", "ad"));
+        IsLessThan(0, nvarchar.Compare("æx", "af"));
+        IsGreaterThan(0, varchar.Compare("æx", "ad"));
+        IsLessThan(0, varchar.Compare("æx", "af"));
+
+        // ß expands to "ss" only in nvarchar.
+        AreEqual(0, nvarchar.Compare("ß", "ss"));
+        AreNotEqual(0, varchar.Compare("ß", "ss"));
+
+        // Cedilla folds onto its base letter at the primary level in both.
+        IsLessThan(0, varchar.Compare("Çm", "cn"));
+        IsLessThan(0, nvarchar.Compare("Çm", "cn"));
+    }
+
     // ---- Latin1_General_100_CI_AS (Windows-style v100) ----
 
     [TestMethod]
