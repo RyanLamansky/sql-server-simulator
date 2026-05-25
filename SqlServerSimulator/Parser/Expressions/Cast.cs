@@ -67,6 +67,8 @@ internal sealed class Cast : Expression
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.source.VisitColumnReferences(visit);
 
+    internal override Expression? PureConversionOperand => this.source;
+
     /// <summary>
     /// Parses the optional <c>(length)</c> or <c>(precision, scale)</c> spec
     /// after a CAST/CONVERT target type name and resolves the type. The caller

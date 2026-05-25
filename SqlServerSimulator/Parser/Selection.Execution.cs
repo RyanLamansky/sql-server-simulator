@@ -256,10 +256,13 @@ internal sealed partial class Selection
         int? topCount,
         int? offsetCount,
         int? fetchCount,
-        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) =>
-        !distinct && orderBy.Count == 0
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
+        return !distinct && orderBy.Count == 0
             ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, batch, outerResolver)
             : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
+    }
 
     /// <summary>
     /// Applies OFFSET (skip) and the row cap (take) to a row sequence in

@@ -127,4 +127,8 @@ internal sealed class ConvertExpression : Expression
         this.style is null
             ? $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()})"
             : $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()}, {this.style.DebugDisplay()})";
+
+    // Stability is governed by the value operand; the optional style is a
+    // constant / variable and never row-varying.
+    internal override Expression? PureConversionOperand => this.source;
 }

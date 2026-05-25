@@ -40,6 +40,19 @@ internal sealed class Heap
     public readonly List<HeapPage> Pages = [];
 
     /// <summary>
+    /// Monotonic counter bumped by every <see cref="Insert"/> and
+    /// <see cref="DeleteAt"/> (UPDATE relocates, so it bumps twice). Read-side
+    /// equality-seek caches (see <c>Selection.Execution.IndexSeek.cs</c>) tag
+    /// their built buckets with the value seen at build time and rebuild when
+    /// it has moved — the heap stays the single source of truth, so a stale
+    /// cache is never consulted. Not a transactional value: it advances on the
+    /// physical mutation and never rolls back (a rolled-back insert/delete
+    /// still bumped it, which only forces a harmless cache rebuild). Mutations
+    /// on a given table are lock-serialized, so this needs no interlocking.
+    /// </summary>
+    public long MutationGeneration;
+
+    /// <summary>
     /// Appends a row's encoded bytes to the heap. The active (last) page is
     /// tried first; on no-fit, a new page is allocated and linked, and the
     /// row goes there. Callers are responsible for sizing the row to
@@ -75,6 +88,7 @@ internal sealed class Heap
         // The new row went into the slot at SlotCount-1 of the chosen page —
         // TryInsert appends a new directory entry as the highest-index slot.
         var slotIndex = this.Pages[pageIndex].SlotCount - 1;
+        this.MutationGeneration++;
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
         return (pageIndex, slotIndex);
     }
@@ -119,6 +133,7 @@ internal sealed class Heap
     /// </summary>
     public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null)
     {
+        this.MutationGeneration++;
         undoLog?.RecordDelete(this, pageIndex, slotIndex);
         this.Pages[pageIndex].DeleteSlot(slotIndex);
     }

@@ -36,7 +36,8 @@ internal sealed class FromSource(
     IEnumerable<byte[]> rows,
     Selection? lateralPlan = null,
     HeapTable? backingTable = null,
-    View? backingView = null)
+    View? backingView = null,
+    DataLockPlan? heapPlan = null)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -75,6 +76,19 @@ internal sealed class FromSource(
     /// the latter null-fills the slot when the plan yields zero rows.
     /// </summary>
     public readonly Selection? LateralPlan = lateralPlan;
+
+    /// <summary>
+    /// The reader-side <see cref="DataLockPlan"/> captured when this source is
+    /// a plain base-table scan (null for derived tables, table variables, and
+    /// <c>FOR SYSTEM_TIME</c> sources). The index-seek narrowing
+    /// (<c>Selection.Execution.IndexSeek.cs</c>) reads it to route the seeked
+    /// candidate rows through the same per-row lock / conflict pipeline the
+    /// full scan would, so a seek's lock footprint covers only the rows it
+    /// touches — and declines entirely when the plan holds row locks
+    /// tx-scoped (REPEATABLE READ / SERIALIZABLE / UPDLOCK …), where a
+    /// whole-table scan's locking is load-bearing.
+    /// </summary>
+    public readonly DataLockPlan? HeapPlan = heapPlan;
 }
 
 /// <summary>

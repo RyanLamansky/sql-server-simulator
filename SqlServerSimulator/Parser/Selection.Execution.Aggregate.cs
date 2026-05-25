@@ -233,7 +233,7 @@ internal sealed partial class Selection
     /// dictionary key for GROUP BY buckets. Two NULL slots compare equal
     /// (matching SQL Server: NULL is a valid group key with one bucket).
     /// </summary>
-    private readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey>
+    internal readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey>
     {
         public static readonly SqlValueKey Empty = new([]);
 

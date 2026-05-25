@@ -1211,7 +1211,8 @@ internal sealed partial class Selection
                     storageOrdinals: heapTable.StorageOrdinals,
                     lobStore: heapTable.Heap,
                     rows: heapRows,
-                    backingTable: heapTable);
+                    backingTable: heapTable,
+                    heapPlan: temporalRowSource is null ? heapPlan : null);
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
             // BatchContext.TableVariables instead of the regular schema dict;

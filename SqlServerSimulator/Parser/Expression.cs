@@ -506,6 +506,18 @@ internal abstract class Expression
     internal virtual void VisitColumnReferences(Action<MultiPartName> visit) { }
 
     /// <summary>
+    /// When this expression is a deterministic, side-effect-free pass-through of
+    /// a single operand — a <c>CAST</c> / <c>CONVERT</c> (their value operand) or
+    /// a parenthesization — returns that operand; <see langword="null"/>
+    /// otherwise. Such a node is value-stable exactly when its operand is, so the
+    /// index-seek planner (<c>Selection.Execution.IndexSeek.cs</c>) peels these
+    /// to decide whether a WHERE value side is row-invariant and safe to evaluate
+    /// once for a seek. Matches real SQL Server keeping <c>col = CAST(&lt;const&gt;
+    /// AS …)</c> sargable (probe-confirmed: integer / decimal widenings seek).
+    /// </summary>
+    internal virtual Expression? PureConversionOperand => null;
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar

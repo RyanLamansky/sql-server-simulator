@@ -19,4 +19,6 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
     internal override string DebugDisplay() => $"( {this.Wrapped.DebugDisplay()} )";
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Wrapped.VisitColumnReferences(visit);
+
+    internal override Expression? PureConversionOperand => this.Wrapped;
 }

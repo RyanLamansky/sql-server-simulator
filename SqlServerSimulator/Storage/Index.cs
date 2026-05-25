@@ -10,14 +10,20 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The simulator has no B-tree storage, so non-UNIQUE indexes are pure
-/// catalog metadata (visible through <c>sys.indexes</c> /
-/// <c>sys.index_columns</c>) — they don't accelerate query execution and
-/// don't constrain inserts. UNIQUE indexes enforce the same multiset rule
-/// the existing UNIQUE constraint path uses (one NULL allowed, second NULL
-/// raises Msg 2601), plus the filter-aware extension when
-/// <see cref="Filter"/> is non-null: only rows for which the filter
-/// evaluates true participate in the uniqueness check.
+/// The simulator has no B-tree storage, so an index never constrains inserts
+/// (UNIQUE aside) and is pure catalog metadata for <c>sys.indexes</c> /
+/// <c>sys.index_columns</c>. It does, however, accelerate <b>equality seeks</b>
+/// on its leading key column: a single-base-table scan whose WHERE carries a
+/// <c>leadingKeyColumn = &lt;stable value&gt;</c> conjunct narrows to a lazy
+/// per-table hash index instead of a full scan (see
+/// <c>Selection.Execution.IndexSeek.cs</c>) — the path that collapses
+/// correlated <c>EXISTS</c> / <c>IN</c> / scalar subqueries from O(outer ×
+/// inner) toward linear. Range seeks, composite-key seeks beyond the leading
+/// column, and ORDER BY elimination are not modeled. UNIQUE indexes also
+/// enforce the same multiset rule the existing UNIQUE constraint path uses
+/// (one NULL allowed, second NULL raises Msg 2601), plus the filter-aware
+/// extension when <see cref="Filter"/> is non-null: only rows for which the
+/// filter evaluates true participate in the uniqueness check.
 /// </para>
 /// <para>
 /// The CLUSTERED keyword on a CREATE INDEX is accepted but doesn't change
