@@ -312,21 +312,66 @@ internal sealed partial class Selection
                                 continue;
                             }
 
-                            // Per-row frame path.
-                            for (var i = 0; i < indices.Count; i++)
+                            // Framed path. Evaluate each row's operand exactly
+                            // once (in sorted order), then maintain the frame
+                            // incrementally. Both frame bounds move
+                            // monotonically forward as i advances, so a
+                            // two-pointer slide — Add as the end advances, Remove
+                            // as the start advances — touches each row O(1)
+                            // amortized, collapsing the former per-row
+                            // re-aggregation from O(n²) to O(n) per partition.
+                            var count = indices.Count;
+                            var operandByPos = new SqlValue[count];
+                            for (var p = 0; p < count; p++)
+                            {
+                                var localTuple = buffered[indices[p]];
+                                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                                operandByPos[p] = aggregate.Operand is null
+                                    ? SqlValue.Null(SqlType.Int32)
+                                    : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
+                            }
+
+                            // The start advances (so rows leave the frame and the
+                            // aggregator must support removal) for any explicit
+                            // start bound other than UNBOUNDED PRECEDING. The
+                            // default frame (no explicit frame, with ORDER BY) is
+                            // UNBOUNDED PRECEDING TO CURRENT ROW — start pinned at
+                            // row 0, so it's a pure forward accumulation.
+                            var startAdvances = win.Frame is { } frame && frame.Start.Kind != FrameBoundKind.UnboundedPreceding;
+                            var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances);
+
+                            // DISTINCT forms can't undo an Add (illegal with OVER
+                            // anyway): re-aggregate each frame, but off the
+                            // once-evaluated operands.
+                            if (startAdvances && !slider.CanRemove)
+                            {
+                                for (var i = 0; i < count; i++)
+                                {
+                                    var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                    var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                    for (var j = rebuildStart; j <= rebuildEnd; j++)
+                                        aggregator.Add(operandByPos[j]);
+                                    results[indices[i]] = aggregator.Result();
+                                }
+                                continue;
+                            }
+
+                            var emptyResult = Aggregator.Create(aggregate, operandType, resultType).Result();
+                            var lo = 0;
+                            var hi = -1;
+                            for (var i = 0; i < count; i++)
                             {
                                 var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
-                                var aggregator = Aggregator.Create(aggregate, operandType, resultType);
-                                for (var j = frameStart; j <= frameEnd; j++)
+                                if (frameStart > frameEnd)
                                 {
-                                    var localTuple = buffered[indices[j]];
-                                    SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
-                                    var operandValue = aggregate.Operand is null
-                                        ? SqlValue.Null(SqlType.Int32)
-                                        : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
-                                    aggregator.Add(operandValue);
+                                    results[indices[i]] = emptyResult;
+                                    continue;
                                 }
-                                results[indices[i]] = aggregator.Result();
+                                while (hi < frameEnd)
+                                    slider.Add(operandByPos[++hi]);
+                                while (lo < frameStart)
+                                    slider.Remove(operandByPos[lo++]);
+                                results[indices[i]] = slider.Result();
                             }
                         }
                     }

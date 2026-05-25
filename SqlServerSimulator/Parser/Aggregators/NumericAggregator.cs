@@ -50,6 +50,20 @@ internal abstract class NumericAggregator<TAccumulator> : Aggregator
         this.Count++;
     }
 
+    // A running sum subtracts cleanly, so SUM / AVG slide incrementally — but
+    // only without DISTINCT, whose dedup set can't tell whether a removed value
+    // still has surviving duplicates. (DISTINCT is illegal with OVER anyway, so
+    // the window path never requests it.)
+    public sealed override bool CanRemove => !this.distinct;
+
+    public sealed override void Remove(SqlValue value)
+    {
+        if (value.IsNull)
+            return;
+        this.Accumulator -= Extract(value.CoerceTo(this.ResultType));
+        this.Count--;
+    }
+
     public sealed override SqlValue Result()
     {
         if (this.Count == 0)

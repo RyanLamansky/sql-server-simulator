@@ -26,5 +26,17 @@ internal sealed class ChecksumAggAggregator : Aggregator
         this.folded ^= value.GetHashCode();
     }
 
+    // XOR is its own inverse, so re-folding a value removes it — the window
+    // frame slides incrementally. (Two equal values XOR-cancel each other, which
+    // is exactly the multiset removal semantic.)
+    public override bool CanRemove => true;
+
+    public override void Remove(SqlValue value)
+    {
+        if (value.IsNull)
+            return;
+        this.folded ^= value.GetHashCode();
+    }
+
     public override SqlValue Result() => SqlValue.FromInt32(this.folded);
 }

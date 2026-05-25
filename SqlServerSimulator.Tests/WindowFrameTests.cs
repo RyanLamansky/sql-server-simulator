@@ -405,4 +405,102 @@ public sealed class WindowFrameTests
         // Running averages: 1/1=1, 4/2=2, 9/3=3.
         CollectionAssert.AreEqual(new[] { (1, 1), (3, 2), (5, 3) }, values);
     }
+
+    // === Sliding frames exercise the incremental Remove path per aggregator ===
+
+    [TestMethod]
+    public void Sum_RowsBetweenCurrentRowAndUnboundedFollowing_ReverseRunningTotal()
+    {
+        // Start advances (CURRENT ROW) with the end pinned at the partition's
+        // last row — every step removes the leaving row from the slider.
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, sum(v) over(partition by grp order by id rows between current row and unbounded following) from t order by grp, id").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        // grp 1 v=10,20,20,30 → suffix sums 80,70,50,30.
+        AreEqual(80, byId[1]);
+        AreEqual(70, byId[2]);
+        AreEqual(50, byId[3]);
+        AreEqual(30, byId[4]);
+        // grp 2 v=5,5,50 → 60,55,50.
+        AreEqual(60, byId[5]);
+        AreEqual(55, byId[6]);
+        AreEqual(50, byId[7]);
+    }
+
+    [TestMethod]
+    public void Min_SlidingFrame_DropsLeavingExtreme()
+    {
+        // Ascending values with a trailing 2-PRECEDING frame: the current
+        // minimum repeatedly leaves the window, so the removable multiset must
+        // surface the next-smallest survivor rather than a stale extreme.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table m (id int, v int);
+            insert m values (1,10), (2,20), (3,30), (4,40), (5,50)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand(
+            "select id, min(v) over(order by id rows between 2 preceding and current row) from m order by id").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(1));
+        // Frames {10},{10,20},{10,20,30},{20,30,40},{30,40,50} → mins 10,10,10,20,30.
+        CollectionAssert.AreEqual(new[] { 10, 10, 10, 20, 30 }, values);
+    }
+
+    [TestMethod]
+    public void Avg_SlidingFrame_RemovesLeavingRows()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table a (id int, v int);
+            insert a values (1,10), (2,20), (3,30), (4,40)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand(
+            "select id, avg(v) over(order by id rows between 1 preceding and current row) from a order by id").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(1));
+        // Pairs {10}=10, {10,20}=15, {20,30}=25, {30,40}=35.
+        CollectionAssert.AreEqual(new[] { 10, 15, 25, 35 }, values);
+    }
+
+    [TestMethod]
+    public void VarP_SlidingFrame_SubtractsMoments()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table s (id int, v int);
+            insert s values (1,2), (2,4), (3,6), (4,8)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand(
+            "select id, varp(v) over(order by id rows between 1 preceding and current row) from s order by id").ExecuteReader();
+        var values = new List<double>();
+        while (reader.Read())
+            values.Add(reader.GetDouble(1));
+        // {2}→0, {2,4}→1, {4,6}→1, {6,8}→1 (sum / sum-of-squares moments subtract).
+        CollectionAssert.AreEqual(new[] { 0.0, 1.0, 1.0, 1.0 }, values);
+    }
+
+    [TestMethod]
+    public void ChecksumAgg_SlidingFrame_MatchesDirectAggregate()
+    {
+        // XOR is its own inverse: removing the leaving row must leave exactly
+        // the state of aggregating the survivors directly.
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table c (id int, v int);
+            insert c values (1,11), (2,22), (3,33), (4,44)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand(
+            "select id, checksum_agg(v) over(order by id rows between 1 preceding and current row) from c order by id").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        // Row 3's frame is {22, 33}; the slider reached it by removing 11.
+        var expected = (int)connection.CreateCommand("select checksum_agg(v) from c where id in (2,3)").ExecuteScalar()!;
+        AreEqual(expected, byId[3]);
+    }
 }

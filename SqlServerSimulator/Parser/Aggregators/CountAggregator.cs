@@ -39,6 +39,19 @@ internal sealed class CountAggregator(bool isStar, bool isBigCount, bool distinc
         }
     }
 
+    // A plain row/value count decrements cleanly; the DISTINCT form can't,
+    // since the dedup set doesn't carry per-value multiplicity. (COUNT(DISTINCT)
+    // / APPROX_COUNT_DISTINCT are illegal with OVER, so the window path never
+    // requests a removable distinct count.)
+    public override bool CanRemove => this.seen is null;
+
+    public override void Remove(SqlValue value)
+    {
+        if (!isStar && value.IsNull)
+            return;
+        this.count--;
+    }
+
     public override SqlValue Result() => isBigCount
         ? SqlValue.FromInt64(this.count)
         : this.count > int.MaxValue

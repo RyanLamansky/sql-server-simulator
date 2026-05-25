@@ -29,6 +29,20 @@ internal sealed class StatisticalAggregator(AggregateKind kind) : Aggregator
         this.sumOfSquares += x * x;
     }
 
+    // The classical sum / sum-of-squares moments subtract directly, so the
+    // statistical aggregates slide incrementally over a window frame.
+    public override bool CanRemove => true;
+
+    public override void Remove(SqlValue value)
+    {
+        if (value.IsNull)
+            return;
+        var x = value.CoerceTo(SqlType.Float).AsDouble;
+        this.count--;
+        this.sum -= x;
+        this.sumOfSquares -= x * x;
+    }
+
     public override SqlValue Result()
     {
         var isPopulation = kind is AggregateKind.StdevP or AggregateKind.VarP;
