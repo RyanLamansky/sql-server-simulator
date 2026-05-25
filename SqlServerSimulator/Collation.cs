@@ -227,10 +227,12 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// <see cref="CompareInfo"/> and a flag-derived
     /// <see cref="CompareOptions"/> set; routes <see cref="Compare"/> /
     /// <see cref="Equals"/> / <see cref="GetHashCode"/> through them.
-    /// Sort options layer <see cref="CompareOptions.IgnoreSymbols"/> on
-    /// top of the equality options, matching real SQL Server's sort-only
-    /// ignore-symbols treatment (probe-confirmed across the SQL_*,
-    /// Windows, and locale families).
+    /// Hyphen and apostrophe get the two-pass minimal-weight treatment in
+    /// <see cref="Compare"/> (sort as if absent at the primary level, break
+    /// ties only against an otherwise-identical neighbor); every other symbol
+    /// keeps its real primary weight and sorts ahead of digits and letters.
+    /// Probe-confirmed identical across the SQL_*, Windows, and locale
+    /// families on SQL Server 2025 — see <c>docs/claude/collations.md</c>.
     /// </summary>
     internal sealed class CultureCollation : Collation
     {
@@ -243,8 +245,6 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         private readonly CompareInfo compareInfo;
 
         private readonly CompareOptions equalityOptions;
-
-        private readonly CompareOptions sortOptions;
 
         private readonly Encoding storageEncoding;
 
@@ -268,11 +268,6 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
             if (!kanaTypeSensitive) baseOpts |= CompareOptions.IgnoreKanaType;
             if (!widthSensitive) baseOpts |= CompareOptions.IgnoreWidth;
             this.equalityOptions = baseOpts;
-            // Sort layers IgnoreSymbols on top — probe-confirmed against
-            // SQL Server 2025: every modeled family (SQL_*, Windows-style,
-            // locale) treats apostrophe / hyphen as primary-weight-zero in
-            // sort, while equality keeps them significant.
-            this.sortOptions = baseOpts | CompareOptions.IgnoreSymbols;
         }
 
         public override string Name => this.name;
@@ -285,10 +280,75 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         internal override bool IsSupplementaryCharacterAware => this.isSupplementaryCharacterAware;
 
-        public override int Compare(string? x, string? y) =>
-            x is null
-                ? (y is null ? 0 : -1)
-                : y is null ? 1 : this.compareInfo.Compare(x, y, this.sortOptions);
+        public override int Compare(string? x, string? y)
+        {
+            if (x is null)
+                return y is null ? 0 : -1;
+            if (y is null)
+                return 1;
+
+            // Hyphen and apostrophe are the two marks SQL Server's collations
+            // weight only at a secondary level: at the primary level they sort
+            // as if absent (so "co-op" ranks beside "coop", "'Aiea" beside
+            // "Aiea"), while every other symbol keeps a real primary weight
+            // that sorts ahead of digits and letters. .NET exposes neither
+            // knob granularly — IgnoreSymbols drops *all* punctuation, the
+            // default keeps it all — so the two minimal marks are stripped for
+            // the primary pass and consulted only to break an otherwise-exact
+            // tie (the copy carrying one sorts after: "coop" < "co-op").
+            if (!ContainsMinimalPunctuation(x) && !ContainsMinimalPunctuation(y))
+                return this.compareInfo.Compare(x, y, this.equalityOptions);
+            var primary = this.compareInfo.Compare(
+                StripMinimalPunctuation(x), StripMinimalPunctuation(y), this.equalityOptions);
+            return primary != 0 ? primary : MinimalPunctuationTiebreak(x, y);
+        }
+
+        private static bool IsMinimalPunctuation(char c) => c is '-' or '\'';
+
+        private static bool ContainsMinimalPunctuation(string s)
+        {
+            foreach (var c in s)
+            {
+                if (IsMinimalPunctuation(c))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string StripMinimalPunctuation(string s)
+        {
+            var buffer = s.Length <= 256 ? stackalloc char[s.Length] : new char[s.Length];
+            var count = 0;
+            foreach (var c in s)
+            {
+                if (!IsMinimalPunctuation(c))
+                    buffer[count++] = c;
+            }
+
+            return new string(buffer[..count]);
+        }
+
+        // Primary-equal strings differ only in their hyphen / apostrophe
+        // content; the copy carrying such a mark where the other has a real
+        // character (or its end) sorts later, matching "coop" &lt; "co-op",
+        // "cant" &lt; "can't", "A" &lt; "'A".
+        private static int MinimalPunctuationTiebreak(string x, string y)
+        {
+            var i = 0;
+            var j = 0;
+            while (i < x.Length && j < y.Length)
+            {
+                var xMinimal = IsMinimalPunctuation(x[i]);
+                var yMinimal = IsMinimalPunctuation(y[j]);
+                if (xMinimal != yMinimal)
+                    return xMinimal ? 1 : -1;
+                i++;
+                j++;
+            }
+
+            return (x.Length - i).CompareTo(y.Length - j);
+        }
 
         public override bool Equals(string? x, string? y) =>
             x is null

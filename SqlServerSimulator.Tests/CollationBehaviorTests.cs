@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Public-surface coverage for the default collation's
 /// (<c>SQL_Latin1_General_CP1_CI_AS</c>) case-folding, accent-sensitivity,
-/// and primary-weight-zero sort/equality rules — exercised through
+/// and minimal-weight (hyphen / apostrophe) sort/equality rules — exercised through
 /// <c>=</c>, <c>ORDER BY</c>, <c>DISTINCT</c>, and <c>COLLATE</c>-name
 /// case-insensitive resolution. Counterpart to the internal-only
 /// <c>CollationTests</c>, which retains the algorithm-contract tests for
@@ -62,14 +62,15 @@ public sealed class CollationBehaviorTests
     }
 
     /// <summary>
-    /// Probe-confirmed against SQL Server 2025: the default collation
-    /// applies <c>IgnoreSymbols</c> in sort — apostrophe drops out of the
-    /// primary sort key, so "'Aiea" sorts as "Aiea" which is greater than
-    /// "Aaronsburg". Equality keeps symbols significant — the direct
-    /// asymmetry probe lives in <c>CollationTests</c>.
+    /// Probe-confirmed against SQL Server 2025: apostrophe and hyphen carry
+    /// only a secondary sort weight, so they drop out of the *primary* key —
+    /// "'Aiea" sorts as "Aiea", which is greater than "Aaronsburg". (Other
+    /// symbols keep a real primary weight and sort ahead of letters; the
+    /// minimal-weight asymmetry and the secondary tie-break live in
+    /// <c>CollationTests</c>.) Equality keeps every symbol significant.
     /// </summary>
     [TestMethod]
-    public void DefaultCollation_OrderBy_ApostropheIsIgnored()
+    public void DefaultCollation_OrderBy_ApostropheHasMinimalWeight()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(
@@ -79,6 +80,46 @@ public sealed class CollationBehaviorTests
         while (reader.Read())
             rows.Add(reader.GetString(0));
         CollectionAssert.AreEqual(new[] { "Aaronsburg", "'Aiea" }, rows);
+    }
+
+    /// <summary>
+    /// Probe-confirmed against SQL Server 2025: symbols other than hyphen /
+    /// apostrophe keep a real primary weight that sorts them ahead of digits
+    /// and letters, so MIN of ('#500-75', '00,', 'abc') is '#500-75'. (An
+    /// earlier ignore-all-symbols sort stripped the '#' and mis-ranked
+    /// "#500-75" among the digits as "50075" — the divergence this guards.)
+    /// </summary>
+    [TestMethod]
+    public void DefaultCollation_OrderBy_NonMinimalSymbolsSortFirst()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table t (v nvarchar(20)); insert t values ('00,'), ('abc'), ('#500-75')");
+        AreEqual("#500-75", sim.ExecuteScalar("select min(v) from t"));
+        using var reader = sim.CreateCommand("select v from t order by v").ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "#500-75", "00,", "abc" }, rows);
+    }
+
+    /// <summary>
+    /// The minimal-weight marks break ties only against an otherwise-identical
+    /// neighbor: "coop" sorts before "co-op" (probe-confirmed). MIN therefore
+    /// picks the mark-free spelling.
+    /// </summary>
+    [TestMethod]
+    public void DefaultCollation_OrderBy_MinimalWeightBreaksTieAfterPlainSpelling()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table t (v nvarchar(20)); insert t values ('co-op'), ('coop')");
+        AreEqual("coop", sim.ExecuteScalar("select min(v) from t"));
+        using var reader = sim.CreateCommand("select v from t order by v").ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "coop", "co-op" }, rows);
     }
 
     /// <summary>

@@ -70,22 +70,27 @@ public sealed class CollationTests
     }
 
     [TestMethod]
-    public void Win100_ApostropheIsPrimaryWeightZero_InSort()
+    public void Win100_ApostropheIsMinimalWeight_InSort()
     {
         // Probe-confirmed against WideWorldImporters.Application.Cities:
-        // MIN of ('Aaronsburg', "'Aiea") is 'Aaronsburg' under
-        // Latin1_General_100_CI_AS because the apostrophe drops out of
-        // the primary sort key, leaving "Aiea" > "Aaronsburg".
+        // MIN of ('Aaronsburg', "'Aiea") is 'Aaronsburg' because the
+        // apostrophe drops out of the *primary* sort key, leaving "Aiea" >
+        // "Aaronsburg". The apostrophe is not weightless, though — it carries
+        // a secondary weight, so between two strings that share a primary key
+        // the copy bearing it sorts after: "A" < "'A", "OBrien" < "O'Brien"
+        // (probe-confirmed on SQL Server 2025, all three families identical).
         IsLessThan(0, Latin1General100CiAs.Compare("Aaronsburg", "'Aiea"));
-        AreEqual(0, Latin1General100CiAs.Compare("'A", "A"));
-        AreEqual(0, Latin1General100CiAs.Compare("O'Brien", "OBrien"));
+        IsGreaterThan(0, Latin1General100CiAs.Compare("'A", "A"));
+        IsGreaterThan(0, Latin1General100CiAs.Compare("O'Brien", "OBrien"));
     }
 
     [TestMethod]
-    public void Win100_HyphenIsPrimaryWeightZero_InSort()
+    public void Win100_HyphenIsMinimalWeight_InSort()
     {
-        AreEqual(0, Latin1General100CiAs.Compare("co-op", "coop"));
-        AreEqual(0, Latin1General100CiAs.Compare("re-do", "redo"));
+        // Same secondary-weight rule as the apostrophe: "coop" < "co-op",
+        // "redo" < "re-do".
+        IsGreaterThan(0, Latin1General100CiAs.Compare("co-op", "coop"));
+        IsGreaterThan(0, Latin1General100CiAs.Compare("re-do", "redo"));
     }
 
     [TestMethod]
@@ -127,7 +132,7 @@ public sealed class CollationTests
         // Latin scripts and a handful of newly-added supplementary code
         // points; none reach the regression bar).
         IsTrue(Latin1GeneralCiAs.Equals("abc", "ABC"));
-        AreEqual(0, Latin1GeneralCiAs.Compare("'A", "A"));
+        IsGreaterThan(0, Latin1GeneralCiAs.Compare("'A", "A"));
         IsFalse(Latin1GeneralCiAs.Equals("'A", "A"));
         IsLessThan(0, Latin1GeneralCiAs.Compare("Aaronsburg", "'Aiea"));
     }

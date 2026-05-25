@@ -119,12 +119,25 @@ The override registry (`overrides` ConcurrentDictionary in `Collation.Parser.cs`
 
 ### Behavioral notes by family
 
-- **SQL_\* family**: routed through invariant `CompareInfo` (unless the human-prefix description maps to a locale-specific culture, e.g., `SQL_Croatian_CP1250_CI_AS` → `hr-HR`); same IgnoreSymbols-in-sort treatment as the Windows family. Description carries the per-name SQL Server Sort Order number + Code Page (extracted from the `CP*` token).
-- **Windows-style Latin1_General**: invariant `CompareInfo`; IgnoreSymbols layered on sort options. `_BIN` engages the pre-2005 position-0-codeunit / position-1+-codepoint quirk; `_BIN2` is pure UTF-16 code-unit ordinal.
+- **SQL_\* family**: routed through invariant `CompareInfo` (unless the human-prefix description maps to a locale-specific culture, e.g., `SQL_Croatian_CP1250_CI_AS` → `hr-HR`); same two-pass minimal-punctuation sort treatment as the Windows family (see [Symbol sort weighting](#symbol-sort-weighting)). Description carries the per-name SQL Server Sort Order number + Code Page (extracted from the `CP*` token).
+- **Windows-style Latin1_General**: invariant `CompareInfo`; two-pass minimal-punctuation sort. `_BIN` engages the pre-2005 position-0-codeunit / position-1+-codepoint quirk; `_BIN2` is pure UTF-16 code-unit ordinal.
 - **`_UTF8` collations**: storage encoding flips from CP1252 to UTF-8 for varchar/char columns. `_BIN2_UTF8` substitutes `Utf8CodepointBinaryCollation` (codepoint-order = UTF-8 byte order) on varchar storage.
 - **`_SC_` collations** (and v140+ implicitly): set `IsSupplementaryCharacterAware` on the constructed instance, driving codepoint-aware LEN/SUBSTRING/etc. dispatch (see [`_SC_` function-semantics dispatch](#_sc_-function-semantics-dispatch)).
 - **`_KS_` / `_WS_` flags**: flip `CompareOptions.IgnoreKanaType` / `IgnoreWidth` off (default = both on).
 - **Locale prefixes** (Japanese, Chinese, Turkish, Korean, etc.): map to the closest .NET culture via `KnownPrefixes`; fall back to invariant when no clean .NET equivalent exists (Tamazight, Traditional_Spanish, Indic_General). Sort-parity caveat in [Locale-comparer sort-parity gap](#locale-comparer-sort-parity-gap) applies — equality / CI/CS / KS / WS folding align, secondary sort tiebreakers within equivalence classes may diverge.
+
+## Symbol sort weighting
+
+`CultureCollation.Compare` (the `CompareInfo`-routed comparer behind every SQL_\*, Windows, and locale family) gives hyphen (`-`) and apostrophe (`'`) the **minimal-weight** treatment SQL Server applies, while every other symbol keeps a real primary weight. Probe-confirmed identical across `SQL_Latin1_General_CP1_CI_AS`, `Latin1_General_100_CI_AS`, and `Latin1_General_CI_AS` on SQL Server 2025:
+
+- **Non-minimal symbols (`#`, `+`, `,`, `!`, `~`, `_`, …) sort first** — ahead of digits and letters. So `MIN('#500-75', '00,', 'abc')` is `'#500-75'`. .NET's `CompareOptions.IgnoreSymbols` would *strip* these (mis-ranking `'#500-75'` among the digits as `50075`); plain `CompareInfo` without it keeps them, which is what the comparer uses.
+- **Hyphen and apostrophe drop out of the primary key** — `'co-op'` ranks beside `'coop'`, `"'Aiea"` beside `'Aiea'` — but carry a secondary weight, so between two strings sharing a primary key the copy bearing the mark sorts *after*: `'coop' < 'co-op'`, `'cant' < "can't"`, `'A' < "'A"`.
+
+Implementation: a fast path (`compareInfo.Compare(x, y, equalityOptions)`) when neither operand contains a minimal mark; otherwise a primary pass over hyphen/apostrophe-stripped copies, then `MinimalPunctuationTiebreak` (a two-pointer scan where a minimal mark sorts after a real character). Equality and `GetHashCode` keep *every* symbol significant (only trailing spaces fold, handled at the `SqlValue` layer) — so `'co-op' = 'coop'` is false, matching real SQL Server.
+
+### Known gap: varchar symbol order under SQL_\* collations
+
+`SQL_*` collations sort **non-Unicode (`varchar`/`char`) data through a CP1252 code-page sort table** that differs from their Unicode (`nvarchar`/`nchar`) rules — the same collation name orders the same characters differently by storage type. Probe-confirmed: under `SQL_Latin1_General_CP1_CI_AS`, `varchar` sorts `'+' < '/'` but `nvarchar` sorts `'/' < '+'`. The simulator routes both through one Unicode `CompareInfo`, so it matches the nvarchar order for both. Bites base64-bearing `varchar` columns (`+`/`/` are base64's two special chars) — e.g. AdventureWorks `Person.Password.PasswordHash` (`varchar`), where live `MIN(PasswordHash)` starts `++…` (code-page order) but the simulator picks `//…` (Unicode order). Closing it requires the CP1252 SQL sort-order weight table for varchar storage, which the simulator doesn't ship.
 
 ## Locale-comparer sort-parity gap
 
