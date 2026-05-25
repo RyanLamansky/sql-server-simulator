@@ -309,6 +309,24 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void DateTimeColumn_LateDaySubSecond_RoundTripsThroughBcp()
+    {
+        // datetime decode converts 1/300-second ticks back to .NET ticks. Doing
+        // the divide before the multiply (TicksPerSecond / 300 = 33333, truncating
+        // the real 33333.333) under-counts every tick — an error that compounds
+        // with the tick-count-since-midnight, reaching ~0.4-0.9s late in the day.
+        // 23:47:16.030 sits on the 1/300 grid (30ms = 9 ticks) so it must survive
+        // exactly; the old truncation shifted it back to ~23:47:15.6.
+        var stamp = new DateTime(2024, 11, 8, 23, 47, 16, 30, DateTimeKind.Unspecified);
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Stamps", t => t.Column("When", "datetime").Row(stamp))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _);
+        AreEqual(stamp, sim.ExecuteScalar("SELECT [When] FROM Stamps"));
+    }
+
+    [TestMethod]
     public void DecimalColumn_RoundTripsThroughBcp_AcrossPrecisionBuckets()
     {
         // Three precision buckets exercise the 4 / 8 / 12-byte mantissa

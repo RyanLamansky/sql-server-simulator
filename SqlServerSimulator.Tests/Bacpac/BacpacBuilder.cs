@@ -800,7 +800,8 @@ public sealed partial class BacpacBuilder
         var epoch = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
         var diff = dt - epoch;
         var days = diff.Days;
-        var ticks300 = (uint)((diff.Ticks - (TimeSpan.TicksPerDay * days)) / (TimeSpan.TicksPerSecond / 300L));
+        var timeTicks = diff.Ticks - (TimeSpan.TicksPerDay * days);
+        var ticks300 = (uint)(((timeTicks * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond);
         BinaryPrimitives.WriteInt32LittleEndian(buf[..4], days);
         BinaryPrimitives.WriteUInt32LittleEndian(buf[4..8], ticks300);
     }

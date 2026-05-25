@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -473,6 +474,29 @@ internal abstract class BooleanExpression
     internal abstract void VisitOperandExpressions(Action<Expression> visitor);
 
     /// <summary>
+    /// Flattens a top-level <c>AND</c> chain into its individual conjuncts,
+    /// appending each to <paramref name="sink"/>. A non-<c>AND</c> predicate
+    /// contributes itself. Used by the join planner to pull equi-join key
+    /// equalities out of an <c>ON</c> predicate; <c>OR</c> / <c>NOT</c> /
+    /// comparison nodes are opaque leaves here (only the outermost <c>AND</c>
+    /// spine splits), so <c>a.x = b.y OR …</c> stays a single conjunct.
+    /// </summary>
+    internal virtual void CollectConjuncts(List<BooleanExpression> sink) => sink.Add(this);
+
+    /// <summary>
+    /// Exposes the two operands when this predicate is an equality comparison
+    /// (<c>=</c>); returns false for every other node. Lets the join planner
+    /// recognize <c>left = right</c> conjuncts without reaching into the
+    /// private comparison-subclass hierarchy.
+    /// </summary>
+    internal virtual bool TryGetEqualityOperands([NotNullWhen(true)] out Expression? left, [NotNullWhen(true)] out Expression? right)
+    {
+        left = null;
+        right = null;
+        return false;
+    }
+
+    /// <summary>
     /// Three-valued <c>AND</c>: <c>false AND x = false</c> regardless of
     /// <c>x</c>; <c>true AND x = x</c>; <c>NULL AND NULL = NULL</c>. Short-
     /// circuits when the left side is <c>false</c> — the right side isn't
@@ -498,6 +522,12 @@ internal abstract class BooleanExpression
         {
             left.VisitOperandExpressions(visitor);
             right.VisitOperandExpressions(visitor);
+        }
+
+        internal override void CollectConjuncts(List<BooleanExpression> sink)
+        {
+            left.CollectConjuncts(sink);
+            right.CollectConjuncts(sink);
         }
     }
 
@@ -911,6 +941,13 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "equal to", static (l, r) => l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
+
+        internal override bool TryGetEqualityOperands([NotNullWhen(true)] out Expression? l, [NotNullWhen(true)] out Expression? r)
+        {
+            l = left;
+            r = right;
+            return true;
+        }
     }
 
     private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)

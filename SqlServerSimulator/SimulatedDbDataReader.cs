@@ -149,7 +149,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             : v.Type switch
             {
                 var t when t == SqlType.Date => v.AsDate.ToDateTime(TimeOnly.MinValue),
-                var t when t == SqlType.DateTime => v.AsDateTime,
+                var t when t == SqlType.DateTime => DateTimeSqlType.RoundToClientMilliseconds(v.AsDateTime),
                 var t when t == SqlType.SmallDateTime => v.AsSmallDateTime,
                 DateTime2SqlType => v.AsDateTime2,
                 _ => throw new InvalidCastException($"Cannot cast column of type {v.Type} to DateTime."),

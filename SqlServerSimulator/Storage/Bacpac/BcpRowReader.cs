@@ -401,7 +401,7 @@ internal static class BcpRowReader
         var days = BinaryPrimitives.ReadInt32LittleEndian(bytes[..4]);
         var ticks300 = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..8]);
         var epoch = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
-        var dt = epoch.AddDays(days).AddTicks(ticks300 * (TimeSpan.TicksPerSecond / 300L));
+        var dt = epoch.AddDays(days).AddTicks(ticks300 * TimeSpan.TicksPerSecond / 300L);
         return SqlValue.FromDateTime(dt);
     }
 

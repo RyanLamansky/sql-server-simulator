@@ -208,6 +208,8 @@ public sealed class CurrentTimeFunctionTests
             timeUnits = 0;
         }
         var roundedTicks = timeUnits * TimeSpan.TicksPerSecond / 300;
-        return new DateTime(1900, 1, 1).AddDays(dayCount).AddTicks(roundedTicks);
+        // SqlClient rounds the stored 1/300 tick to whole milliseconds on retrieval.
+        var clientTicks = (roundedTicks + (TimeSpan.TicksPerMillisecond / 2)) / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond;
+        return new DateTime(1900, 1, 1).AddDays(dayCount).AddTicks(clientTicks);
     }
 }

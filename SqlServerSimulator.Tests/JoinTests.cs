@@ -504,4 +504,107 @@ public sealed class JoinTests
             create table a (id int);
             select * from , a
             """, 102);
+
+    // --- Equi-join hash path edge cases (Selection.Execution.Joins.cs). ---
+    // The `a.col = b.col` fast path replaces the nested loop; these pin the
+    // semantics that differ from a naive hash: NULL keys, type promotion,
+    // composite keys, residual non-equi conjuncts, and collation folding.
+
+    private static Simulation SeededNullKeys()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table l (id int, k int);
+            create table r (k int, v int);
+            insert l values (1, 10), (2, null);
+            insert r values (10, 100), (null, 999)
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// l.id=2 (NULL k) and r's NULL-k row must not pair — NULL = NULL is UNKNOWN.
+    /// </summary>
+    [TestMethod]
+    public void HashEquiJoin_NullKey_ExcludedFromInnerMatch()
+        => AreEqual(1, SeededNullKeys().ExecuteScalar("select count(*) from l join r on l.k = r.k"));
+
+    [TestMethod]
+    public void HashEquiJoin_NullKey_LeftJoinEmitsNullFilledRight()
+    {
+        var sim = SeededNullKeys();
+        // Both left rows survive; the NULL-key one is NULL-filled, not matched to r's NULL row.
+        AreEqual(2, sim.ExecuteScalar("select count(*) from l left join r on l.k = r.k"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from l left join r on l.k = r.k where r.v is null"));
+    }
+
+    /// <summary>
+    /// r's NULL-key row never matches, so RIGHT JOIN emits it with left NULL-filled (2 rows total).
+    /// </summary>
+    [TestMethod]
+    public void HashEquiJoin_NullKey_RightJoinEmitsUnmatchedRightRow()
+        => AreEqual(2, SeededNullKeys().ExecuteScalar("select count(*) from l right join r on l.k = r.k"));
+
+    /// <summary>
+    /// bigint = int must hash under the promoted common type, not by raw SqlValue.Type.
+    /// </summary>
+    [TestMethod]
+    public void HashEquiJoin_CrossTypeKey_PromotesAndMatches()
+        => AreEqual(1L, new Simulation().ExecuteScalar("""
+            create table l (k bigint);
+            create table r (k int);
+            insert l values (5);
+            insert r values (5);
+            select count_big(*) from l join r on l.k = r.k
+            """));
+
+    [TestMethod]
+    public void HashEquiJoin_CompositeKey_AllColumnsMustMatch()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table l (a int, b int);
+            create table r (a int, b int);
+            insert l values (1, 2), (1, 3);
+            insert r values (1, 2), (9, 9);
+            select count(*) from l join r on l.a = r.a and l.b = r.b
+            """));
+
+    /// <summary>
+    /// The `r.v > 150` conjunct isn't an equi-key; it's re-checked per probed candidate.
+    /// </summary>
+    [TestMethod]
+    public void HashEquiJoin_ResidualNonEquiConjunct_FiltersCandidates()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table l (k int);
+            create table r (k int, v int);
+            insert l values (10);
+            insert r values (10, 100), (10, 200);
+            select count(*) from l join r on l.k = r.k and r.v > 150
+            """));
+
+    /// <summary>
+    /// Default SQL_Latin1_General_CP1_CI_AS is case-insensitive — the hash key
+    /// must fold case (GetHashCode agreeing with collation-aware Equals).
+    /// </summary>
+    [TestMethod]
+    public void HashEquiJoin_StringKey_FoldsCaseUnderDefaultCollation()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table l (name varchar(20));
+            create table r (name varchar(20));
+            insert l values ('One');
+            insert r values ('one');
+            select count(*) from l join r on l.name = r.name
+            """));
+
+    /// <summary>
+    /// 1 match + 1 unmatched-left + 1 unmatched-right = 3 rows.
+    /// </summary>
+    [TestMethod]
+    public void HashEquiJoin_FullJoin_EmitsUnmatchedFromBothSides()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table l (k int);
+            create table r (k int);
+            insert l values (1), (2);
+            insert r values (1), (3);
+            select count(*) from l full outer join r on l.k = r.k
+            """));
 }

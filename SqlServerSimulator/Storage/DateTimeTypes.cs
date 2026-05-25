@@ -78,6 +78,22 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
         return SqlValue.FromDateTimeUnchecked(BaseDate.AddDays(dayCount).AddTicks(timeTicks));
     }
 
+    /// <summary>
+    /// Rounds a <c>datetime</c> to whole milliseconds the way SqlClient
+    /// materializes one (the <c>.000</c>/<c>.003</c>/<c>.007</c> pattern):
+    /// the value is stored and compared at 1/300-second resolution, but every
+    /// path that hands a <see cref="DateTime"/> back across the ADO.NET
+    /// boundary rounds first. No 0.5-ms tie can occur — a 1/300-second tick is
+    /// always 0, 1/3, or 2/3 ms past a millisecond — so round-to-nearest is
+    /// exact. Engine-internal reads (<see cref="SqlValue.AsDateTime"/>,
+    /// re-encode, arithmetic, comparison) keep the full tick.
+    /// </summary>
+    public static DateTime RoundToClientMilliseconds(DateTime value)
+    {
+        var ticks = (value.Ticks + (TimeSpan.TicksPerMillisecond / 2)) / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond;
+        return new DateTime(ticks, value.Kind);
+    }
+
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromDateTime(raw switch
     {
         DateTime dt => dt,

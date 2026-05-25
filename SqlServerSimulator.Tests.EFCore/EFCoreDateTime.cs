@@ -161,7 +161,9 @@ public class EFCoreDateTime
     [TestMethod]
     public void Insert_LegacyDateTime_RoundTripsAtTickGranularity()
     {
-        // Legacy datetime stores 1/300-second ticks; .997 input → tick 299 = 9_966_666 100-ns ticks past second.
+        // Legacy datetime stores 1/300-second ticks (.997 input → tick 299, the
+        // raw .9966666); SqlClient rounds that to whole ms on read, so EF surfaces
+        // .997 — a lossless round-trip for a millisecond-precision input.
         using var context = new TestDbContext(TestDbContext.CreateEventsSimulation());
 
         var started = new DateTime(2026, 5, 4, 13, 45, 30, 997);
@@ -174,7 +176,7 @@ public class EFCoreDateTime
         Assert.AreEqual(started.Hour, read.Value.Hour);
         Assert.AreEqual(started.Minute, read.Value.Minute);
         Assert.AreEqual(started.Second, read.Value.Second);
-        Assert.AreEqual(9_966_666, read.Value.Ticks % TimeSpan.TicksPerSecond);
+        Assert.AreEqual(9_970_000, read.Value.Ticks % TimeSpan.TicksPerSecond);
     }
 
     [TestMethod]

@@ -26,28 +26,28 @@ public sealed class LegacyDateTimeTests
     public void Cast_StringToDateTime(string input, string expectedIso)
         => AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), ExecuteScalar($"select cast({input} as datetime)"));
 
+    // Sub-ms input rounds half-up on store to the nearest 1/300-second tick;
+    // SqlClient then rounds that tick to whole milliseconds on retrieval, so an
+    // end-to-end read lands on SQL Server's .000/.003/.007/.010/.013 pattern.
+    // The lossless raw tick (before client rounding) is pinned by
+    // Cast_DateTimeToDateTime2_PreservesValue.
     [TestMethod]
     [DataRow(0, 0)]
     [DataRow(1, 0)]
-    [DataRow(2, 1)]
-    [DataRow(3, 1)]
-    [DataRow(4, 1)]
-    [DataRow(5, 2)]
-    [DataRow(6, 2)]
-    [DataRow(7, 2)]
-    [DataRow(8, 2)]
-    [DataRow(9, 3)]
-    [DataRow(10, 3)]
-    [DataRow(11, 3)]
-    [DataRow(12, 4)]
-    public void Cast_StringToDateTime_RoundsToNearest1_300Tick(int inputMs, int expectedTickIndex)
-    {
-        // SQL Server's legacy datetime stores 1/300-second ticks; sub-tick ms inputs round half-up to nearest tick.
-        // .NET's DateTime.Millisecond won't match SQL's displayed .003/.007/.010; the canonical tick value does.
-        var value = (DateTime)ExecuteScalar($"select cast('2024-01-15 12:00:00.{inputMs:D3}' as datetime)")!;
-        var expectedTimeTicks = expectedTickIndex * 10_000_000L / 300;
-        AreEqual(new DateTime(2024, 1, 15).Ticks + (12 * TimeSpan.TicksPerHour) + expectedTimeTicks, value.Ticks);
-    }
+    [DataRow(2, 3)]
+    [DataRow(3, 3)]
+    [DataRow(4, 3)]
+    [DataRow(5, 7)]
+    [DataRow(6, 7)]
+    [DataRow(7, 7)]
+    [DataRow(8, 7)]
+    [DataRow(9, 10)]
+    [DataRow(10, 10)]
+    [DataRow(11, 10)]
+    [DataRow(12, 13)]
+    public void Cast_StringToDateTime_RoundsSubMillisecondToClientMillisecond(int inputMs, int expectedMs)
+        => AreEqual(new DateTime(2024, 1, 15, 12, 0, 0).AddMilliseconds(expectedMs),
+            ExecuteScalar($"select cast('2024-01-15 12:00:00.{inputMs:D3}' as datetime)"));
 
     [TestMethod]
     public void Cast_StringToDateTime_999RollsToNextSecond()
@@ -58,14 +58,14 @@ public sealed class LegacyDateTimeTests
         => AssertSqlMessage("select cast('9999-12-31 23:59:59.999' as datetime)",
             "The conversion of a varchar data type to a datetime data type resulted in an out-of-range value.");
 
+    /// <summary>
+    /// .998 rounds half-up on store to tick 25_919_999 (last tick of the day);
+    /// SqlClient rounds that to whole ms on retrieval, surfacing 23:59:59.997.
+    /// </summary>
     [TestMethod]
     public void Cast_StringToDateTime_998AtAbsoluteMax_RoundsToValidLastTick()
-    {
-        // .998 rounds half-up to tick 25_919_999 (last tick of day) → materializes as 23:59:59.9966666 in .NET.
-        var value = (DateTime)ExecuteScalar("select cast('9999-12-31 23:59:59.998' as datetime)")!;
-        var expected = new DateTime(9999, 12, 31).AddTicks(25_919_999L * TimeSpan.TicksPerSecond / 300);
-        AreEqual(expected, value);
-    }
+        => AreEqual(new DateTime(9999, 12, 31, 23, 59, 59, 997),
+            (DateTime)ExecuteScalar("select cast('9999-12-31 23:59:59.998' as datetime)")!);
 
     [TestMethod]
     public void Cast_StringToDateTime_BelowMin_RaisesMsg242()
@@ -143,8 +143,22 @@ public sealed class LegacyDateTimeTests
             rows.Add(reader.GetDateTime(0));
         HasCount(2, rows);
         AreEqual(new DateTime(1900, 1, 1), rows[0]);
-        // .998 rounds half-up; lands at 9_966_666 100-ns ticks past 12:00:00 (.NET sees ms=996).
-        AreEqual(new DateTime(2024, 1, 15, 12, 0, 0).AddTicks(9_966_666), rows[1]);
+        // .998 rounds half-up on store to tick 299 (1/300s); SqlClient then rounds
+        // that to whole milliseconds on retrieval, so the reader surfaces .997.
+        AreEqual(new DateTime(2024, 1, 15, 12, 0, 0, 997), rows[1]);
+    }
+
+    [TestMethod]
+    public void Reader_DateTime_RoundsToWholeMillisecondsOnEveryAccessor()
+    {
+        // .637 stores as tick 191 (raw .6366666); SqlClient surfaces .637 through
+        // every value accessor — the typed GetDateTime and the boxing GetValue /
+        // ToObject path must agree. Engine-internal reads keep the full tick.
+        using var reader = new Simulation().ExecuteReader("select cast('2024-06-15 09:17:08.637' as datetime)");
+        IsTrue(reader.Read());
+        var expected = new DateTime(2024, 6, 15, 9, 17, 8, 637);
+        AreEqual(expected, reader.GetDateTime(0));
+        AreEqual(expected, reader.GetValue(0));
     }
 
     [TestMethod]

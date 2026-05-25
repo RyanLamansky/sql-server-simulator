@@ -674,7 +674,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // when read via the untyped accessors. EF's DateOnly mapping reads
         // through GetDateTime and converts on its own.
         var t when t == SqlType.Date => this.AsDate.ToDateTime(TimeOnly.MinValue),
-        var t when t == SqlType.DateTime => this.AsDateTime,
+        var t when t == SqlType.DateTime => DateTimeSqlType.RoundToClientMilliseconds(this.AsDateTime),
         var t when t == SqlType.SmallDateTime => this.AsSmallDateTime,
         DateTime2SqlType => this.AsDateTime2,
         // SqlClient surfaces a time column as TimeSpan via the untyped
