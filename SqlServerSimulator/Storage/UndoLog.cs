@@ -75,6 +75,9 @@ internal sealed class UndoLog
     public void RecordForwardRetarget(Heap heap, int pageIndex, int slotIndex, (int Page, int Slot) oldTarget, (int Page, int Slot) newTarget) =>
         this.entries.Add(new SlotRewrite(heap, SlotRewriteKind.ForwardRetarget, pageIndex, slotIndex, [], oldTarget, newTarget, freeOnCommit: false));
 
+    public void RecordForwardedPointerDelete(Heap heap, int pageIndex, int slotIndex, (int Page, int Slot) target) =>
+        this.entries.Add(new ForwardedPointerDelete(heap, pageIndex, slotIndex, target));
+
     public void RecordTempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) =>
         this.entries.Add(new TempTableCreation(owner, name));
 
@@ -188,8 +191,16 @@ internal sealed class UndoLog
                     // The row this INSERT created is being unwound; its off-row
                     // chains were allocated by the rolled-back statement and no
                     // surviving row, undo entry, or version references them.
+                    // Rollback is terminal — the row can't come back and an
+                    // uncommitted insert is invisible to every snapshot — so the
+                    // slot is reclaimable just like a committed DELETE's: mark it
+                    // so Compact packs the row-payload bytes away and later
+                    // inserts reuse the space, instead of leaking a slot's worth
+                    // of bytes per rolled-back insert.
                     FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex);
                     page.DeleteSlot(this.SlotIndex);
+                    page.MarkSlotReclaimable(this.SlotIndex);
+                    this.Heap.MarkPageReclaimable(this.PageIndex);
                     break;
                 case UndoKind.Delete:
                     // Un-tombstone: the row (and its chains) become live again,
@@ -272,6 +283,33 @@ internal sealed class UndoLog
             // superseded payload of its own (its old target rides a Delete).
             if (this.FreeOnCommit && this.Kind != SlotRewriteKind.ForwardRetarget)
                 FreeChainsInBytes(this.Heap, this.OldPayload);
+        }
+    }
+
+    /// <summary>
+    /// Undo entry for the forwarding-pointer half of a forwarded-row DELETE
+    /// (the relocated target is handled by a paired <see cref="UndoKind.Delete"/>
+    /// <see cref="SlotChange"/>). The pointer slot holds a forward pointer, not a
+    /// row, so commit reclaims only its directory slot — never decoding it for
+    /// LOB chains — and undo resurrects the pointer and re-registers the target.
+    /// </summary>
+    private sealed class ForwardedPointerDelete(Heap heap, int pageIndex, int slotIndex, (int Page, int Slot) target) : UndoEntry
+    {
+        public readonly Heap Heap = heap;
+        public readonly int PageIndex = pageIndex;
+        public readonly int SlotIndex = slotIndex;
+        public readonly (int Page, int Slot) Target = target;
+
+        public override void Undo()
+        {
+            this.Heap.Pages[this.PageIndex].UndeleteSlot(this.SlotIndex);
+            this.Heap.ReinstateForwardTargetForUndo(this.Target);
+        }
+
+        public override void Commit()
+        {
+            this.Heap.Pages[this.PageIndex].MarkSlotReclaimable(this.SlotIndex);
+            this.Heap.MarkPageReclaimable(this.PageIndex);
         }
     }
 

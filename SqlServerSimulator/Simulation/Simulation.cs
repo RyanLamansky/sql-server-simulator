@@ -1155,6 +1155,9 @@ public sealed partial class Simulation
             var outcome = body(context);
             if (statementVersionEntries is { } autoCommitEntries)
             {
+                // FinalizePendingEntries clears the list, so capture whether
+                // this statement versioned anything before the call.
+                var versionedThisStatement = autoCommitEntries.Count > 0;
                 Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, context.CurrentDatabase);
                 // Auto-commit statement: its writes are now permanent, so
                 // commit the throwaway log — reclaiming chains superseded by
@@ -1162,6 +1165,16 @@ public sealed partial class Simulation
                 // explicit tx (statementVersionEntries is null) the entries
                 // stay on the tx's log until COMMIT instead.
                 log.Commit();
+                // When this statement versioned its superseded rows, those
+                // images are pinned only by the HistoricalVersions just
+                // created. With no snapshot open nothing needs them, so collect
+                // now rather than leaving them until the next explicit-tx
+                // commit (the version-store analog of the unversioned
+                // log.Commit() above). An active snapshot legitimately needs the
+                // versions, so defer — and skip the scan — until it closes.
+                var autoCommitDatabase = context.CurrentDatabase;
+                if (versionedThisStatement && autoCommitDatabase.ActiveSnapshotTxs.IsEmpty)
+                    Storage.VersionStore.RunGarbageCollection(autoCommitDatabase);
             }
             // Table-variable writes are non-transactional and final on
             // statement success regardless of any enclosing tx, so their

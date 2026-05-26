@@ -302,20 +302,41 @@ internal sealed class Heap
 
     /// <summary>
     /// Marks the row at <paramref name="pageIndex"/> / <paramref name="slotIndex"/>
-    /// as deleted. The slot is tombstoned at the page level; row payload bytes
-    /// are not reclaimed (the heap-page-byte leak quirk in CLAUDE.md). The
-    /// row's off-row LOB chains, however, are reclaimed: when
+    /// as deleted. The slot is tombstoned at the page level; on commit its undo
+    /// entry marks the slot reclaimable so <see cref="HeapPage.Compact"/> can
+    /// pack the bytes away. The row's off-row LOB chains are reclaimed too: when
     /// <paramref name="reclaimSuperseded"/> is set (no <c>HistoricalVersion</c>
     /// will pin them — see <see cref="VersionStore.WillCaptureVersions"/>) the
     /// recorded undo entry frees them on commit via
     /// <see cref="FreeLobChain"/>; otherwise version-store GC frees them once
     /// no snapshot needs the deleted row.
     /// </summary>
+    /// <remarks>
+    /// When the visible slot is a forwarding pointer, the row's payload (and any
+    /// off-row chains) lives at the relocated target, not the pointer slot — so
+    /// both are deleted, and the target is unregistered from
+    /// <see cref="ForwardTargets"/>. The target's Delete entry carries the
+    /// <paramref name="reclaimSuperseded"/> gate (it owns the row + chains); the
+    /// pointer's entry only reclaims its directory slot — its bytes are a
+    /// forward pointer, not a row, so they must never be decoded for LOB heads.
+    /// Rollback resurrects both slots and re-registers the target.
+    /// </remarks>
     public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
         this.MutationGeneration++;
+        var page = this.Pages[pageIndex];
+        if (page.IsSlotForwarded(slotIndex))
+        {
+            var target = page.ReadForwardTarget(slotIndex);
+            undoLog?.RecordDelete(this, target.PageIndex, target.SlotIndex, reclaimSuperseded);
+            this.Pages[target.PageIndex].DeleteSlot(target.SlotIndex);
+            undoLog?.RecordForwardedPointerDelete(this, pageIndex, slotIndex, target);
+            page.DeleteSlot(slotIndex);
+            _ = this.ForwardTargets.Remove(target);
+            return;
+        }
         undoLog?.RecordDelete(this, pageIndex, slotIndex, reclaimSuperseded);
-        this.Pages[pageIndex].DeleteSlot(slotIndex);
+        page.DeleteSlot(slotIndex);
     }
 
     /// <summary>
@@ -420,6 +441,15 @@ internal sealed class Heap
         _ = this.ForwardTargets.Remove(newTarget);
         _ = this.ForwardTargets.Add(oldTarget);
     }
+
+    /// <summary>
+    /// Undo callback for <see cref="UndoLog.RecordForwardedPointerDelete"/> —
+    /// re-registers a target whose forwarding row was deleted, so the
+    /// resurrected pointer surfaces the row once (via the forwarder) rather than
+    /// the target also appearing as a standalone live row.
+    /// </summary>
+    internal void ReinstateForwardTargetForUndo((int Page, int Slot) target) =>
+        _ = this.ForwardTargets.Add(target);
 
     /// <summary>
     /// Returns a fresh copy of the row bytes at the given Rid, dereferencing

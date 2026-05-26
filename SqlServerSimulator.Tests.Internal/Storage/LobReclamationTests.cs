@@ -136,6 +136,26 @@ public sealed class LobReclamationTests
         IsLessThanOrEqualTo(8, HeapFor(conn, "t").LobPages.Count, "Version-store GC should trim each committed tx's history entry and free its chain when no snapshot needs it.");
     }
 
+    // Under RCSI with no concurrent snapshot reader, even plain autocommit
+    // UPDATEs (no explicit transaction) must reclaim their superseded chains:
+    // version-store GC runs at the end of a versioned autocommit statement when
+    // no snapshot is open, so churn stays bounded without an explicit COMMIT to
+    // trigger collection.
+    [TestMethod]
+    public void VersionedAutocommitUpdate_ReclaimsWithoutExplicitTransaction()
+    {
+        var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        Exec(conn, "alter database simulated set read_committed_snapshot on");
+        Exec(conn, "create table t (id int not null primary key, v nvarchar(max) not null)");
+        Exec(conn, "insert t values (1, replicate(N'a', 100))");
+
+        for (var i = 0; i < 100; i++)
+            Exec(conn, "update t set v = replicate(N'b', 100) where id = 1");
+
+        IsLessThanOrEqualTo(8, HeapFor(conn, "t").LobPages.Count, "A versioned autocommit UPDATE with no open snapshot should GC its superseded chain immediately, not wait for an explicit-tx commit.");
+    }
+
     // Reclamation must not corrupt a surviving value: the live row reads back
     // correctly after extensive churn around it.
     [TestMethod]

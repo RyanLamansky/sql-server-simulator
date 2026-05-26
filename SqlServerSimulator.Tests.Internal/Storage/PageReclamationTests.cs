@@ -115,6 +115,64 @@ public sealed class PageReclamationTests
         }
     }
 
+    // Deleting a *forwarded* row must reclaim the relocated target's bytes, not
+    // just the pointer slot. Each cycle grows a row (forwarding it to a fresh
+    // target) then deletes it; without target reclamation the target pages
+    // accrete one per cycle.
+    [TestMethod]
+    public void ForwardedRowDeleteChurn_KeepsPagesBounded()
+    {
+        var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        Exec(conn, "create table t (id int not null primary key, v varchar(7000) not null)");
+
+        for (var i = 0; i < 100; i++)
+        {
+            Exec(conn, "insert t values (1, 'x')");
+            Exec(conn, "update t set v = replicate('a', 7000) where id = 1");
+            Exec(conn, "delete from t where id = 1");
+        }
+
+        IsLessThanOrEqualTo(6, HeapFor(conn, "t").Pages.Count, "Deleting a forwarded row should reclaim the relocated target's page space, not orphan a page per cycle.");
+    }
+
+    // Rolling back a forwarded-row DELETE must restore the row exactly once — the
+    // pointer and target both un-tombstone and the target re-registers as a
+    // forward target, so the row surfaces via the forwarder rather than also
+    // appearing as a standalone live row.
+    [TestMethod]
+    public void RolledBackForwardedRowDelete_RestoresRowExactlyOnce()
+    {
+        var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        Exec(conn, "create table t (id int not null primary key, v varchar(7000) not null)");
+        Exec(conn, "insert t values (1, 'x')");
+        Exec(conn, "update t set v = replicate('a', 7000) where id = 1"); // grows → forwards
+        Exec(conn, "begin tran; delete from t where id = 1; rollback");
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "select count(*) from t";
+        AreEqual(1, cmd.ExecuteScalar());
+        cmd.CommandText = "select len(v) from t where id = 1";
+        AreEqual(7000, cmd.ExecuteScalar());
+    }
+
+    // A rolled-back INSERT's page-payload bytes must be reclaimed: the row is
+    // gone for good, so its slot is reclaimable and later inserts reuse the
+    // space rather than appending a page per rolled-back cycle.
+    [TestMethod]
+    public void RolledBackInsertChurn_KeepsPagesBounded()
+    {
+        var conn = new Simulation().CreateDbConnection();
+        conn.Open();
+        Exec(conn, "create table t (id int not null primary key, v varchar(7000) not null)");
+
+        for (var i = 0; i < 100; i++)
+            Exec(conn, "begin tran; insert t values (1, replicate('a', 7000)); rollback");
+
+        IsLessThanOrEqualTo(4, HeapFor(conn, "t").Pages.Count, "Rolled-back INSERT page bytes should be reclaimable and reused, not leak a page per cycle.");
+    }
+
     // A rolled-back DELETE must not be reclaimed: compaction has to preserve an
     // uncommitted-tombstone's bytes so the row comes back intact.
     [TestMethod]
