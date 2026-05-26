@@ -118,6 +118,12 @@ internal static class BuiltInResources
     /// </summary>
     private static Dictionary<string, CatalogView> BuildCatalogViews()
     {
+        var views = new Dictionary<string, CatalogView>(BuiltInToken.Comparer);
+        void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
+            views["sys." + name] = new CatalogView(name, columns, rows);
+        void Iso(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
+            views["INFORMATION_SCHEMA." + name] = new CatalogView(name, columns, rows);
+
         // Catalog-pinned types reused across catalog views — Latin1_General_CI_AS_KS_WS
         // at Implicit rank, matching what real SQL Server's catalog DDL pins
         // for _desc enum columns, permission_name, and the char(1)/char(2)
@@ -127,13 +133,12 @@ internal static class BuiltInResources
         var nvarchar128Catalog = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
 
         // sys.schemas: (name sysname, schema_id int, principal_id int null)
-        var schemasColumns = new HeapColumn[]
-        {
+        Sys("schemas",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
-        };
-        var schemasView = new CatalogView("schemas", schemasColumns, (batch, database) =>
+        ], (batch, database) =>
             database.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
             {
                 SqlValue.FromSystemName(s.Name),
@@ -159,8 +164,8 @@ internal static class BuiltInResources
         var temporalDescNone = SqlValue.FromNVarchar("NON_TEMPORAL_TABLE");
         var temporalDescHistory = SqlValue.FromNVarchar("HISTORY_TABLE");
         var temporalDescBase = SqlValue.FromNVarchar("SYSTEM_VERSIONED_TEMPORAL_TABLE");
-        var tablesColumns = new HeapColumn[]
-        {
+        Sys("tables",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
@@ -172,8 +177,7 @@ internal static class BuiltInResources
             new("temporal_type", SqlType.TinyInt, null, true),
             new("temporal_type_desc", nvarchar60Catalog, 60, true),
             new("history_table_id", SqlType.Int32, null, true),
-        };
-        var tablesView = new CatalogView("tables", tablesColumns, (batch, database) =>
+        ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
                 .OrderBy(t => t.ObjectId)
@@ -217,8 +221,8 @@ internal static class BuiltInResources
         var checkType = SqlValue.FromChar(charTwo, "C ");
         var checkTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var zeroParent = SqlValue.FromInt32(0);
-        var objectsColumns = new HeapColumn[]
-        {
+        Sys("objects",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, true),
             new("schema_id", SqlType.Int32, null, false),
@@ -228,8 +232,7 @@ internal static class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
-        };
-        var objectsView = new CatalogView("objects", objectsColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
@@ -242,8 +245,8 @@ internal static class BuiltInResources
         var systemTypeId = SqlType.TinyInt;
         var defaultCollation = SqlValue.FromSystemName("SQL_Latin1_General_CP1_CI_AS");
         var nullCollation = SqlValue.Null(SqlType.SystemName);
-        var columnsColumns = new HeapColumn[]
-        {
+        Sys("columns",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("column_id", SqlType.Int32, null, false),
@@ -256,8 +259,7 @@ internal static class BuiltInResources
             new("is_identity", SqlType.Bit, null, false),
             new("is_computed", SqlType.Bit, null, false),
             new("collation_name", SqlType.SystemName, 128, true),
-        };
-        var columnsView = new CatalogView("columns", columnsColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation));
 
         // INFORMATION_SCHEMA.TABLES: ISO-standard 4-column shape. TABLE_TYPE
@@ -265,14 +267,13 @@ internal static class BuiltInResources
         // the other shipped value.
         var baseTable = SqlValue.FromVarchar("BASE TABLE");
         var viewTableType = SqlValue.FromVarchar("VIEW");
-        var isTablesColumns = new HeapColumn[]
-        {
+        Iso("TABLES",
+        [
             new("TABLE_CATALOG", SqlType.SystemName, 128, true),
             new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("TABLE_TYPE", SqlType.Varchar, 10, true),
-        };
-        var isTablesView = new CatalogView("TABLES", isTablesColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateInformationSchemaTables(batch, database, baseTable, viewTableType));
 
         // INFORMATION_SCHEMA.COLUMNS: ISO-standard 23-column shape. Tooling
@@ -284,8 +285,8 @@ internal static class BuiltInResources
         var isoCs = SqlValue.FromSystemName("iso_1");
         var radix10 = SqlValue.FromInt16(10);
         var radix2 = SqlValue.FromInt16(2);
-        var isColumnsColumns = new HeapColumn[]
-        {
+        Iso("COLUMNS",
+        [
             new("TABLE_CATALOG", SqlType.SystemName, 128, true),
             new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
@@ -309,8 +310,7 @@ internal static class BuiltInResources
             new("DOMAIN_CATALOG", SqlType.SystemName, 128, true),
             new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
             new("DOMAIN_NAME", SqlType.SystemName, 128, true),
-        };
-        var isColumnsView = new CatalogView("COLUMNS", isColumnsColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2));
 
         // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Lists
@@ -321,16 +321,15 @@ internal static class BuiltInResources
         // AUTHORIZATION).
         var defaultCsName = SqlValue.FromSystemName("iso_1");
         var nullSysName = SqlValue.Null(SqlType.SystemName);
-        var isSchemataColumns = new HeapColumn[]
-        {
+        Iso("SCHEMATA",
+        [
             new("CATALOG_NAME", SqlType.SystemName, 128, true),
             new("SCHEMA_NAME", SqlType.SystemName, 128, false),
             new("SCHEMA_OWNER", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
-        };
-        var isSchemataView = new CatalogView("SCHEMATA", isSchemataColumns, (batch, database) =>
+        ], (batch, database) =>
             database.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
             {
                 SqlValue.FromSystemName(database.Name),
@@ -348,8 +347,8 @@ internal static class BuiltInResources
         // precision / scale / is_output / is_nullable. Probe-confirmed
         // ordering: return type emits first (parameter_id=0, empty name),
         // declared params follow in source order.
-        var parametersColumns = new HeapColumn[]
-        {
+        Sys("parameters",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("parameter_id", SqlType.Int32, null, false),
@@ -361,30 +360,28 @@ internal static class BuiltInResources
             new("is_output", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, false),
             new("is_readonly", SqlType.Bit, null, false),
-        };
-        var parametersView = new CatalogView("parameters", parametersColumns, EnumerateParameters);
+        ], EnumerateParameters);
 
         // sys.views: per-view rows. Load-bearing subset of real SQL Server's
         // sys.views shape — object_id / name / schema_id / with_check_option /
         // is_date_correlation_view. Other documented columns (principal_id,
         // is_replicated, has_replication_filter, etc.) aren't modeled.
-        var viewsColumns = new HeapColumn[]
-        {
+        Sys("views",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
-        };
-        var viewsCatalogView = new CatalogView("views", viewsColumns, EnumerateViews);
+        ], EnumerateViews);
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
         // the load-bearing surface — object_id / name / schema_id /
         // create_date / modify_date / is_ms_shipped. Other documented
         // columns (principal_id, is_auto_executed, is_execution_replicated,
         // etc.) aren't modeled.
-        var proceduresColumns = new HeapColumn[]
-        {
+        Sys("procedures",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
@@ -393,8 +390,7 @@ internal static class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
-        };
-        var proceduresView = new CatalogView("procedures", proceduresColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateProcedures(batch, database, charTwo, notMsShipped));
 
         // INFORMATION_SCHEMA.ROUTINES: ISO-shape view listing both procedures
@@ -408,15 +404,14 @@ internal static class BuiltInResources
         var procedureRoutineType = SqlValue.FromVarchar("PROCEDURE");
         var functionRoutineType = SqlValue.FromVarchar("FUNCTION");
         var tableDataType = SqlValue.FromSystemName("TABLE");
-        var isRoutinesColumns = new HeapColumn[]
-        {
+        Iso("ROUTINES",
+        [
             new("ROUTINE_CATALOG", SqlType.SystemName, 128, true),
             new("ROUTINE_SCHEMA", SqlType.SystemName, 128, true),
             new("ROUTINE_NAME", SqlType.SystemName, 128, false),
             new("ROUTINE_TYPE", SqlType.Varchar, 9, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
-        };
-        var isRoutinesView = new CatalogView("ROUTINES", isRoutinesColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateInformationSchemaRoutines(batch, database, procedureRoutineType, functionRoutineType, tableDataType));
 
         // INFORMATION_SCHEMA.PARAMETERS: ISO-shape view listing parameters
@@ -427,8 +422,8 @@ internal static class BuiltInResources
         // only for string types.
         var modeIn = SqlValue.FromVarchar("IN");
         var modeInOut = SqlValue.FromVarchar("INOUT");
-        var isParametersColumns = new HeapColumn[]
-        {
+        Iso("PARAMETERS",
+        [
             new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
             new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
             new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
@@ -437,8 +432,7 @@ internal static class BuiltInResources
             new("PARAMETER_NAME", SqlType.SystemName, 128, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
-        };
-        var isParametersView = new CatalogView("PARAMETERS", isParametersColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut));
 
         // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
@@ -450,16 +444,15 @@ internal static class BuiltInResources
         var checkOptionNone = SqlValue.FromVarchar("NONE");
         var checkOptionCascade = SqlValue.FromVarchar("CASCADE");
         var isUpdatableNo = SqlValue.FromVarchar("NO");
-        var isViewsColumns = new HeapColumn[]
-        {
+        Iso("VIEWS",
+        [
             new("TABLE_CATALOG", SqlType.SystemName, 128, true),
             new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("VIEW_DEFINITION", SqlType.NVarchar, 4000, true),
             new("CHECK_OPTION", SqlType.Varchar, 7, true),
             new("IS_UPDATABLE", SqlType.Varchar, 2, true),
-        };
-        var isViewsView = new CatalogView("VIEWS", isViewsColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateInformationSchemaViews(batch, database, checkOptionNone, checkOptionCascade, isUpdatableNo));
 
         // sys.types: per-database list of system + user-defined types. Probe-
@@ -468,8 +461,8 @@ internal static class BuiltInResources
         // Server has many more columns (principal_id, max_length, precision,
         // scale, collation_name, is_assembly_type, default_object_id, etc.);
         // the shipped set is what apps typically test for.
-        var typesColumns = new HeapColumn[]
-        {
+        Sys("types",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("system_type_id", SqlType.TinyInt, null, false),
             new("user_type_id", SqlType.Int32, null, false),
@@ -477,21 +470,19 @@ internal static class BuiltInResources
             new("is_user_defined", SqlType.Bit, null, false),
             new("is_table_type", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, false),
-        };
-        var typesView = new CatalogView("types", typesColumns, EnumerateSysTypes);
+        ], EnumerateSysTypes);
 
         // sys.table_types: per-database list of user-defined table types
         // only. Probe-confirmed shipped subset: name / type_table_object_id /
         // is_user_defined / schema_id / user_type_id.
-        var tableTypesColumns = new HeapColumn[]
-        {
+        Sys("table_types",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("type_table_object_id", SqlType.Int32, null, false),
             new("is_user_defined", SqlType.Bit, null, false),
             new("schema_id", SqlType.Int32, null, false),
             new("user_type_id", SqlType.Int32, null, false),
-        };
-        var tableTypesView = new CatalogView("table_types", tableTypesColumns, EnumerateSysTableTypes);
+        ], EnumerateSysTableTypes);
 
         // sys.sequences: per-database list of user-defined sequence objects.
         // Probe-confirmed shipped subset: name / object_id / schema_id /
@@ -505,8 +496,8 @@ internal static class BuiltInResources
         // emits bigint here since all sequence state is tracked as long
         // (a minor projection-schema divergence; SqlClient surfaces these
         // as long, which matches what HiLo-style apps assert on).
-        var sequencesColumns = new HeapColumn[]
-        {
+        Sys("sequences",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("schema_id", SqlType.Int32, null, false),
@@ -521,8 +512,7 @@ internal static class BuiltInResources
             new("system_type_id", SqlType.TinyInt, null, false),
             new("user_type_id", SqlType.Int32, null, false),
             new("is_exhausted", SqlType.Bit, null, false),
-        };
-        var sequencesView = new CatalogView("sequences", sequencesColumns, EnumerateSysSequences);
+        ], EnumerateSysSequences);
 
         // sys.triggers: per-trigger rows. Probe-confirmed shipped subset
         // (SQL Server 2025): name / object_id / parent_class /
@@ -534,8 +524,8 @@ internal static class BuiltInResources
         // modeled. parent_id is the parent table's object_id.
         var parentClassObjectColumn = SqlValue.FromByte(1);
         var parentClassObjectColumnDesc = SqlValue.FromNVarchar("OBJECT_OR_COLUMN");
-        var triggersColumns = new HeapColumn[]
-        {
+        Sys("triggers",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("parent_class", SqlType.TinyInt, null, false),
@@ -548,8 +538,7 @@ internal static class BuiltInResources
             new("is_disabled", SqlType.Bit, null, false),
             new("is_instead_of_trigger", SqlType.Bit, null, false),
             new("is_not_for_replication", SqlType.Bit, null, false),
-        };
-        var triggersView = new CatalogView("triggers", triggersColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateSysTriggers(batch, database, charTwo, parentClassObjectColumn, parentClassObjectColumnDesc));
 
         // sys.foreign_keys: probe-confirmed 21-column shape against SQL
@@ -557,8 +546,8 @@ internal static class BuiltInResources
         // referenced_object_id / delete_referential_action /
         // update_referential_action; the simulator ships the full set so
         // catalog-introspection tooling sees an authentic shape.
-        var foreignKeysColumns = new HeapColumn[]
-        {
+        Sys("foreign_keys",
+        [
             new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
@@ -581,44 +570,41 @@ internal static class BuiltInResources
             new("update_referential_action", SqlType.TinyInt, null, false),
             new("update_referential_action_desc", nvarchar60Catalog, 60, true),
             new("is_system_named", SqlType.Bit, null, false),
-        };
-        var foreignKeysView = new CatalogView("foreign_keys", foreignKeysColumns, EnumerateSysForeignKeys);
+        ], EnumerateSysForeignKeys);
 
         // sys.foreign_key_columns: probe-confirmed 6-column shape. One row
         // per (FK, column-pair) — composite FKs emit one row per participant
         // column with constraint_column_id starting at 1.
-        var foreignKeyColumnsColumns = new HeapColumn[]
-        {
+        Sys("foreign_key_columns",
+        [
             new("constraint_object_id", SqlType.Int32, null, false),
             new("constraint_column_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("parent_column_id", SqlType.Int32, null, false),
             new("referenced_object_id", SqlType.Int32, null, false),
             new("referenced_column_id", SqlType.Int32, null, false),
-        };
-        var foreignKeyColumnsView = new CatalogView("foreign_key_columns", foreignKeyColumnsColumns, EnumerateSysForeignKeyColumns);
+        ], EnumerateSysForeignKeyColumns);
 
         // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
         // emits a row for every user-defined type (scalar UDTs surface their
         // base type; table types surface 'table type' as the data_type
         // literal — probe-confirmed G6). Load-bearing subset: DOMAIN_CATALOG /
         // DOMAIN_SCHEMA / DOMAIN_NAME / DATA_TYPE.
-        var isDomainsColumns = new HeapColumn[]
-        {
+        var tableTypeDataType = SqlValue.FromNVarchar("table type");
+        Iso("DOMAINS",
+        [
             new("DOMAIN_CATALOG", SqlType.SystemName, 128, true),
             new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
             new("DOMAIN_NAME", SqlType.SystemName, 128, false),
             new("DATA_TYPE", SqlType.NVarchar, 128, true),
-        };
-        var tableTypeDataType = SqlValue.FromNVarchar("table type");
-        var isDomainsView = new CatalogView("DOMAINS", isDomainsColumns, (batch, database) =>
+        ], (batch, database) =>
             EnumerateInformationSchemaDomains(batch, database, tableTypeDataType));
 
         // sys.check_constraints: probe-confirmed 13-column shape (a subset
         // of sys.objects + the check-specific columns). Used by EF Migrations'
         // model snapshot and tooling that introspects existing CHECK rules.
-        var checkConstraintsColumns = new HeapColumn[]
-        {
+        Sys("check_constraints",
+        [
             new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
@@ -638,13 +624,12 @@ internal static class BuiltInResources
             new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
             new("uses_database_collation", SqlType.Bit, null, false),
             new("is_system_named", SqlType.Bit, null, false),
-        };
-        var checkConstraintsView = new CatalogView("check_constraints", checkConstraintsColumns, EnumerateSysCheckConstraints);
+        ], EnumerateSysCheckConstraints);
 
         // sys.key_constraints: PK + UNIQUE rows, parallel shape to
         // sys.foreign_keys. Probe-confirmed column set.
-        var keyConstraintsColumns = new HeapColumn[]
-        {
+        Sys("key_constraints",
+        [
             new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
@@ -660,13 +645,12 @@ internal static class BuiltInResources
             new("unique_index_id", SqlType.Int32, null, false),
             new("is_system_named", SqlType.Bit, null, false),
             new("is_enforced", SqlType.Bit, null, false),
-        };
-        var keyConstraintsView = new CatalogView("key_constraints", keyConstraintsColumns, EnumerateSysKeyConstraints);
+        ], EnumerateSysKeyConstraints);
 
         // sys.default_constraints: per-column named DEFAULT bindings. Real
         // SQL Server emits one row per default (inline or named via ALTER).
-        var defaultConstraintsColumns = new HeapColumn[]
-        {
+        Sys("default_constraints",
+        [
             new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
@@ -682,8 +666,7 @@ internal static class BuiltInResources
             new("parent_column_id", SqlType.Int32, null, false),
             new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
             new("is_system_named", SqlType.Bit, null, false),
-        };
-        var defaultConstraintsView = new CatalogView("default_constraints", defaultConstraintsColumns, EnumerateSysDefaultConstraints);
+        ], EnumerateSysDefaultConstraints);
 
         // sys.indexes: probe-confirmed 24-column shape against SQL Server
         // 2025 (2026-05-14). One row per (table, index) — PK / UQ
@@ -693,8 +676,8 @@ internal static class BuiltInResources
         // heap" semantic). EF Migrations introspection reads name /
         // is_unique / is_primary_key / is_unique_constraint /
         // has_filter / filter_definition.
-        var indexesColumns = new HeapColumn[]
-        {
+        Sys("indexes",
+        [
             new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
@@ -719,15 +702,14 @@ internal static class BuiltInResources
             new("auto_created", SqlType.Bit, null, false),
             new("optimize_for_sequential_key", SqlType.Bit, null, false),
             new("statistics_incremental", SqlType.Bit, null, true),
-        };
-        var indexesView = new CatalogView("indexes", indexesColumns, EnumerateSysIndexes);
+        ], EnumerateSysIndexes);
 
         // sys.index_columns: probe-confirmed 10-column shape. One row per
         // (index, column) pair — KEY columns get key_ordinal = 1..N and
         // index_column_id = 1..N; INCLUDE columns get key_ordinal = 0 and
         // index_column_id continuing past the key column count.
-        var indexColumnsColumns = new HeapColumn[]
-        {
+        Sys("index_columns",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
             new("index_column_id", SqlType.Int32, null, false),
@@ -738,8 +720,7 @@ internal static class BuiltInResources
             new("is_included_column", SqlType.Bit, null, false),
             new("column_store_order_ordinal", SqlType.TinyInt, null, true),
             new("data_clustering_ordinal", SqlType.TinyInt, null, true),
-        };
-        var indexColumnsView = new CatalogView("index_columns", indexColumnsColumns, EnumerateSysIndexColumns);
+        ], EnumerateSysIndexColumns);
 
         // sys.dm_tran_locks: per-Hold rows across every schema-bound
         // SchemaLock, every HeapTable.TableDataLock, and every per-row
@@ -748,8 +729,8 @@ internal static class BuiltInResources
         // WaitingOnResource / WaitingForMode. Shipped column subset is
         // the most commonly read seven fields; the full real-SQL-Server
         // shape has ~18 columns most apps never touch.
-        var dmTranLocksColumns = new HeapColumn[]
-        {
+        Sys("dm_tran_locks",
+        [
             new("resource_type", SqlType.NVarchar, 60, false),
             new("resource_database_id", SqlType.Int32, null, false),
             new("resource_description", SqlType.NVarchar, 256, true),
@@ -757,28 +738,26 @@ internal static class BuiltInResources
             new("request_mode", SqlType.NVarchar, 60, false),
             new("request_status", SqlType.NVarchar, 60, false),
             new("request_session_id", SqlType.Int32, null, false),
-        };
-        var dmTranLocksView = new CatalogView("dm_tran_locks", dmTranLocksColumns, LockDmvs.EnumerateDmTranLocks);
+        ], LockDmvs.EnumerateDmTranLocks);
 
         // sys.dm_os_waiting_tasks: one row per currently-waiting
         // connection. session_id / blocking_session_id are smallint
         // matching real SQL Server; wait_type is `LCK_M_<mode>` per
         // SQL Server's convention.
-        var dmOsWaitingTasksColumns = new HeapColumn[]
-        {
+        Sys("dm_os_waiting_tasks",
+        [
             new("session_id", SqlType.SmallInt, null, true),
             new("wait_type", SqlType.NVarchar, 60, true),
             new("resource_description", SqlType.NVarchar, 2000, true),
             new("blocking_session_id", SqlType.SmallInt, null, true),
-        };
-        var dmOsWaitingTasksView = new CatalogView("dm_os_waiting_tasks", dmOsWaitingTasksColumns, LockDmvs.EnumerateDmOsWaitingTasks);
+        ], LockDmvs.EnumerateDmOsWaitingTasks);
 
         // sys.dm_tran_version_store: one row per finalized HistoricalVersion
         // across every per-table chain. Pending HVs (Xmax = PendingXmax)
         // are excluded. Real SQL Server's exact column order is preserved
         // so existing diagnostic queries port unchanged.
-        var dmTranVersionStoreColumns = new HeapColumn[]
-        {
+        Sys("dm_tran_version_store",
+        [
             new("transaction_sequence_num", SqlType.BigInt, null, false),
             new("version_sequence_num", SqlType.BigInt, null, false),
             new("database_id", SqlType.SmallInt, null, false),
@@ -789,25 +768,23 @@ internal static class BuiltInResources
             new("record_image_first_part", VarbinarySqlType.MaxForm, null, true),
             new("record_length_second_part_in_bytes", SqlType.SmallInt, null, true),
             new("record_image_second_part", VarbinarySqlType.MaxForm, null, true),
-        };
-        var dmTranVersionStoreView = new CatalogView("dm_tran_version_store", dmTranVersionStoreColumns, VersionStoreDmvs.EnumerateDmTranVersionStore);
+        ], VersionStoreDmvs.EnumerateDmTranVersionStore);
 
         // sys.dm_tran_version_store_space_usage: aggregate sizing per
         // database. The simulator approximates pages as ceil(bytes / 8192)
         // since HV payloads aren't backed by real pages.
-        var dmTranVersionStoreSpaceUsageColumns = new HeapColumn[]
-        {
+        Sys("dm_tran_version_store_space_usage",
+        [
             new("database_id", SqlType.Int32, null, false),
             new("reserved_page_count", SqlType.BigInt, null, false),
             new("reserved_space_kb", SqlType.BigInt, null, false),
-        };
-        var dmTranVersionStoreSpaceUsageView = new CatalogView("dm_tran_version_store_space_usage", dmTranVersionStoreSpaceUsageColumns, VersionStoreDmvs.EnumerateDmTranVersionStoreSpaceUsage);
+        ], VersionStoreDmvs.EnumerateDmTranVersionStoreSpaceUsage);
 
         // sys.dm_tran_active_snapshot_database_transactions: one row per
         // active SI tx with an allocated snapshot Xid. RCSI per-statement
         // snapshots are not tracked here (matching real SQL Server).
-        var dmTranActiveSnapshotDbTxColumns = new HeapColumn[]
-        {
+        Sys("dm_tran_active_snapshot_database_transactions",
+        [
             new("transaction_id", SqlType.BigInt, null, false),
             new("transaction_sequence_num", SqlType.BigInt, null, false),
             new("commit_sequence_num", SqlType.BigInt, null, true),
@@ -817,8 +794,7 @@ internal static class BuiltInResources
             new("max_version_chain_traversed", SqlType.Int32, null, false),
             new("average_version_chain_traversed", SqlType.Float, null, false),
             new("elapsed_time_seconds", SqlType.BigInt, null, false),
-        };
-        var dmTranActiveSnapshotDbTxView = new CatalogView("dm_tran_active_snapshot_database_transactions", dmTranActiveSnapshotDbTxColumns, VersionStoreDmvs.EnumerateDmTranActiveSnapshotDatabaseTransactions);
+        ], VersionStoreDmvs.EnumerateDmTranActiveSnapshotDatabaseTransactions);
 
         // sys.extended_properties: per-database user-defined annotations
         // attached to schemas / tables / columns / etc. via the
@@ -827,24 +803,23 @@ internal static class BuiltInResources
         // typed `sql_variant` — the simulator surfaces it as `nvarchar(MAX)`
         // since sql_variant isn't modeled; AW's 538 properties are all
         // nvarchar values so functional fidelity is preserved.
-        var extendedPropertiesColumns = new HeapColumn[]
-        {
+        Sys("extended_properties",
+        [
             new("class", SqlType.TinyInt, null, false),
             new("class_desc", SqlType.SystemName, 60, true),
             new("major_id", SqlType.Int32, null, false),
             new("minor_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("value", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
-        };
-        var extendedPropertiesView = new CatalogView("extended_properties", extendedPropertiesColumns, EnumerateSysExtendedProperties);
+        ], EnumerateSysExtendedProperties);
 
         // sys.database_principals: probe-confirmed shipped subset of columns
         // (real SQL Server's full row is ~16 cols). The simulator's principal
         // model is a thin name + id + type triple; columns we don't track
         // (authentication_type, default_schema_name, default_language_name,
         // owning_principal_id, modify_date) are emitted as NULL.
-        var databasePrincipalsColumns = new HeapColumn[]
-        {
+        Sys("database_principals",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("principal_id", SqlType.Int32, null, false),
             new("type", charTwo, 2, false),
@@ -857,16 +832,15 @@ internal static class BuiltInResources
             new("is_fixed_role", SqlType.Bit, null, false),
             new("authentication_type", SqlType.TinyInt, null, true),
             new("authentication_type_desc", nvarchar60Catalog, 60, true),
-        };
-        var databasePrincipalsView = new CatalogView("database_principals", databasePrincipalsColumns, EnumerateSysDatabasePrincipals);
+        ], EnumerateSysDatabasePrincipals);
 
         // sys.database_permissions: probe-confirmed 8-col shipped subset.
         // Real SQL Server's row carries a few additional internal columns
         // (e.g. revert_audit_flag); the simulator surfaces the user-visible
         // set only.
         var charOne = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
-        var databasePermissionsColumns = new HeapColumn[]
-        {
+        Sys("database_permissions",
+        [
             new("class", SqlType.TinyInt, null, false),
             new("class_desc", nvarchar60Catalog, 60, true),
             new("major_id", SqlType.Int32, null, false),
@@ -877,25 +851,23 @@ internal static class BuiltInResources
             new("permission_name", nvarchar128Catalog, 128, true),
             new("state", charOne, 1, false),
             new("state_desc", nvarchar60Catalog, 60, true),
-        };
-        var databasePermissionsView = new CatalogView("database_permissions", databasePermissionsColumns, EnumerateSysDatabasePermissions);
+        ], EnumerateSysDatabasePermissions);
 
         // sys.database_role_members: 2-col shipped subset (real SQL Server
         // surfaces just these two — no additional internal columns).
-        var databaseRoleMembersColumns = new HeapColumn[]
-        {
+        Sys("database_role_members",
+        [
             new("role_principal_id", SqlType.Int32, null, false),
             new("member_principal_id", SqlType.Int32, null, false),
-        };
-        var databaseRoleMembersView = new CatalogView("database_role_members", databaseRoleMembersColumns, EnumerateSysDatabaseRoleMembers);
+        ], EnumerateSysDatabaseRoleMembers);
 
         // sys.fulltext_catalogs: per-database full-text catalog metadata.
         // Column subset matches Microsoft Learn's documented surface for
         // SQL Server 2022+ (the reference instance doesn't have full-text
         // installed, so probe-confirmation isn't available — column shapes
         // are taken from learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-fulltext-catalogs-transact-sql).
-        var fulltextCatalogsColumns = new HeapColumn[]
-        {
+        Sys("fulltext_catalogs",
+        [
             new("fulltext_catalog_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("path", SqlType.NVarchar, 260, true),
@@ -905,13 +877,12 @@ internal static class BuiltInResources
             new("file_id", SqlType.Int32, null, true),
             new("principal_id", SqlType.Int32, null, false),
             new("is_importing", SqlType.Bit, null, false),
-        };
-        var fulltextCatalogsView = new CatalogView("fulltext_catalogs", fulltextCatalogsColumns, EnumerateSysFullTextCatalogs);
+        ], EnumerateSysFullTextCatalogs);
 
         // sys.fulltext_indexes: per-database full-text indexes. One row per
         // indexed table. Column subset from Microsoft Learn.
-        var fulltextIndexesColumns = new HeapColumn[]
-        {
+        Sys("fulltext_indexes",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("unique_index_id", SqlType.Int32, null, false),
             new("fulltext_catalog_id", SqlType.Int32, null, false),
@@ -926,45 +897,42 @@ internal static class BuiltInResources
             new("stoplist_id", SqlType.Int32, null, true),
             new("data_space_id", SqlType.Int32, null, true),
             new("property_list_id", SqlType.Int32, null, true),
-        };
-        var fulltextIndexesView = new CatalogView("fulltext_indexes", fulltextIndexesColumns, EnumerateSysFullTextIndexes);
+        ], EnumerateSysFullTextIndexes);
 
         // sys.fulltext_index_columns: one row per indexed column inside each
         // full-text index. column_id = 1-based storage ordinal of the
         // indexed column; type_column_id = nullable ordinal of the paired
         // doc-extension column for varbinary indexes.
-        var fulltextIndexColumnsColumns = new HeapColumn[]
-        {
+        Sys("fulltext_index_columns",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("column_id", SqlType.Int32, null, false),
             new("type_column_id", SqlType.Int32, null, true),
             new("language_id", SqlType.Int32, null, false),
             new("statistical_semantics", SqlType.Bit, null, false),
-        };
-        var fulltextIndexColumnsView = new CatalogView("fulltext_index_columns", fulltextIndexColumnsColumns, EnumerateSysFullTextIndexColumns);
+        ], EnumerateSysFullTextIndexColumns);
 
         // sys.xml_schema_collections: probe-confirmed 6-col shipped subset
         // against SQL Server 2025 (2026-05-15). Real SQL Server's
         // principal_id column is nullable; the simulator's pre-seeded
         // collections leave it NULL.
-        var xmlSchemaCollectionsColumns = new HeapColumn[]
-        {
+        Sys("xml_schema_collections",
+        [
             new("xml_collection_id", SqlType.Int32, null, false),
             new("schema_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("name", SqlType.SystemName, 128, false),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-        };
-        var xmlSchemaCollectionsView = new CatalogView("xml_schema_collections", xmlSchemaCollectionsColumns, EnumerateSysXmlSchemaCollections);
+        ], EnumerateSysXmlSchemaCollections);
 
         // sys.xml_indexes: probe-confirmed 9-col shipped subset (real SQL
         // Server's row is 26 cols including a long is_disabled / is_padded
         // / allow_row_locks tail of admin flags). The simulator surfaces
         // the AW-load-bearing core: identity, primary/secondary
         // discriminator, and the FOR-PATH/VALUE/PROPERTY classifier.
-        var xmlIndexesColumns = new HeapColumn[]
-        {
+        Sys("xml_indexes",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, true),
             new("index_id", SqlType.Int32, null, false),
@@ -974,8 +942,7 @@ internal static class BuiltInResources
             new("secondary_type", charOne, 1, true),
             new("secondary_type_desc", nvarchar60Catalog, 60, true),
             new("is_primary_key", SqlType.Bit, null, true),
-        };
-        var xmlIndexesView = new CatalogView("xml_indexes", xmlIndexesColumns, EnumerateSysXmlIndexes);
+        ], EnumerateSysXmlIndexes);
 
         // sys.spatial_indexes: probe-confirmed 23-col shape against SQL Server
         // 2025 (2026-05-15). Same shape as sys.indexes except (type, type_desc)
@@ -985,8 +952,8 @@ internal static class BuiltInResources
         // is_disabled / is_padded / allow_row_locks tail mirrors real values
         // (false / false / true / true) but isn't read by any application
         // path the loader cares about.
-        var spatialIndexesColumns = new HeapColumn[]
-        {
+        Sys("spatial_indexes",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, true),
             new("index_id", SqlType.Int32, null, false),
@@ -1010,14 +977,13 @@ internal static class BuiltInResources
             new("has_filter", SqlType.Bit, null, false),
             new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), null, true),
             new("auto_created", SqlType.Bit, null, true),
-        };
-        var spatialIndexesView = new CatalogView("spatial_indexes", spatialIndexesColumns, EnumerateSysSpatialIndexes);
+        ], EnumerateSysSpatialIndexes);
 
         // sys.spatial_index_tessellations: probe-confirmed 16-col shape
         // against SQL Server 2025 (2026-05-15). One row per spatial index
         // carrying the per-index bounding-box + 4-level grid detail.
-        var spatialIndexTessellationsColumns = new HeapColumn[]
-        {
+        Sys("spatial_index_tessellations",
+        [
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
             new("tessellation_scheme", SqlType.NVarchar, 60, true),
@@ -1034,8 +1000,7 @@ internal static class BuiltInResources
             new("level_4_grid", SqlType.SmallInt, null, true),
             new("level_4_grid_desc", SqlType.NVarchar, 60, true),
             new("cells_per_object", SqlType.Int32, null, true),
-        };
-        var spatialIndexTessellationsView = new CatalogView("spatial_index_tessellations", spatialIndexTessellationsColumns, EnumerateSysSpatialIndexTessellations);
+        ], EnumerateSysSpatialIndexTessellations);
 
         // sys.spatial_reference_systems: real SQL Server seeds this view with
         // ~390 rows of authoritative SRID definitions (EPSG / ESRI). The
@@ -1043,24 +1008,23 @@ internal static class BuiltInResources
         // and the catalog is reachable, but no SRID rows pre-populate. This
         // keeps applications that reference the view's schema from breaking
         // without the byte-tonnage of the WKT-laden seed data.
-        var spatialReferenceSystemsColumns = new HeapColumn[]
-        {
+        Sys("spatial_reference_systems",
+        [
             new("spatial_reference_id", SqlType.Int32, null, true),
             new("authority_name", SqlType.NVarchar, 256, true),
             new("authorized_spatial_reference_id", SqlType.Int32, null, true),
             new("well_known_text", SqlType.NVarchar, 8000, true),
             new("unit_of_measure", SqlType.NVarchar, 256, true),
             new("unit_conversion_factor", SqlType.Float, null, true),
-        };
-        var spatialReferenceSystemsView = new CatalogView("spatial_reference_systems", spatialReferenceSystemsColumns, EnumerateSysSpatialReferenceSystems);
+        ], EnumerateSysSpatialReferenceSystems);
 
         // sys.databases: real SQL Server emits ~95 columns; the simulator
         // exposes the load-bearing subset that tooling actually queries (name,
         // database_id, compatibility_level, collation_name, snapshot-isolation
         // state, and the common boolean toggles). Single row for the current
         // database; multi-database support would extend this enumeration.
-        var databasesColumns = new HeapColumn[]
-        {
+        Sys("databases",
+        [
             new("name", SqlType.SystemName, 128, false),
             new("database_id", SqlType.SmallInt, null, false),
             new("compatibility_level", SqlType.TinyInt, null, true),
@@ -1070,20 +1034,18 @@ internal static class BuiltInResources
             new("is_read_committed_snapshot_on", SqlType.Bit, null, false),
             new("state", SqlType.TinyInt, null, false),
             new("state_desc", nvarchar60Catalog, 60, true),
-        };
-        var databasesView = new CatalogView("databases", databasesColumns, EnumerateSysDatabases);
+        ], EnumerateSysDatabases);
 
         // sys.fn_helpcollations() — table-valued metadata function listing the
         // collations the simulator recognizes. Real SQL Server emits ~5540
         // rows; the simulator emits the whitelist defined in Collation.Recognized
         // (currently 2). Each row carries the canonical name + a human
         // description, matching real SQL Server's column shape.
-        var fnHelpCollationsColumns = new HeapColumn[]
-        {
+        Sys("fn_helpcollations",
+        [
             new("name", SqlType.SystemName, 128, true),
             new("description", SqlType.NVarchar, 1000, true),
-        };
-        var fnHelpCollationsView = new CatalogView("fn_helpcollations", fnHelpCollationsColumns, EnumerateFnHelpCollations);
+        ], EnumerateFnHelpCollations);
 
         // sys.servers: the local instance projects as row 0 (is_linked = 0);
         // each entry in <see cref="Simulation.ActiveLinkedServers"/> follows
@@ -1093,65 +1055,17 @@ internal static class BuiltInResources
         // touch (server_id / name / product / provider / data_source /
         // is_linked). modify_date is always epoch-zero since linked-server
         // registration doesn't carry a creation timestamp.
-        var serversColumns = new HeapColumn[]
-        {
+        Sys("servers",
+        [
             new("server_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("product", SqlType.NVarchar, 128, true),
             new("provider", SqlType.NVarchar, 128, true),
             new("data_source", SqlType.NVarchar, 4000, true),
             new("is_linked", SqlType.Bit, null, false),
-        };
-        var serversView = new CatalogView("servers", serversColumns, EnumerateSysServers);
+        ], EnumerateSysServers);
 
-        return new Dictionary<string, CatalogView>(BuiltInToken.Comparer)
-        {
-            ["sys.databases"] = databasesView,
-            ["sys.servers"] = serversView,
-            ["sys.fn_helpcollations"] = fnHelpCollationsView,
-            ["sys.schemas"] = schemasView,
-            ["sys.tables"] = tablesView,
-            ["sys.objects"] = objectsView,
-            ["sys.columns"] = columnsView,
-            ["sys.parameters"] = parametersView,
-            ["sys.views"] = viewsCatalogView,
-            ["sys.procedures"] = proceduresView,
-            ["sys.types"] = typesView,
-            ["sys.table_types"] = tableTypesView,
-            ["sys.sequences"] = sequencesView,
-            ["sys.triggers"] = triggersView,
-            ["sys.foreign_keys"] = foreignKeysView,
-            ["sys.foreign_key_columns"] = foreignKeyColumnsView,
-            ["sys.check_constraints"] = checkConstraintsView,
-            ["sys.key_constraints"] = keyConstraintsView,
-            ["sys.default_constraints"] = defaultConstraintsView,
-            ["sys.indexes"] = indexesView,
-            ["sys.index_columns"] = indexColumnsView,
-            ["sys.dm_tran_locks"] = dmTranLocksView,
-            ["sys.dm_os_waiting_tasks"] = dmOsWaitingTasksView,
-            ["sys.dm_tran_version_store"] = dmTranVersionStoreView,
-            ["sys.dm_tran_version_store_space_usage"] = dmTranVersionStoreSpaceUsageView,
-            ["sys.dm_tran_active_snapshot_database_transactions"] = dmTranActiveSnapshotDbTxView,
-            ["sys.extended_properties"] = extendedPropertiesView,
-            ["sys.database_principals"] = databasePrincipalsView,
-            ["sys.database_permissions"] = databasePermissionsView,
-            ["sys.database_role_members"] = databaseRoleMembersView,
-            ["sys.fulltext_catalogs"] = fulltextCatalogsView,
-            ["sys.fulltext_indexes"] = fulltextIndexesView,
-            ["sys.fulltext_index_columns"] = fulltextIndexColumnsView,
-            ["sys.xml_schema_collections"] = xmlSchemaCollectionsView,
-            ["sys.xml_indexes"] = xmlIndexesView,
-            ["sys.spatial_indexes"] = spatialIndexesView,
-            ["sys.spatial_index_tessellations"] = spatialIndexTessellationsView,
-            ["sys.spatial_reference_systems"] = spatialReferenceSystemsView,
-            ["INFORMATION_SCHEMA.TABLES"] = isTablesView,
-            ["INFORMATION_SCHEMA.COLUMNS"] = isColumnsView,
-            ["INFORMATION_SCHEMA.SCHEMATA"] = isSchemataView,
-            ["INFORMATION_SCHEMA.VIEWS"] = isViewsView,
-            ["INFORMATION_SCHEMA.ROUTINES"] = isRoutinesView,
-            ["INFORMATION_SCHEMA.PARAMETERS"] = isParametersView,
-            ["INFORMATION_SCHEMA.DOMAINS"] = isDomainsView,
-        };
+        return views;
     }
 
     /// <summary>
@@ -1281,22 +1195,6 @@ internal static class BuiltInResources
         }
     }
 
-    /// <summary>
-    /// Rows for <c>sys.sequences</c>: one per registered sequence object,
-    /// schema-ordered. <c>cache_size</c> is always NULL (the simulator
-    /// doesn't model the batched-allocation cache; real SQL Server returns
-    /// NULL when no explicit <c>CACHE n</c> was given anyway). Type-id
-    /// columns derive from the declared type via <see cref="SystypesRowData"/>.
-    /// </summary>
-    /// <summary>
-    /// Rows for <c>sys.triggers</c>: one row per <see cref="Trigger"/> in
-    /// every schema. <c>parent_class</c> is always 1 (DML triggers attached
-    /// to tables — DDL/server triggers aren't modeled);
-    /// <c>is_not_for_replication</c> is always 0 (the simulator
-    /// parse-and-ignores the WITH clause). Probe-confirmed columns; modify
-    /// date mirrors create date because <c>ALTER TRIGGER</c> replaces the
-    /// instance wholesale.
-    /// </summary>
     /// <summary>
     /// Rows for <c>sys.foreign_keys</c>: every FOREIGN KEY constraint across
     /// every schema. <c>type</c> = <c>F </c> (probe-confirmed two-char
@@ -1820,6 +1718,15 @@ internal static class BuiltInResources
         return storageOrdinal + 1;
     }
 
+    /// <summary>
+    /// Rows for <c>sys.triggers</c>: one row per <see cref="Trigger"/> in
+    /// every schema. <c>parent_class</c> is always 1 (DML triggers attached
+    /// to tables — DDL/server triggers aren't modeled);
+    /// <c>is_not_for_replication</c> is always 0 (the simulator
+    /// parse-and-ignores the WITH clause). Probe-confirmed columns; modify
+    /// date mirrors create date because <c>ALTER TRIGGER</c> replaces the
+    /// instance wholesale.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
         Parser.BatchContext batch,
         Database database,
@@ -2369,6 +2276,13 @@ internal static class BuiltInResources
             yield return [SqlValue.FromSystemName(entryName), SqlValue.FromNVarchar(entryDesc)];
     }
 
+    /// <summary>
+    /// Rows for <c>sys.sequences</c>: one per registered sequence object,
+    /// schema-ordered. <c>cache_size</c> is always NULL (the simulator
+    /// doesn't model the batched-allocation cache; real SQL Server returns
+    /// NULL when no explicit <c>CACHE n</c> was given anyway). Type-id
+    /// columns derive from the declared type via <see cref="SystypesRowData"/>.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch, Database database)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
