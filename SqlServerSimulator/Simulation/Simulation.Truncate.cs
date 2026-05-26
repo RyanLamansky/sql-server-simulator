@@ -88,6 +88,7 @@ partial class Simulation
         table.Heap.LobPages.Clear();
         table.Heap.ForwardTargets.Clear();
         table.Heap.ClearFreeLobPages();
+        table.Heap.ClearReclaimablePages();
         for (var i = 0; i < identitySnapshots.Count; i++)
             identitySnapshots[i].State.Restore(null);
 

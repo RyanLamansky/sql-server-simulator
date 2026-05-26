@@ -49,10 +49,11 @@ internal sealed class HeapPage
     /// High bit of a slot's 16-bit value flags the slot as deleted (tombstone).
     /// Offsets fit in 13 bits (max 8191) so the top three bits are always
     /// available; DELETE and a relocated-UPDATE's original slot both set this
-    /// bit, <see cref="EnumerateRowsWithSlots"/> skips tombstoned slots. Row
-    /// payload bytes are not reclaimed — slot directory space and row data
-    /// area both grow monotonically (intentional simplifying trade-off; see
-    /// CLAUDE.md).
+    /// bit, <see cref="EnumerateRowsWithSlots"/> skips tombstoned slots. A
+    /// tombstone whose DELETE has committed also gets <see cref="SlotReclaimableBit"/>,
+    /// and <see cref="Compact"/> reclaims its row-data bytes for reuse; the slot
+    /// directory still grows monotonically (a reclaimed slot keeps a zero-extent
+    /// directory entry — see CLAUDE.md for the residual slot-directory growth).
     /// </summary>
     private const ushort SlotTombstoneBit = 0x8000;
 
@@ -64,6 +65,21 @@ internal sealed class HeapPage
     /// UPDATEs that don't fit in place. See <see cref="Heap.UpdateAt"/>.
     /// </summary>
     private const ushort SlotForwardBit = 0x4000;
+
+    /// <summary>
+    /// Bit 13 flags a tombstoned slot as <em>committed-dead and reclaimable</em>:
+    /// its row's DELETE (or the supersede half of a forwarding UPDATE) has
+    /// committed, so no rollback can resurrect it and no snapshot reads its live
+    /// bytes (snapshot history is a version-store copy, not the live slot). Set
+    /// at commit by the undo log; consumed by <see cref="Compact"/>, which packs
+    /// such slots to zero extent and reclaims their bytes. An uncommitted
+    /// tombstone (DELETE still in an open tx) lacks this bit, so compaction
+    /// preserves its bytes for a possible un-delete. The slot directory entry
+    /// itself is never removed (that would renumber slots), so it stays as a
+    /// zero-extent tombstone — the residual slot-directory growth noted in
+    /// CLAUDE.md.
+    /// </summary>
+    private const ushort SlotReclaimableBit = 0x2000;
 
     /// <summary>Low-13-bits mask: the actual byte offset within the page (always &lt; <see cref="PageSize"/>).</summary>
     private const ushort SlotOffsetMask = 0x1FFF;
@@ -207,6 +223,85 @@ internal sealed class HeapPage
         var slotByteOffset = PageSize - (2 * (slotIndex + 1));
         var slotValue = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2));
         BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue & ~SlotTombstoneBit));
+    }
+
+    /// <summary>
+    /// Marks a tombstoned slot as committed-dead and reclaimable (see
+    /// <see cref="SlotReclaimableBit"/>). Called by the undo log when a DELETE
+    /// (or a forwarding UPDATE's supersede) commits. Idempotent.
+    /// </summary>
+    public void MarkSlotReclaimable(int slotIndex)
+    {
+        var slotByteOffset = PageSize - (2 * (slotIndex + 1));
+        var slotValue = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2));
+        BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue | SlotReclaimableBit));
+    }
+
+    /// <summary>True iff the slot carries the committed-dead reclaimable flag.</summary>
+    public bool IsSlotReclaimable(int slotIndex) =>
+        slotIndex >= 0 && slotIndex < this.SlotCount
+        && (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotReclaimableBit) != 0;
+
+    /// <summary>
+    /// Total bytes occupied by reclaimable (committed-dead) slots — the space
+    /// <see cref="Compact"/> would return to free space. The Insert no-fit path
+    /// consults this to decide whether compacting a page is worth it.
+    /// </summary>
+    public int ReclaimableBytes
+    {
+        get
+        {
+            var count = this.SlotCount;
+            var sum = 0;
+            for (var i = 0; i < count; i++)
+            {
+                if (this.IsSlotReclaimable(i))
+                    sum += this.SlotExtent(i);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>
+    /// Packs the page's live row data, reclaiming the bytes of committed-dead
+    /// (reclaimable) slots. Slot indices are preserved — only byte offsets move
+    /// — so every <c>(page, slot)</c> holder (cursors, version-chain Rids,
+    /// forward pointers, the seek cache) stays valid; reclaimable slots collapse
+    /// to zero-extent tombstones at their packed position. Live, forwarded, and
+    /// <em>uncommitted</em>-tombstoned slots keep their bytes and extents (the
+    /// last so a rolled-back DELETE can still be un-deleted). After this,
+    /// <see cref="FreeSpace"/> grows by <see cref="ReclaimableBytes"/> (which
+    /// then reads zero), and new rows append into the freed room with fresh
+    /// (higher) slot indices.
+    /// </summary>
+    public void Compact()
+    {
+        var count = this.SlotCount;
+        var writePos = HeaderSize;
+        for (var i = 0; i < count; i++)
+        {
+            var slotByteOffset = PageSize - (2 * (i + 1));
+            var raw = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2));
+            var flags = (ushort)(raw & ~SlotOffsetMask);
+            if ((raw & SlotReclaimableBit) != 0)
+            {
+                // Committed-dead: keep the directory entry as a zero-extent
+                // tombstone at the current write position, drop its bytes.
+                BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(writePos | flags));
+                continue;
+            }
+            // SlotExtent reads the original (not-yet-rewritten) offsets of this
+            // slot and its successor, and FreeSpacePointer for the last slot —
+            // all still pristine here since we set FreeSpacePointer last and
+            // only rewrite already-processed slots.
+            var extent = this.SlotExtent(i);
+            var srcOffset = (ushort)(raw & SlotOffsetMask);
+            if (srcOffset != writePos)
+                this.Bytes.AsSpan(srcOffset, extent).CopyTo(this.Bytes.AsSpan(writePos, extent));
+            BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(writePos | flags));
+            writePos += extent;
+        }
+        BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(3, 2), (ushort)writePos);
     }
 
     /// <summary>

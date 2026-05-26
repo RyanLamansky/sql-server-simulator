@@ -201,10 +201,18 @@ internal sealed class UndoLog
 
         public override void Commit()
         {
-            // A committed DELETE's row is permanently gone; reclaim its chains
-            // when no version owns them (freeOnCommit = versioning was off).
-            if (this.Kind == UndoKind.Delete && this.FreeOnCommit)
+            if (this.Kind != UndoKind.Delete)
+                return;
+            // A committed DELETE's row is permanently gone. Reclaim its off-row
+            // LOB chains when no version owns them (freeOnCommit = versioning was
+            // off), and mark its heap-page slot reclaimable so compaction can
+            // pack away the row-payload bytes and reuse the space — independent
+            // of versioning, since snapshot history reads a version-store copy,
+            // not the live (now tombstoned) slot.
+            if (this.FreeOnCommit)
                 FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex);
+            this.Heap.Pages[this.PageIndex].MarkSlotReclaimable(this.SlotIndex);
+            this.Heap.MarkPageReclaimable(this.PageIndex);
         }
     }
 
@@ -232,7 +240,7 @@ internal sealed class UndoLog
             switch (this.Kind)
             {
                 case SlotRewriteKind.InPlaceRewrite:
-                    // The slot currently holds the (rolled-back) new payload;
+                    // At this point the slot holds the (rolled-back) new payload;
                     // free its chains before overwriting with the old image,
                     // whose chains were never freed (Commit didn't run).
                     FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex);
@@ -308,6 +316,9 @@ internal sealed class UndoLog
             // The restored LobPages are indexed by their original positions, so
             // the pre-truncate free-list indices are valid again.
             heap.RestoreFreeLobPages(oldFreeLobPages);
+            // The restored pages carry their slots' reclaimable bits, so rescan
+            // to reconstruct the candidate set.
+            heap.RebuildReclaimablePages();
             for (var i = 0; i < identitySnapshots.Length; i++)
                 identitySnapshots[i].State.Restore(identitySnapshots[i].HighWaterMark);
         }

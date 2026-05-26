@@ -3,8 +3,8 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// Guards LOB-chain reclamation (Stage 1 of the heap space-reclamation work):
-/// an UPDATE / DELETE that supersedes an off-row <c>nvarchar(MAX)</c> value
+/// Guards off-row LOB-chain reclamation: an UPDATE / DELETE that supersedes
+/// an off-row <c>nvarchar(MAX)</c> value
 /// must return the old chain's pages to the heap's free-list rather than
 /// orphaning them in <see cref="Heap.LobPages"/>. Without reclamation
 /// a logical dataset of constant size grows <see cref="Heap.LobPages"/>

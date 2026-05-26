@@ -83,6 +83,11 @@ internal sealed class Heap
         {
             pageIndex = this.Pages.Count - 1;
         }
+        else if (TryReuseReclaimablePage(row, out pageIndex))
+        {
+            // Inserted into a page whose committed-dead space was reused
+            // (compacted if needed) — bounds Pages.Count by the working set.
+        }
         else
         {
             var newPage = new HeapPage();
@@ -104,6 +109,87 @@ internal sealed class Heap
         this.MutationGeneration++;
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
         return (pageIndex, slotIndex);
+    }
+
+    /// <summary>
+    /// Page indices known to hold committed-dead (reclaimable) row space —
+    /// populated by <see cref="MarkPageReclaimable"/> when a DELETE / forwarding
+    /// UPDATE commits. The Insert no-fit path draws from this set (compacting a
+    /// page to consolidate the dead space) before appending a fresh page, which
+    /// is what bounds <see cref="Pages"/>.Count by the working set instead of the
+    /// churn count. A concurrent set because commit (which marks) and Insert
+    /// (which drains) on a table are lock-serialized but reached from different
+    /// call paths; weakly-consistent iteration is fine — a missed candidate just
+    /// defers reuse to the next insert.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, byte> reclaimablePages = new();
+
+    /// <summary>
+    /// Records that page <paramref name="pageIndex"/> holds reclaimable space.
+    /// Called by the undo log when a DELETE (or forwarding-UPDATE supersede)
+    /// commits the tombstone on a slot there.
+    /// </summary>
+    internal void MarkPageReclaimable(int pageIndex) => this.reclaimablePages[pageIndex] = 0;
+
+    /// <summary>
+    /// Tries to place <paramref name="row"/> into an existing page's reclaimable
+    /// space, compacting that page if the room is fragmented behind dead slots.
+    /// Returns false (and the caller appends a new page) when no candidate can
+    /// hold the row. New rows always take a fresh, higher slot index, so reuse
+    /// never aliases a <c>(page, slot)</c> any holder still references.
+    /// </summary>
+    private bool TryReuseReclaimablePage(ReadOnlySpan<byte> row, out int pageIndex)
+    {
+        var need = row.Length + 2;
+        foreach (var candidate in this.reclaimablePages.Keys)
+        {
+            if (candidate < 0 || candidate >= this.Pages.Count)
+            {
+                _ = this.reclaimablePages.TryRemove(candidate, out _);
+                continue;
+            }
+            var page = this.Pages[candidate];
+            if (page.FreeSpace >= need)
+            {
+                // Trailing room already; no compaction needed.
+                _ = page.TryInsert(row);
+                if (page.ReclaimableBytes == 0)
+                    _ = this.reclaimablePages.TryRemove(candidate, out _);
+                pageIndex = candidate;
+                return true;
+            }
+            if (page.FreeSpace + page.ReclaimableBytes >= need)
+            {
+                page.Compact();
+                _ = page.TryInsert(row);
+                // Compaction consumed all reclaimable space on this page.
+                _ = this.reclaimablePages.TryRemove(candidate, out _);
+                pageIndex = candidate;
+                return true;
+            }
+            // Can't fit even compacted — leave it a candidate for a smaller row.
+        }
+        pageIndex = -1;
+        return false;
+    }
+
+    /// <summary>Drops all reclaimable-page candidates — paired with clearing <see cref="Pages"/> on <c>TRUNCATE</c>.</summary>
+    internal void ClearReclaimablePages() => this.reclaimablePages.Clear();
+
+    /// <summary>
+    /// Rebuilds the reclaimable-page candidate set by scanning every page for
+    /// committed-dead slots. Used by <c>TRUNCATE</c>'s undo entry after it
+    /// restores the pre-truncate <see cref="Pages"/> (the reclaimable bits ride
+    /// the restored slot directories, so a scan reconstructs the set exactly).
+    /// </summary>
+    internal void RebuildReclaimablePages()
+    {
+        this.reclaimablePages.Clear();
+        for (var p = 0; p < this.Pages.Count; p++)
+        {
+            if (this.Pages[p].ReclaimableBytes > 0)
+                this.reclaimablePages[p] = 0;
+        }
     }
 
     /// <summary>
@@ -336,7 +422,7 @@ internal sealed class Heap
 
 #if DEBUG
     /// <summary>
-    /// Debug-only double-free guard: the set of indices currently on
+    /// Debug-only double-free guard: the set of indices held by
     /// <see cref="freeLobPages"/>. Reclamation routes through two disjoint
     /// owners (commit-time undo entries for the unversioned path, version-GC
     /// for the versioned path), so a chain should be freed exactly once;
