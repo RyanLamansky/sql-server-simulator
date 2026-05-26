@@ -1368,7 +1368,7 @@ partial class Simulation
             {
                 if (lockableTable)
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
-                destinationTable.Heap.DeleteAt(page, slot, undoLog);
+                destinationTable.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(destinationTable, context));
             }
         }
         if (!insteadOfUpdate)
@@ -1377,7 +1377,7 @@ partial class Simulation
             {
                 if (lockableTable)
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
-                destinationTable.Heap.UpdateAt(page, slot, RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+                destinationTable.Heap.UpdateAt(page, slot, RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog, ReclaimSuperseded(destinationTable, context));
             }
         }
         if (!insteadOfInsert)

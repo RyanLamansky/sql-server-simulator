@@ -6,7 +6,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// Shared lookup machinery for the <c>INDEX_COL</c> /
 /// <c>INDEXKEY_PROPERTY</c> / <c>STATS_DATE</c> functions: resolves an
-/// <c>index_id</c> back to the corresponding <see cref="Storage.Index"/> or
+/// <c>index_id</c> back to the corresponding <see cref="Index"/> or
 /// <see cref="KeyConstraint"/> on a <see cref="HeapTable"/>, mirroring the
 /// emission order used by <c>sys.indexes</c> / <c>sys.index_columns</c>.
 /// </summary>
@@ -18,7 +18,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// has no key columns (this function returns <c>null</c> for that case).</description></item>
 /// <item><description><c>index_id ≥ 2</c> (or ≥ 1 on a heap): remaining
 /// <see cref="KeyConstraint"/>s (UNIQUE) plus user
-/// <see cref="Storage.Index"/>es, sorted by <c>ObjectId</c>.</description></item>
+/// <see cref="Index"/>es, sorted by <c>ObjectId</c>.</description></item>
 /// </list>
 /// </remarks>
 internal static class IndexLookup
@@ -26,7 +26,7 @@ internal static class IndexLookup
     /// <summary>
     /// Resolves <paramref name="indexId"/> against <paramref name="table"/>.
     /// Returns either a <see cref="KeyConstraint"/> (PK / UQ) or a
-    /// <see cref="Storage.Index"/>, never both. Returns <c>null</c> when the
+    /// <see cref="Index"/>, never both. Returns <c>null</c> when the
     /// id is out of range or refers to the heap row.
     /// </summary>
     public static (KeyConstraint? Constraint, Index? Index)? ResolveByIndexId(HeapTable table, int indexId)

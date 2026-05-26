@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 
 namespace SqlServerSimulator.Storage;
 
@@ -147,15 +148,19 @@ internal sealed class Heap
 
     /// <summary>
     /// Marks the row at <paramref name="pageIndex"/> / <paramref name="slotIndex"/>
-    /// as deleted. The slot is tombstoned at the page level; row payload
-    /// bytes are not reclaimed and any LOB chain the row referenced is
-    /// orphaned (left in <see cref="LobPages"/>) — see CLAUDE.md for the
-    /// LOB-leak quirk on UPDATE / DELETE.
+    /// as deleted. The slot is tombstoned at the page level; row payload bytes
+    /// are not reclaimed (the heap-page-byte leak quirk in CLAUDE.md). The
+    /// row's off-row LOB chains, however, are reclaimed: when
+    /// <paramref name="reclaimSuperseded"/> is set (no <c>HistoricalVersion</c>
+    /// will pin them — see <see cref="VersionStore.WillCaptureVersions"/>) the
+    /// recorded undo entry frees them on commit via
+    /// <see cref="FreeLobChain"/>; otherwise version-store GC frees them once
+    /// no snapshot needs the deleted row.
     /// </summary>
-    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null)
+    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
         this.MutationGeneration++;
-        undoLog?.RecordDelete(this, pageIndex, slotIndex);
+        undoLog?.RecordDelete(this, pageIndex, slotIndex, reclaimSuperseded);
         this.Pages[pageIndex].DeleteSlot(slotIndex);
     }
 
@@ -175,40 +180,42 @@ internal sealed class Heap
     /// any number of growth / shrink UPDATEs.
     /// </summary>
     /// <remarks>
-    /// The orphaned-LOB-chain quirk still applies — both the in-place and
-    /// forwarding paths allocate fresh LOB chains for the new payload without
-    /// tombstoning the old row's LOB references.
+    /// Both the in-place and forwarding paths allocate a fresh LOB chain for
+    /// the new payload; the superseded old chain is reclaimed (returned to the
+    /// free-list) either when the recorded undo entry commits (unversioned,
+    /// gated by <paramref name="reclaimSuperseded"/>) or by version-store GC
+    /// (versioned). A rolled-back UPDATE frees the new chain and keeps the old.
     /// </remarks>
-    public void UpdateAt(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog = null)
+    public void UpdateAt(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
-            this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog);
+            this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
         else
-            this.UpdateDirect(page, pageIndex, slotIndex, newRow, undoLog);
+            this.UpdateDirect(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
         this.MutationGeneration++;
     }
 
-    private void UpdateDirect(HeapPage page, int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog)
+    private void UpdateDirect(HeapPage page, int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog, bool reclaimSuperseded)
     {
         var oldExtent = page.SlotExtent(slotIndex);
         if (newRow.Length <= oldExtent)
         {
             var oldBytes = page.ReadSlotBytes(slotIndex)!;
-            undoLog?.RecordInPlaceRewrite(this, pageIndex, slotIndex, oldBytes);
+            undoLog?.RecordInPlaceRewrite(this, pageIndex, slotIndex, oldBytes, reclaimSuperseded);
             page.RewriteSlotInPlace(slotIndex, newRow);
         }
         else
         {
             var oldBytes = page.ReadSlotBytes(slotIndex)!;
             var target = this.Insert(newRow, undoLog);
-            undoLog?.RecordForwardInstall(this, pageIndex, slotIndex, oldBytes, target);
+            undoLog?.RecordForwardInstall(this, pageIndex, slotIndex, oldBytes, target, reclaimSuperseded);
             this.Pages[pageIndex].InstallForward(slotIndex, target);
             _ = this.ForwardTargets.Add(target);
         }
     }
 
-    private void UpdateForwarded(HeapPage originalPage, int originalPageIndex, int originalSlotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog)
+    private void UpdateForwarded(HeapPage originalPage, int originalPageIndex, int originalSlotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog, bool reclaimSuperseded)
     {
         var oldTarget = originalPage.ReadForwardTarget(originalSlotIndex);
         var targetPage = this.Pages[oldTarget.PageIndex];
@@ -217,16 +224,18 @@ internal sealed class Heap
         {
             // Fits at the existing forward target — rewrite there, forward pointer untouched.
             var oldTargetBytes = targetPage.ReadSlotBytes(oldTarget.SlotIndex)!;
-            undoLog?.RecordInPlaceRewrite(this, oldTarget.PageIndex, oldTarget.SlotIndex, oldTargetBytes);
+            undoLog?.RecordInPlaceRewrite(this, oldTarget.PageIndex, oldTarget.SlotIndex, oldTargetBytes, reclaimSuperseded);
             targetPage.RewriteSlotInPlace(oldTarget.SlotIndex, newRow);
         }
         else
         {
             // Doesn't fit. Insert at a fresh target, tombstone the old one, and
             // re-point the original slot's forward. Forward bit at the original
-            // never clears; the row keeps its visible identity.
+            // never clears; the row keeps its visible identity. The old target's
+            // superseded chains ride its Delete entry (reclaimSuperseded passed
+            // through); the new target's ride its Insert entry.
             var newTarget = this.Insert(newRow, undoLog);
-            this.DeleteAt(oldTarget.PageIndex, oldTarget.SlotIndex, undoLog);
+            this.DeleteAt(oldTarget.PageIndex, oldTarget.SlotIndex, undoLog, reclaimSuperseded);
             undoLog?.RecordForwardRetarget(this, originalPageIndex, originalSlotIndex, oldTarget, newTarget);
             originalPage.RewriteForward(originalSlotIndex, newTarget);
             _ = this.ForwardTargets.Remove(oldTarget);
@@ -311,29 +320,156 @@ internal sealed class Heap
     public readonly List<HeapLobPage> LobPages = [];
 
     /// <summary>
+    /// Indices into <see cref="LobPages"/> whose chains have been reclaimed
+    /// (a row that referenced them was superseded by a committed UPDATE /
+    /// DELETE, or an INSERT that allocated them rolled back) and may be
+    /// reused by a later <see cref="AllocateLobChain"/>. Reuse keeps the
+    /// <see cref="LobPages"/> list bounded by the high-water set of
+    /// concurrently-live (+ version-pinned) chains rather than total mutation
+    /// count — the heap's analog of SQL Server's ghost-record / page
+    /// deallocation. Concurrent because version-store GC frees chains without
+    /// holding the table's locks (see <c>VersionStore.RunGarbageCollection</c>);
+    /// per-index pop/push are individually atomic, which is all the linking
+    /// needs (a freed index is never simultaneously live).
+    /// </summary>
+    private readonly ConcurrentStack<int> freeLobPages = new();
+
+#if DEBUG
+    /// <summary>
+    /// Debug-only double-free guard: the set of indices currently on
+    /// <see cref="freeLobPages"/>. Reclamation routes through two disjoint
+    /// owners (commit-time undo entries for the unversioned path, version-GC
+    /// for the versioned path), so a chain should be freed exactly once;
+    /// freeing an already-free index would mean those owners overlapped and
+    /// risks handing the same page to two live rows. Locked rather than
+    /// concurrent because GC and a committing writer can free in parallel.
+    /// </summary>
+    private readonly HashSet<int> debugFreedLobPages = [];
+#endif
+
+    /// <summary>
+    /// The owning table's stored-column layout (set by <see cref="HeapTable"/>
+    /// whenever it (re)computes <c>StoredColumns</c>). The undo-log free hooks
+    /// and version-store GC use it with <see cref="RowDecoder.CollectLobHeads"/>
+    /// to locate a superseded row's off-row chain heads. Null on bare heaps
+    /// (ALTER-rebuild scratch, procedure-param clones, tests); those skip
+    /// reclamation — they either never carry an undo log or are discarded
+    /// wholesale.
+    /// </summary>
+    internal HeapColumn[]? ReclaimColumns;
+
+    /// <summary>
     /// Splits <paramref name="data"/> into <see cref="HeapLobPage.MaxPayload"/>-sized
     /// chunks, allocates a page chain in <see cref="LobPages"/>, and returns
-    /// the index of the chain's head page. Empty inputs allocate a single
-    /// zero-payload page so the row's pointer is always valid; callers that
-    /// want NULL semantics should not call this method at all.
+    /// the index of the chain's head page. Reuses pages from
+    /// <see cref="freeLobPages"/> before appending. Empty inputs allocate a
+    /// single zero-payload page so the row's pointer is always valid; callers
+    /// that want NULL semantics should not call this method at all.
     /// </summary>
     public int AllocateLobChain(ReadOnlySpan<byte> data)
     {
-        var head = this.LobPages.Count;
+        var head = AllocateLobPage();
+        var page = this.LobPages[head];
         var remaining = data;
         while (true)
         {
             var chunkSize = Math.Min(HeapLobPage.MaxPayload, remaining.Length);
-            var page = new HeapLobPage();
+            // WritePayload resets the page's length and clears NextPageIndex,
+            // so a recycled page starts clean; the tail terminates at -1.
             page.WritePayload(remaining[..chunkSize]);
-            this.LobPages.Add(page);
             remaining = remaining[chunkSize..];
             if (remaining.Length == 0)
                 return head;
-            // The just-added page's next pointer references the page we're
-            // about to allocate.
-            page.NextPageIndex = this.LobPages.Count;
+            var nextIdx = AllocateLobPage();
+            page.NextPageIndex = nextIdx;
+            page = this.LobPages[nextIdx];
         }
+    }
+
+    /// <summary>
+    /// Returns a free <see cref="LobPages"/> index — popped from
+    /// <see cref="freeLobPages"/> when available, otherwise a freshly appended
+    /// page. The returned page's contents are overwritten by the caller via
+    /// <see cref="HeapLobPage.WritePayload"/>.
+    /// </summary>
+    private int AllocateLobPage()
+    {
+        if (this.freeLobPages.TryPop(out var recycled))
+        {
+#if DEBUG
+            lock (this.debugFreedLobPages)
+                _ = this.debugFreedLobPages.Remove(recycled);
+#endif
+            return recycled;
+        }
+        this.LobPages.Add(new HeapLobPage());
+        return this.LobPages.Count - 1;
+    }
+
+    /// <summary>
+    /// Returns every page of the chain rooted at <paramref name="headIndex"/>
+    /// to <see cref="freeLobPages"/> for reuse. The pages stay physically in
+    /// <see cref="LobPages"/> (their stable indices back the free-list and any
+    /// surviving <c>NextPageIndex</c> links elsewhere remain valid); they're
+    /// reset to empty so stale payload isn't read if a bug ever revisits a
+    /// freed index. Caller must guarantee no live row, undo entry, or
+    /// historical version still references the chain — see the reclamation
+    /// ownership rules in the undo-log free hooks and
+    /// <c>VersionStore.RunGarbageCollection</c>.
+    /// </summary>
+    public void FreeLobChain(int headIndex)
+    {
+        var idx = headIndex;
+        while (idx >= 0 && idx < this.LobPages.Count)
+        {
+            var page = this.LobPages[idx];
+            var next = page.NextPageIndex;
+            page.PayloadLength = 0;
+            page.NextPageIndex = -1;
+#if DEBUG
+            lock (this.debugFreedLobPages)
+            {
+                if (!this.debugFreedLobPages.Add(idx))
+                    throw new InvalidOperationException($"LOB page {idx} double-freed; reclamation owners overlapped.");
+            }
+#endif
+            this.freeLobPages.Push(idx);
+            idx = next;
+        }
+    }
+
+    /// <summary>
+    /// Snapshots the current free-list (used by <c>TRUNCATE</c>'s undo entry,
+    /// which must restore both <see cref="LobPages"/> and the indices that
+    /// were reusable before the truncate).
+    /// </summary>
+    internal int[] SnapshotFreeLobPages() => [.. this.freeLobPages];
+
+    /// <summary>Clears the free-list — paired with clearing <see cref="LobPages"/> on <c>TRUNCATE</c>.</summary>
+    internal void ClearFreeLobPages()
+    {
+        this.freeLobPages.Clear();
+#if DEBUG
+        lock (this.debugFreedLobPages)
+            this.debugFreedLobPages.Clear();
+#endif
+    }
+
+    /// <summary>Replaces the free-list contents with <paramref name="indices"/> (TRUNCATE rollback).</summary>
+    internal void RestoreFreeLobPages(int[] indices)
+    {
+        this.freeLobPages.Clear();
+        // ConcurrentStack.PushRange preserves order such that ToArray() round-trips.
+        if (indices.Length > 0)
+            this.freeLobPages.PushRange(indices);
+#if DEBUG
+        lock (this.debugFreedLobPages)
+        {
+            this.debugFreedLobPages.Clear();
+            foreach (var i in indices)
+                _ = this.debugFreedLobPages.Add(i);
+        }
+#endif
     }
 
     /// <summary>

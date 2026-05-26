@@ -49,6 +49,24 @@ internal sealed class HeapTable : SchemaObject
         this.StoredColumns = storedColumns;
         this.Schema = schema;
         this.StorageOrdinals = storageOrdinals;
+        this.Heap.ReclaimColumns = HasOffRowCapableColumn(storedColumns) ? storedColumns : null;
+    }
+
+    /// <summary>
+    /// Whether any stored column can land off-row — a LOB-typed column or any
+    /// variable-length column (bounded var columns overflow-push when a row
+    /// exceeds 8060 bytes). Purely fixed/bit tables never allocate LOB chains,
+    /// so their heaps leave <see cref="Heap.ReclaimColumns"/> null and skip the
+    /// reclamation decode walk entirely.
+    /// </summary>
+    private static bool HasOffRowCapableColumn(HeapColumn[] stored)
+    {
+        foreach (var column in stored)
+        {
+            if (column.Type != SqlType.Bit && !column.Type.IsFixedLength)
+                return true;
+        }
+        return false;
     }
 
     public override string ObjectTypeCode => "U ";
@@ -170,6 +188,7 @@ internal sealed class HeapTable : SchemaObject
         this.StoredColumns = storedColumns;
         this.Schema = schema;
         this.StorageOrdinals = storageOrdinals;
+        this.Heap.ReclaimColumns = HasOffRowCapableColumn(storedColumns) ? storedColumns : null;
     }
 
     /// <summary>

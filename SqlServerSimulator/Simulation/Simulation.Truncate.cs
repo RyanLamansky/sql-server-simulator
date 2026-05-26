@@ -75,6 +75,7 @@ partial class Simulation
         var oldPages = new List<HeapPage>(table.Heap.Pages);
         var oldLobPages = new List<HeapLobPage>(table.Heap.LobPages);
         var oldForwardTargets = new HashSet<(int Page, int Slot)>(table.Heap.ForwardTargets);
+        var oldFreeLobPages = table.Heap.SnapshotFreeLobPages();
 
         var identitySnapshots = new List<(IdentityState State, long? HighWaterMark)>();
         foreach (var column in table.Columns)
@@ -86,10 +87,11 @@ partial class Simulation
         table.Heap.Pages.Clear();
         table.Heap.LobPages.Clear();
         table.Heap.ForwardTargets.Clear();
+        table.Heap.ClearFreeLobPages();
         for (var i = 0; i < identitySnapshots.Count; i++)
             identitySnapshots[i].State.Restore(null);
 
         if (context.Connection.CurrentTransaction is { } tx)
-            tx.UndoLog.RecordTruncation(table.Heap, oldPages, oldLobPages, oldForwardTargets, [.. identitySnapshots]);
+            tx.UndoLog.RecordTruncation(table.Heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, [.. identitySnapshots]);
     }
 }

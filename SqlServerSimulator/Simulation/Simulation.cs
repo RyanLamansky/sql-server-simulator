@@ -1145,7 +1145,19 @@ public sealed partial class Simulation
         {
             var outcome = body(context);
             if (statementVersionEntries is { } autoCommitEntries)
+            {
                 Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, context.CurrentDatabase);
+                // Auto-commit statement: its writes are now permanent, so
+                // commit the throwaway log — reclaiming chains superseded by
+                // this statement's UPDATE/DELETEs (unversioned path). Under an
+                // explicit tx (statementVersionEntries is null) the entries
+                // stay on the tx's log until COMMIT instead.
+                log.Commit();
+            }
+            // Table-variable writes are non-transactional and final on
+            // statement success regardless of any enclosing tx, so their
+            // throwaway log always commits here.
+            tableVarLog.Commit();
             return outcome;
         }
         catch

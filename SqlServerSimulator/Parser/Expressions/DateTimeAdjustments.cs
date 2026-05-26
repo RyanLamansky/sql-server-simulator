@@ -100,10 +100,10 @@ internal sealed class SwitchOffset : Expression
     public SwitchOffset(ParserContext context)
     {
         this.dtoArg = Parse(context);
-        if (context.Token is not Tokens.Operator { Character: ',' })
+        if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.offsetArg = Parse(context.MoveNextRequiredReturnSelf());
-        if (context.Token is not Tokens.Operator { Character: ')' })
+        if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
@@ -169,10 +169,10 @@ internal sealed class ToDateTimeOffset : Expression
     public ToDateTimeOffset(ParserContext context)
     {
         this.dtArg = Parse(context);
-        if (context.Token is not Tokens.Operator { Character: ',' })
+        if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.offsetArg = Parse(context.MoveNextRequiredReturnSelf());
-        if (context.Token is not Tokens.Operator { Character: ')' })
+        if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 

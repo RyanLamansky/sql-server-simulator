@@ -58,6 +58,22 @@ internal static class VersionStore
         database.AllowSnapshotIsolation || database.ReadCommittedSnapshot;
 
     /// <summary>
+    /// Whether a mutation of <paramref name="table"/> in
+    /// <paramref name="database"/> will record pre-write history. The single
+    /// source of truth for <see cref="CaptureWrite"/>'s capture guard, and the
+    /// inverse of "the superseding undo entry may reclaim the old row's off-row
+    /// LOB chains at commit": when this is <c>false</c> no
+    /// <see cref="HistoricalVersion"/> ever pins those chains, so the committing
+    /// undo entry owns reclamation; when <c>true</c> the history entry owns them
+    /// until <see cref="RunGarbageCollection"/> trims it.
+    /// </summary>
+    internal static bool WillCaptureVersions(Database database, HeapTable table) =>
+        IsVersioningEnabled(database)
+        && !table.IsTableVariable
+        && !BatchContext.IsLocalTempName(table.Name)
+        && !Simulation.SystemHeapTables.ContainsValue(table);
+
+    /// <summary>
     /// Captures a pre-write snapshot for the row at
     /// <paramref name="newRid"/> (post-mutation slot). For UPDATE /
     /// DELETE, <paramref name="oldPayload"/> and <paramref name="oldRid"/>
@@ -69,11 +85,7 @@ internal static class VersionStore
     /// </summary>
     internal static void CaptureWrite(BatchContext batch, HeapTable table, (int Page, int Slot) newRid, (int Page, int Slot)? oldRid, byte[]? oldPayload, VersionWriteKind kind)
     {
-        if (!IsVersioningEnabled(batch.CurrentDatabase))
-            return;
-        if (table.IsTableVariable || BatchContext.IsLocalTempName(table.Name))
-            return;
-        if (Simulation.SystemHeapTables.ContainsValue(table))
+        if (!WillCaptureVersions(batch.CurrentDatabase, table))
             return;
 
         var tx = batch.Connection.CurrentTransaction;
@@ -269,7 +281,7 @@ internal static class VersionStore
                     var chain = kv.Value;
                     if (chain.WriterTx is not null)
                         continue;
-                    chain.Head = TrimHistory(chain.Head, cutoff);
+                    chain.Head = TrimHistory(chain.Head, cutoff, table);
                     if (chain.Head is null && !chain.IsDeletedLive)
                         _ = table.RowVersions.TryRemove(kv.Key, out _);
                 }
@@ -286,7 +298,7 @@ internal static class VersionStore
     /// an HV invisible to every active snapshot (Xmax &lt;= cutoff) is
     /// invisible to all future snapshots too (cutoff only rises).
     /// </summary>
-    private static HistoricalVersion? TrimHistory(HistoricalVersion? head, long cutoff)
+    private static HistoricalVersion? TrimHistory(HistoricalVersion? head, long cutoff, HeapTable table)
     {
         var node = head;
         HistoricalVersion? previous = null;
@@ -294,6 +306,14 @@ internal static class VersionStore
         {
             if (node.Xmax <= cutoff)
             {
+                // node and everything after it are invisible to every active
+                // (and future) snapshot, so they're being dropped — reclaim
+                // each dropped version's off-row LOB chains. Each historical
+                // payload owns a chain distinct from the live row's and from
+                // newer versions (a write allocates fresh chains), so freeing
+                // here can't strand a still-referenced chain.
+                for (var dropped = node; dropped is not null; dropped = dropped.Next)
+                    FreeVersionChains(table, dropped);
                 if (previous is null)
                     return null;
                 previous.Next = null;
@@ -303,6 +323,21 @@ internal static class VersionStore
             node = node.Next;
         }
         return head;
+    }
+
+    /// <summary>
+    /// Returns the off-row LOB chains referenced by a dropped historical
+    /// version's payload to the heap's free-list. No-op when the table carries
+    /// no reclaim layout or the payload is empty.
+    /// </summary>
+    private static void FreeVersionChains(HeapTable table, HistoricalVersion version)
+    {
+        if (table.Heap.ReclaimColumns is not { } columns || version.Payload.Length == 0)
+            return;
+        var heads = new List<int>(1);
+        RowDecoder.CollectLobHeads(columns, version.Payload, heads);
+        for (var i = 0; i < heads.Count; i++)
+            table.Heap.FreeLobChain(heads[i]);
     }
 
     /// <summary>

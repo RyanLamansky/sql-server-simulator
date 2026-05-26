@@ -178,6 +178,39 @@ internal static class RowDecoder
         throw new InvalidOperationException("Unreachable: loop terminates on hit.");
     }
 
+    /// <summary>
+    /// Collects the off-row LOB chain head-indices the row references — one per
+    /// variable-length column the encoder stored as a
+    /// <see cref="RowEncoder.VarPointerMarker"/> pointer — into
+    /// <paramref name="heads"/>, without materializing any value. The heap's
+    /// reclamation paths (undo-log commit / rollback free hooks and
+    /// version-store GC) use it to locate the chains a superseded or
+    /// rolled-back row owned. NULL columns and inline values contribute
+    /// nothing; a row with no off-row column adds nothing.
+    /// </summary>
+    public static void CollectLobHeads(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes, List<int> heads)
+    {
+        var header = ValidateHeader(schema, bytes);
+        var varIndex = 0;
+        var prevVarEnd = header.VarDataStart;
+        for (var i = 0; i < schema.Length; i++)
+        {
+            var type = schema[i].Type;
+            if (type == SqlType.Bit || type.IsFixedLength)
+                continue;
+
+            var end = ReadVarOffset(header, bytes, varIndex);
+            if (!IsNullColumn(bytes, header.BitmapStart, i))
+            {
+                var payload = bytes[prevVarEnd..end];
+                if (payload.Length > 0 && payload[0] == RowEncoder.VarPointerMarker)
+                    heads.Add(BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(1, 4)));
+            }
+            prevVarEnd = end;
+            varIndex++;
+        }
+    }
+
     private static SqlValue DecodeVarValue(HeapColumn column, ReadOnlySpan<byte> payload, Heap? lobStore)
     {
         if (payload.Length == 0)

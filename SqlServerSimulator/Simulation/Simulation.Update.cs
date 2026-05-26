@@ -516,7 +516,7 @@ partial class Simulation
             var (pageIndex, slotIndex, fullNew, _) = affected[i];
             if (lockableTable)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
-            table.Heap.UpdateAt(pageIndex, slotIndex, RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
+            table.Heap.UpdateAt(pageIndex, slotIndex, RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog, ReclaimSuperseded(table, context));
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }
@@ -591,6 +591,17 @@ partial class Simulation
         !table.IsTableVariable
         && !BatchContext.IsLocalTempName(table.Name)
         && !Simulation.SystemHeapTables.ContainsValue(table);
+
+    /// <summary>
+    /// Whether a superseding UPDATE / DELETE may reclaim the old row's off-row
+    /// LOB chains when its undo entry commits. True exactly when no
+    /// <see cref="HistoricalVersion"/> will pin those chains — the
+    /// inverse of <see cref="VersionStore.WillCaptureVersions"/>. For
+    /// the versioned case the chains are instead reclaimed by version-store GC
+    /// once no snapshot needs them.
+    /// </summary>
+    internal static bool ReclaimSuperseded(HeapTable table, ParserContext context) =>
+        !Storage.VersionStore.WillCaptureVersions(context.CurrentDatabase, table);
 
     private static List<byte[]> ProjectMutationOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,

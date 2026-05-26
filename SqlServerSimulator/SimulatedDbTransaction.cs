@@ -166,7 +166,12 @@ public sealed class SimulatedDbTransaction : DbTransaction
             return;
         var db = this.Connection.CurrentDatabase;
         Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, db);
-        this.UndoLog.Clear();
+        // Commit() (vs the former discard-only Clear) reclaims the off-row LOB
+        // chains superseded by this tx's committed UPDATE/DELETEs in the
+        // unversioned case; under SNAPSHOT/RCSI those chains are pinned by the
+        // history entries FinalizePendingEntries just stamped and are reclaimed
+        // instead by RunGarbageCollection below once no snapshot needs them.
+        this.UndoLog.Commit();
         ReleaseAllLocks();
         UnregisterActiveSnapshot(db);
         Storage.VersionStore.RunGarbageCollection(db);
