@@ -38,6 +38,16 @@ partial class SimulatedSqlException
         new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 2520: <c>DBCC SHRINKDATABASE(&lt;name&gt;)</c>
+    /// names a database not present in this <see cref="Simulation"/>. Distinct
+    /// from the <c>USE</c> path's Msg 911 — DBCC reports its own wording.
+    /// Probe-confirmed against SQL Server 2025: Class 16 State 12, the
+    /// "querying the sys.databases catalog view" suffix.
+    /// </summary>
+    internal static SimulatedSqlException CouldNotFindDatabase(string databaseName) =>
+        new($"Could not find database '{databaseName}'. The database either does not exist, or was dropped before a statement tried to use it. Verify if the database exists by querying the sys.databases catalog view.", 2520, 16, 12);
+
+    /// <summary>
     /// Mimics SQL Server error 2760: a statement referenced a schema that
     /// doesn't exist (or whose principal the caller can't access). Probe-
     /// confirmed wording — real SQL Server uses the same Msg / wording for

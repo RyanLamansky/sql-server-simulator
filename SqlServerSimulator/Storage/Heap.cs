@@ -193,6 +193,74 @@ internal sealed class Heap
     }
 
     /// <summary>
+    /// Drops fully-dead pages from the tail of <see cref="Pages"/>, lowering the
+    /// list below its high-water mark — the page-data half of a
+    /// <c>DBCC SHRINKDATABASE</c>. A trailing page is removed only when it holds
+    /// no reachable row (<see cref="HeapPage.IsFullyDead"/>) and
+    /// <paramref name="pageIsPinned"/> reports no historical-version entry or
+    /// held lock keyed on it; either keeps a <c>(page, slot)</c> address live.
+    /// Removal stops at the first page that fails — only the trailing run goes,
+    /// so surviving pages keep their indices and no cursor / version Rid /
+    /// forward pointer is invalidated. Returns the number of pages dropped.
+    /// </summary>
+    internal int TrimTrailingDeadPages(Func<int, bool> pageIsPinned)
+    {
+        var removed = 0;
+        while (this.Pages.Count > 0)
+        {
+            var last = this.Pages.Count - 1;
+            if (!this.Pages[last].IsFullyDead || pageIsPinned(last))
+                break;
+            this.Pages.RemoveAt(last);
+            _ = this.reclaimablePages.TryRemove(last, out _);
+            if (this.Pages.Count > 0)
+                this.Pages[^1].NextPageIndex = -1;
+            removed++;
+        }
+        if (removed > 0)
+            this.MutationGeneration++;
+        return removed;
+    }
+
+    /// <summary>
+    /// Drops reclaimed pages from the tail of <see cref="LobPages"/> — the
+    /// off-row half of a <c>DBCC SHRINKDATABASE</c>. A trailing page is removable
+    /// exactly when its index sits on <see cref="freeLobPages"/>: free-list
+    /// membership is the reclamation contract that no live row, surviving
+    /// <c>NextPageIndex</c> link, or historical version still references it.
+    /// Only the trailing run of free pages is removed, so surviving indices —
+    /// which back live chain links and row head-indices — stay valid. Returns
+    /// the number of pages dropped.
+    /// </summary>
+    internal int TrimTrailingFreeLobPages()
+    {
+        var free = new HashSet<int>(this.freeLobPages);
+        var removed = 0;
+        while (this.LobPages.Count > 0 && free.Remove(this.LobPages.Count - 1))
+        {
+            this.LobPages.RemoveAt(this.LobPages.Count - 1);
+            removed++;
+        }
+        if (removed > 0)
+        {
+            // Rebuild the free-list (and its debug mirror) from the survivors —
+            // the dropped indices no longer exist to be reused.
+            this.freeLobPages.Clear();
+            if (free.Count > 0)
+                this.freeLobPages.PushRange([.. free]);
+#if DEBUG
+            lock (this.debugFreedLobPages)
+            {
+                this.debugFreedLobPages.Clear();
+                foreach (var idx in free)
+                    _ = this.debugFreedLobPages.Add(idx);
+            }
+#endif
+        }
+        return removed;
+    }
+
+    /// <summary>
     /// Yields every live row in the heap, dereferencing forward pointers so
     /// each row appears exactly once at its stable address. Tombstoned slots
     /// and slots that are the target of a forwarding pointer (still physically

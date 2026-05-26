@@ -85,6 +85,8 @@ enum ContextualKeyword
     Scoped,
     Sequence,
     Sets,
+    ShrinkDatabase,
+    ShrinkFile,
     Spatial,
     Target,
     SetError,

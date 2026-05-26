@@ -263,6 +263,29 @@ internal sealed class HeapPage
     }
 
     /// <summary>
+    /// True when no slot holds a reachable row — every slot is a committed-dead
+    /// (reclaimable) entry, or the page has none at all. Live, forwarded,
+    /// forward-target, and <em>uncommitted</em>-tombstoned slots are all
+    /// non-reclaimable, so any of them makes the page not dead. A page that
+    /// reads true can be dropped from the tail of <see cref="Heap.Pages"/>
+    /// without losing reachable data (a non-tail page still can't, because that
+    /// would renumber the stable indices later pages depend on).
+    /// </summary>
+    public bool IsFullyDead
+    {
+        get
+        {
+            var count = this.SlotCount;
+            for (var i = 0; i < count; i++)
+            {
+                if (!this.IsSlotReclaimable(i))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Packs the page's live row data, reclaiming the bytes of committed-dead
     /// (reclaimable) slots. Slot indices are preserved — only byte offsets move
     /// — so every <c>(page, slot)</c> holder (cursors, version-chain Rids,

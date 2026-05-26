@@ -823,6 +823,15 @@ public sealed partial class Simulation
                     break;
                 }
 
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShrink(context, batch, out outcome):
+                if (!batch.IsSkipping)
+                {
+                    connection.LastStatementRowCount = 0;
+                    if (outcome is not null)
+                        yield return outcome;
+                }
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
             case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
             case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
