@@ -124,7 +124,7 @@ partial class Simulation
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
-            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, rowBytes))
+            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, (pageIndex, slotIndex)))
                 continue;
 
             SqlValue[]? fullValues = null;

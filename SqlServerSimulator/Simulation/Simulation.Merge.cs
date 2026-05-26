@@ -1373,17 +1373,11 @@ partial class Simulation
         }
         if (!insteadOfUpdate)
         {
-            foreach (var (page, slot, _, _, _) in pendingUpdates)
+            foreach (var (page, slot, _, newValues, _) in pendingUpdates)
             {
                 if (lockableTable)
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
-                destinationTable.Heap.DeleteAt(page, slot, undoLog);
-            }
-            foreach (var (_, _, _, newValues, _) in pendingUpdates)
-            {
-                var (newPage, newSlot) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
-                if (lockableTable)
-                    context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive);
+                destinationTable.Heap.UpdateAt(page, slot, RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
             }
         }
         if (!insteadOfInsert)

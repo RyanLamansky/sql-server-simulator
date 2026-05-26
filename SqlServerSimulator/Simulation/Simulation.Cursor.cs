@@ -146,13 +146,14 @@ partial class Simulation
             return;
 
         // Resolve updatability + effective sensitivity. A non-updatable query
-        // (no single base table with a unique key) is forced to STATIC, as is
-        // an explicit STATIC / INSENSITIVE / FAST_FORWARD request. Otherwise
-        // honor the requested type; an unspecified type defaults to KEYSET
-        // when SCROLL was asked for and DYNAMIC for the forward-only default.
+        // (no single base table) is forced to STATIC, as is an explicit
+        // STATIC / INSENSITIVE / FAST_FORWARD request. Otherwise honor the
+        // requested type; an unspecified type defaults to KEYSET when SCROLL
+        // was asked for and DYNAMIC for the forward-only default. A base
+        // table without a unique key is fine — cursor identity rides the
+        // heap's stable <c>(page, slot)</c> address, not the row's values.
         var baseTable = selection.CursorBaseTable;
-        var keyOrdinals = baseTable is null ? null : Selection.CursorUniqueKeyOrdinals(baseTable);
-        var updatable = baseTable is not null && keyOrdinals is not null;
+        var updatable = baseTable is not null;
 
         var sensitivity = !updatable || reqStatic || reqFastForward
             ? CursorSensitivity.Static
@@ -175,8 +176,7 @@ partial class Simulation
             sensitivity,
             scrollable,
             readOnly,
-            updatable ? baseTable : null,
-            updatable ? keyOrdinals : null);
+            updatable ? baseTable : null);
     }
 
     /// <summary>Parses and runs <c>OPEN [GLOBAL] &lt;cursor&gt;</c>.</summary>
@@ -331,7 +331,7 @@ partial class Simulation
     /// <paramref name="table"/>: Msg 16929 when the cursor is read-only,
     /// Msg 16931 when it isn't positioned on a live row (or is positioned on a
     /// different table). Returns the validated cursor whose
-    /// <see cref="Cursor.CurrentKey"/> identifies the row to mutate.
+    /// <see cref="Cursor.CurrentRid"/> identifies the row to mutate.
     /// </summary>
     internal static Cursor ParseWhereCurrentOf(ParserContext context, HeapTable table)
     {
@@ -344,24 +344,18 @@ partial class Simulation
         var cursor = GetCursor(context.Batch, name);
         return cursor.ReadOnly
             ? throw SimulatedSqlException.CursorIsReadOnly()
-            : cursor.CurrentKey is null || !ReferenceEquals(cursor.BaseTable, table)
+            : cursor.CurrentRid is null || !ReferenceEquals(cursor.BaseTable, table)
                 ? throw SimulatedSqlException.CursorNoCurrentRow()
                 : cursor;
     }
 
     /// <summary>
-    /// True when the heap row <paramref name="rowBytes"/> is the one the
-    /// positioned <paramref name="cursor"/> is sitting on — i.e. its unique-key
-    /// columns equal the cursor's <see cref="Cursor.CurrentKey"/>.
+    /// True when the heap row at <paramref name="rid"/> is the one the
+    /// positioned <paramref name="cursor"/> is sitting on — i.e. the row's
+    /// stable address equals <see cref="Cursor.CurrentRid"/>.
     /// </summary>
-    internal static bool CursorRowMatches(Cursor cursor, HeapTable table, ReadOnlySpan<byte> rowBytes)
-    {
-        var keyOrdinals = cursor.KeyStorageOrdinals!;
-        var rowKey = new SqlValue[keyOrdinals.Length];
-        for (var i = 0; i < keyOrdinals.Length; i++)
-            rowKey[i] = RowDecoder.DecodeColumn(table.StoredColumns, rowBytes, keyOrdinals[i], table.Heap);
-        return Selection.CompareKeyTuples(rowKey, cursor.CurrentKey!) == 0;
-    }
+    internal static bool CursorRowMatches(Cursor cursor, (int Page, int Slot) rid) =>
+        cursor.CurrentRid is { } current && current.Equals(rid);
 
     /// <summary>
     /// Resolves a declared cursor by name, raising Msg 16916 when no cursor of

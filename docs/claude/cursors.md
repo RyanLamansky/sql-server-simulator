@@ -36,11 +36,16 @@ get their own dispatch cases and are in `IsStatementBoundary`.
 ## Sensitivity model (probe-confirmed)
 
 The effective type is resolved at DECLARE from the requested keywords **and**
-whether the SELECT is updatable — a query that isn't a single base table with a
-unique key (PRIMARY KEY or UNIQUE) is forced to STATIC, matching SQL Server's
-silent conversion. With an updatable query: explicit `STATIC` / `INSENSITIVE` /
-`FAST_FORWARD` → STATIC; `KEYSET` → KEYSET; `DYNAMIC` → DYNAMIC; unspecified →
-KEYSET when `SCROLL` was asked for, DYNAMIC for the forward-only default.
+whether the SELECT is updatable — a query that isn't a single base table is
+forced to STATIC, matching SQL Server's silent conversion. With an updatable
+query: explicit `STATIC` / `INSENSITIVE` / `FAST_FORWARD` → STATIC; `KEYSET`
+→ KEYSET; `DYNAMIC` → DYNAMIC; unspecified → KEYSET when `SCROLL` was asked
+for, DYNAMIC for the forward-only default. The base table is **not** required
+to have a unique key — the row's stable heap address (delivered by
+`Heap.UpdateAt`'s in-place / forwarding-pointer machinery) is the fallback
+identity. Probe-confirmed: real SQL Server's KEYSET on a no-unique-key heap
+also opens with a positive `@@CURSOR_ROWS`, so this matches rather than
+diverges.
 
 | Type | Membership | Column values | `@@CURSOR_ROWS` | Updatable |
 |------|-----------|---------------|-----------------|-----------|
@@ -50,19 +55,28 @@ KEYSET when `SCROLL` was asked for, DYNAMIC for the forward-only default.
 
 - **STATIC** snapshots projected rows once (`Selection.Execute` → decoded
   `SqlValue[]`); immune to later changes; covers every non-updatable query.
-- **KEYSET** snapshots the ordered unique-key tuples at OPEN. Each FETCH
-  re-enumerates the live base table (`EnumerateForCursor`) and matches by key:
-  a value change shows through (status 0); a deleted member yields
+- **KEYSET** snapshots an ordered list of `(UniqueKey?, Rid)` pairs at OPEN.
+  Each FETCH re-enumerates the live base table (`EnumerateForCursor`) and
+  matches the snapshotted member — by unique key when the base table has a
+  PK/UNIQUE (probe-confirmed: real SQL Server's KEYSET tracks the chosen
+  unique-index columns, so an UPDATE to those columns invalidates the
+  matching row), by stable address otherwise. A value change to non-identity
+  columns shows through (status 0); a deleted-or-key-changed member yields
   `@@FETCH_STATUS = -2`.
 - **DYNAMIC** stores no list; it tracks the last-emitted `(ORDER BY key,
-  unique key)` and re-enumerates live each FETCH to find the next/prior row by
-  that total order. Deletes ahead are silently skipped; inserts ahead appear.
+  Rid)` and re-enumerates live each FETCH to find the next/prior row by that
+  total order. Deletes ahead are silently skipped; inserts ahead appear.
 
-Position is tracked by the **logical unique key**, not a physical RID, because
-the simulator's UPDATE relocates rows (delete + re-insert) — a RID would make an
-in-place value update look like a delete. The unique key also gives KEYSET and
-positioned DML a stable identity and a deterministic total order (ORDER BY key,
-then unique key ascending as tiebreak).
+Cursor identity rides the row's stable `(page, slot)` heap address.
+`Heap.UpdateAt` (see [`storage.md`](storage.md) — TODO if you split that out;
+for now the in-place / forwarding-pointer machinery lives in `Storage/Heap.cs`)
+preserves that address through value updates: a fits-in-place rewrite
+overwrites the slot's bytes; an oversize rewrite appends the new row
+elsewhere and installs a single-level forwarding pointer at the original
+slot. Either way the row's visible address is unchanged, so KEYSET re-reads
+and positioned `WHERE CURRENT OF` DML survive value updates without
+requiring a unique key — a strict improvement over the previous "force
+STATIC when no PK/UNIQUE" rule.
 
 ## FETCH
 
@@ -97,24 +111,25 @@ single live row).
 - **Cursors over a JOIN / derived table / view are forced to STATIC.** Probed
   against SQL Server 2025: such cursors are **DYNAMIC** on the real server
   (`@@CURSOR_ROWS = -1`, mid-loop changes visible, `WHERE CURRENT OF` updates
-  the named base table). Only a *direct single base table with a PK/UNIQUE*
-  takes the KEYSET / DYNAMIC / updatable path here (`CursorBaseTable` is null
-  for any indirect source → STATIC). The forced-STATIC snapshot returns the
+  the named base table). Only a *direct single base table* takes the
+  KEYSET / DYNAMIC / updatable path here (`CursorBaseTable` is null for any
+  indirect source → STATIC). The forced-STATIC snapshot returns the
   **correct rowset** for a read-only forward loop — it only diverges on
   sensitivity (no mid-loop change visibility), `@@CURSOR_ROWS` (count instead
   of `-1`), and positioned DML (Msg 16929 instead of updating). Faithful
   multi-source cursors would need per-source row identity carried through the
   join driver (`EnumerateJoinedRows` yields identity-less `byte[]?[]` tuples)
-  plus live re-execution + navigation — a separate subsystem, independent of
-  the RID-stability question below. A set-op (UNION/…) cursor is forced STATIC
-  on the real server too, so that case matches.
-- **Position is tracked by the logical unique key, not a physical RID**, because
-  the simulator's UPDATE relocates rows (delete + re-insert → new RID), which
-  would make a KEYSET row falsely read as deleted after an in-place value
-  update. Real SQL Server keeps the RID stable via forwarding pointers; if the
-  simulator grew those (or an in-row stable row-id), cursor identity could
-  collapse to a single RID scheme for both single- and multi-source cursors and
-  drop the unique-key requirement — a candidate future storage feature.
+  plus live re-execution + navigation — a separate subsystem. A set-op
+  (UNION/…) cursor is forced STATIC on the real server too, so that case
+  matches.
+- **Position is tracked by the row's stable heap address**, made possible by
+  `Heap.UpdateAt`'s in-place / forwarding-pointer design (the simulator's UPDATE
+  no longer relocates rows). KEYSET membership additionally tracks the
+  unique-key tuple when the base table has a PK/UNIQUE, so a UPDATE to those
+  columns produces `@@FETCH_STATUS = -2` (matches real SQL Server's
+  keyset-tracks-the-unique-index behavior, probe-confirmed). Multi-source
+  cursors still force STATIC — see the JOIN/derived-table/view bullet above;
+  that's now the sole structural restriction.
 - **`@@CURSOR_ROWS` is `-1` throughout for DYNAMIC.** Real SQL Server may report
   a transient positive count for a freshly-opened dynamic cursor before the
   first fetch (asynchronous population heuristic); the simulator doesn't model

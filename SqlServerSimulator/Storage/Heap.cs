@@ -40,15 +40,27 @@ internal sealed class Heap
     public readonly List<HeapPage> Pages = [];
 
     /// <summary>
-    /// Monotonic counter bumped by every <see cref="Insert"/> and
-    /// <see cref="DeleteAt"/> (UPDATE relocates, so it bumps twice). Read-side
-    /// equality-seek caches (see <c>Selection.Execution.IndexSeek.cs</c>) tag
-    /// their built buckets with the value seen at build time and rebuild when
-    /// it has moved — the heap stays the single source of truth, so a stale
-    /// cache is never consulted. Not a transactional value: it advances on the
-    /// physical mutation and never rolls back (a rolled-back insert/delete
-    /// still bumped it, which only forces a harmless cache rebuild). Mutations
-    /// on a given table are lock-serialized, so this needs no interlocking.
+    /// Slots that are the target of some forwarding pointer. Iteration over
+    /// the whole heap skips these (the row will be yielded via the
+    /// forwarding slot at the row's stable address); single-slot reads through
+    /// <see cref="ReadSlotBytes"/> still resolve them directly so forward-chasing
+    /// callers can address them by their physical location. <c>TRUNCATE</c>
+    /// clears this alongside <see cref="Pages"/> and <see cref="LobPages"/>;
+    /// <see cref="UndoLog"/>'s truncation entry snapshots and restores it.
+    /// </summary>
+    internal readonly HashSet<(int Page, int Slot)> ForwardTargets = [];
+
+    /// <summary>
+    /// Monotonic counter bumped by every <see cref="Insert"/>,
+    /// <see cref="DeleteAt"/>, and <see cref="UpdateAt"/>; the forwarding
+    /// UPDATE path may bump multiple times (its internal Insert + Delete each
+    /// contribute) and that's fine — read-side equality-seek caches (see
+    /// <c>Selection.Execution.IndexSeek.cs</c>) only check whether anything
+    /// changed, so any-positive delta forces a rebuild. Not a transactional
+    /// value: it advances on the physical mutation and never rolls back (a
+    /// rolled-back insert/delete/update still bumped it, which only forces a
+    /// harmless cache rebuild). Mutations on a given table are lock-serialized,
+    /// so this needs no interlocking.
     /// </summary>
     public long MutationGeneration;
 
@@ -94,33 +106,42 @@ internal sealed class Heap
     }
 
     /// <summary>
-    /// Yields every row in every page in allocation order. Each yielded array
-    /// is a fresh copy of the page bytes for that row. Tombstoned slots
-    /// (DELETE / UPDATE-relocated) are skipped at the page level.
+    /// Yields every live row in the heap, dereferencing forward pointers so
+    /// each row appears exactly once at its stable address. Tombstoned slots
+    /// and slots that are the target of a forwarding pointer (still physically
+    /// present, surfaced via the forwarder) are skipped.
     /// </summary>
     public IEnumerable<byte[]> EnumerateRows()
     {
-        foreach (var page in this.Pages)
-        {
-            foreach (var row in page.EnumerateRows())
-                yield return row;
-        }
+        foreach (var (_, _, bytes) in this.EnumerateRowsWithAddress())
+            yield return bytes;
     }
 
     /// <summary>
     /// Like <see cref="EnumerateRows"/> but yields a stable address for each
-    /// row alongside its bytes — UPDATE and DELETE need this to call
-    /// <see cref="DeleteAt"/> on the rows they're operating on. The address
-    /// is a (pageIndex, slotIndex) tuple; the index pair survives further
-    /// inserts (insertions may add new pages but never reshuffle existing
-    /// slots).
+    /// row alongside its resolved bytes — UPDATE and DELETE need this to call
+    /// <see cref="UpdateAt"/> / <see cref="DeleteAt"/> through the visible
+    /// row identity, which survives a forwarding UPDATE.
     /// </summary>
     public IEnumerable<(int PageIndex, int SlotIndex, byte[] Bytes)> EnumerateRowsWithAddress()
     {
         for (var p = 0; p < this.Pages.Count; p++)
         {
-            foreach (var (slotIndex, bytes) in this.Pages[p].EnumerateRowsWithSlots())
-                yield return (p, slotIndex, bytes);
+            var page = this.Pages[p];
+            foreach (var (slotIndex, raw) in page.EnumerateRowsWithSlots())
+            {
+                if (this.ForwardTargets.Contains((p, slotIndex)))
+                    continue;
+                if (page.IsSlotForwarded(slotIndex))
+                {
+                    var (tp, ts) = page.ReadForwardTarget(slotIndex);
+                    yield return (p, slotIndex, this.Pages[tp].ReadSlotBytes(ts)!);
+                }
+                else
+                {
+                    yield return (p, slotIndex, raw);
+                }
+            }
         }
     }
 
@@ -139,15 +160,125 @@ internal sealed class Heap
     }
 
     /// <summary>
-    /// Returns a fresh copy of the row bytes at the given Rid (whether the
-    /// slot is currently tombstoned or not). Used by the version store to
-    /// snapshot the pre-mutation payload before <see cref="DeleteAt"/> /
-    /// in-place rewrites.
+    /// Rewrites the row at <paramref name="pageIndex"/> / <paramref name="slotIndex"/>
+    /// with <paramref name="newRow"/>, keeping the caller-visible address
+    /// stable: if the new payload fits within the slot's existing extent it's
+    /// rewritten in place; otherwise the new row is appended elsewhere and the
+    /// original slot becomes a single-level forwarding pointer to that target.
+    /// When the original slot is already forwarded the same fits-or-forwards
+    /// decision applies to the current target — if the new row needs more
+    /// room than the target offers, a fresh target is allocated and the
+    /// original slot's forward pointer is re-pointed (the now-dead target is
+    /// tombstoned); the original slot's forward bit is never cleared by an
+    /// UPDATE, so chains never form. Matches SQL Server's heap-update
+    /// behavior (probe-confirmed 2026-05-26): same physloc reported through
+    /// any number of growth / shrink UPDATEs.
     /// </summary>
-    public byte[]? ReadSlotBytes(int pageIndex, int slotIndex) =>
-        pageIndex >= 0 && pageIndex < this.Pages.Count
-            ? this.Pages[pageIndex].ReadSlotBytes(slotIndex)
-            : null;
+    /// <remarks>
+    /// The orphaned-LOB-chain quirk still applies — both the in-place and
+    /// forwarding paths allocate fresh LOB chains for the new payload without
+    /// tombstoning the old row's LOB references.
+    /// </remarks>
+    public void UpdateAt(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog = null)
+    {
+        var page = this.Pages[pageIndex];
+        if (page.IsSlotForwarded(slotIndex))
+            this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog);
+        else
+            this.UpdateDirect(page, pageIndex, slotIndex, newRow, undoLog);
+        this.MutationGeneration++;
+    }
+
+    private void UpdateDirect(HeapPage page, int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog)
+    {
+        var oldExtent = page.SlotExtent(slotIndex);
+        if (newRow.Length <= oldExtent)
+        {
+            var oldBytes = page.ReadSlotBytes(slotIndex)!;
+            undoLog?.RecordInPlaceRewrite(this, pageIndex, slotIndex, oldBytes);
+            page.RewriteSlotInPlace(slotIndex, newRow);
+        }
+        else
+        {
+            var oldBytes = page.ReadSlotBytes(slotIndex)!;
+            var target = this.Insert(newRow, undoLog);
+            undoLog?.RecordForwardInstall(this, pageIndex, slotIndex, oldBytes, target);
+            this.Pages[pageIndex].InstallForward(slotIndex, target);
+            _ = this.ForwardTargets.Add(target);
+        }
+    }
+
+    private void UpdateForwarded(HeapPage originalPage, int originalPageIndex, int originalSlotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog)
+    {
+        var oldTarget = originalPage.ReadForwardTarget(originalSlotIndex);
+        var targetPage = this.Pages[oldTarget.PageIndex];
+        var targetExtent = targetPage.SlotExtent(oldTarget.SlotIndex);
+        if (newRow.Length <= targetExtent)
+        {
+            // Fits at the existing forward target — rewrite there, forward pointer untouched.
+            var oldTargetBytes = targetPage.ReadSlotBytes(oldTarget.SlotIndex)!;
+            undoLog?.RecordInPlaceRewrite(this, oldTarget.PageIndex, oldTarget.SlotIndex, oldTargetBytes);
+            targetPage.RewriteSlotInPlace(oldTarget.SlotIndex, newRow);
+        }
+        else
+        {
+            // Doesn't fit. Insert at a fresh target, tombstone the old one, and
+            // re-point the original slot's forward. Forward bit at the original
+            // never clears; the row keeps its visible identity.
+            var newTarget = this.Insert(newRow, undoLog);
+            this.DeleteAt(oldTarget.PageIndex, oldTarget.SlotIndex, undoLog);
+            undoLog?.RecordForwardRetarget(this, originalPageIndex, originalSlotIndex, oldTarget, newTarget);
+            originalPage.RewriteForward(originalSlotIndex, newTarget);
+            _ = this.ForwardTargets.Remove(oldTarget);
+            _ = this.ForwardTargets.Add(newTarget);
+        }
+    }
+
+    /// <summary>
+    /// Undo callback for <see cref="UndoLog.RecordForwardInstall"/> — removes
+    /// the target from <see cref="ForwardTargets"/> after the page-level
+    /// forward bit is cleared. Called as part of the rollback walk; the
+    /// target slot itself is tombstoned by the paired <see cref="UndoKind.Insert"/>
+    /// entry.
+    /// </summary>
+    internal void UnregisterForwardTargetForUndo((int Page, int Slot) target)
+    {
+        _ = this.ForwardTargets.Remove(target);
+    }
+
+    /// <summary>
+    /// Undo callback for <see cref="UndoLog.RecordForwardRetarget"/> — restores
+    /// the forwarding-target tracking to its pre-UPDATE shape (old target back
+    /// in, new target removed). The old target slot's tombstone bit is cleared
+    /// by the paired <see cref="UndoKind.Delete"/> entry.
+    /// </summary>
+    internal void SwapForwardTargetForUndo((int Page, int Slot) oldTarget, (int Page, int Slot) newTarget)
+    {
+        _ = this.ForwardTargets.Remove(newTarget);
+        _ = this.ForwardTargets.Add(oldTarget);
+    }
+
+    /// <summary>
+    /// Returns a fresh copy of the row bytes at the given Rid, dereferencing
+    /// one level of forwarding so callers see the live row's payload even
+    /// when the slot is a forwarding pointer. Reads through tombstoned slots
+    /// (the bytes are still resident pre-finalization). Used by the version
+    /// store to snapshot the pre-mutation payload before
+    /// <see cref="DeleteAt"/> / <see cref="UpdateAt"/>, and by the index-seek
+    /// materializer to read seeked candidates through their stable address.
+    /// </summary>
+    public byte[]? ReadSlotBytes(int pageIndex, int slotIndex)
+    {
+        if (pageIndex < 0 || pageIndex >= this.Pages.Count)
+            return null;
+        var page = this.Pages[pageIndex];
+        if (page.IsSlotForwarded(slotIndex))
+        {
+            var (tp, ts) = page.ReadForwardTarget(slotIndex);
+            return this.Pages[tp].ReadSlotBytes(ts);
+        }
+        return page.ReadSlotBytes(slotIndex);
+    }
 
     /// <summary>
     /// Returns true when the slot at the given Rid is past the page's high-

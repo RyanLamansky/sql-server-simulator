@@ -196,27 +196,43 @@ internal static class VersionStore
     /// statement-atomic mid-execution failure). Clears every pending
     /// entry's <see cref="RowVersionChain.WriterTx"/> mark so SI readers
     /// no longer see "uncommitted writer" on those slots; the heap rows
-    /// themselves are restored by the undo log. For INSERT entries the
-    /// chain itself is dropped (the row never existed from any
-    /// snapshot's perspective).
+    /// themselves are restored by the undo log. For INSERT the chain is
+    /// dropped (the row never existed from any snapshot's perspective);
+    /// for UPDATE the pending pre-write <see cref="HistoricalVersion"/> is
+    /// popped off the chain head, restoring the pre-tx history shape (with
+    /// stable RIDs, a row UPDATEd in this tx still has earlier committed
+    /// history at the same chain — preserving that is required for SI
+    /// readers whose snapshot pre-dates this tx).
     /// </summary>
     internal static void DiscardPendingEntries(List<PendingVersionEntry> entries)
     {
         foreach (var entry in entries)
         {
-            // INSERT / UPDATE both created the chain at NewRid in this tx
-            // (slot indices never reuse — every new write goes to a fresh
-            // slot). Roll back by removing the entire chain at NewRid; the
-            // heap row itself is restored by the undo log. DELETE leaves
-            // the chain entry intact — its WriterTx mark gets cleared so
-            // future SI readers consult the live (un-tombstoned) row.
-            if (entry.Kind is VersionWriteKind.Insert or VersionWriteKind.Update)
-            {
-                _ = entry.Table.RowVersions.TryRemove(entry.NewRid, out _);
+            if (!entry.Table.RowVersions.TryGetValue(entry.NewRid, out var chain))
                 continue;
+            chain.WriterTx = null;
+            switch (entry.Kind)
+            {
+                case VersionWriteKind.Insert:
+                    // The chain was created by this tx's INSERT and has no
+                    // pre-tx history — drop it entirely.
+                    _ = entry.Table.RowVersions.TryRemove(entry.NewRid, out _);
+                    break;
+                case VersionWriteKind.Update:
+                    // Pop the pending HV the matching CaptureWrite prepended.
+                    if (chain.Head is { Xmax: PendingXmax } pendingHead)
+                        chain.Head = pendingHead.Next;
+                    // INSERT-then-UPDATE in the same tx leaves the chain with
+                    // LiveXmin = 0 (the INSERT hadn't committed); a subsequent
+                    // INSERT-entry discard will drop the chain, so here we just
+                    // strip the UPDATE's contribution. Pre-existing chains
+                    // retain their LiveXmin and any earlier HVs.
+                    break;
+                case VersionWriteKind.Delete:
+                    // chain stays with WriterTx cleared so future SI readers
+                    // consult the live (un-tombstoned) row.
+                    break;
             }
-            if (GetExistingChain(entry.Table, entry.NewRid) is { } chain)
-                chain.WriterTx = null;
         }
         entries.Clear();
     }

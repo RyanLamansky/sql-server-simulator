@@ -47,14 +47,26 @@ internal sealed class HeapPage
 
     /// <summary>
     /// High bit of a slot's 16-bit value flags the slot as deleted (tombstone).
-    /// The remaining 15 bits hold the row's byte offset within the page; offsets
-    /// fit in 13 bits (max 8190) so the high bit is always available. UPDATE
-    /// and DELETE set this bit; <see cref="EnumerateRowsWithSlots"/> skips
-    /// tombstoned slots. Row payload bytes are not reclaimed — slot directory
-    /// space and row data area both grow monotonically (intentional simplifying
-    /// trade-off; see CLAUDE.md).
+    /// Offsets fit in 13 bits (max 8191) so the top three bits are always
+    /// available; DELETE and a relocated-UPDATE's original slot both set this
+    /// bit, <see cref="EnumerateRowsWithSlots"/> skips tombstoned slots. Row
+    /// payload bytes are not reclaimed — slot directory space and row data
+    /// area both grow monotonically (intentional simplifying trade-off; see
+    /// CLAUDE.md).
     /// </summary>
     private const ushort SlotTombstoneBit = 0x8000;
+
+    /// <summary>
+    /// Second-highest bit flags the slot as a forwarding pointer. The 6 bytes
+    /// at the slot's payload offset encode <c>(int32 pageIndex, int16 slotIndex)</c>
+    /// — the live target. A forwarded slot's <em>visible</em> identity stays at
+    /// the original (page, slot) so callers track stable row addresses across
+    /// UPDATEs that don't fit in place. See <see cref="Heap.UpdateAt"/>.
+    /// </summary>
+    private const ushort SlotForwardBit = 0x4000;
+
+    /// <summary>Low-13-bits mask: the actual byte offset within the page (always &lt; <see cref="PageSize"/>).</summary>
+    private const ushort SlotOffsetMask = 0x1FFF;
 
     /// <summary>The page's raw bytes (for tests and future page I/O).</summary>
     public readonly byte[] Bytes = new byte[PageSize];
@@ -132,7 +144,9 @@ internal sealed class HeapPage
     /// Like <see cref="EnumerateRows"/> but yields the slot index alongside
     /// each row's bytes. Used by UPDATE and DELETE to address rows for
     /// in-place removal via <see cref="DeleteSlot"/>. Tombstoned slots are
-    /// skipped — the caller never sees them.
+    /// skipped; forwarded slots yield the forward pointer's 6-byte payload
+    /// (callers that need the target row's bytes resolve through
+    /// <see cref="ReadForwardTarget"/> against the owning heap).
     /// </summary>
     public IEnumerable<(int SlotIndex, byte[] Bytes)> EnumerateRowsWithSlots()
     {
@@ -142,13 +156,32 @@ internal sealed class HeapPage
             if (this.IsSlotDeleted(i))
                 continue;
 
-            var rowStart = this.ReadSlotOffset(i);
-            var rowEnd = i + 1 < count
-                ? this.ReadSlotOffset(i + 1)
-                : this.FreeSpacePointer;
-
-            yield return (i, this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray());
+            yield return (i, this.SlotPayload(i));
         }
+    }
+
+    /// <summary>
+    /// Returns the byte extent for the slot at <paramref name="slotIndex"/>
+    /// (the bytes between this slot's offset and the next live-or-tombstoned
+    /// slot's offset, or <see cref="FreeSpacePointer"/> when this is the last
+    /// slot). The extent is fixed at the row's original encoded length —
+    /// in-place rewrites must fit inside it (<see cref="RewriteSlotInPlace"/>
+    /// validates).
+    /// </summary>
+    public int SlotExtent(int slotIndex)
+    {
+        var rowStart = this.ReadSlotOffset(slotIndex);
+        var rowEnd = slotIndex + 1 < this.SlotCount
+            ? this.ReadSlotOffset(slotIndex + 1)
+            : this.FreeSpacePointer;
+        return rowEnd - rowStart;
+    }
+
+    /// <summary>Fresh copy of the slot's payload bytes — see <see cref="SlotExtent"/> for the extent rule.</summary>
+    private byte[] SlotPayload(int slotIndex)
+    {
+        var rowStart = this.ReadSlotOffset(slotIndex);
+        return this.Bytes.AsSpan(rowStart, this.SlotExtent(slotIndex)).ToArray();
     }
 
     /// <summary>
@@ -198,16 +231,101 @@ internal sealed class HeapPage
     /// Returns true when the slot is past the slot directory's high-water
     /// mark or has been tombstoned. The version store's snapshot-aware
     /// readers consult this to decide whether to substitute a chain's
-    /// historical version for a slot the live heap iteration skipped.
+    /// historical version for a slot the live heap iteration skipped. A
+    /// <em>forwarded</em> slot is NOT tombstoned — the row is alive at the
+    /// forward target while its visible identity remains here.
     /// </summary>
     public bool IsSlotTombstoned(int slotIndex) =>
         slotIndex < 0 || slotIndex >= this.SlotCount || this.IsSlotDeleted(slotIndex);
+
+    /// <summary>True iff this slot is a forwarding pointer (see <see cref="SlotForwardBit"/>).</summary>
+    public bool IsSlotForwarded(int slotIndex) =>
+        slotIndex >= 0 && slotIndex < this.SlotCount && this.ReadSlotRaw(slotIndex).Forwarded;
+
+    /// <summary>
+    /// Decodes the 6-byte forward-target reference stored at a forwarded slot's
+    /// payload offset. Caller must have checked <see cref="IsSlotForwarded"/>.
+    /// </summary>
+    public (int PageIndex, int SlotIndex) ReadForwardTarget(int slotIndex)
+    {
+        var offset = this.ReadSlotOffset(slotIndex);
+        var page = BinaryPrimitives.ReadInt32LittleEndian(this.Bytes.AsSpan(offset, 4));
+        var slot = BinaryPrimitives.ReadInt16LittleEndian(this.Bytes.AsSpan(offset + 4, 2));
+        return (page, slot);
+    }
+
+    /// <summary>
+    /// Converts a live slot into a forwarded slot pointing at
+    /// <paramref name="target"/>. Caller guarantees the slot's existing
+    /// extent is at least 6 bytes (always true: the row encoder emits no
+    /// payload shorter than that). Sets <see cref="SlotForwardBit"/> and
+    /// overwrites the slot's first 6 payload bytes with the target reference;
+    /// any trailing bytes inside the extent are left as dead space.
+    /// </summary>
+    public void InstallForward(int slotIndex, (int PageIndex, int SlotIndex) target)
+    {
+        var (offset, _, _) = this.ReadSlotRaw(slotIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(this.Bytes.AsSpan(offset, 4), target.PageIndex);
+        BinaryPrimitives.WriteInt16LittleEndian(this.Bytes.AsSpan(offset + 4, 2), (short)target.SlotIndex);
+        var slotByteOffset = PageSize - (2 * (slotIndex + 1));
+        BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(offset | SlotForwardBit));
+    }
+
+    /// <summary>
+    /// Updates an already-forwarded slot's target. The 6-byte forward payload
+    /// is rewritten in place — used when a doubly-relocating UPDATE re-points
+    /// the original slot at a fresh target (single-level forwarding, matching
+    /// SQL Server's heap behavior).
+    /// </summary>
+    public void RewriteForward(int slotIndex, (int PageIndex, int SlotIndex) target)
+    {
+        var offset = this.ReadSlotOffset(slotIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(this.Bytes.AsSpan(offset, 4), target.PageIndex);
+        BinaryPrimitives.WriteInt16LittleEndian(this.Bytes.AsSpan(offset + 4, 2), (short)target.SlotIndex);
+    }
+
+    /// <summary>
+    /// Clears the forward bit, restoring a non-forwarded live slot. Used by
+    /// the undo log when rolling back a forwarding UPDATE — paired with a
+    /// payload restore via <see cref="RewriteSlotInPlace"/>.
+    /// </summary>
+    public void ClearForward(int slotIndex)
+    {
+        var slotByteOffset = PageSize - (2 * (slotIndex + 1));
+        var slotValue = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2));
+        BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(slotByteOffset, 2), (ushort)(slotValue & ~SlotForwardBit));
+    }
+
+    /// <summary>
+    /// Overwrites the slot's payload bytes in place. The new payload must fit
+    /// inside the slot's existing extent (validated); shorter rewrites
+    /// zero-pad the trailing bytes so the page's byte image stays
+    /// deterministic. Used by <see cref="Heap.UpdateAt"/> for the fits-in-place
+    /// fast path and by <see cref="UndoLog"/> to restore an updated slot's
+    /// pre-update bytes.
+    /// </summary>
+    public void RewriteSlotInPlace(int slotIndex, ReadOnlySpan<byte> newPayload)
+    {
+        var extent = this.SlotExtent(slotIndex);
+        if (newPayload.Length > extent)
+            throw new InvalidOperationException($"In-place rewrite payload of {newPayload.Length} bytes does not fit slot extent {extent}; caller should have forwarded instead.");
+        var offset = this.ReadSlotOffset(slotIndex);
+        newPayload.CopyTo(this.Bytes.AsSpan(offset, newPayload.Length));
+        if (newPayload.Length < extent)
+            this.Bytes.AsSpan(offset + newPayload.Length, extent - newPayload.Length).Clear();
+    }
 
     private bool IsSlotDeleted(int slotIndex) =>
         (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotTombstoneBit) != 0;
 
     private ushort ReadSlotOffset(int slotIndex) =>
-        (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & ~SlotTombstoneBit);
+        (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotOffsetMask);
+
+    private (ushort Offset, bool Tombstoned, bool Forwarded) ReadSlotRaw(int slotIndex)
+    {
+        var raw = BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2));
+        return ((ushort)(raw & SlotOffsetMask), (raw & SlotTombstoneBit) != 0, (raw & SlotForwardBit) != 0);
+    }
 
     internal string DebugDisplay() => $"HeapPage(type=0x{this.PageType:X2}, slots={this.SlotCount}, freePtr={this.FreeSpacePointer}, prev={this.PrevPageIndex}, next={this.NextPageIndex})";
 }

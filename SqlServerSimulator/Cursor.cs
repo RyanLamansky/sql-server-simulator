@@ -32,9 +32,11 @@ internal enum FetchDirection { Next, Prior, First, Last, Absolute, Relative }
 /// <summary>
 /// A session-scoped T-SQL cursor (declared with <c>DECLARE … CURSOR FOR
 /// &lt;select&gt;</c>). Lives in <see cref="SimulatedDbConnection.Cursors"/>.
-/// Position is tracked by the base table's unique-key tuple (not a physical
-/// RID, since the simulator's UPDATE relocates rows), so KEYSET re-reads and
-/// positioned <c>WHERE CURRENT OF</c> DML survive value updates.
+/// Position is tracked by the base row's stable <c>(page, slot)</c> address,
+/// which <see cref="Heap.UpdateAt"/> preserves through value updates by
+/// rewriting in place (or installing a forwarding pointer) — so KEYSET
+/// membership tracking and positioned <c>WHERE CURRENT OF</c> DML work
+/// without requiring the base table to have a unique key.
 /// </summary>
 internal sealed class Cursor(
     string name,
@@ -42,8 +44,7 @@ internal sealed class Cursor(
     CursorSensitivity sensitivity,
     bool scrollable,
     bool readOnly,
-    HeapTable? baseTable,
-    int[]? keyStorageOrdinals)
+    HeapTable? baseTable)
 {
     public readonly string Name = name;
     public readonly Selection Selection = selection;
@@ -53,9 +54,6 @@ internal sealed class Cursor(
 
     /// <summary>The single base table, non-null for KEYSET / DYNAMIC / positioned DML.</summary>
     public readonly HeapTable? BaseTable = baseTable;
-
-    /// <summary>Storage ordinals of the base table's unique key; non-null with <see cref="BaseTable"/>.</summary>
-    public readonly int[]? KeyStorageOrdinals = keyStorageOrdinals;
 
     public bool IsOpen;
 
@@ -69,17 +67,21 @@ internal sealed class Cursor(
         ? -1
         : this.Sensitivity == CursorSensitivity.Dynamic
             ? 1
-            : (this.staticRows?.Count ?? this.keysetKeys?.Count ?? 0) > 0 ? 1 : 0;
+            : (this.staticRows?.Count ?? this.keysetIdentities?.Count ?? 0) > 0 ? 1 : 0;
 
-    /// <summary>Unique-key tuple of the row the cursor is positioned on, or
-    /// null when not on a live row (before first FETCH, past the end, or on a
+    /// <summary>Stable <c>(page, slot)</c> address of the row the cursor is positioned
+    /// on, or null when not on a live row (before first FETCH, past the end, or on a
     /// keyset hole). Read by positioned <c>WHERE CURRENT OF</c> DML.</summary>
-    public SqlValue[]? CurrentKey;
+    public (int Page, int Slot)? CurrentRid;
 
     // STATIC: frozen projected values, walked by index.
     private List<SqlValue[]>? staticRows;
-    // KEYSET: ordered snapshot of unique-key tuples (membership frozen at OPEN).
-    private List<SqlValue[]>? keysetKeys;
+    // KEYSET: ordered snapshot of row identities (membership frozen at OPEN).
+    // UniqueKey carries the tuple when the base table has a PK/UNIQUE — KEYSET
+    // membership tracks by that, matching SQL Server's keyset-is-identified-by-
+    // the-unique-index behavior. UniqueKey null falls back to Rid (no-unique-
+    // key heap path; simulator extension).
+    private List<(SqlValue[]? UniqueKey, (int Page, int Slot) Rid)>? keysetIdentities;
     // Position for indexed (STATIC / KEYSET): -1 before-first, == count after-last.
     private int position;
 
@@ -103,9 +105,9 @@ internal sealed class Cursor(
                 batch.Connection.LastCursorRows = this.staticRows.Count;
                 break;
             case CursorSensitivity.Keyset:
-                this.keysetKeys = [.. this.Selection.EnumerateForCursor(batch).Select(r => r.UniqueKey)];
+                this.keysetIdentities = [.. this.Selection.EnumerateForCursor(batch).Select(r => (r.UniqueKey, r.Rid))];
                 this.position = -1;
-                batch.Connection.LastCursorRows = this.keysetKeys.Count;
+                batch.Connection.LastCursorRows = this.keysetIdentities.Count;
                 break;
             default: // Dynamic
                 this.dynamicLast = null;
@@ -115,7 +117,7 @@ internal sealed class Cursor(
                 break;
         }
 
-        this.CurrentKey = null;
+        this.CurrentRid = null;
         this.IsOpen = true;
     }
 
@@ -127,9 +129,9 @@ internal sealed class Cursor(
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 1);
         this.staticRows = null;
-        this.keysetKeys = null;
+        this.keysetIdentities = null;
         this.dynamicLast = null;
-        this.CurrentKey = null;
+        this.CurrentRid = null;
         this.IsOpen = false;
     }
 
@@ -171,33 +173,38 @@ internal sealed class Cursor(
         var count = this.staticRows!.Count;
         if (!this.TryMoveIndex(direction, offset, count))
         {
-            this.CurrentKey = null;
+            this.CurrentRid = null;
             return (-1, null);
         }
-        // STATIC is read-only; CurrentKey stays null (WHERE CURRENT OF rejected upstream).
+        // STATIC is read-only; CurrentRid stays null (WHERE CURRENT OF rejected upstream).
         return (0, this.staticRows[this.position]);
     }
 
     private (int, SqlValue[]?) FetchKeyset(BatchContext batch, FetchDirection direction, long offset)
     {
-        var count = this.keysetKeys!.Count;
+        var count = this.keysetIdentities!.Count;
         if (!this.TryMoveIndex(direction, offset, count))
         {
-            this.CurrentKey = null;
+            this.CurrentRid = null;
             return (-1, null);
         }
 
-        var key = this.keysetKeys[this.position];
+        var (key, rid) = this.keysetIdentities[this.position];
         foreach (var row in this.Selection.EnumerateForCursor(batch))
         {
-            if (Selection.CompareKeyTuples(row.UniqueKey, key) == 0)
+            var match = key is not null
+                ? row.UniqueKey is not null && Selection.CompareKeyTuples(row.UniqueKey, key) == 0
+                : row.Rid.Equals(rid);
+            if (match)
             {
-                this.CurrentKey = key;
+                this.CurrentRid = row.Rid;
                 return (0, row.Values);
             }
         }
-        // Member deleted out from under the keyset: status -2, no current row.
-        this.CurrentKey = null;
+        // Member deleted out from under the keyset (or its unique-key columns
+        // changed, making the row no longer findable by the snapshotted key):
+        // status -2, no current row.
+        this.CurrentRid = null;
         return (-2, null);
     }
 
@@ -245,14 +252,14 @@ internal sealed class Cursor(
 
         if (target is null)
         {
-            this.CurrentKey = null;
+            this.CurrentRid = null;
             return (-1, null);
         }
 
         this.dynamicLast = target;
         this.dynamicBeforeFirst = false;
         this.dynamicAfterLast = false;
-        this.CurrentKey = target.UniqueKey;
+        this.CurrentRid = target.Rid;
         return (0, target.Values);
     }
 

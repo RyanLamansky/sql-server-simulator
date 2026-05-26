@@ -209,8 +209,8 @@ partial class Simulation
         foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
         {
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
-            // cursor is sitting on, identified by its unique key.
-            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, rowBytes))
+            // cursor is sitting on, identified by its stable heap address.
+            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, (pageIndex, slotIndex)))
                 continue;
 
             var fullValues = DecodeFullRow(table, rowBytes);
@@ -497,9 +497,9 @@ partial class Simulation
         if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
             WriteHistoryRowsForUpdate(table, historyTable, pc, affected, context, undoLog);
         var lockableTable = IsLockableTable(table);
-        // Capture pre-delete payloads in parallel with the affected list so
-        // the version-store CaptureWrite call after re-Insert can pair
-        // each new Rid with its pre-update bytes.
+        // Capture pre-update payloads so the version-store CaptureWrite call
+        // after UpdateAt can pair each row's stable Rid with its pre-update
+        // bytes.
         var oldBytesPerAffected = Storage.VersionStore.IsVersioningEnabled(context.CurrentDatabase) && lockableTable
             ? new byte[affected.Count][]
             : null;
@@ -511,22 +511,14 @@ partial class Simulation
                 oldBytesPerAffected[i] = table.Heap.ReadSlotBytes(pageIndex, slotIndex) ?? [];
             }
         }
-        foreach (var (pageIndex, slotIndex, _, _) in affected)
-        {
-            if (lockableTable)
-                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
-            table.Heap.DeleteAt(pageIndex, slotIndex, undoLog);
-        }
         for (var i = 0; i < affected.Count; i++)
         {
-            var (oldPage, oldSlot, fullNew, _) = affected[i];
-            var (newPageIndex, newSlotIndex) = table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
+            var (pageIndex, slotIndex, fullNew, _) = affected[i];
             if (lockableTable)
-            {
-                context.Batch.AcquireRowLockTxScoped(table, newPageIndex, newSlotIndex, LockMode.Exclusive);
-                if (oldBytesPerAffected is not null)
-                    Storage.VersionStore.CaptureWrite(context.Batch, table, (newPageIndex, newSlotIndex), (oldPage, oldSlot), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
-            }
+                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+            table.Heap.UpdateAt(pageIndex, slotIndex, RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog);
+            if (lockableTable && oldBytesPerAffected is not null)
+                Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }
 
         // Incoming-FK cascade: if any of the updated rows participate in a

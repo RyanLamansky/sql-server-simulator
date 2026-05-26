@@ -15,6 +15,23 @@ internal enum UndoKind
 }
 
 /// <summary>
+/// Per-slot UPDATE flavor recorded by <see cref="UndoLog"/>. Each variant's
+/// undo is the inverse of <see cref="Heap.UpdateAt"/>'s mutating action: an
+/// <see cref="InPlaceRewrite"/> overwrites the slot back to its pre-UPDATE
+/// payload; a <see cref="ForwardInstall"/> additionally clears the forward
+/// bit; a <see cref="ForwardRetarget"/> restores the pre-UPDATE forward
+/// target. The paired insert at the new target (and the paired tombstone of
+/// the old target, in the retarget case) ride their own
+/// <see cref="UndoKind.Insert"/> / <see cref="UndoKind.Delete"/> entries.
+/// </summary>
+internal enum SlotRewriteKind
+{
+    InPlaceRewrite,
+    ForwardInstall,
+    ForwardRetarget,
+}
+
+/// <summary>
 /// Per-statement (Bundle 1) / per-connection-transaction (Bundle 2) record
 /// of heap mutations and temp-table DDL, walked in reverse on rollback.
 /// Insert entries are undone by tombstoning the slot they created; delete
@@ -46,14 +63,23 @@ internal sealed class UndoLog
     public void RecordDelete(Heap heap, int pageIndex, int slotIndex) =>
         this.entries.Add(new SlotChange(heap, UndoKind.Delete, pageIndex, slotIndex));
 
+    public void RecordInPlaceRewrite(Heap heap, int pageIndex, int slotIndex, byte[] oldPayload) =>
+        this.entries.Add(new SlotRewrite(heap, SlotRewriteKind.InPlaceRewrite, pageIndex, slotIndex, oldPayload, default, default));
+
+    public void RecordForwardInstall(Heap heap, int pageIndex, int slotIndex, byte[] oldPayload, (int Page, int Slot) installedTarget) =>
+        this.entries.Add(new SlotRewrite(heap, SlotRewriteKind.ForwardInstall, pageIndex, slotIndex, oldPayload, default, installedTarget));
+
+    public void RecordForwardRetarget(Heap heap, int pageIndex, int slotIndex, (int Page, int Slot) oldTarget, (int Page, int Slot) newTarget) =>
+        this.entries.Add(new SlotRewrite(heap, SlotRewriteKind.ForwardRetarget, pageIndex, slotIndex, [], oldTarget, newTarget));
+
     public void RecordTempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) =>
         this.entries.Add(new TempTableCreation(owner, name));
 
     public void RecordTempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) =>
         this.entries.Add(new TempTableRemoval(owner, name, table));
 
-    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
-        this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, identitySnapshots));
+    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
+        this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, identitySnapshots));
 
     /// <summary>
     /// Current end-of-log position, captured by callers as a marker before a
@@ -119,6 +145,44 @@ internal sealed class UndoLog
         }
     }
 
+    /// <summary>
+    /// Undo entry for an UPDATE flavor recorded by <see cref="Heap.UpdateAt"/>.
+    /// See <see cref="SlotRewriteKind"/> for the per-variant inverse.
+    /// <c>SecondaryTarget</c> carries the installed target on ForwardInstall and
+    /// the new target on ForwardRetarget; <c>OldTarget</c> carries the
+    /// pre-UPDATE forward target on ForwardRetarget.
+    /// </summary>
+    private sealed class SlotRewrite(Heap heap, SlotRewriteKind kind, int pageIndex, int slotIndex, byte[] oldPayload, (int Page, int Slot) oldTarget, (int Page, int Slot) secondaryTarget) : UndoEntry
+    {
+        public readonly Heap Heap = heap;
+        public readonly SlotRewriteKind Kind = kind;
+        public readonly int PageIndex = pageIndex;
+        public readonly int SlotIndex = slotIndex;
+        public readonly byte[] OldPayload = oldPayload;
+        public readonly (int Page, int Slot) OldTarget = oldTarget;
+        public readonly (int Page, int Slot) SecondaryTarget = secondaryTarget;
+
+        public override void Undo()
+        {
+            var page = this.Heap.Pages[this.PageIndex];
+            switch (this.Kind)
+            {
+                case SlotRewriteKind.InPlaceRewrite:
+                    page.RewriteSlotInPlace(this.SlotIndex, this.OldPayload);
+                    break;
+                case SlotRewriteKind.ForwardInstall:
+                    page.ClearForward(this.SlotIndex);
+                    page.RewriteSlotInPlace(this.SlotIndex, this.OldPayload);
+                    this.Heap.UnregisterForwardTargetForUndo(this.SecondaryTarget);
+                    break;
+                case SlotRewriteKind.ForwardRetarget:
+                    page.RewriteForward(this.SlotIndex, this.OldTarget);
+                    this.Heap.SwapForwardTargetForUndo(this.OldTarget, this.SecondaryTarget);
+                    break;
+            }
+        }
+    }
+
     private sealed class TempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) : UndoEntry
     {
         public readonly ConcurrentDictionary<string, HeapTable> Owner = owner;
@@ -147,7 +211,7 @@ internal sealed class UndoLog
     /// the simulator's general "identity bypasses the log" rule, which
     /// applies to INSERT only).
     /// </summary>
-    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) : UndoEntry
+    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, (IdentityState State, long? HighWaterMark)[] identitySnapshots) : UndoEntry
     {
         public override void Undo()
         {
@@ -155,6 +219,8 @@ internal sealed class UndoLog
             heap.Pages.AddRange(oldPages);
             heap.LobPages.Clear();
             heap.LobPages.AddRange(oldLobPages);
+            heap.ForwardTargets.Clear();
+            heap.ForwardTargets.UnionWith(oldForwardTargets);
             for (var i = 0; i < identitySnapshots.Length; i++)
                 identitySnapshots[i].State.Restore(identitySnapshots[i].HighWaterMark);
         }

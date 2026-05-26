@@ -556,6 +556,69 @@ public sealed class CursorTests
             """));
     }
 
+    private const string NoKeySeed =
+        "create table h (id int not null, name varchar(20) not null); " +
+        "insert h values (1,'a'),(2,'b'),(3,'c');";
+
+    [TestMethod]
+    public void KeysetCursor_NoUniqueKeyHeap_SeesUpdatedValues()
+        => AreEqual("a;NEW;c;", new Simulation().ExecuteScalar(NoKeySeed + """
+            declare @id int, @name varchar(20), @log varchar(200) = '';
+            declare c cursor keyset for select id, name from h order by id;
+            open c; fetch next from c into @id, @name;
+            update h set name = 'NEW' where id = 2;        -- non-key UPDATE on no-key heap
+            while @@fetch_status = 0
+            begin
+              set @log = @log + @name + ';';
+              fetch next from c into @id, @name;
+            end
+            close c; deallocate c;
+            select @log
+            """));
+
+    [TestMethod]
+    public void WhereCurrentOf_NoUniqueKeyHeap_UpdatesPositionedRow()
+        => AreEqual("POS", new Simulation().ExecuteScalar(NoKeySeed + """
+            declare @id int;
+            declare c cursor for select id from h order by id;
+            open c;
+            fetch next from c into @id;        -- id 1
+            fetch next from c into @id;        -- id 2 (positioned)
+            update h set name = 'POS' where current of c;
+            close c; deallocate c;
+            select name from h where id = 2
+            """));
+
+    [TestMethod]
+    public void WhereCurrentOf_NoUniqueKeyHeap_DeletesPositionedRow()
+        => AreEqual(2, ExecuteScalar<int>(NoKeySeed + """
+            declare @id int;
+            declare c cursor for select id from h order by id;
+            open c;
+            fetch next from c into @id;
+            fetch next from c into @id;
+            delete h where current of c;
+            close c; deallocate c;
+            select count(*) from h
+            """));
+
+    /// <summary>
+    /// Force the UPDATE to forward (new name longer than old) — the cursor
+    /// must still find the row by its stable address on re-fetch.
+    /// </summary>
+    [TestMethod]
+    public void ForwardedUpdate_PreservesRowAddressForCursorRefetch()
+        => AreEqual("AAA", new Simulation().ExecuteScalar(NoKeySeed + """
+            declare @id int, @name varchar(20);
+            declare c cursor keyset for select id, name from h order by id;
+            open c;
+            fetch next from c into @id, @name;        -- id 1
+            update h set name = replicate('A', 20) where id = 1;   -- grows the row → forward
+            update h set name = 'AAA' where id = 1;               -- second update on the same (now-forwarded) row
+            fetch first from c into @id, @name;
+            select @name
+            """));
+
     [TestMethod]
     public void FetchWithoutInto_YieldsSingleRowResultSet()
     {
