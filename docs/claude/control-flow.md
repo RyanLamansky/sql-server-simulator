@@ -56,6 +56,12 @@ Each statement parser still runs its full parse — the cursor advances normally
 
 **Fidelity gap — un-taken-branch name resolution**: real SQL Server defers name resolution for un-taken branches — `IF 1=0 SELECT bad_col FROM bad_table` runs silently. The simulator's parsers do name resolution inline with parsing, so un-taken branches with non-existent table/column refs still raise Msg 208 / Msg 207. Common idioms (safe-CREATE / safe-DROP / safe-INSERT against pre-existing tables) work end-to-end because referenced names exist when the branch is skipped.
 
+**Fidelity gap — `IF` cond divide-by-zero**: real SQL Server surfaces `IF 1/0 = 0 …` as Msg 8134; the simulator surfaces the raw `DivideByZeroException` from .NET decimal arithmetic (same gap as `TRY_CAST(1/0 AS INT)`).
+
+**Fidelity gap — `IF (value-expr) …` positional**: `IF (1) select` raises Msg 4145 near `')'`; real SQL Server reports the post-paren token (`'select'`). Wording is correct (Msg 4145, non-boolean type); only the "near 'X'" suffix differs. Applies to any paren-wrapped non-boolean `IF` cond.
+
+**Fidelity gap — CREATE/ALTER inside a control-flow body raises Msg 111, not Msg 156**: the must-be-first-statement check for `CREATE/ALTER PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA` is enforced at parse time. Inside `IF` / `WHILE` / `BEGIN…END`, `BatchContext.BlockDepth > 0` triggers Msg 111; real SQL Server's parser surfaces Msg 156 ("Incorrect syntax near 'procedure'") at the same position. Same end state (statement rejected), different code. Inner CommandText-equivalent contexts (procedure / function / trigger / dynamic-SQL bodies) get a fresh `BatchContext` and the flag resets, so a CREATE PROCEDURE as the first statement of a proc body succeeds (real SQL Server raises Msg 156 here — related minor divergence; no real application emits nested CREATE PROCEDUREs).
+
 ## TRY/CATCH + ERROR_*() + live @@ERROR + THROW
 `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` blocks parse via `Simulation.TryCatch.cs:ParseTryCatch`. TRY and CATCH aren't reserved keywords (contextual identifiers), so the BEGIN dispatch site peeks the next token: `Tran`/`Transaction` routes to `TryParseBeginTransaction`, `TRY` (unquoted) routes here, `ATOMIC` raises `NotSupportedException`, anything else falls through to `ParseBeginBlock`. Probed against SQL Server 2025 (2026-05-12).
 

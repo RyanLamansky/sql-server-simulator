@@ -146,7 +146,7 @@ Real bugs / limitations against shipped functions — fixes are tickable work, n
 
 ## Documented design choices (review rationale)
 
-Function-level decisions documented in CLAUDE.md's Quirks section. These shipped intentionally — the simulator works correctly under the documented contract — but the original rationale may have aged out. Worth a look before either checking off or re-affirming.
+Function-level decisions documented in `scalars.md`'s divergence notes (the aggregate/string scalars below) and CLAUDE.md's cross-cutting Quirks (`float` text formatting). These shipped intentionally — the simulator works correctly under the documented contract — but the original rationale may have aged out. Worth a look before either checking off or re-affirming.
 
 - [ ] **APPROX_COUNT_DISTINCT** implemented as exact `COUNT(DISTINCT)`. Original rationale: same semantic guarantee, no HyperLogLog dependency. Review: is the perf gap visible against the simulator's in-process workloads? If not, the simpler implementation stays defensible.
 - [ ] **CHECKSUM_AGG** uses an order-independent XOR fold. Original rationale: same-multiset-same-checksum guarantee preserved, bit-identical match wasn't required. Review: have any consumers needed bit-identical checksums (e.g., for replication-comparison parity)?

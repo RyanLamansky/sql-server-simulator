@@ -123,7 +123,9 @@ Five integer scalars sharing one dispatch file (`Parser/Expressions/BitManipulat
 ## CHECKSUM family
 
 - **`CHECKSUM(args...)` / `BINARY_CHECKSUM(args...)`** (`Parser/Expressions/ChecksumAndRowVersion.cs`) — fast 32-bit fold over the argument list. Implementation uses FNV-1a; semantic guarantee matches SQL Server (same inputs → same checksum, deterministically). **Bit-pattern divergence**: real SQL Server uses an undocumented byte-mix; the simulator's FNV-1a output won't match real SQL Server bit-for-bit. Same-value-same-checksum invariant holds; same-multiset-same-checksum doesn't (CHECKSUM is order-sensitive, unlike CHECKSUM_AGG). Result `int`.
-- **`CHECKSUM_AGG(expr)`** uses an order-independent XOR fold for the aggregate form — same multiset → same checksum, bit pattern won't match real SQL Server. Documented in CLAUDE.md's Quirks.
+- **`CHECKSUM_AGG(expr)`** uses an order-independent XOR fold for the aggregate form — same multiset → same checksum, bit pattern won't match real SQL Server.
+- **`APPROX_COUNT_DISTINCT(expr)`** is implemented as an exact `COUNT(DISTINCT expr)` — no HyperLogLog approximation, so results are exact rather than within real SQL Server's ~2% error bound.
+- **`DATALENGTH(expr)`** returns `int` even for `varchar(MAX)` / `nvarchar(MAX)` and the legacy LOB family, where real SQL Server returns `bigint`. The value still fits in int for anything the simulator can produce; only the declared result type doesn't widen.
 
 ## Session / connection placeholders
 
@@ -150,7 +152,7 @@ Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catal
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution. Yields one row per substring split on the single-character separator.
 
-- Schema is decided at parse time: 2-arg form projects `(value <input-string-type>)`; 3-arg form with literal `enable_ordinal = 1` adds `ordinal bigint`. `enable_ordinal = 0` or NULL collapses back to the 2-arg schema. The third argument must be a parse-time-constant integer expression — column / parameter references raise `NotSupportedException`; real SQL Server's grammar enforces the same constraint (the schema is shape-fixed at compile time).
+- Schema is decided at parse time: 2-arg form projects `(value <input-string-type>)`; 3-arg form with literal `enable_ordinal = 1` adds `ordinal bigint`. `enable_ordinal = 0` or NULL collapses back to the 2-arg schema. The third argument must be a parse-time-constant integer expression — column / parameter references raise `NotSupportedException`; real SQL Server's grammar enforces the same constraint (the schema is shape-fixed at compile time). **Const-only gate edge**: a bare `@v` is rejected (Msg 8748, matching real), but a `CAST` / `Parenthesized` wrapper around the variable (`cast(@v as int)`) slips past the gate where real SQL Server rejects all variable-bearing shapes regardless of wrapping. No real-world emission hits this.
 - NULL `input` → zero rows; empty `input` → one row with empty value (and ordinal 1 in the ordinal-enabled form).
 - NULL / empty / multi-character `separator` → Msg 214 at runtime (probe-confirmed: validated before the input — NULL sep raises 214 even when input is also NULL).
 - Non-int third argument → Msg 8116; `enable_ordinal` literal outside {0, 1, NULL} → Msg 4199.
