@@ -31,11 +31,17 @@ internal abstract partial class Collation
     /// <c>æ Æ œ Œ ß þ Þ</c> expand to their base letters (<c>'æ'</c> = <c>'ae'</c>,
     /// <c>'ß'</c> = <c>'ss'</c>, <c>'þ'</c> = <c>'th'</c>).</item>
     /// </list>
-    /// Strings containing any non-CP1252 character fall back to the inner
-    /// <see cref="CultureCollation"/>'s <see cref="CompareInfo"/> path — close
-    /// for arbitrary Unicode, exact for the CP1252 universe this collation is
-    /// built for. Metadata (name, description, storage encoding) delegates to
-    /// that same parser-built inner. See <c>docs/claude/collations.md</c>.
+    /// The nvarchar table is extended to the Thai block (U+0E00–U+0E7F) on the
+    /// same unified scale, so Thai data (and Latin/Thai mixes) sort byte-exactly
+    /// too — Thai letters above Latin, Thai leading vowels just above 'z', Thai
+    /// digits between '0' and 'a'. Thai tone-mark combining characters carry the
+    /// lowest primary weight rather than SQL Server's secondary-diacritic
+    /// treatment (a documented edge that doesn't affect tone-free data). Strings
+    /// with any character outside the active repertoire (CP1252, plus Thai for
+    /// nvarchar) fall back to the inner <see cref="CultureCollation"/>'s
+    /// <see cref="CompareInfo"/> path — close for arbitrary Unicode. Metadata
+    /// (name, description, storage encoding) delegates to that same parser-built
+    /// inner. See <c>docs/claude/collations.md</c>.
     /// </summary>
     internal sealed class SqlLatin1Cp1CiAsCollation : Collation
     {
@@ -92,44 +98,84 @@ internal abstract partial class Collation
             198, 172, 174, 175, 176, 177, 178, 131, 179, 187, 188, 189, 190, 195, 199, 196,
         ];
 
-        private static ReadOnlySpan<byte> NvarcharPrimaryByteRank =>
+        // Unified scale: a single DENSE_RANK over the CP1252 repertoire *and*
+        // the Thai block (U+0E00–U+0E7F) under CI_AI (primary) / CI_AS
+        // (secondary), so Thai characters interleave with Latin exactly as real
+        // SQL Server's SQL_Latin1 nvarchar sort places them (Thai letters rank
+        // above all Latin letters; Thai digits between ASCII '0' and 'a'; Thai
+        // leading vowels เ แ โ ใ ไ just above Latin 'z' — probe-confirmed). The
+        // CP1252-only relative order is identical to the prior byte-indexed
+        // tables (DENSE_RANK is monotonic), so the collation stays byte-exact
+        // for CP1252; <c>ushort</c> because the union pushes the max rank past
+        // 255. Thai weights live in the parallel <see cref="ThaiPrimaryRank"/> /
+        // <see cref="ThaiSecondaryRank"/> arrays keyed by <c>cp - 0x0E00</c>.
+        private static ReadOnlySpan<ushort> NvarcharPrimaryByteRank =>
         [
             0, 2, 3, 4, 5, 6, 7, 8, 9, 40, 41, 42, 43, 44, 10, 11,
             12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
             1, 45, 46, 47, 48, 49, 50, 34, 51, 52, 53, 87, 54, 35, 55, 56,
-            114, 118, 119, 120, 121, 122, 123, 124, 125, 126, 57, 58, 88, 89, 90, 59,
-            60, 127, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,
-            144, 145, 146, 147, 149, 152, 153, 154, 155, 156, 157, 61, 62, 63, 64, 65,
-            66, 127, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,
-            144, 145, 146, 147, 149, 152, 153, 154, 155, 156, 157, 67, 68, 69, 70, 28,
-            113, 29, 81, 133, 84, 111, 108, 109, 64, 112, 147, 85, 143, 30, 157, 31,
-            32, 79, 80, 82, 83, 110, 37, 38, 78, 151, 147, 86, 143, 33, 157, 156,
-            39, 71, 96, 97, 98, 99, 72, 100, 73, 101, 127, 92, 102, 36, 103, 74,
-            104, 91, 119, 120, 75, 105, 106, 107, 76, 118, 142, 93, 115, 116, 117, 77,
-            127, 127, 127, 127, 127, 127, 128, 130, 132, 132, 132, 132, 136, 136, 136, 136,
-            131, 141, 142, 142, 142, 142, 142, 94, 142, 152, 152, 152, 152, 156, 150, 148,
-            127, 127, 127, 127, 127, 127, 128, 130, 132, 132, 132, 132, 136, 136, 136, 136,
-            131, 141, 142, 142, 142, 142, 142, 95, 142, 152, 152, 152, 152, 156, 150, 156,
+            115, 120, 122, 124, 126, 128, 130, 132, 134, 136, 57, 58, 88, 89, 90, 59,
+            60, 138, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153,
+            155, 156, 157, 158, 160, 163, 164, 165, 166, 167, 168, 61, 62, 63, 64, 65,
+            66, 138, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153,
+            155, 156, 157, 158, 160, 163, 164, 165, 166, 167, 168, 67, 68, 69, 70, 28,
+            114, 29, 81, 144, 84, 111, 108, 109, 64, 112, 158, 85, 154, 30, 168, 31,
+            32, 79, 80, 82, 83, 110, 37, 38, 78, 162, 158, 86, 154, 33, 168, 167,
+            39, 71, 96, 97, 98, 99, 72, 100, 73, 101, 138, 92, 102, 36, 103, 74,
+            104, 91, 122, 124, 75, 105, 106, 107, 76, 120, 153, 93, 117, 118, 119, 77,
+            138, 138, 138, 138, 138, 138, 139, 141, 143, 143, 143, 143, 147, 147, 147, 147,
+            142, 152, 153, 153, 153, 153, 153, 94, 153, 163, 163, 163, 163, 167, 161, 159,
+            138, 138, 138, 138, 138, 138, 139, 141, 143, 143, 143, 143, 147, 147, 147, 147,
+            142, 152, 153, 153, 153, 153, 153, 95, 153, 163, 163, 163, 163, 167, 161, 167,
         ];
 
-        private static ReadOnlySpan<byte> NvarcharSecondaryByteRank =>
+        private static ReadOnlySpan<ushort> NvarcharSecondaryByteRank =>
         [
-            0, 2, 3, 4, 5, 6, 7, 8, 9, 40, 41, 42, 43, 44, 10, 11,
+            0, 2, 3, 4, 5, 6, 7, 8, 9, 47, 48, 49, 50, 51, 10, 11,
             12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-            1, 45, 46, 47, 48, 49, 50, 34, 51, 52, 53, 88, 54, 35, 55, 56,
-            115, 119, 120, 121, 122, 123, 124, 125, 126, 127, 57, 58, 89, 90, 91, 59,
-            60, 128, 137, 138, 140, 142, 147, 149, 150, 151, 156, 157, 158, 159, 160, 162,
-            171, 172, 173, 174, 177, 180, 185, 186, 187, 188, 191, 61, 62, 63, 64, 66,
-            67, 128, 137, 138, 140, 142, 147, 149, 150, 151, 156, 157, 158, 159, 160, 162,
-            171, 172, 173, 174, 177, 180, 185, 186, 187, 188, 191, 68, 69, 70, 71, 28,
-            114, 29, 82, 148, 85, 112, 109, 110, 65, 113, 175, 86, 170, 30, 192, 31,
-            32, 80, 81, 83, 84, 111, 37, 38, 79, 179, 175, 87, 170, 33, 192, 190,
-            39, 72, 97, 98, 99, 100, 73, 101, 74, 102, 129, 93, 103, 36, 104, 75,
-            105, 92, 120, 121, 76, 106, 107, 108, 77, 119, 163, 94, 116, 117, 118, 78,
-            131, 130, 132, 134, 133, 135, 136, 139, 144, 143, 145, 146, 153, 152, 154, 155,
-            141, 161, 165, 164, 166, 168, 167, 95, 169, 182, 181, 183, 184, 189, 178, 176,
-            131, 130, 132, 134, 133, 135, 136, 139, 144, 143, 145, 146, 153, 152, 154, 155,
-            141, 161, 165, 164, 166, 168, 167, 96, 169, 182, 181, 183, 184, 189, 178, 190,
+            1, 52, 53, 54, 55, 56, 57, 34, 58, 59, 60, 95, 61, 35, 62, 63,
+            123, 128, 130, 132, 134, 136, 138, 140, 142, 144, 64, 65, 96, 97, 98, 66,
+            67, 146, 155, 156, 158, 160, 165, 167, 168, 169, 174, 175, 176, 177, 178, 180,
+            189, 190, 191, 192, 195, 198, 203, 204, 205, 206, 209, 68, 69, 70, 71, 73,
+            74, 146, 155, 156, 158, 160, 165, 167, 168, 169, 174, 175, 176, 177, 178, 180,
+            189, 190, 191, 192, 195, 198, 203, 204, 205, 206, 209, 75, 76, 77, 78, 28,
+            122, 29, 89, 166, 92, 119, 116, 117, 72, 120, 193, 93, 188, 30, 210, 31,
+            32, 87, 88, 90, 91, 118, 37, 38, 86, 197, 193, 94, 188, 33, 210, 208,
+            46, 79, 104, 105, 106, 107, 80, 108, 81, 109, 147, 100, 110, 36, 111, 82,
+            112, 99, 130, 132, 83, 113, 114, 115, 84, 128, 181, 101, 125, 126, 127, 85,
+            149, 148, 150, 152, 151, 153, 154, 157, 162, 161, 163, 164, 171, 170, 172, 173,
+            159, 179, 183, 182, 184, 186, 185, 102, 187, 200, 199, 201, 202, 207, 196, 194,
+            149, 148, 150, 152, 151, 153, 154, 157, 162, 161, 163, 164, 171, 170, 172, 173,
+            159, 179, 183, 182, 184, 186, 185, 103, 187, 200, 199, 201, 202, 207, 196, 208,
+        ];
+
+        // Thai block weights on the same unified scale, indexed by
+        // <c>cp - 0x0E00</c> (U+0E00–U+0E7F). Reserved/unassigned slots and the
+        // tone-mark combining characters carry primary rank 1 (lowest, like
+        // SPACE); the secondary distinguishes the marks. Consumed only by the
+        // nvarchar weight map.
+        private static ReadOnlySpan<ushort> ThaiPrimaryRank =>
+        [
+            1, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188,
+            189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204,
+            205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220,
+            221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 1, 1, 1, 1, 113,
+            169, 170, 171, 172, 173, 232, 233, 1, 1, 1, 1, 1, 1, 1, 234, 235,
+            116, 121, 123, 125, 127, 129, 131, 133, 135, 137, 236, 237, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            169, 170, 171, 172, 173, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        ];
+
+        private static ReadOnlySpan<ushort> ThaiSecondaryRank =>
+        [
+            1, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230,
+            231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246,
+            247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262,
+            263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 1, 1, 1, 1, 121,
+            211, 212, 213, 214, 215, 274, 275, 40, 41, 42, 43, 44, 39, 45, 276, 277,
+            124, 129, 131, 133, 135, 137, 139, 141, 143, 145, 278, 279, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            211, 212, 213, 214, 215, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         ];
 
         // CP1252 bytes the nvarchar sort gives minimal (primary-zero) weight:
@@ -146,7 +192,7 @@ internal abstract partial class Collation
         private static readonly FrozenDictionary<char, (int Primary, int Secondary)> varcharWeights =
             BuildWeights(VarcharPrimaryByteRank, VarcharSecondaryByteRank);
         private static readonly FrozenDictionary<char, (int Primary, int Secondary)> nvarcharWeights =
-            BuildWeights(NvarcharPrimaryByteRank, NvarcharSecondaryByteRank);
+            BuildNvarcharWeights();
         private static readonly FrozenSet<char> nvarcharIgnorable = BuildIgnorableChars();
 
         // Ligatures the sort expands to their base letters at the primary level
@@ -206,6 +252,29 @@ internal abstract partial class Collation
             return map.ToFrozenDictionary();
         }
 
+        // nvarchar weights span the CP1252 repertoire (decoded per byte from the
+        // unified ushort tables) plus the Thai block (keyed by cp - 0x0E00). Both
+        // sets share the one unified rank scale, so a Latin/Thai mix compares
+        // correctly.
+        private static FrozenDictionary<char, (int, int)> BuildNvarcharWeights()
+        {
+            var encoding = CharSqlType.Cp1252Encoder;
+            var map = new Dictionary<char, (int, int)>(NvarcharPrimaryByteRank.Length + ThaiPrimaryRank.Length);
+            Span<byte> buffer = stackalloc byte[1];
+            for (var b = 1; b < NvarcharPrimaryByteRank.Length; b++)
+            {
+                buffer[0] = (byte)b;
+                var decoded = encoding.GetString(buffer);
+                if (decoded.Length == 1)
+                    map[decoded[0]] = (NvarcharPrimaryByteRank[b], NvarcharSecondaryByteRank[b]);
+            }
+
+            for (var i = 0; i < ThaiPrimaryRank.Length; i++)
+                map[(char)(0x0E00 + i)] = (ThaiPrimaryRank[i], ThaiSecondaryRank[i]);
+
+            return map.ToFrozenDictionary();
+        }
+
         private static FrozenSet<char> BuildIgnorableChars()
         {
             var encoding = CharSqlType.Cp1252Encoder;
@@ -237,7 +306,7 @@ internal abstract partial class Collation
         public override int Compare(string? x, string? y) =>
             x is null ? (y is null ? 0 : -1)
             : y is null ? 1
-            : !AllCp1252(x) || !AllCp1252(y) ? this.inner.Compare(x, y)
+            : !this.InRepertoire(x) || !this.InRepertoire(y) ? this.inner.Compare(x, y)
             : CompareInRepertoire(x, y);
 
         public override bool Equals(string? x, string? y) =>
@@ -245,7 +314,7 @@ internal abstract partial class Collation
 
         public override int GetHashCode(string obj)
         {
-            if (!AllCp1252(obj))
+            if (!this.InRepertoire(obj))
                 return this.inner.GetHashCode(obj);
 
             // Hash the primary weight run, a separator, then the secondary run —
@@ -431,11 +500,15 @@ internal abstract partial class Collation
             return key;
         }
 
-        private static bool AllCp1252(string s)
+        // Repertoire is storage-dependent: the varchar body knows only CP1252;
+        // the nvarchar body also knows the Thai block. A string outside the
+        // active body's repertoire falls back to the inner CultureCollation.
+        private bool InRepertoire(string s)
         {
+            var weights = this.varcharStorage ? varcharWeights : nvarcharWeights;
             foreach (var ch in s)
             {
-                if (!varcharWeights.ContainsKey(ch))
+                if (!weights.ContainsKey(ch))
                     return false;
             }
 

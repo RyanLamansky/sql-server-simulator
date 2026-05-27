@@ -83,6 +83,34 @@ public sealed class CollationBehaviorTests
     }
 
     /// <summary>
+    /// Thai (out-of-CP1252) data sorts through the unified SqlLatin1 weight
+    /// table baked from SQL Server's NLS Unicode weights, not .NET's code-point
+    /// order: every Thai letter ranks above all Latin, and the leading vowel
+    /// เ (U+0E40) sorts low — so เบญจศร &lt; คณาพล &lt; บางสุขศรี. This is the
+    /// exact AdventureWorks <c>vJobCandidate.[Name.Last]</c> ordering;
+    /// probe-confirmed against SQL Server 2025 (.NET's invariant and th-TH
+    /// CompareInfo both order these the opposite way).
+    /// </summary>
+    [TestMethod]
+    public void DefaultCollation_OrderBy_ThaiUsesSqlServerNlsWeights()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table t (v nvarchar(20)); insert t values (N'บางสุขศรี'), (N'Yee'), (N'เบญจศร'), (N'คณาพล')");
+        using var reader = sim.CreateCommand("select v from t order by v").ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "Yee", "เบญจศร", "คณาพล", "บางสุขศรี" }, rows);
+    }
+
+    /// <summary>MAX over a Latin/Thai mix returns the Thai extreme — Thai letters outrank Latin.</summary>
+    [TestMethod]
+    public void DefaultCollation_Max_ThaiOutranksLatin()
+        => AreEqual("บางสุขศรี", new Simulation().ExecuteScalar(
+            "create table t (v nvarchar(20)); insert t values (N'Yee'), (N'เบญจศร'), (N'บางสุขศรี'); select max(v) from t"));
+
+    /// <summary>
     /// Probe-confirmed against SQL Server 2025: symbols other than hyphen /
     /// apostrophe keep a real primary weight that sorts them ahead of digits
     /// and letters, so MIN of ('#500-75', '00,', 'abc') is '#500-75'. (An
