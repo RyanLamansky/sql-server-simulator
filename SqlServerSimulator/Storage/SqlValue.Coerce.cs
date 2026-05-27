@@ -434,78 +434,102 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// String → date-like coercion with a CONVERT style hint. Each style
-    /// pins the acceptable input format(s); a string that matches the
-    /// style's format parses; a string that's a valid date by some OTHER
-    /// format raises Msg 9807 (style mismatch); a string that's not a
-    /// valid date by any format raises Msg 241 (general parse failure).
-    /// Probe-confirmed against SQL Server 2025 (2026-05-13): all three
-    /// disposition paths land on the matching Msg numbers / wording.
+    /// String → date-like coercion with a CONVERT style hint, mirroring SQL
+    /// Server's flexible string-to-datetime parser (probed against SQL Server
+    /// 2025, 2026-05-27).
     /// </summary>
     /// <remarks>
-    /// Styles supported here: <c>1</c>/<c>101</c>, <c>10</c>/<c>110</c>,
-    /// <c>12</c>/<c>112</c>, <c>102</c>, <c>103</c>, <c>23</c>,
-    /// <c>126</c>/<c>127</c> (ISO 8601 with optional fractional seconds).
-    /// Other styles fall through to the default style-less parser via
-    /// caller dispatch.
+    /// <para>
+    /// <strong>Strict styles</strong> (<c>12</c> <c>yymmdd</c>, <c>112</c>
+    /// <c>yyyymmdd</c>, <c>23</c> <c>yyyy-mm-dd</c>, <c>126</c>/<c>127</c>
+    /// ISO 8601) pin an exact format; a string that's a valid date by some
+    /// OTHER format raises Msg 9807, a non-date raises Msg 241.
+    /// </para>
+    /// <para>
+    /// <strong>General styles</strong> route through .NET's flexible parser:
+    /// separators (<c>/ - .</c>) are interchangeable, and numeric / ISO
+    /// year-first / month-name forms plus an optional trailing time all parse.
+    /// The only family distinction is date-part order for ambiguous numeric
+    /// dates — the dmy set (<see cref="IsDayMonthYearStyle"/>) reads day-first
+    /// (<c>en-GB</c>), every other style month-first (<c>en-US</c>); a leading
+    /// 4-digit token is the year, with the trailing pair following the family
+    /// order. Known leniency divergences: the 2-digit-vs-4-digit-year
+    /// with/without-century restriction isn't enforced, and a <c>T</c>-separated
+    /// time is accepted under general styles (real SQL Server reserves it for
+    /// 126/127). See [`docs/claude/casting.md`].
+    /// </para>
     /// </remarks>
     internal SqlValue CoerceStringToDateLikeWithStyle(SqlType target, int style)
     {
         var input = this.AsString;
-        var formats = StyleSpecificDateFormats(style);
-        if (formats is null)
+
+        var strictFormats = StrictStyleDateFormats(style);
+        if (strictFormats is not null)
         {
-            // Style isn't in the parser's known set; fall back to default
-            // style-less parsing. Matches SQL Server's "silently ignore
-            // unrecognized style on string source" behavior for the styles
-            // that lack a dedicated input parser (e.g. styles only meaningful
-            // on output, like style 0 with mixed-type sources).
-            return this.CoerceTo(target);
+            // AssumeUniversal + AdjustToUniversal keeps the wall-clock reading
+            // for style 127's `Z` UTC suffix regardless of host timezone.
+            const DateTimeStyles StrictParseStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
+            if (DateTime.TryParseExact(input, strictFormats, CultureInfo.InvariantCulture, StrictParseStyles, out var exact))
+                return FromDateTime2(SqlType.GetDateTime2(7), exact).CoerceTo(target);
+            if (DateTime.TryParse(input, CultureInfo.InvariantCulture, StrictParseStyles, out _))
+                throw SimulatedSqlException.InputCharacterStringStyleMismatch(style);
+            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
         }
-        // AssumeUniversal + AdjustToUniversal keeps the wall-clock reading
-        // when the input carries a `Z` suffix (style 127's UTC form): the
-        // parser would otherwise reinterpret `Z` as "convert to local
-        // timezone", which on a non-UTC host (e.g. Windows in PT) returns a
-        // value offset from the input. Real SQL Server's datetime2 target
-        // has no offset surface, so it preserves the literal wall-clock
-        // time verbatim — those flags get us the same result deterministically
-        // regardless of host timezone.
-        const DateTimeStyles ParseStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
-        if (DateTime.TryParseExact(input, formats, CultureInfo.InvariantCulture, ParseStyles, out var parsed))
+
+        var dayMonthYear = IsDayMonthYearStyle(style);
+        var culture = dayMonthYear ? GbCulture : UsCulture;
+        const DateTimeStyles ParseStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.NoCurrentDateDefault;
+
+        // Separatorless yyyyMMdd is accepted under every general style but
+        // isn't recognized by the flexible parser.
+        if (DateTime.TryParseExact(input.Trim(), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var basic))
+            return FromDateTime2(SqlType.GetDateTime2(7), basic).CoerceTo(target);
+
+        // dmy + year-first: the flexible en-GB parse reads a leading 4-digit
+        // token then month-first, so force day-first on the trailing pair to
+        // match SQL Server (e.g. style 103 reads '2003-04-05' as 2003-05-04).
+        if (dayMonthYear
+            && DateTime.TryParseExact(input.Trim(), DayMonthYearFirstFormats, CultureInfo.InvariantCulture, ParseStyles, out var dmyYearFirst))
         {
-            // Re-encode via the simulator's own datetime2(7) path so target-
-            // specific narrowing (smalldatetime range, datetime2 precision,
-            // date-only truncation) goes through one route.
+            return FromDateTime2(SqlType.GetDateTime2(7), dmyYearFirst).CoerceTo(target);
+        }
+
+        if (DateTime.TryParse(input, culture, ParseStyles, out var parsed))
+        {
+            // A bare time (no date component) anchors to 1900-01-01 — NoCurrentDateDefault
+            // leaves the date at 0001-01-01, which is below the datetime range anyway.
+            if (parsed is { Year: 1, Month: 1, Day: 1 })
+                parsed = DateTimeSqlType.BaseDate.Add(parsed.TimeOfDay);
             return FromDateTime2(SqlType.GetDateTime2(7), parsed).CoerceTo(target);
         }
-        // Style didn't match. Distinguish "parseable as some date" (Msg 9807)
-        // from "not a date at all" (Msg 241) by trying the default parser.
         if (DateTime.TryParse(input, CultureInfo.InvariantCulture, ParseStyles, out _))
             throw SimulatedSqlException.InputCharacterStringStyleMismatch(style);
         throw SimulatedSqlException.ConversionFailedDateTimeFromString();
     }
 
+    private static readonly CultureInfo UsCulture = CultureInfo.GetCultureInfo("en-US");
+
+    private static readonly CultureInfo GbCulture = CultureInfo.GetCultureInfo("en-GB");
+
+    private static readonly string[] DayMonthYearFirstFormats = ["yyyy/d/M", "yyyy-d-M", "yyyy.d.M"];
+
     /// <summary>
-    /// Returns the input-format strings accepted by <see cref="CoerceStringToDateLikeWithStyle"/>
-    /// for the given style code, or <see langword="null"/> when the style
-    /// has no dedicated input parser (caller falls back to the default
-    /// style-less parser). Each style allows the trailing-time portion as
-    /// an optional extra: real SQL Server accepts <c>'20260513 14:25:36'</c>
-    /// under style 112 by parsing the date portion against style and the
-    /// time portion as free-form — the alternative formats here capture
-    /// that "date + optional time" shape.
+    /// The day-month-year CONVERT styles. Every other (general) style orders
+    /// ambiguous numeric dates month-first.
     /// </summary>
-    private static string[]? StyleSpecificDateFormats(int style) => style switch
+    private static bool IsDayMonthYearStyle(int style) =>
+        style is 3 or 4 or 5 or 13 or 14 or 103 or 104 or 105 or 113 or 114 or 130 or 131;
+
+    /// <summary>
+    /// Exact format(s) for the strict CONVERT styles (basic <c>yymmdd</c> /
+    /// <c>yyyymmdd</c> and the ISO 8601 forms, each with an optional trailing
+    /// time), or null for the general flexible styles.
+    /// </summary>
+    private static string[]? StrictStyleDateFormats(int style) => style switch
     {
-        1 => ["MM/dd/yy", "MM/dd/yy HH:mm:ss", "MM/dd/yy HH:mm:ss.fff"],
-        101 => ["MM/dd/yyyy", "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm:ss.fff"],
-        10 => ["MM-dd-yy", "MM-dd-yy HH:mm:ss", "MM-dd-yy HH:mm:ss.fff"],
-        110 => ["MM-dd-yyyy", "MM-dd-yyyy HH:mm:ss", "MM-dd-yyyy HH:mm:ss.fff"],
         12 => ["yyMMdd", "yyMMdd HH:mm:ss", "yyMMdd HH:mm:ss.fff"],
-        112 => ["yyyyMMdd", "yyyyMMdd HH:mm:ss", "yyyyMMdd HH:mm:ss.fff"],
-        102 => ["yyyy.MM.dd", "yyyy.MM.dd HH:mm:ss", "yyyy.MM.dd HH:mm:ss.fff"],
-        103 => ["dd/MM/yyyy", "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm:ss.fff"],
         23 => ["yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm:ss.fff", "yyyy-MM-dd HH:mm:ss.fffffff"],
+        112 => ["yyyyMMdd", "yyyyMMdd HH:mm:ss", "yyyyMMdd HH:mm:ss.fff"],
         126 or 127 =>
         [
             "yyyy-MM-ddTHH:mm:ss",

@@ -58,7 +58,7 @@ Backs `.value()` / `.nodes()` / `.query()` / `.exist()`. Covers the subset SQL S
 ### Divergences
 
 - Only the path subset above is modeled. FLWOR, arithmetic / comparison / boolean XQuery operators, `local-name()`-style functions in the source text, and constructors are not — they'd surface as malformed XPath or wrong results rather than a clean error.
-- `.value()` casts go through the standard string→type coercion, which inherits the simulator's CONVERT limitations — notably **`CONVERT(datetime, '<yyyy-mm-dd>', 101)` rejects year-first ISO strings the live server accepts under mdy-family styles** (Msg 9807). This blocks the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views at the downstream `CONVERT`, not at the XML extraction. Tracked as a CONVERT date-style gap, separate from XML.
+- `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — now resolve.
 
 ## Catalog views in `BuiltInResources.cs`
 

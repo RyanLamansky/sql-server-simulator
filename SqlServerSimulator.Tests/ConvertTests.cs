@@ -221,6 +221,44 @@ public sealed class ConvertTests
     public void Convert_StringToDateWithStyle(int style, string input) =>
         AreEqual(new DateTime(2026, 5, 13), ExecuteScalar($"select convert(date, '{input}', {style})"));
 
+    // General styles run SQL Server's flexible parser: separators (/ - .) are
+    // interchangeable and ISO year-first is accepted, with the trailing pair
+    // ordered by the style family. Each input below resolves to 2026-05-13.
+    [TestMethod]
+    [DataRow(101, "2026-05-13")]   // mdy + ISO year-first (the AdventureWorks shape)
+    [DataRow(101, "2026/05/13")]
+    [DataRow(101, "05-13-2026")]   // mdy, dash where the style documents slash
+    [DataRow(0, "2026-05-13")]     // default style, ISO
+    [DataRow(120, "2026-05-13")]   // ODBC canonical
+    [DataRow(102, "2026/05/13")]   // ymd, slash where the style documents dot
+    [DataRow(110, "05/13/2026")]   // mdy, slash where the style documents dash
+    public void Convert_StringToDate_GeneralStyle_SeparatorAndIsoFlexible(int style, string input) =>
+        AreEqual(new DateTime(2026, 5, 13), ExecuteScalar($"select convert(date, '{input}', {style})"));
+
+    [TestMethod]
+    [DataRow(103, "2003-04-05")]   // dmy + year-first → trailing pair is day-month → May 4
+    [DataRow(104, "2003.04.05")]
+    public void Convert_StringToDate_DmyYearFirst_OrdersTrailingDayMonth(int style, string input) =>
+        AreEqual(new DateTime(2003, 5, 4), ExecuteScalar($"select convert(date, '{input}', {style})"));
+
+    [TestMethod]
+    [DataRow("Apr 5 2003")]
+    [DataRow("April 5, 2003")]
+    [DataRow("5 Apr 2003")]
+    public void Convert_StringToDate_MonthNameForms_StyleIndependent(string input) =>
+        AreEqual(new DateTime(2003, 4, 5), ExecuteScalar($"select convert(date, '{input}', 101)"));
+
+    [TestMethod]
+    public void Convert_StringToDateTime_GeneralStyle_AmPmAndSpaceTime()
+    {
+        AreEqual(new DateTime(2003, 1, 1, 23, 59, 0), ExecuteScalar("select convert(datetime, 'Jan 1 2003 11:59PM', 101)"));
+        AreEqual(new DateTime(2003, 4, 5, 10, 20, 30), ExecuteScalar("select convert(datetime, '2003-04-05 10:20:30', 101)"));
+    }
+
+    [TestMethod]
+    public void Convert_StringToDateTime_GeneralStyle_BareTimeAnchorsTo1900() =>
+        AreEqual(new DateTime(1900, 1, 1, 10, 20, 30), ExecuteScalar("select convert(datetime, '10:20:30', 101)"));
+
     [TestMethod]
     public void Convert_StringToDateTime2_Style126() =>
         AreEqual(new DateTime(2026, 5, 13, 14, 25, 36, 789), ExecuteScalar(
