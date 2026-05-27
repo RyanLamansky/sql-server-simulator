@@ -17,6 +17,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <see cref="Aggregate"/> wraps an <see cref="AggregateExpression"/>
 /// (<c>SUM/AVG/COUNT/...</c> with <c>OVER</c>) and applies the same per-row
 /// frame extent for running totals + sliding aggregations.
+/// <see cref="CumeDist"/> / <see cref="PercentRank"/> are distribution
+/// ranking functions (require ORDER BY inside OVER like the other ranking
+/// functions, reject explicit frames). <see cref="PercentileCont"/> /
+/// <see cref="PercentileDisc"/> are ordered-set analytic functions: their
+/// ordering comes from a mandatory <c>WITHIN GROUP (ORDER BY ...)</c> clause,
+/// their OVER clause carries only PARTITION BY (ORDER BY there is rejected),
+/// and the per-partition percentile is broadcast to every row.
 /// </summary>
 internal enum WindowKind
 {
@@ -29,6 +36,10 @@ internal enum WindowKind
     Lead,
     FirstValue,
     LastValue,
+    CumeDist,
+    PercentRank,
+    PercentileCont,
+    PercentileDisc,
 }
 
 /// <summary>
@@ -108,6 +119,16 @@ internal sealed class WindowExpression : Expression
     public readonly Expression? BucketCount;
 
     /// <summary>
+    /// For <see cref="WindowKind.PercentileCont"/> / <see cref="WindowKind.PercentileDisc"/>,
+    /// the percentile fraction argument (a value in <c>[0, 1]</c>). Evaluated
+    /// once per query — real SQL Server allows a constant, variable, or
+    /// parameter; out-of-range / NULL surfaces Msg 8727 at runtime. The
+    /// <c>WITHIN GROUP</c> ordering is stored in <see cref="OrderBy"/> (exactly
+    /// one entry). Null for every other kind.
+    /// </summary>
+    public readonly Expression? PercentileArg;
+
+    /// <summary>
     /// Explicit window frame for the value family
     /// (<see cref="WindowKind.FirstValue"/> / <see cref="WindowKind.LastValue"/>)
     /// and aggregate-OVER (<see cref="WindowKind.Aggregate"/>). Null = use the
@@ -133,6 +154,7 @@ internal sealed class WindowExpression : Expression
         Expression? offsetArg = null,
         Expression? defaultArg = null,
         Expression? bucketCount = null,
+        Expression? percentileArg = null,
         FrameSpec? frame = null)
     {
         this.Kind = kind;
@@ -143,6 +165,7 @@ internal sealed class WindowExpression : Expression
         this.OffsetArg = offsetArg;
         this.DefaultArg = defaultArg;
         this.BucketCount = bucketCount;
+        this.PercentileArg = percentileArg;
         this.Frame = frame;
     }
 
@@ -176,6 +199,8 @@ internal sealed class WindowExpression : Expression
     {
         WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank => SqlType.BigInt,
         WindowKind.NTile => SqlType.Int32,
+        WindowKind.CumeDist or WindowKind.PercentRank or WindowKind.PercentileCont => SqlType.Float,
+        WindowKind.PercentileDisc => this.OrderBy[0].Expr!.GetSqlType(batch, resolveColumnType),
         WindowKind.Aggregate => this.AggregateInfo!.GetSqlType(batch, resolveColumnType),
         WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.GetSqlType(batch, resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown window kind {this.Kind}."),
@@ -198,6 +223,14 @@ internal sealed class WindowExpression : Expression
     /// <summary>Parses <c>DENSE_RANK() OVER (... ORDER BY ...)</c>.</summary>
     public static WindowExpression ParseDenseRank(ParserContext context) =>
         ParseNoArgRankingFunction(context, WindowKind.DenseRank);
+
+    /// <summary>Parses <c>CUME_DIST() OVER (... ORDER BY ...)</c>.</summary>
+    public static WindowExpression ParseCumeDist(ParserContext context) =>
+        ParseNoArgRankingFunction(context, WindowKind.CumeDist);
+
+    /// <summary>Parses <c>PERCENT_RANK() OVER (... ORDER BY ...)</c>.</summary>
+    public static WindowExpression ParsePercentRank(ParserContext context) =>
+        ParseNoArgRankingFunction(context, WindowKind.PercentRank);
 
     /// <summary>
     /// Shared backbone for the no-operand ranking functions
@@ -232,6 +265,8 @@ internal sealed class WindowExpression : Expression
             WindowKind.RowNumber => "row_number",
             WindowKind.Rank => "rank",
             WindowKind.DenseRank => "dense_rank",
+            WindowKind.CumeDist => "cume_dist",
+            WindowKind.PercentRank => "percent_rank",
             _ => throw new InvalidOperationException($"Unexpected kind {kind} in no-arg ranking parser."),
         });
 
@@ -367,6 +402,73 @@ internal sealed class WindowExpression : Expression
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
             : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, operand: operand, frame: frame));
+    }
+
+    /// <summary>
+    /// Parses an ordered-set analytic function
+    /// (<c>PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY sort [ASC|DESC]) OVER ([PARTITION BY ...])</c>
+    /// or its <c>PERCENTILE_DISC</c> sibling). Entered with the cursor on the
+    /// percentile-fraction argument (the first token after the opening <c>(</c>
+    /// the dispatcher consumed); leaves the cursor on the OVER's closing
+    /// <c>)</c>. The <c>WITHIN GROUP</c> ordering is mandatory and supplies the
+    /// single sort key; <c>OVER</c> is mandatory (Msg 10753 when absent) and
+    /// may carry only <c>PARTITION BY</c> (an <c>ORDER BY</c> inside OVER is
+    /// rejected with Msg 10758).
+    /// </summary>
+    public static WindowExpression ParsePercentile(ParserContext context, WindowKind kind)
+    {
+        var functionLowerName = kind == WindowKind.PercentileCont ? "percentile_cont" : "percentile_disc";
+
+        var percentileArg = Expression.Parse(context);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // WITHIN GROUP ( ORDER BY <sort> [ASC|DESC] ). WITHIN is contextual.
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Within })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Group })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Order })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var sortExpr = Expression.Parse(context);
+        var descending = false;
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Asc }:
+                context.MoveNextRequired();
+                break;
+            case ReservedKeyword { Keyword: Keyword.Desc }:
+                descending = true;
+                context.MoveNextRequired();
+                break;
+        }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var orderBy = new[] { OrderBySpec.FromExpression(sortExpr, descending) };
+
+        // OVER is mandatory for the ordered-set analytic functions.
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
+            throw SimulatedSqlException.FunctionMustHaveOverClause(functionLowerName);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        var partitionBy = ParseOptionalPartitionBy(context);
+
+        // ORDER BY inside the OVER clause is rejected — the ordering must come
+        // from WITHIN GROUP. A frame would also be invalid, but ORDER BY is the
+        // only thing that can legally precede the closing ) at this point, so
+        // any non-) token after PARTITION BY falls through to a syntax error.
+        return context.Token is ReservedKeyword { Keyword: Keyword.Order }
+            ? throw SimulatedSqlException.FunctionMayNotHaveOrderByInOver(functionLowerName)
+            : context.Token is not Operator { Character: ')' }
+                ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, percentileArg: percentileArg));
     }
 
     /// <summary>

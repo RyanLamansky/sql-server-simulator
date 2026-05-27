@@ -92,4 +92,18 @@ internal sealed partial class Selection
         }
         return 0;
     }
+
+    /// <summary>
+    /// Compares two non-NULL scalar values — the single-key, ascending form of
+    /// <see cref="CompareOrderKeys"/>'s per-key compare (promoting to a common
+    /// type when the declared types differ). Used to sort the WITHIN GROUP
+    /// sort-key values for <c>PERCENTILE_CONT</c> / <c>PERCENTILE_DISC</c>.
+    /// </summary>
+    private static int CompareScalarValues(SqlValue a, SqlValue b)
+    {
+        if (a.Type == b.Type)
+            return a.CompareTo(b);
+        var common = SqlType.Promote(a.Type, b.Type);
+        return a.CoerceTo(common).CompareTo(b.CoerceTo(common));
+    }
 }

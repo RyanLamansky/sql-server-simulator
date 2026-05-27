@@ -196,6 +196,128 @@ internal sealed partial class Selection
                     }
                     break;
 
+                case WindowKind.CumeDist:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        var n = indices.Count;
+                        var i = 0;
+                        while (i < n)
+                        {
+                            // Walk the peer group sharing this ORDER BY key; every
+                            // peer gets (rows with key <= this) / N — i.e. the
+                            // group's last 1-based position over N.
+                            var j = i;
+                            while (j + 1 < n && CompareOrderKeys(
+                                    perWindowKeys[indices[j + 1]][w].OrderKeys,
+                                    perWindowKeys[indices[j]][w].OrderKeys,
+                                    orderByList) == 0)
+                            {
+                                j++;
+                            }
+                            var cumeDist = SqlValue.FromDouble((double)(j + 1) / n);
+                            for (var k = i; k <= j; k++)
+                                results[indices[k]] = cumeDist;
+                            i = j + 1;
+                        }
+                    }
+                    break;
+
+                case WindowKind.PercentRank:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        var n = indices.Count;
+                        long rankValue = 1;
+                        for (var i = 0; i < n; i++)
+                        {
+                            if (i > 0 && CompareOrderKeys(
+                                    perWindowKeys[indices[i]][w].OrderKeys,
+                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
+                                    orderByList) != 0)
+                            {
+                                rankValue = i + 1;
+                            }
+                            // PERCENT_RANK = (RANK - 1) / (N - 1); a single-row
+                            // partition is defined as 0 (avoids divide-by-zero).
+                            var percentRank = n == 1 ? 0.0 : (double)(rankValue - 1) / (n - 1);
+                            results[indices[i]] = SqlValue.FromDouble(percentRank);
+                        }
+                    }
+                    break;
+
+                case WindowKind.PercentileCont:
+                case WindowKind.PercentileDisc:
+                    {
+                        var isDisc = win.Kind == WindowKind.PercentileDisc;
+                        var sortType = win.OrderBy[0].Expr!.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
+                        var descending = win.OrderBy[0].Descending;
+
+                        // The percentile fraction is evaluated once per query.
+                        // NULL or a value outside [0, 1] surfaces Msg 8727. With
+                        // no buffered rows there's no partition to emit into, so
+                        // the check is skipped (matches "no rows → no error").
+                        var p = 0.0;
+                        if (buffered.Count > 0)
+                        {
+                            var pValue = EvaluateScalarArg(win.PercentileArg!, buffered, sources, batch, outerResolver);
+                            if (pValue.IsNull)
+                                throw SimulatedSqlException.PercentileInputOutOfRange();
+                            p = pValue.CoerceTo(SqlType.Float).AsDouble;
+                            if (p is < 0.0 or > 1.0)
+                                throw SimulatedSqlException.PercentileInputOutOfRange();
+                        }
+
+                        foreach (var (_, indices) in partitions)
+                        {
+                            // Collect non-NULL WITHIN GROUP sort-key values; NULLs
+                            // are excluded from the percentile computation.
+                            var values = new List<SqlValue>(indices.Count);
+                            foreach (var idx in indices)
+                            {
+                                var key = perWindowKeys[idx][w].OrderKeys[0];
+                                if (!key.IsNull)
+                                    values.Add(key);
+                            }
+                            values.Sort((a, b) =>
+                            {
+                                var c = CompareScalarValues(a, b);
+                                return descending ? -c : c;
+                            });
+
+                            SqlValue result;
+                            if (values.Count == 0)
+                            {
+                                result = SqlValue.Null(isDisc ? sortType : SqlType.Float);
+                            }
+                            else if (isDisc)
+                            {
+                                // Smallest value whose cumulative distribution >= p:
+                                // index ceil(p*n) - 1, clamped. Returned in the sort
+                                // expression's own type.
+                                var k = Math.Max(0, (int)Math.Ceiling(p * values.Count) - 1);
+                                result = values[k].CoerceTo(sortType);
+                            }
+                            else
+                            {
+                                // Continuous: linear interpolation at rank p*(n-1).
+                                var count = values.Count;
+                                var rank = p * (count - 1);
+                                var lo = (int)Math.Floor(rank);
+                                var hi = (int)Math.Ceiling(rank);
+                                var loValue = values[lo].CoerceTo(SqlType.Float).AsDouble;
+                                var hiValue = values[hi].CoerceTo(SqlType.Float).AsDouble;
+                                result = SqlValue.FromDouble(loValue + ((rank - lo) * (hiValue - loValue)));
+                            }
+
+                            foreach (var idx in indices)
+                                results[idx] = result;
+                        }
+                    }
+                    break;
+
                 case WindowKind.Lag:
                 case WindowKind.Lead:
                     {

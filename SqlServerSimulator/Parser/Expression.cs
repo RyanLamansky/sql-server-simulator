@@ -674,6 +674,7 @@ internal abstract class Expression
                 "CHARINDEX" => new CharIndex(context),
                 "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
+                "CUME_DIST" => WindowExpression.ParseCumeDist(context),
                 "DATETRUNC" => new DateTrunc(context),
                 "HOST_NAME" => new HostName(context),
                 "INDEX_COL" => new IndexCol(context),
@@ -736,6 +737,7 @@ internal abstract class Expression
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),
                 "ERROR_NUMBER" => new ErrorNumberFunction(context),
+                "PERCENT_RANK" => WindowExpression.ParsePercentRank(context),
                 "ROWCOUNT_BIG" => new RowCountBig(context),
                 "SWITCHOFFSET" => new SwitchOffset(context),
                 "TYPEPROPERTY" => new TypeProperty(context),
@@ -769,6 +771,8 @@ internal abstract class Expression
                 "BINARY_CHECKSUM" => new Checksum(context, isBinary: true),
                 "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
+                "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),
+                "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
                 _ => null
             },
             16 => uppercaseName switch

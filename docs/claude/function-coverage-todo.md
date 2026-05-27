@@ -44,7 +44,6 @@ Existing infrastructure plus a small lookup, property table, or splitter.
 - [x] **SWITCHOFFSET(dto, offset)** — adjust `datetimeoffset` preserving the UTC instant.
 - [x] **TODATETIMEOFFSET(dt, offset)** — attach offset to `datetime` / `datetime2`.
 - [x] **DATE_BUCKET(part, bucket_width, date [, origin])** — bucket-aligned floor (origin defaults to 1900-01-01). 🎯 closes **Date/Time (26/26)** with the items above.
-- [ ] **ANY_VALUE(expr)** — aggregate returning any group value. (Note: probe showed not yet shipped in SQL Server 2025 RTM — Azure-only — verify before adding.)
 - [x] **JSON_OBJECT(k:v, ...)** / **JSON_ARRAY(v, ...)** — JSON literal builders. Bare-`:` postfix in `Expression.Parse` is gated on a new `ParserContext.StopExpressionAtBareColon` flag the JSON_OBJECT key-parse sets transiently; the existing `::` type-prefix path still resolves (peek the second colon — bail to caller on single, run static-call on double). Nested `JSON_OBJECT` / `JSON_ARRAY` / `JSON_QUERY` values embed raw via compile-time `ProducesJson(Expression)` detection. Default null clause is `ABSENT ON NULL` (probe-confirmed); explicit `NULL ON NULL` / `ABSENT ON NULL` suffix parsed via `ReservedKeyword`-based `Keyword.On` / `Keyword.Null` match. Output format matches SQL Server: bit→true/false, varbinary→base64, datetime2→T-separated ISO, dates/times/guids→quoted ISO/uppercase-hex; float/real keep simulator's existing G15/G7 quirk. Tests in `JsonBuilderTests` (36).
 - [x] **JSON_PATH_EXISTS(json, path)** — true if path resolves; routes through existing `JsonPath.Walk`.
 - [ ] **FORMATMESSAGE(msg_id_or_string, args...)** — printf-style with `sys.messages` fallback (sys.messages not modeled).
@@ -59,10 +58,10 @@ Existing infrastructure plus a small lookup, property table, or splitter.
 
 Need new aggregators, large property tables, or principal-model wiring.
 
-- [ ] **CUME_DIST() OVER (...)** — cumulative distribution window.
-- [ ] **PERCENT_RANK() OVER (...)** — relative-rank window.
-- [ ] **PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY ...)** — sort-and-interpolate aggregator.
-- [ ] **PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY ...)** — sort-and-pick aggregator. 🎯 closes **Analytic (9/9)** with CUME_DIST / PERCENT_RANK / PERCENTILE_CONT and ANY_VALUE from Tier 3.
+- [x] **CUME_DIST() OVER (...)** — cumulative distribution window. New `WindowKind.CumeDist`; reuses the RANK peer-group path (NULLs participate in ordering), returns float. See [`query.md`](query.md).
+- [x] **PERCENT_RANK() OVER (...)** — relative-rank window. `(RANK − 1) / (N − 1)`, single-row partition → 0; returns float.
+- [x] **PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY ...)** — sort-and-interpolate. `OVER ([PARTITION BY …])` mandatory (Msg 10753) and ORDER-BY-free (Msg 10758); NULLs excluded; linear interpolation at `p·(n−1)`; returns float; out-of-range `p` → Msg 8727.
+- [x] **PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY ...)** — sort-and-pick (smallest value with CUME_DIST ≥ p); returns the sort-expression's type. 🎯 closes **Analytic** for the box product — the only other catalog entry, ANY_VALUE, is excluded as cloud-only (see Tier 6).
 - [ ] **JSON_OBJECTAGG(k VALUE v)** / **JSON_ARRAYAGG(expr)** — JSON aggregators. 🎯 closes **JSON (10/10)** with JSON_OBJECT / JSON_ARRAY / JSON_PATH_EXISTS from Tier 3.
 - [x] **STR(float, len, decimals)** — float-to-string formatting (right-aligned, half-away-from-zero rounding, `*` overflow).
 - [x] **DIFFERENCE(s1, s2)** — SOUNDEX-distance helper (0-4 matches).
@@ -115,7 +114,13 @@ Real applications use these. Each family graduates when its parent feature lands
 
 ## Tier 6 — Skip candidates (genuinely rare, deprecated, or won't-model)
 
-These can stay unchecked at delete time without blocking it.
+These can stay unchecked at delete time without blocking it. ~~Strikethrough~~ marks an item that was evaluated and **deliberately excluded** (not merely deprioritized) — don't re-surface it as a candidate.
+
+### Cloud-only (not in the box / on-prem product the simulator targets)
+
+Functions that exist only in Azure SQL Database / Fabric surfaces, not in the SQL Server 2025 RTM box product. Out of scope by definition: the simulator's fidelity oracle is the box product (and the live reference instance is a box install), so modeling these would *diverge* from the reference, not match it.
+
+- ~~**ANY_VALUE(expr)**~~ — aggregate returning an arbitrary value from each group. **Excluded: not present in SQL Server 2025 RTM** (probe-confirmed Azure/Fabric-only, 2026-05-27). It was the only catalog entry standing between the simulator and a complete **Analytic** category; with it excluded, Analytic is complete for the box product (CUME_DIST / PERCENT_RANK / PERCENTILE_CONT / PERCENTILE_DISC all shipped — see Tier 4). Revisit only if a future box release promotes it.
 
 ### Legacy text/image
 - [ ] **TEXTPTR / TEXTVALID** — paired with deprecated READTEXT / WRITETEXT / UPDATETEXT.

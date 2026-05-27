@@ -385,6 +385,35 @@ partial class SimulatedSqlException
         new($"The function '{functionLowerName}' may not have a WITHIN GROUP clause.", 10757, 15, 9);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 10753 — an ordered-set analytic function
+    /// (<c>percentile_cont</c> / <c>percentile_disc</c>) was used without the
+    /// required <c>OVER</c> clause. Probe-confirmed against SQL Server 2025
+    /// (2026-05-27): Class 15, State 3.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMustHaveOverClause(string functionLowerName) =>
+        new($"The function '{functionLowerName}' must have an OVER clause.", 10753, 15, 3);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10758 — an ordered-set analytic function
+    /// (<c>percentile_cont</c> / <c>percentile_disc</c>) supplied an
+    /// <c>ORDER BY</c> inside its <c>OVER</c> clause; the ordering must come
+    /// from <c>WITHIN GROUP</c> instead. Probe-confirmed against SQL Server
+    /// 2025 (2026-05-27): Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMayNotHaveOrderByInOver(string functionLowerName) =>
+        new($"The function '{functionLowerName}' may not have ORDER BY in OVER clause.", 10758, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8727 — the percentile argument to
+    /// <c>PERCENTILE_CONT</c> / <c>PERCENTILE_DISC</c> evaluated outside the
+    /// closed interval <c>[0, 1]</c> (or was NULL). Raised at runtime once the
+    /// argument value is known. Probe-confirmed against SQL Server 2025
+    /// (2026-05-27): Class 16, State 1.
+    /// </summary>
+    internal static SimulatedSqlException PercentileInputOutOfRange() =>
+        new("Input parameter of percentile function is outside of range [0, 1].", 8727, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 5308 — windowed/aggregate ORDER BY rejects
     /// integer-ordinal expressions (e.g. <c>STRING_AGG(x, ',') WITHIN GROUP
     /// (ORDER BY 1)</c>). The projection-level ORDER BY accepts ordinals;
