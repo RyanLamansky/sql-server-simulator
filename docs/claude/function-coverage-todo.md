@@ -144,7 +144,6 @@ Functions that exist only in Azure SQL Database / Fabric surfaces, not in the SQ
 
 Real bugs / limitations against shipped functions — fixes are tickable work, not design decisions.
 
-- [ ] **OPENJSON ... WITH ... AS JSON** on `nvarchar(max)` raises `NotSupportedException` (sub-tree extraction missing); non-`nvarchar(max)` raises Msg 13618.
 - [ ] **REPLICATE** of a MAX-typed *column* reference truncates to 8000 bytes (parse-time type resolver doesn't reach FROM-source columns; literal / CAST-target inputs work).
 - [ ] **GROUPING / GROUPING_ID** only accept `Reference` arguments — `GROUPING(a+1)` paired with `GROUP BY a+1` always raises Msg 8161 instead of matching structurally.
 - [ ] **STRING_SPLIT(..., ..., CAST(@v AS INT))** wrapped-variable accepted; real SQL Server rejects all variable-bearing `enable_ordinal` shapes regardless of wrapping.

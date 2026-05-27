@@ -130,16 +130,18 @@ internal readonly struct JsonPath
     /// the matched element or null when a segment misses (lax mode);
     /// raises Msg 13608 in strict mode. The "missing" cases are (a) property
     /// name not present in an object, (b) array index out of bounds,
-    /// (c) traversing into a non-object/non-array.
+    /// (c) traversing into a non-object/non-array. <paramref name="strictNotFoundState"/>
+    /// carries the caller's context-specific Msg 13608 State byte (OPENJSON
+    /// columns report 6; the default 1 matches JSON_QUERY).
     /// </summary>
-    public JsonElement? Walk(JsonElement root)
+    public JsonElement? Walk(JsonElement root, byte strictNotFoundState = 1)
     {
         var current = root;
         foreach (var segment in this.Segments)
         {
             var next = TryStep(current, segment);
             if (next is null)
-                return this.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonStrictPathNotFound() : null;
+                return this.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonStrictPathNotFound(strictNotFoundState) : null;
             current = next.Value;
         }
         return current;

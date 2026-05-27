@@ -15,10 +15,22 @@ partial class SimulatedSqlException
     /// Msg 13608: SQL Server raises this when a <c>strict</c>-mode JSON
     /// path resolves through a missing property / out-of-bounds index /
     /// non-object-or-array intermediate. Lax mode silently returns NULL
-    /// instead.
+    /// instead. The State byte is context-dependent: JSON_VALUE reports
+    /// state 2, an OPENJSON … WITH column reports state 6, and the
+    /// JSON_QUERY / JSON_MODIFY default is state 1.
     /// </summary>
-    internal static SimulatedSqlException JsonStrictPathNotFound() =>
-        new("Property cannot be found on the specified JSON path.", 13608, 16, 1);
+    internal static SimulatedSqlException JsonStrictPathNotFound(byte state = 1) =>
+        new("Property cannot be found on the specified JSON path.", 13608, 16, state);
+
+    /// <summary>
+    /// Msg 13624: a <c>strict</c>-mode JSON path under JSON_QUERY (or an
+    /// <c>OPENJSON … WITH (col … AS JSON)</c> column) resolved to a value
+    /// that is present but is neither an object nor an array. Lax mode
+    /// returns NULL instead; a JSON <c>null</c> value returns NULL in
+    /// both modes.
+    /// </summary>
+    internal static SimulatedSqlException JsonObjectOrArrayNotFound() =>
+        new("Object or array cannot be found in the specified JSON path.", 13624, 16, 1);
 
     /// <summary>
     /// Msg 13609: invalid JSON text passed to JSON_VALUE / JSON_QUERY /

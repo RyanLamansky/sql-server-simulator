@@ -104,7 +104,17 @@ internal sealed partial class Selection
                 root = match.Value;
             }
 
-            if (root.ValueKind == JsonValueKind.Array)
+            // An explicit WITH schema evaluates its column paths relative to
+            // the root document: an array root yields one row per element
+            // (paths relative to the element), an object root yields a single
+            // row (paths relative to the root). The default (key, value, type)
+            // schema instead unfolds the root — one row per array element or
+            // per object property.
+            if (root.ValueKind == JsonValueKind.Object && withColumns is not null)
+            {
+                yield return BuildOpenJsonRow(root, withColumns, schema, key: "");
+            }
+            else if (root.ValueKind == JsonValueKind.Array)
             {
                 var index = 0;
                 foreach (var element in root.EnumerateArray())
@@ -153,7 +163,7 @@ internal sealed partial class Selection
         for (var i = 0; i < withColumns.Length; i++)
         {
             var column = withColumns[i];
-            var matched = column.Path.Walk(element);
+            var matched = column.Path.Walk(element, strictNotFoundState: 6);
             values[i] = matched is null
                 ? SqlValue.Null(column.Type)
                 : ExtractColumnValue(matched.Value, column);
@@ -169,6 +179,15 @@ internal sealed partial class Selection
     /// </summary>
     private static SqlValue ExtractColumnValue(JsonElement element, OpenJsonColumn column)
     {
+        if (column.AsJson)
+        {
+            // AS JSON: return the matched object/array subtree as verbatim
+            // text. A JSON null or (under lax) a non-null scalar yields NULL;
+            // a non-null scalar under strict raised Msg 13624 inside Extract.
+            var subtree = JsonSubtree.Extract(element, column.Path.Mode);
+            return subtree is null ? SqlValue.Null(column.Type) : SqlValue.FromNVarchar(subtree).CoerceTo(column.Type);
+        }
+
         if (element.ValueKind == JsonValueKind.Null)
             return SqlValue.Null(column.Type);
 
@@ -252,9 +271,8 @@ internal sealed partial class Selection
     /// Parses the body of an OPENJSON <c>WITH (col TYPE [path] [AS JSON], ...)</c>
     /// clause. Enters with <see cref="ParserContext.Token"/> on the
     /// <c>WITH</c> keyword; on return Token sits on the closing <c>)</c>.
-    /// <c>AS JSON</c> isn't modeled — raises NotSupportedException so users
-    /// get a diagnostic when they try owned-many-as-JSON-with-AS-JSON
-    /// shapes (EF Core 10 doesn't emit these).
+    /// <c>AS JSON</c> is accepted only on <c>nvarchar(max)</c> columns
+    /// (Msg 13618 otherwise) and flags the column for subtree extraction.
     /// </summary>
     private static OpenJsonColumn[] ParseOpenJsonWithColumns(ParserContext context, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
@@ -320,21 +338,25 @@ internal sealed partial class Selection
                 path = JsonPath.Parse("$." + columnName);
             }
 
-            // AS JSON modifier — real SQL Server only accepts it on
+            // AS JSON modifier — real SQL Server accepts it only on
             // nvarchar(max) columns and raises Msg 13618 for any other type
-            // (probe-confirmed). The simulator emits the matching rejection
-            // for non-nvarchar(max) types but still raises NotSupportedException
-            // for the accepted nvarchar(max) shape, which the simulator hasn't
-            // built the surrounding sub-tree extraction for. EF Core 10 doesn't
-            // emit the AS JSON modifier.
+            // (probe-confirmed). The matched object/array subtree is later
+            // extracted as verbatim JSON text; see ExtractColumnValue.
+            var asJson = false;
             if (context.Token is ReservedKeyword { Keyword: Keyword.As })
             {
+                if (context.GetNextRequired() is not Name { Value: var modifier }
+                    || !string.Equals(modifier, "JSON", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
                 if (resolvedType is not NVarcharSqlType { length: SqlType.MaxLengthSentinel })
                     throw SimulatedSqlException.OpenJsonAsJsonRequiresNVarcharMax();
-                throw new NotSupportedException("OPENJSON column-level AS JSON modifier on nvarchar(max) isn't modeled.");
+                asJson = true;
+                context.MoveNextRequired();
             }
 
-            columns.Add(new OpenJsonColumn(columnName, resolvedType, path));
+            columns.Add(new OpenJsonColumn(columnName, resolvedType, path, asJson));
 
             if (context.Token is Operator { Character: ')' })
                 break;
@@ -351,9 +373,14 @@ internal sealed partial class Selection
 /// is parsed once at FROM-source-parse time (not per row) since the WITH
 /// clause's path argument is always a string literal.
 /// </summary>
-internal sealed class OpenJsonColumn(string name, SqlType type, JsonPath path)
+internal sealed class OpenJsonColumn(string name, SqlType type, JsonPath path, bool asJson)
 {
     public readonly string Name = name;
     public readonly SqlType Type = type;
     public readonly JsonPath Path = path;
+
+    /// <summary>The <c>AS JSON</c> modifier was present: the column extracts
+    /// the matched object/array subtree as verbatim JSON text rather than
+    /// coercing a scalar leaf to <see cref="Type"/>.</summary>
+    public readonly bool AsJson = asJson;
 }

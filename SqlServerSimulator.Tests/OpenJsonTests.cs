@@ -184,6 +184,88 @@ public sealed class OpenJsonTests
             13618,
             "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.");
 
+    [TestMethod]
+    public void OpenJson_AsJson_ObjectSubtree_PreservesVerbatimText()
+        => AreEqual("{  \"b\" : 2 , \"a\" : 1  }", new Simulation().ExecuteScalar(
+            "select x from openjson('{ \"o\" : {  \"b\" : 2 , \"a\" : 1  } }') with (x nvarchar(max) '$.o' as json)"));
+
+    [TestMethod]
+    public void OpenJson_AsJson_ArraySubtree()
+        => AreEqual("[1,2,3]", new Simulation().ExecuteScalar(
+            "select x from openjson('{\"tags\":[1,2,3]}') with (x nvarchar(max) '$.tags' as json)"));
+
+    [TestMethod]
+    public void OpenJson_AsJson_ScalarUnderLax_Null()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select x from openjson('{\"scalar\":42}') with (x nvarchar(max) '$.scalar' as json)");
+        IsTrue(reader.Read());
+        IsTrue(reader.IsDBNull(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void OpenJson_AsJson_ScalarUnderStrict_RaisesMsg13624()
+        => new Simulation().AssertSqlError(
+            "select x from openjson('{\"scalar\":42}') with (x nvarchar(max) 'strict $.scalar' as json)",
+            13624,
+            "Object or array cannot be found in the specified JSON path.");
+
+    [TestMethod]
+    public void OpenJson_AsJson_MissingUnderStrict_RaisesMsg13608_State6()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "select x from openjson('{\"a\":1}') with (x nvarchar(max) 'strict $.missing' as json)",
+            13608);
+        AreEqual("Property cannot be found on the specified JSON path.", ex.Message);
+        AreEqual((byte)6, ex.State);
+    }
+
+    [TestMethod]
+    public void OpenJson_AsJson_JsonNullUnderStrict_ReturnsNull()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select x from openjson('{\"n\":null}') with (x nvarchar(max) 'strict $.n' as json)");
+        IsTrue(reader.Read());
+        IsTrue(reader.IsDBNull(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void OpenJson_AsJson_MixedScalarAndSubtreeColumns()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select name, addr, city from openjson('{"name":"Alice","address":{"city":"NYC"}}')
+            with (name nvarchar(100) '$.name', addr nvarchar(max) '$.address' as json, city nvarchar(50) '$.address.city')
+            """);
+        IsTrue(reader.Read());
+        AreEqual("Alice", reader.GetString(0));
+        AreEqual("{\"city\":\"NYC\"}", reader.GetString(1));
+        AreEqual("NYC", reader.GetString(2));
+    }
+
+    [TestMethod]
+    public void OpenJson_AsJson_ArraySource_ExtractsSubtreePerElement()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select id, meta from openjson('[{"id":1,"meta":{"x":10}},{"id":2,"meta":{"y":20}}]')
+            with (id int '$.id', meta nvarchar(max) '$.meta' as json)
+            """);
+        var rows = new List<(int id, string meta)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetString(1)));
+        CollectionAssert.AreEqual(new[] { (1, "{\"x\":10}"), (2, "{\"y\":20}") }, rows);
+    }
+
+    // JSON_QUERY shares the AS JSON subtree-extraction rule: a strict-mode
+    // scalar match raises Msg 13624 (lax returns NULL).
+    [TestMethod]
+    public void JsonQuery_StrictScalar_RaisesMsg13624()
+        => new Simulation().AssertSqlError(
+            "select json_query('{\"a\":1}', 'strict $.a')",
+            13624,
+            "Object or array cannot be found in the specified JSON path.");
+
     // EF Core 10's primitive-collection .Any() shape: EXISTS over a
     // typed-OPENJSON subquery with a WHERE filter.
     [TestMethod]

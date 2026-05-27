@@ -55,19 +55,8 @@ internal sealed class JsonQuery : Expression
             if (match is null)
                 return SqlValue.Null(SqlType.NVarchar);
 
-            var element = match.Value;
-            return element.ValueKind switch
-            {
-                // Object / Array — JSON_QUERY returns the raw JSON text of
-                // the subtree (re-serialized via GetRawText, which preserves
-                // the input's whitespace shape — matching SQL Server's
-                // observable behavior on round-trip).
-                JsonValueKind.Object or JsonValueKind.Array => SqlValue.FromNVarchar(element.GetRawText()),
-                // Scalar match (String / Number / True / False / Null) —
-                // JSON_QUERY returns NULL in lax mode (Msg 13624 in strict,
-                // which EF / DACFx never depend on).
-                _ => SqlValue.Null(SqlType.NVarchar),
-            };
+            var subtree = JsonSubtree.Extract(match.Value, path.Mode);
+            return subtree is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(subtree);
         }
     }
 
