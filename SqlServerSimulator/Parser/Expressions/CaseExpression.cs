@@ -56,6 +56,17 @@ internal sealed class CaseExpression : Expression
         this.elseBranch = elseBranch;
     }
 
+    /// <summary>
+    /// Builds a simple-form CASE programmatically — <c>CASE input WHEN
+    /// compareValues[i] THEN thens[i] ... [ELSE elseBranch] END</c> — bypassing
+    /// the token parser. Used by PIVOT desugaring, where each pivot column is
+    /// <c>&lt;agg&gt;(CASE forCol WHEN value THEN argCol END)</c>; the
+    /// simple-form <c>=</c> comparison aligns the value's type to the FOR
+    /// column's via <see cref="BooleanExpression.CompareValuesPromoted"/>.
+    /// </summary>
+    internal static CaseExpression CreateSimple(Expression input, Expression[] compareValues, Expression[] thens, Expression? elseBranch) =>
+        new(input, searchedWhens: null, compareValues, thens, elseBranch);
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = this.input is null ? FindSearchedMatch(runtime) : FindSimpleMatch(runtime);

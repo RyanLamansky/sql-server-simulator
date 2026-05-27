@@ -47,6 +47,24 @@ partial class SimulatedSqlException
         new($"Argument {argumentIndex} of the {functionName} function does not match any of the expressions in the GROUP BY clause.", 8161, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8156 — raised when a PIVOT's <c>IN</c> list
+    /// names the same pivot value twice (each value becomes an output column,
+    /// so a repeat is a duplicate column). <paramref name="pivotAlias"/> is
+    /// the alias given to the PIVOT table source.
+    /// </summary>
+    internal static SimulatedSqlException PivotColumnSpecifiedMultipleTimes(string column, string pivotAlias) =>
+        new($"The column '{column}' was specified multiple times for '{pivotAlias}'.", 8156, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8167 — raised when the columns in an
+    /// UNPIVOT's <c>IN</c> list don't all share one type (UNPIVOT folds them
+    /// into a single value column, so their types must match). The
+    /// conflicting column name is double-quoted in the message.
+    /// </summary>
+    internal static SimulatedSqlException UnpivotColumnTypeConflict(string column) =>
+        new($"The type of column \"{column}\" conflicts with the type of other columns specified in the UNPIVOT list.", 8167, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 512 — fired when a scalar subquery (or one
     /// behind a comparison operator) returns more than one row. Verbatim
     /// text from the probed real SQL Server, including the literal extra

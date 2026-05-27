@@ -909,6 +909,18 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Parses one FROM source (see <see cref="ParseSingleFromSourceCore"/>)
+    /// and applies any trailing <c>PIVOT</c> / <c>UNPIVOT</c> table operator.
+    /// The postfix wrapper lives here so both the leftmost source and every
+    /// join-right source pick up PIVOT / UNPIVOT without changing their call
+    /// sites; the cursor-after-source contract is preserved either way (a
+    /// PIVOT / UNPIVOT clause consumes through its own alias and stops at the
+    /// next lookahead token).
+    /// </summary>
+    private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver) =>
+        ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, depth, outerTypeResolver), outerTypeResolver);
+
+    /// <summary>
     /// Parses one FROM source: a table name (with optional alias) or a
     /// derived-table <c>(SELECT ...)</c> (with optional alias). On entry
     /// the cursor is on the FROM or JOIN keyword (caller advances past it
@@ -916,7 +928,7 @@ internal sealed partial class Selection
     /// return, the cursor is at the first un-consumed token after the
     /// source — typically WHERE / ORDER / a JOIN keyword / ON / etc.
     /// </summary>
-    private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static FromSource ParseSingleFromSourceCore(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var token = context.GetNextRequired();
         switch (token)

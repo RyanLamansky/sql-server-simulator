@@ -99,6 +99,17 @@ internal sealed class AggregateExpression : Expression
     };
 
     /// <summary>
+    /// Builds a single-operand aggregate programmatically (used by PIVOT
+    /// desugaring, where each pivot column becomes
+    /// <c>&lt;kind&gt;(CASE forCol WHEN value THEN argCol END)</c>). Bypasses
+    /// the token parser and the <c>AggregateCollector</c> registration — the
+    /// PIVOT planner hands the built list straight to
+    /// <c>Selection.BuildSqlProjection</c>.
+    /// </summary>
+    internal static AggregateExpression CreatePivotAggregate(AggregateKind kind, Expression operand) =>
+        new(kind, operand, distinct: false, separator: null);
+
+    /// <summary>
     /// Convenience overload that auto-registers the new instance with the
     /// parser context's aggregate collector (when one is in scope, e.g.
     /// during a Selection projection / HAVING parse). Lets the executor
