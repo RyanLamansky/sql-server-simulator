@@ -8,9 +8,9 @@ namespace SqlServerSimulator;
 /// a single-base-table scan with <c>indexedColumn = &lt;stable value&gt;</c> WHERE
 /// conjuncts must take the index seek, keyed on the longest leading key-column
 /// prefix those conjuncts cover (the <c>SeekWidth(table,n)</c> trace records the
-/// prefix length); reads where the seek would be unsound (snapshot / RCSI,
-/// tx-scoped row locks, non-indexed or range predicates, NULL probe) must keep
-/// the full scan. The seek is
+/// prefix length); reads where the seek would be unsound (snapshot / RCSI once
+/// the table carries a version chain, tx-scoped row locks, non-indexed or range
+/// predicates, NULL probe) must keep the full scan. The seek is
 /// result-transparent, so the correctness suite passes either way — these read
 /// the opt-in <see cref="IndexSeekDiagnostics"/> trace (recorded at the single
 /// decision point) to assert the path directly, and check the row results stay
@@ -351,14 +351,59 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void RcsiRead_Declines()
+    public void RcsiRead_NoVersions_Seeks()
     {
+        // With an empty version store every row is implicitly committed at
+        // Xmin 0 (visible to every snapshot), so the live-heap index is sound
+        // for an RCSI reader — the seek fires instead of forcing a full scan.
         var (trace, rows) = Run($"alter database simulated set read_committed_snapshot on; {TableT}",
             "select val from t where id = 2");
-        Contains("Scan(t)", trace);
-        DoesNotContain("Seek(t)", trace);
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
         HasCount(1, rows);
         AreEqual(50, rows[0]);
+    }
+
+    [TestMethod]
+    public void RcsiRead_WithLiveVersionChain_Declines()
+    {
+        // An open writer leaves a version chain on the table, so an RCSI
+        // reader's visible version can diverge from the live heap row — the
+        // seek declines back to the full scan, and the reader still sees the
+        // pre-write committed value.
+        var sim = new Simulation();
+        using var reader = sim.CreateDbConnection();
+        reader.Open();
+        using (var setup = reader.CreateCommand())
+        {
+            setup.CommandText = $"alter database simulated set read_committed_snapshot on; {TableT}";
+            _ = setup.ExecuteNonQuery();
+        }
+
+        using var writer = sim.CreateDbConnection();
+        writer.Open();
+        using var writeCmd = writer.CreateCommand();
+        writeCmd.CommandText = "begin tran; update t set val = 999 where id = 1";
+        _ = writeCmd.ExecuteNonQuery();
+
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            using var command = reader.CreateCommand();
+            command.CommandText = "select val from t where id = 2";
+            using var r = command.ExecuteReader();
+            var rows = new List<object?>();
+            while (r.Read())
+                rows.Add(r.GetValue(0));
+            Contains("Scan(t)", IndexSeekDiagnostics.Sink);
+            DoesNotContain("Seek(t)", IndexSeekDiagnostics.Sink);
+            HasCount(1, rows);
+            AreEqual(50, rows[0]);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
     }
 
     [TestMethod]

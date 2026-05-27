@@ -32,6 +32,8 @@ internal sealed partial class Selection
         List<Expression> expressions,
         FromClause fromClause,
         SqlType[] outputSchema,
+        string[] outputColumnNames,
+        List<OrderBySpec> orderByItems,
         List<AggregateExpression> aggregates,
         int? topCount,
         int? offsetCount,
@@ -92,7 +94,7 @@ internal sealed partial class Selection
             ? (IReadOnlyList<Expression[]>)fromClause.GroupingSets
             : [[]];
 
-        var output = new List<byte[]>();
+        var output = new List<(SqlValue[] OrderKeys, byte[] Row)>();
         foreach (var groupingSet in effectiveSets)
         {
             var groups = new Dictionary<SqlValueKey, GroupState>();
@@ -122,6 +124,13 @@ internal sealed partial class Selection
                         groups[key] = state;
                     }
                 }
+
+                // Keep the first row that lands in each group as a
+                // representative. Within a group every grouping expression is
+                // constant, so any projection / HAVING / ORDER BY column buried
+                // inside a grouping expression (e.g. OrderDate under
+                // GROUP BY MONTH(OrderDate)) resolves correctly against it.
+                state.Representative ??= tuple;
 
                 for (var i = 0; i < aggregates.Count; i++)
                 {
@@ -202,9 +211,32 @@ internal sealed partial class Selection
                             return SqlValue.Null(expr.GetSqlType(batch, resolveColumnType));
                         }
                     }
-                    return outerResolver is not null
-                        ? outerResolver(name)
-                        : throw SimulatedSqlException.InvalidColumnName(name);
+
+                    // Column referenced inside one of this (non-empty) set's
+                    // grouping expressions: resolve against the group's
+                    // representative row. ResolveAcrossTuple itself falls back
+                    // to the outer resolver / Msg 207 when the name isn't a
+                    // source column, so this subsumes the outer-or-throw tail.
+                    return capturedSet.Length > 0 && state.Representative is { } rep
+                        ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, ResolveByGroupKey)
+                        : outerResolver is not null
+                            ? outerResolver(name)
+                            : throw SimulatedSqlException.InvalidColumnName(name);
+                }
+
+                // Resolves an ORDER BY item's column references against this
+                // group's output (alias / select-list name first), then through
+                // the grouped-key resolver — so ORDER BY can reference a select
+                // alias, a grouped column, or a grouping expression.
+                SqlValue ResolveOrderName(SqlValue[] projectedRow, MultiPartName name)
+                {
+                    for (var j = 0; j < outputColumnNames.Length; j++)
+                    {
+                        if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                            return projectedRow[j];
+                    }
+
+                    return ResolveByGroupKey(name);
                 }
 
                 try
@@ -216,7 +248,21 @@ internal sealed partial class Selection
                     for (var i = 0; i < expressions.Count; i++)
                         projected[i] = expressions[i].Run(new RuntimeContext(ResolveByGroupKey, batch));
 
-                    output.Add(RowEncoder.EncodeRow(outputSchema, projected));
+                    // Aggregate-query ORDER BY: keys are computed here, where
+                    // each aggregate is bound and the grouping context is
+                    // published, then the whole stream is sorted before TOP /
+                    // OFFSET / FETCH apply. Ordinal items index the output row;
+                    // expression items (aggregates, grouped columns, aliases,
+                    // grouping expressions) resolve through ResolveOrderName.
+                    var orderKeys = new SqlValue[orderByItems.Count];
+                    for (var k = 0; k < orderByItems.Count; k++)
+                    {
+                        orderKeys[k] = orderByItems[k].IsOrdinal
+                            ? projected[orderByItems[k].Ordinal - 1]
+                            : orderByItems[k].Expr!.Run(new RuntimeContext(name => ResolveOrderName(projected, name), batch));
+                    }
+
+                    output.Add((orderKeys, RowEncoder.EncodeRow(outputSchema, projected)));
                 }
                 finally
                 {
@@ -226,15 +272,21 @@ internal sealed partial class Selection
             }
         }
 
-        if (topCount is { } topLimit && output.Count > topLimit)
-            output = [.. output.Take(topLimit)];
+        // ORDER BY sorts the full grouped stream (across all grouping sets)
+        // before any row-count limiting — so TOP / FETCH select the correct
+        // rows rather than an arbitrary prefix.
+        if (orderByItems.Count > 0)
+            output.Sort((a, b) => CompareOrderKeys(a.OrderKeys, b.OrderKeys, orderByItems));
 
+        IEnumerable<(SqlValue[] OrderKeys, byte[] Row)> limited = output;
+        if (topCount is { } topLimit)
+            limited = limited.Take(topLimit);
         if (offsetCount is { } offset && offset > 0)
-            output = [.. output.Skip(offset)];
-        if (fetchCount is { } fetchLimit && output.Count > fetchLimit)
-            output = [.. output.Take(fetchLimit)];
+            limited = limited.Skip(offset);
+        if (fetchCount is { } fetchLimit)
+            limited = limited.Take(fetchLimit);
 
-        return output;
+        return [.. limited.Select(o => o.Row)];
     }
 
     /// <summary>
@@ -247,6 +299,12 @@ internal sealed partial class Selection
     {
         public readonly SqlValue[] KeyValues = keyValues;
         public readonly Aggregator[] Aggregators = aggregators;
+
+        /// <summary>
+        /// First input row that landed in this group, used to resolve columns
+        /// buried inside a grouping expression (constant within the group).
+        /// </summary>
+        public byte[]?[]? Representative;
     }
 
     /// <summary>

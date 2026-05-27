@@ -142,11 +142,26 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
             }
         }
+        // ORDER BY items resolve output-column aliases first (then fall back to
+        // source columns), matching SQL Server and the runtime ComputeOrderKeys
+        // — so `ORDER BY <select-alias>` and `ORDER BY <aggregate/expression>`
+        // type-check here instead of failing as an unknown source column.
+        SqlType ResolveOrderByType(MultiPartName name)
+        {
+            for (var j = 0; j < outputColumnNames.Length; j++)
+            {
+                if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                    return outputSchema[j];
+            }
+
+            return ResolveColumnType(name);
+        }
+
         for (var i = 0; i < orderBy.Count; i++)
         {
             var keyType = orderBy[i].IsOrdinal
                 ? outputSchema[orderBy[i].Ordinal - 1]
-                : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveColumnType);
+                : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
             if (keyType.IsLob)
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
@@ -192,7 +207,7 @@ internal sealed partial class Selection
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
             (batch, outerResolver) =>
             aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
+                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
                 : windows.Count > 0
                     ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                     : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),

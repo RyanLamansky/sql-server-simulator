@@ -208,4 +208,47 @@ public class OrderByTests
         CollectionAssert.AreEquivalent(new[] { 100, 101, 102, 200 }, rows);
         AreEqual(200, rows[^1]);
     }
+
+    [TestMethod]
+    public void OrderBy_AggregateExpression_OnGroupedQuery_SortsByAggregate()
+    {
+        using var connection = Seeded("k int, v int", "(1,10),(1,20),(2,5),(3,100)");
+        using var reader = connection.CreateCommand(
+            "select k from t group by k order by sum(v) desc").ExecuteReader();
+        CollectionAssert.AreEqual(new object?[] { 3, 1, 2 }, Column0(reader));
+    }
+
+    [TestMethod]
+    public void OrderBy_SelectAlias_OnGroupedQuery_SortsByAlias()
+    {
+        using var connection = Seeded("k int, v int", "(1,10),(1,20),(2,5),(3,100)");
+        using var reader = connection.CreateCommand(
+            "select k, sum(v) as s from t group by k order by s desc").ExecuteReader();
+        CollectionAssert.AreEqual(new object?[] { 3, 1, 2 }, Column0(reader));
+    }
+
+    [TestMethod]
+    public void Top_WithOrderByAggregate_OnGroupedQuery_SelectsHighestGroups()
+    {
+        // TOP must apply AFTER the ORDER BY aggregate sort, not to an arbitrary prefix.
+        using var connection = Seeded("k int, v int", "(1,10),(1,20),(2,5),(3,100)");
+        using var reader = connection.CreateCommand(
+            "select top (2) k from t group by k order by sum(v) desc").ExecuteReader();
+        CollectionAssert.AreEqual(new object?[] { 3, 1 }, Column0(reader));
+    }
+
+    [TestMethod]
+    public void GroupBy_ScalarExpression_ProjectsAndOrdersByExpression()
+    {
+        // GROUP BY <expression> while projecting and ordering by that same
+        // expression: it resolves against the group (constant within it), not
+        // by re-evaluating the now-grouped-away underlying column.
+        using var connection = Seeded("v int", "(1),(2),(11),(12),(21)");
+        using var reader = connection.CreateCommand(
+            "select v / 10 as bucket, count(*) as c from t group by v / 10 order by v / 10").ExecuteReader();
+        var rows = new List<(int Bucket, int Count)>();
+        while (reader.Read())
+            rows.Add(((int)reader[0], (int)reader[1]));
+        CollectionAssert.AreEqual(new[] { (0, 2), (1, 2), (2, 1) }, rows);
+    }
 }

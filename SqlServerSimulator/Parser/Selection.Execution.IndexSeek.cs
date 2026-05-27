@@ -52,15 +52,27 @@ internal sealed partial class Selection
         // The seek narrows the row source, then routes each candidate through
         // the SAME per-row lock / conflict pipeline the full scan uses — so it
         // touches (and locks) only the seeked rows, matching a real index seek.
-        // Two reads keep their whole-table scan instead:
-        //   * snapshot / RCSI — the version visible to the reader can carry a
-        //     different key than the live heap row, so a current-heap index
-        //     would miss it;
-        //   * tx-scoped row locks (REPEATABLE READ / SERIALIZABLE / UPDLOCK …)
-        //     — the scan deliberately locks every row it reads to end of tx.
-        if (source.HeapPlan is not { } plan
-            || plan.RowTxScoped
-            || batch.ResolveSnapshotXidForRead(table) is not null)
+        // tx-scoped row locks (REPEATABLE READ / SERIALIZABLE / UPDLOCK …) keep
+        // the whole-table scan, which deliberately locks every row it reads to
+        // end of transaction.
+        if (source.HeapPlan is not { } plan || plan.RowTxScoped)
+        {
+            IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
+            return sources;
+        }
+
+        // A snapshot / RCSI reader's visible version can carry a different key
+        // than the live heap row, so a current-heap index could miss it — but
+        // only once the table actually has version chains. With an empty version
+        // store every row is implicitly committed at Xmin 0 (visible to every
+        // snapshot) and the live heap IS the visible version, so the seek is
+        // safe; this is the common case for read-mostly / bacpac-loaded data,
+        // where declining would force a full scan on every point lookup.
+        // ResolveSnapshotXidForRead is called unconditionally for its side
+        // effects (pins the statement/tx snapshot xid, registers the active
+        // snapshot reader) — the row-touch path relies on that bookkeeping
+        // whether the read seeks or scans.
+        if (batch.ResolveSnapshotXidForRead(table) is not null && !table.RowVersions.IsEmpty)
         {
             IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
             return sources;
