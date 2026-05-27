@@ -406,6 +406,17 @@ internal sealed partial class Selection
                         var aggregate = win.AggregateInfo!;
                         var operandType = windowOperandTypes[w];
                         var resultType = windowResultTypes[w];
+
+                        // JSON_OBJECTAGG carries a per-row key that the generic
+                        // value-only Add path can't thread, so it gets a
+                        // dedicated walk. JSON_ARRAYAGG has no second operand and
+                        // rides the generic path below unchanged.
+                        if (aggregate.Kind == AggregateKind.JsonObjectAgg)
+                        {
+                            ComputeJsonObjectAggWindow(win, sources, buffered, perWindowKeys, w, orderByList, operandType, resultType, partitions, results, batch, outerResolver);
+                            break;
+                        }
+
                         foreach (var (_, indices) in partitions)
                         {
                             if (orderByList.Count > 0)
@@ -546,6 +557,80 @@ internal sealed partial class Selection
 
         foreach (var (projected, _) in windowed)
             yield return RowEncoder.EncodeRow(outputSchema, projected);
+    }
+
+    /// <summary>
+    /// Window walk for <c>JSON_OBJECTAGG(key : value) OVER (...)</c>. Unlike
+    /// the generic aggregate path, each row contributes two evaluated
+    /// expressions (key + value), so the key is set on the aggregator
+    /// immediately before its value is added. Whole-partition windows (no
+    /// ORDER BY, no explicit frame) compute one object and broadcast it;
+    /// running / framed windows rebuild per row over the frame extent (JSON
+    /// aggregators are non-removable, matching the generic path's rebuild
+    /// fallback). Results are written into <paramref name="results"/> by
+    /// buffer index.
+    /// </summary>
+    private static void ComputeJsonObjectAggWindow(
+        WindowExpression win,
+        FromSource[] sources,
+        List<byte[]?[]> buffered,
+        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
+        int w,
+        List<OrderBySpec> orderByList,
+        SqlType operandType,
+        SqlType resultType,
+        Dictionary<SqlValue[], List<int>> partitions,
+        SqlValue[] results,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var aggregate = win.AggregateInfo!;
+        foreach (var (_, indices) in partitions)
+        {
+            if (orderByList.Count > 0)
+            {
+                indices.Sort((a, b) =>
+                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+            }
+
+            var count = indices.Count;
+            var keys = new SqlValue[count];
+            var values = new SqlValue[count];
+            for (var p = 0; p < count; p++)
+            {
+                var localTuple = buffered[indices[p]];
+                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                var runtime = new RuntimeContext(ResolveSource, batch);
+                keys[p] = aggregate.KeyExpression!.Run(runtime);
+                values[p] = aggregate.Operand!.Run(runtime);
+            }
+
+            if (orderByList.Count == 0 && win.Frame is null)
+            {
+                var aggregator = (Aggregators.JsonObjectAggAggregator)Aggregator.Create(aggregate, operandType, resultType);
+                for (var p = 0; p < count; p++)
+                {
+                    aggregator.SetKey(keys[p]);
+                    aggregator.Add(values[p]);
+                }
+                var partitionResult = aggregator.Result();
+                foreach (var idx in indices)
+                    results[idx] = partitionResult;
+                continue;
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                var aggregator = (Aggregators.JsonObjectAggAggregator)Aggregator.Create(aggregate, operandType, resultType);
+                for (var j = frameStart; j <= frameEnd; j++)
+                {
+                    aggregator.SetKey(keys[j]);
+                    aggregator.Add(values[j]);
+                }
+                results[indices[i]] = aggregator.Result();
+            }
+        }
     }
 
     /// <summary>

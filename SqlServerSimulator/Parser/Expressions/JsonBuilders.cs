@@ -174,10 +174,12 @@ internal static class JsonValueRender
 }
 
 /// <summary>
-/// Either-or clause that follows JSON_OBJECT / JSON_ARRAY's value list,
-/// controlling whether SQL NULL value-expressions appear in the output as
-/// JSON null or are absent altogether. Default is <see cref="AbsentOnNull"/>
-/// (matching real SQL Server — probe-confirmed 2026-05-23).
+/// Either-or clause that follows a JSON builder's value list, controlling
+/// whether SQL NULL value-expressions appear in the output as JSON null or are
+/// absent altogether. The default is builder-specific (probe-confirmed against
+/// SQL Server 2025): the array builders (<c>JSON_ARRAY</c> / <c>JSON_ARRAYAGG</c>)
+/// default to <see cref="AbsentOnNull"/>, while the object builders
+/// (<c>JSON_OBJECT</c> / <c>JSON_OBJECTAGG</c>) default to <see cref="NullOnNull"/>.
 /// </summary>
 internal enum JsonNullClause
 {
@@ -198,7 +200,17 @@ internal static class JsonNullClauseParser
     /// resolved clause; the default when neither shape appears is
     /// <see cref="JsonNullClause.AbsentOnNull"/>.
     /// </summary>
-    public static JsonNullClause Parse(ParserContext context)
+    public static JsonNullClause Parse(ParserContext context) =>
+        Parse(context, JsonNullClause.AbsentOnNull);
+
+    /// <summary>
+    /// As <see cref="Parse(ParserContext)"/>, but returns
+    /// <paramref name="default"/> when no explicit clause is present. The
+    /// aggregate builders supply their kind-specific default
+    /// (<c>JSON_ARRAYAGG</c> → <see cref="JsonNullClause.AbsentOnNull"/>,
+    /// <c>JSON_OBJECTAGG</c> → <see cref="JsonNullClause.NullOnNull"/>).
+    /// </summary>
+    public static JsonNullClause Parse(ParserContext context, JsonNullClause @default)
     {
         // ABSENT ON NULL — bare `absent` Name token followed by ON NULL.
         if (context.Token is UnquotedString { Value: var absentText }
@@ -213,7 +225,7 @@ internal static class JsonNullClauseParser
             ExpectOnNull(context);
             return JsonNullClause.NullOnNull;
         }
-        return JsonNullClause.AbsentOnNull;
+        return @default;
     }
 
     private static void ExpectOnNull(ParserContext context)
@@ -231,16 +243,18 @@ internal static class JsonNullClauseParser
 /// <summary>
 /// SQL <c>JSON_OBJECT([key1 : value1 [, ... keyN : valueN]] [null_clause])</c>:
 /// builds a JSON object string from key-value pairs. Default null clause is
-/// <see cref="JsonNullClause.AbsentOnNull"/> (NULL values are omitted).
-/// Duplicate keys are preserved verbatim (matching real SQL Server — no
-/// dedup). Result type is <see cref="SqlType.NVarchar"/>.
+/// <see cref="JsonNullClause.NullOnNull"/> — NULL values emit a JSON
+/// <c>null</c> (Microsoft documents this default verbatim; note it is the
+/// opposite of both <c>JSON_ARRAY</c> and the <c>FOR JSON</c> clause, which
+/// omit NULLs by default). Duplicate keys are preserved verbatim (matching
+/// real SQL Server — no dedup). Result type is <see cref="SqlType.NVarchar"/>.
 /// </summary>
 /// <remarks>
 /// Probe-confirmed against SQL Server 2025 (2026-05-23): empty argument
 /// list yields <c>{}</c>; nested <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> /
 /// <c>JSON_QUERY</c> values embed as raw JSON (not re-quoted); other
 /// strings go through JSON's escape set (<c>\"</c>, <c>\\</c>, control
-/// chars). NULL key raises Msg 13601 at runtime; missing <c>:</c> /
+/// chars). NULL key raises Msg 13638 at runtime; missing <c>:</c> /
 /// trailing comma / partial null-clause raise Msg 102 at parse.
 /// </remarks>
 internal sealed class JsonObject : Expression
@@ -254,7 +268,7 @@ internal sealed class JsonObject : Expression
         if (context.Token is Operator { Character: ')' })
         {
             this.entries = [];
-            this.nullClause = JsonNullClause.AbsentOnNull;
+            this.nullClause = JsonNullClause.NullOnNull;
             return;
         }
 
@@ -287,7 +301,7 @@ internal sealed class JsonObject : Expression
             break;
         }
 
-        this.nullClause = JsonNullClauseParser.Parse(context);
+        this.nullClause = JsonNullClauseParser.Parse(context, JsonNullClause.NullOnNull);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.entries = [.. list];

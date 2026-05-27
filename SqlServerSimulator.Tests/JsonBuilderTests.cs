@@ -4,11 +4,13 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// <c>JSON_OBJECT</c> and <c>JSON_ARRAY</c> builders. Output strings probed
-/// verbatim against SQL Server 2025 (2026-05-23): default null clause is
-/// <c>ABSENT ON NULL</c>; nested <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> /
-/// <c>JSON_QUERY</c> results embed raw; numbers / booleans render
-/// unquoted; varbinary base64-encodes; datetime2 uses the <c>T</c>-separated
-/// ISO form.
+/// verbatim against SQL Server 2025: the default null clause is
+/// builder-specific — <c>JSON_ARRAY</c> defaults to <c>ABSENT ON NULL</c> but
+/// <c>JSON_OBJECT</c> defaults to <c>NULL ON NULL</c> (Microsoft documents this
+/// explicitly; it is the opposite of the <c>FOR JSON</c> clause). Nested
+/// <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> / <c>JSON_QUERY</c> results embed
+/// raw; numbers / booleans render unquoted; varbinary base64-encodes;
+/// datetime2 uses the <c>T</c>-separated ISO form.
 /// </summary>
 [TestClass]
 public class JsonBuilderTests
@@ -27,8 +29,8 @@ public class JsonBuilderTests
             new Simulation().ExecuteScalar("select json_object('a': 1, 'b': 'two')"));
 
     [TestMethod]
-    public void JsonObject_DefaultIsAbsentOnNull()
-        => AreEqual("{\"a\":1}", new Simulation().ExecuteScalar(
+    public void JsonObject_DefaultIsNullOnNull()
+        => AreEqual("{\"a\":1,\"b\":null}", new Simulation().ExecuteScalar(
             "select json_object('a': 1, 'b': cast(null as int))"));
 
     [TestMethod]

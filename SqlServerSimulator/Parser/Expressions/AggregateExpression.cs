@@ -21,6 +21,8 @@ internal enum AggregateKind
     StringAgg,
     ChecksumAgg,
     ApproxCountDistinct,
+    JsonArrayAgg,
+    JsonObjectAgg,
 }
 
 /// <summary>
@@ -64,6 +66,26 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     public IReadOnlyList<OrderBySpec>? OrderBy;
 
+    /// <summary>
+    /// For <see cref="AggregateKind.JsonObjectAgg"/>, the property-name
+    /// expression (the left side of <c>key : value</c>); the value side is
+    /// carried in <see cref="Operand"/>. Null for every other kind. Set once
+    /// during parse, alongside <see cref="JsonNulls"/>.
+    /// </summary>
+    public Expression? KeyExpression;
+
+    /// <summary>
+    /// For <see cref="AggregateKind.JsonArrayAgg"/> /
+    /// <see cref="AggregateKind.JsonObjectAgg"/>, whether SQL NULL value
+    /// expressions appear as JSON <c>null</c> or are omitted. Defaults match
+    /// the corresponding scalar builders (probe-confirmed against SQL Server
+    /// 2025): <c>JSON_ARRAYAGG</c> → <see cref="JsonNullClause.AbsentOnNull"/>
+    /// (like <c>JSON_ARRAY</c>), <c>JSON_OBJECTAGG</c> →
+    /// <see cref="JsonNullClause.NullOnNull"/> (like <c>JSON_OBJECT</c>). Set
+    /// once during parse; ignored by every non-JSON aggregate kind.
+    /// </summary>
+    public JsonNullClause JsonNulls;
+
     private SqlValue cachedResult;
 
     private bool resultBound;
@@ -95,8 +117,19 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.StringAgg => "string_agg",
         AggregateKind.ChecksumAgg => "checksum_agg",
         AggregateKind.ApproxCountDistinct => "approx_count_distinct",
+        AggregateKind.JsonArrayAgg => "json_arrayagg",
+        AggregateKind.JsonObjectAgg => "json_objectagg",
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
+
+    /// <summary>
+    /// The <c>nvarchar(max)</c> store type both JSON aggregates project (the
+    /// scalar <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> builders return plain
+    /// <c>nvarchar</c>, but the aggregate forms widen to MAX — probe-confirmed
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static readonly NVarcharSqlType NVarcharMax =
+        NVarcharSqlType.Get(SqlType.MaxLengthSentinel, Collation.Baseline, Coercibility.CoercibleDefault);
 
     /// <summary>
     /// Builds a single-operand aggregate programmatically (used by PIVOT
@@ -144,6 +177,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.ChecksumAgg => SqlType.Int32,
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => SqlType.Float,
         AggregateKind.Max or AggregateKind.Min or AggregateKind.StringAgg => this.Operand!.GetSqlType(batch, resolveColumnType),
+        AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg => NVarcharMax,
         AggregateKind.Sum => DeriveSumResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
         AggregateKind.Avg => DeriveAvgResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
@@ -202,6 +236,10 @@ internal sealed class AggregateExpression : Expression
     {
         if (kind == AggregateKind.StringAgg)
             return ParseStringAgg(context);
+        if (kind == AggregateKind.JsonArrayAgg)
+            return ParseJsonArrayAgg(context);
+        if (kind == AggregateKind.JsonObjectAgg)
+            return ParseJsonObjectAgg(context);
 
         // COUNT(*), COUNT_BIG(*) — the only aggregates that accept a bare `*`.
         if (kind is AggregateKind.Count or AggregateKind.CountBig
@@ -236,6 +274,104 @@ internal sealed class AggregateExpression : Expression
         return Register(context, new AggregateExpression(AggregateKind.StringAgg, operand, distinct: false, separator: separator));
     }
 
+    /// <summary>
+    /// Parses <c>JSON_ARRAYAGG(value [ORDER BY expr [ASC|DESC] [, ...]] [null_clause])</c>.
+    /// The <c>ORDER BY</c> sits inside the function parentheses (not a
+    /// <c>WITHIN GROUP</c> postfix) and is mutually exclusive with a following
+    /// <c>OVER</c> — that conflict is rejected in
+    /// <see cref="WindowExpression.WrapAggregate"/>. Default null clause is
+    /// <see cref="JsonNullClause.AbsentOnNull"/> (matching <c>JSON_ARRAY</c>).
+    /// Leaves the cursor on the closing <c>)</c>.
+    /// </summary>
+    private static AggregateExpression ParseJsonArrayAgg(ParserContext context)
+    {
+        var operand = Expression.Parse(context);
+        List<OrderBySpec>? orderBy = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+            orderBy = ParseInParensOrderBy(context);
+        var jsonNulls = JsonNullClauseParser.Parse(context, JsonNullClause.AbsentOnNull);
+        return Register(context, new AggregateExpression(AggregateKind.JsonArrayAgg, operand, distinct: false, separator: null)
+        {
+            OrderBy = orderBy,
+            JsonNulls = jsonNulls,
+        });
+    }
+
+    /// <summary>
+    /// Parses <c>JSON_OBJECTAGG(key : value [null_clause])</c>. Only the colon
+    /// key/value form is accepted (the SQL-standard <c>key VALUE value</c>
+    /// raises Msg 102, matching SQL Server). Default null clause is
+    /// <see cref="JsonNullClause.NullOnNull"/> (matching the scalar
+    /// <c>JSON_OBJECT</c> builder). No <c>ORDER BY</c> is permitted. Leaves the
+    /// cursor on the closing <c>)</c>.
+    /// </summary>
+    private static AggregateExpression ParseJsonObjectAgg(ParserContext context)
+    {
+        // Key parse: redirect a bare ':' to end-of-expression so the colon is
+        // seen by this parser rather than swallowed as a type-cast prefix
+        // (mirrors JsonObject's key handling).
+        var savedFlag = context.StopExpressionAtBareColon;
+        context.StopExpressionAtBareColon = true;
+        Expression key;
+        try
+        {
+            key = Expression.Parse(context);
+        }
+        finally
+        {
+            context.StopExpressionAtBareColon = savedFlag;
+        }
+
+        if (context.Token is not Operator { Character: ':' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var value = Expression.Parse(context);
+        var jsonNulls = JsonNullClauseParser.Parse(context, JsonNullClause.NullOnNull);
+        // JSON_OBJECTAGG has no ordered-set form; ORDER BY here is Msg 156 near
+        // the keyword (real SQL Server), not the generic Msg 102 the bare
+        // missing-')' fall-through would otherwise raise.
+        return context.Token is ReservedKeyword { Keyword: Keyword.Order } orderKeyword
+            ? throw SimulatedSqlException.SyntaxErrorNearKeyword(orderKeyword)
+            : Register(context, new AggregateExpression(AggregateKind.JsonObjectAgg, value, distinct: false, separator: null)
+            {
+                KeyExpression = key,
+                JsonNulls = jsonNulls,
+            });
+    }
+
+    /// <summary>
+    /// Parses the in-parentheses <c>ORDER BY expr [ASC|DESC] [, ...]</c> of
+    /// <c>JSON_ARRAYAGG</c>. Entered with the cursor on the <c>ORDER</c>
+    /// keyword; leaves it on the token after the list (the null clause or the
+    /// closing <c>)</c>).
+    /// </summary>
+    private static List<OrderBySpec> ParseInParensOrderBy(ParserContext context)
+    {
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var items = new List<OrderBySpec>();
+        do
+        {
+            context.MoveNextRequired();
+            var expr = Expression.Parse(context);
+            var descending = false;
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Asc }:
+                    context.MoveNextRequired();
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Desc }:
+                    descending = true;
+                    context.MoveNextRequired();
+                    break;
+            }
+            items.Add(OrderBySpec.FromExpression(expr, descending));
+        }
+        while (context.Token is Operator { Character: ',' });
+        return items;
+    }
+
     internal override string DebugDisplay()
     {
         var name = this.Kind switch
@@ -253,8 +389,12 @@ internal sealed class AggregateExpression : Expression
             AggregateKind.StringAgg => "STRING_AGG",
             AggregateKind.ChecksumAgg => "CHECKSUM_AGG",
             AggregateKind.ApproxCountDistinct => "APPROX_COUNT_DISTINCT",
+            AggregateKind.JsonArrayAgg => "JSON_ARRAYAGG",
+            AggregateKind.JsonObjectAgg => "JSON_OBJECTAGG",
             _ => this.Kind.ToString(),
         };
+        if (this.Kind == AggregateKind.JsonObjectAgg)
+            return $"{name}({this.KeyExpression!.DebugDisplay()}: {this.Operand!.DebugDisplay()})";
         var distinct = this.Distinct ? "DISTINCT " : "";
         var operand = this.Operand?.DebugDisplay() ?? "*";
         var separator = this.Separator is null ? "" : $", {this.Separator.DebugDisplay()}";

@@ -751,6 +751,7 @@ internal abstract class Expression
                 "IDENT_CURRENT" => new IdentCurrent(context),
                 "INDEXPROPERTY" => new IndexProperty(context),
                 "IS_ROLEMEMBER" => new RoleMemberCheck(context),
+                "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
                 "STRING_ESCAPE" => new StringEscape(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null
@@ -759,6 +760,7 @@ internal abstract class Expression
             {
                 "COLUMNPROPERTY" => new ColumnProperty(context),
                 "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
+                "JSON_OBJECTAGG" => AggregateExpression.Parse(context, AggregateKind.JsonObjectAgg),
                 "OBJECTPROPERTY" => new ObjectProperty(context),
                 "ORIGINAL_LOGIN" => new OriginalLogin(context),
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),

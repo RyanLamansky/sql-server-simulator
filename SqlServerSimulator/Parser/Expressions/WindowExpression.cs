@@ -487,6 +487,11 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.DistinctNotAllowedInOver();
         if (aggregate.Kind == AggregateKind.StringAgg)
             throw SimulatedSqlException.FunctionNotValidForOver("string_agg");
+        // JSON_ARRAYAGG's in-parens ORDER BY is mutually exclusive with OVER —
+        // real SQL Server raises Msg 156 near the OVER keyword (the cursor is
+        // on it here). JSON_OBJECTAGG can't carry an in-parens ORDER BY at all.
+        if (aggregate.Kind == AggregateKind.JsonArrayAgg && aggregate.OrderBy is not null)
+            throw context.Token is ReservedKeyword rk ? SimulatedSqlException.SyntaxErrorNearKeyword(rk) : SimulatedSqlException.SyntaxErrorNear(context);
 
         // The aggregate auto-registered with AggregateCollector during its
         // own Parse; remove it now that the window wrapper takes over the

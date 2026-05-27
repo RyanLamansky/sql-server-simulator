@@ -143,7 +143,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Variables, control flow (IF/WHILE/BREAK/CONTINUE/RETURN), TRY/CATCH+THROW+ERROR_*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, PRINT, WAITFOR** → [`control-flow.md`](docs/claude/control-flow.md).
 - **Cursors (`DECLARE … CURSOR` / `OPEN` / `FETCH` / `CLOSE` / `DEALLOCATE`, STATIC / KEYSET / DYNAMIC sensitivity, scroll fetches, `@@FETCH_STATUS` / `@@CURSOR_ROWS` / `CURSOR_STATUS`, `WHERE CURRENT OF`)** → [`cursors.md`](docs/claude/cursors.md).
 - **CTE shapes / recursive-CTE error handling** → [`ctes.md`](docs/claude/ctes.md).
-- **JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / JSON_PATH_EXISTS / ISJSON / OPENJSON** → [`json.md`](docs/claude/json.md).
+- **JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / JSON_OBJECTAGG / JSON_ARRAYAGG / JSON_PATH_EXISTS / ISJSON / OPENJSON** → [`json.md`](docs/claude/json.md).
 - **Name resolution, schema lookup, CREATE / DROP / ALTER SCHEMA TRANSFER, `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` / `SCHEMA_ID` / `SCHEMA_NAME` / `DB_ID` / `DB_NAME`, cross-DB read routing** → [`schemas.md`](docs/claude/schemas.md).
 - **System metadata surfaces** (sys.* / INFORMATION_SCHEMA.*, function-form lookups: `OBJECTPROPERTY` / `OBJECTPROPERTYEX` / `COLUMNPROPERTY` / `INDEXPROPERTY` / `INDEX_COL` / `INDEXKEY_PROPERTY` / `STATS_DATE` / `TYPEPROPERTY` / `SERVERPROPERTY` / `COL_LENGTH` / `COL_NAME` / `TYPE_NAME` / `TYPE_ID` / `PARSENAME`) → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL / `@@NESTLEVEL` / `@@PROCID`** → [`programmable.md`](docs/claude/programmable.md).

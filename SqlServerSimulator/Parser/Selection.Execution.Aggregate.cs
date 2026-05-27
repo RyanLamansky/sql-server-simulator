@@ -140,6 +140,27 @@ internal sealed partial class Selection
                             continue;
                         }
                     }
+
+                    // JSON_ARRAYAGG with an in-parens ORDER BY buffers each
+                    // value + ORDER BY tuple; the aggregator sorts at Result.
+                    if (aggregate.Kind == AggregateKind.JsonArrayAgg && aggregate.OrderBy is { } jsonOrderBy
+                        && state.Aggregators[i] is Aggregators.JsonArrayAggAggregator arrayAgg)
+                    {
+                        var orderKeys = new SqlValue[jsonOrderBy.Count];
+                        for (var k = 0; k < jsonOrderBy.Count; k++)
+                            orderKeys[k] = jsonOrderBy[k].Expr!.Run(new RuntimeContext(ResolveColumn, batch));
+                        arrayAgg.AddOrdered(aggregate.Operand!.Run(new RuntimeContext(ResolveColumn, batch)), orderKeys);
+                        continue;
+                    }
+
+                    // JSON_OBJECTAGG needs the per-row key set before the value
+                    // is streamed; the value flows through the generic Add below.
+                    if (aggregate.Kind == AggregateKind.JsonObjectAgg
+                        && state.Aggregators[i] is Aggregators.JsonObjectAggAggregator objectAgg)
+                    {
+                        objectAgg.SetKey(aggregate.KeyExpression!.Run(new RuntimeContext(ResolveColumn, batch)));
+                    }
+
                     var operand = aggregate.Operand;
                     state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(new RuntimeContext(ResolveColumn, batch)));
                 }
