@@ -164,50 +164,91 @@ public sealed class XmlTests
     }
 
     [TestMethod]
-    public void XmlValue_Method_RaisesNotSupportedAtExecute()
+    public void XmlValue_Method_ExtractsScalar()
+        => AreEqual("hi", new Simulation().ExecuteScalar("""
+            create table dbo.doc (id int, body xml);
+            insert into dbo.doc values (1, N'<r><c>hi</c></r>');
+            select body.value('(/r/c)[1]', 'nvarchar(50)') from dbo.doc
+            """));
+
+    [TestMethod]
+    public void XmlQuery_Method_SerializesMatchedNodes()
+        => AreEqual("<c>a</c><c>b</c>", new Simulation().ExecuteScalar("""
+            create table dbo.doc (id int, body xml);
+            insert into dbo.doc values (1, N'<r><c>a</c><c>b</c></r>');
+            select cast(body.query('/r/c') as nvarchar(max)) from dbo.doc
+            """));
+
+    [TestMethod]
+    public void XmlExist_Method_ReturnsBit()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
+        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r><c>x</c></r>')");
+        IsTrue((bool)sim.ExecuteScalar("select body.exist('/r/c') from dbo.doc")!);
+        IsFalse((bool)sim.ExecuteScalar("select body.exist('/r/missing') from dbo.doc")!);
+    }
+
+    [TestMethod]
+    public void XmlExist_NullInstance_ReturnsNull()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
+        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, NULL)");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select body.exist('/r') from dbo.doc"));
+    }
+
+    [TestMethod]
+    public void XmlModify_Method_RaisesNotSupportedAtExecute()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
+        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r/>')");
+        var ex = ThrowsExactly<NotSupportedException>(() =>
+            sim.ExecuteScalar("select body.modify('insert <c/> into (/r)[1]') from dbo.doc"));
+        Contains(".modify()", ex.Message);
+    }
+
+    [TestMethod]
+    public void CreateViewWithXmlValue_ProjectsExtractedScalar()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
         _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r><c>hi</c></r>')");
-        var ex = ThrowsExactly<NotSupportedException>(() =>
-            sim.ExecuteScalar("select body.value('(/r/c)[1]', 'nvarchar(50)') from dbo.doc"));
-        Contains(".value()", ex.Message);
+        _ = sim.ExecuteNonQuery("create view dbo.v_doc as select body.value('(/r/c)[1]', 'nvarchar(50)') as v from dbo.doc");
+        AreEqual("hi", sim.ExecuteScalar("select v from dbo.v_doc"));
     }
 
     [TestMethod]
-    public void XmlQuery_Method_RaisesNotSupportedAtExecute()
+    public void XmlNodes_CrossApply_ShredsRows()
     {
+        // .nodes() as a CROSS APPLY rowset source, with relative .value()
+        // against each shredded node — the AdventureWorks vJobCandidate* shape.
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
-        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r/>')");
-        var ex = ThrowsExactly<NotSupportedException>(() =>
-            sim.ExecuteScalar("select body.query('/r') from dbo.doc"));
-        Contains(".query()", ex.Message);
+        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r><c>a</c><c>b</c><c>c</c></r>')");
+        AreEqual(3, sim.ExecuteScalar("""
+            select count(*) from dbo.doc
+            cross apply body.nodes('/r/c') as n(ref)
+            """));
+        AreEqual("a|b|c", sim.ExecuteScalar("""
+            select string_agg(n.ref.value('(.)[1]', 'nvarchar(10)'), '|') from dbo.doc
+            cross apply body.nodes('/r/c') as n(ref)
+            """));
     }
 
     [TestMethod]
-    public void XmlExist_Method_RaisesNotSupportedAtExecute()
+    public void XmlNodes_OuterApply_NullXmlYieldsNoRows()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
-        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r/>')");
-        var ex = ThrowsExactly<NotSupportedException>(() =>
-            sim.ExecuteScalar("select body.exist('/r') from dbo.doc"));
-        Contains(".exist()", ex.Message);
-    }
-
-    [TestMethod]
-    public void CreateViewWithXmlMethod_Succeeds_FailsAtExecute()
-    {
-        // CREATE VIEW body parses cleanly (proc/view bodies parse for name
-        // resolution but XML methods defer their NotSupportedException to
-        // run-time). The query against the view fails on first row.
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
-        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r/>')");
-        _ = sim.ExecuteNonQuery("create view dbo.v_doc as select body.value('(/r)[1]', 'nvarchar(50)') as v from dbo.doc");
-        _ = ThrowsExactly<NotSupportedException>(() =>
-            sim.ExecuteScalar("select v from dbo.v_doc"));
+        _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, NULL)");
+        // OUTER APPLY null-fills the right side when the lateral plan is empty,
+        // so the single left row survives with a NULL shredded value.
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(*) from dbo.doc
+            outer apply body.nodes('/r/c') as n(ref)
+            """));
     }
 
     [TestMethod]

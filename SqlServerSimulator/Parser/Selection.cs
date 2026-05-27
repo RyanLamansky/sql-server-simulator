@@ -847,6 +847,25 @@ internal sealed partial class Selection
             // and reject-as-syntax-error.
             var afterNameCheckpoint = context.SaveCheckpoint();
             var resolvedName = BatchContext.ParseObjectName(context);
+
+            // xmlexpr.nodes('xquery') rowset source: the parsed object name's
+            // leaf is the `nodes` method with a `(` following (ParseObjectName
+            // leaves the cursor on the last segment, so peek one token past it).
+            // The xml target — which may correlate to the left APPLY sources —
+            // is re-parsed as an expression and the matched nodes drive a
+            // lateral plan.
+            if (resolvedName.Leaf.Equals("nodes", StringComparison.Ordinal))
+            {
+                var afterNodesLeaf = context.SaveCheckpoint();
+                var followedByParen = context.MoveNext() && context.Token is Operator { Character: '(' };
+                context.RestoreCheckpoint(afterNodesLeaf);
+                if (followedByParen)
+                {
+                    context.RestoreCheckpoint(afterNameCheckpoint);
+                    return ParseXmlNodesSource(context);
+                }
+            }
+
             var resolvedIsTvf = context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
                 && resolvedFn is InlineTableValuedFunction or MultiStatementTableValuedFunction;
             context.RestoreCheckpoint(afterNameCheckpoint);

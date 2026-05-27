@@ -162,7 +162,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **`hierarchyid` data type** (incl. deferred byte-identical CAST research notes) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`, principal DDL, fixed-principal seed, principal scalars (`USER_ID` / `SUSER_ID` / `DATABASE_PRINCIPAL_ID` / `USER_NAME` / `SUSER_NAME` / `SUSER_SNAME` / `CURRENT_USER` / `SESSION_USER` / `SYSTEM_USER` / `ORIGINAL_LOGIN` / `HAS_PERMS_BY_NAME` / `IS_MEMBER` / `IS_ROLEMEMBER` / `IS_SRVROLEMEMBER`)** → [`permissions.md`](docs/claude/permissions.md).
 - **`CREATE FULLTEXT CATALOG`/`INDEX`, `CONTAINS`/`FREETEXT` rejection** → [`full-text.md`](docs/claude/full-text.md).
-- **`xml` data type, XML schema collections, XML method dispatch, XML indexes** → [`xml.md`](docs/claude/xml.md).
+- **`xml` data type, XML schema collections, XML methods (`.value()` / `.nodes()` / `.query()` / `.exist()` execute via an XQuery-subset evaluator; `.modify()` XML-DML skip-with-diagnostic), XML indexes** → [`xml.md`](docs/claude/xml.md).
 - **`geography` / `geometry` types, spatial methods, spatial indexes** → [`spatial.md`](docs/claude/spatial.md).
 - **`ALTER DATABASE SET <option>` accept-list + database-level `COLLATE` clause** → [`database-options.md`](docs/claude/database-options.md).
 - **Per-column / per-expression collation, coercibility precedence, Msg 468 / 457 cross-collation enforcement, recognized catalog, `#temp` collation inheritance** → [`collations.md`](docs/claude/collations.md).
