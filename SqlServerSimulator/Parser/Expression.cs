@@ -791,6 +791,7 @@ internal abstract class Expression
                 "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
                 "HAS_PERMS_BY_NAME" => new HasPermsByName(context),
                 "INDEXKEY_PROPERTY" => new IndexKeyProperty(context),
+                "OBJECT_DEFINITION" => new ObjectDefinition(context),
                 "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
                 "TRIGGER_NESTLEVEL" => new TriggerNestLevelFunction(context),
                 _ => null

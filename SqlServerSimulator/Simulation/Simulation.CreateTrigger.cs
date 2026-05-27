@@ -208,7 +208,10 @@ partial class Simulation
             actions,
             timing,
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow);
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+        };
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
         return true;
     }
@@ -385,7 +388,10 @@ partial class Simulation
             triggerSchema.SchemaId,
             eventTypes,
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow);
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+        };
         context.CurrentDatabase.DdlTriggers[triggerName.Leaf] = trigger;
         return true;
     }

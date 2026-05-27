@@ -91,4 +91,16 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// <c>"SQL_TRIGGER"</c>). Probe-confirmed verbatim per concrete type.
     /// </summary>
     public abstract string ObjectTypeDescription { get; }
+
+    /// <summary>
+    /// Full original <c>CREATE</c>-statement source text for programmable
+    /// modules (procedures, views, triggers, scalar / inline / multi-statement
+    /// functions), captured at CREATE / ALTER time and surfaced verbatim by
+    /// <c>OBJECT_DEFINITION(object_id)</c> and <c>sys.sql_modules.definition</c>.
+    /// Null for non-module objects (tables, sequences, table types) and for
+    /// modules created <c>WITH ENCRYPTION</c> (matching SQL Server's NULL).
+    /// The leading verb is normalized to <c>CREATE</c> even when the statement
+    /// was an <c>ALTER</c> / <c>CREATE OR ALTER</c>, mirroring SQL Server.
+    /// </summary>
+    public string? DefinitionText;
 }

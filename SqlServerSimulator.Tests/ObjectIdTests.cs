@@ -308,6 +308,26 @@ public sealed class ObjectIdTests
     public void ObjectId_TooManyArgs_RaisesMsg174()
         => new Simulation().AssertSqlError("select object_id('foo', 'U', 'extra')", 174);
 
+    [TestMethod]
+    public void ObjectId_Trigger_NoFilter_Resolves()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int)",
+            "create trigger dbo.trg1 on dbo.t after insert as select 1");
+        IsFalseDbNull(sim.ExecuteReader("select object_id('dbo.trg1') as id"));
+    }
+
+    [TestMethod]
+    public void ObjectId_Trigger_TrFilter_Resolves()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int)",
+            "create trigger dbo.trg1 on dbo.t after insert as select 1");
+        IsFalseDbNull(sim.ExecuteReader("select object_id('dbo.trg1', 'TR') as id"));
+    }
+
     private static void IsFalseDbNull(DbDataReader reader)
     {
         using (reader)

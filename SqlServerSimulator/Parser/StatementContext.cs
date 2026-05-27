@@ -48,6 +48,19 @@ internal sealed class StatementContext
     public int StartLine;
 
     /// <summary>
+    /// 0-based character offset within the batch text where this statement's
+    /// leading token starts (taken from <see cref="Token.StartIndex"/> of the
+    /// leading token at dispatch time). The <c>CREATE</c> / <c>ALTER</c>
+    /// handlers use it as the start of the module-definition slice they store
+    /// for <c>OBJECT_DEFINITION</c> / <c>sys.sql_modules</c>. Points at the
+    /// verb keyword itself (any leading whitespace / comment trivia the
+    /// tokenizer already skipped is not included — a documented cosmetic
+    /// divergence from SQL Server, which keeps leading trivia in the stored
+    /// definition).
+    /// </summary>
+    public int StartIndex;
+
+    /// <summary>
     /// Set true by a statement whose end-of-dispatch <c>@@ERROR</c> value
     /// should survive the dispatch wrapper's "successful statement clears
     /// <c>@@ERROR</c> to 0" rule. Used by <c>RAISERROR ... WITH SETERROR</c>

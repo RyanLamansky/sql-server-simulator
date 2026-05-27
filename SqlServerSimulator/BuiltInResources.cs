@@ -262,6 +262,32 @@ internal static class BuiltInResources
         ], (batch, database) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation));
 
+        // sys.sql_modules: one row per programmable module (procedure / view /
+        // DML + DDL trigger / scalar / inline / multi-statement function),
+        // keyed by object_id. The definition column carries the verbatim
+        // CREATE-statement source captured at CREATE / ALTER time
+        // (SchemaObject.DefinitionText); NULL for WITH ENCRYPTION modules.
+        // The boolean flags are probe-confirmed placeholder constants
+        // (uses_ansi_nulls / uses_quoted_identifier default ON, the rest OFF);
+        // null_on_null_input reflects a scalar function's RETURNS NULL ON NULL
+        // INPUT declaration. execute_as_principal_id is always NULL (no
+        // EXECUTE AS principal modeled).
+        Sys("sql_modules",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_ansi_nulls", SqlType.Bit, null, true),
+            new("uses_quoted_identifier", SqlType.Bit, null, true),
+            new("is_schema_bound", SqlType.Bit, null, true),
+            new("uses_database_collation", SqlType.Bit, null, true),
+            new("is_recompiled", SqlType.Bit, null, true),
+            new("null_on_null_input", SqlType.Bit, null, true),
+            new("execute_as_principal_id", SqlType.Int32, null, true),
+            new("uses_native_compilation", SqlType.Bit, null, true),
+            new("inline_type", SqlType.Bit, null, true),
+            new("is_inlineable", SqlType.Bit, null, true),
+        ], EnumerateSqlModules);
+
         // INFORMATION_SCHEMA.TABLES: ISO-standard 4-column shape. TABLE_TYPE
         // is 'BASE TABLE' for every user table; 'VIEW' (not modeled) would be
         // the other shipped value.
@@ -398,9 +424,9 @@ internal static class BuiltInResources
         // ROUTINE_CATALOG / SCHEMA / NAME / TYPE / DATA_TYPE. For procedures
         // DATA_TYPE is NULL (procs have no scalar return type); for scalar
         // UDFs it carries the return type's family name; for inline TVFs it
-        // is 'TABLE'. Real SQL Server ships dozens of additional columns
-        // (CREATED, LAST_ALTERED, ROUTINE_DEFINITION, etc.) that aren't
-        // modeled.
+        // is 'TABLE'. ROUTINE_DEFINITION carries the module source text
+        // (nvarchar(4000), truncated like SQL Server). Real SQL Server ships
+        // dozens of further columns (CREATED, LAST_ALTERED, etc.) not modeled.
         var procedureRoutineType = SqlValue.FromVarchar("PROCEDURE");
         var functionRoutineType = SqlValue.FromVarchar("FUNCTION");
         var tableDataType = SqlValue.FromSystemName("TABLE");
@@ -411,6 +437,7 @@ internal static class BuiltInResources
             new("ROUTINE_NAME", SqlType.SystemName, 128, false),
             new("ROUTINE_TYPE", SqlType.Varchar, 9, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
+            new("ROUTINE_DEFINITION", SqlType.NVarchar, 4000, true),
         ], (batch, database) =>
             EnumerateInformationSchemaRoutines(batch, database, procedureRoutineType, functionRoutineType, tableDataType));
 
@@ -2417,6 +2444,7 @@ internal static class BuiltInResources
                     SqlValue.FromSystemName(proc.Name),
                     procedureRoutineType,
                     nullDataType,
+                    RoutineDefinition(proc.DefinitionText),
                 ];
             }
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
@@ -2430,10 +2458,22 @@ internal static class BuiltInResources
                     SqlValue.FromSystemName(fn.Name),
                     functionRoutineType,
                     dataType,
+                    RoutineDefinition(fn.DefinitionText),
                 ];
             }
         }
     }
+
+    /// <summary>
+    /// Builds the <c>INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION</c> value
+    /// from a module's captured source text. The ISO column is
+    /// <c>nvarchar(4000)</c>, so the definition is truncated to its first 4000
+    /// characters (matching SQL Server); NULL stays NULL (encrypted modules).
+    /// </summary>
+    private static SqlValue RoutineDefinition(string? text) =>
+        text is null
+            ? SqlValue.Null(SqlType.NVarchar)
+            : SqlValue.FromNVarchar(text.Length > 4000 ? text[..4000] : text);
 
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.PARAMETERS</c>: per-parameter entries
@@ -2985,6 +3025,50 @@ internal static class BuiltInResources
             return (-1, -1, null, null, null, null);
         var chars = typeLength == 0 ? (columnMaxLength ?? 1) : typeLength;
         return (chars, chars * octetPerChar, null, null, null, null);
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.sql_modules</c>: one per programmable module across
+    /// every schema (procedure / view / DML trigger / scalar / inline /
+    /// multi-statement function) plus the database-scoped DDL triggers. The
+    /// definition column is <see cref="SchemaObject.DefinitionText"/> (NULL for
+    /// WITH ENCRYPTION). Flag columns are probe-confirmed placeholder constants
+    /// except <c>null_on_null_input</c>, which reads a scalar function's
+    /// RETURNS NULL ON NULL INPUT declaration.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSqlModules(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var on = SqlValue.FromBoolean(true);
+        var off = SqlValue.FromBoolean(false);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+
+        SqlValue[] Row(SchemaObject obj) =>
+        [
+            SqlValue.FromInt32(obj.ObjectId),
+            obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
+            on,  // uses_ansi_nulls
+            on,  // uses_quoted_identifier
+            off, // is_schema_bound
+            off, // uses_database_collation
+            off, // is_recompiled
+            obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input
+            nullPrincipal, // execute_as_principal_id
+            off, // uses_native_compilation
+            off, // inline_type
+            off, // is_inlineable
+        ];
+
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var obj in schema.SchemaObjects().OrderBy(o => o.ObjectId))
+            {
+                if (obj is Procedure or View or Trigger or UserDefinedFunction)
+                    yield return Row(obj);
+            }
+        }
+        foreach (var ddlTrigger in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+            yield return Row(ddlTrigger);
     }
 
     private static IEnumerable<SqlValue[]> EnumerateObjects(

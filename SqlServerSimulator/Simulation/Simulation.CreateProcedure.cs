@@ -152,7 +152,10 @@ partial class Simulation
             objectId,
             [.. parameters],
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow);
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+        };
         schema.Procedures[procName.Leaf] = procedure;
         return true;
     }

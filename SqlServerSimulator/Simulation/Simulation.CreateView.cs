@@ -161,7 +161,10 @@ partial class Simulation
             baseColumnOrdinals: baseColumnOrdinals,
             rejectionReason: rejectionReason,
             visibilityCheck: visibilityCheck,
-            checkOptionCheck: checkOptionCheck);
+            checkOptionCheck: checkOptionCheck)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter: false, createOrAlter: false),
+        };
         schema.Views[viewName.Leaf] = view;
         return true;
     }

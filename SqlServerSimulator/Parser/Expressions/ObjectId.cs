@@ -17,10 +17,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Type codes today: only <c>'U'</c> (user table) matches. Other codes
-/// (<c>V</c>/<c>P</c>/<c>F</c>/<c>FN</c>/...) return NULL since the simulator
-/// doesn't yet model views / procs / functions / FK constraints. When those
-/// features land their codes get added here.
+/// Type codes today: <c>'U'</c> (user table), <c>'V'</c> (view), <c>'P'</c>
+/// (stored procedure), <c>'FN'</c> / <c>'IF'</c> (scalar / inline-TVF
+/// functions), <c>'TR'</c> (DML trigger). Other documented codes (<c>'TF'</c>,
+/// FK / DEFAULT constraint codes, …) return NULL pending those features.
 /// </para>
 /// <para>
 /// Divergence from real SQL Server on temp tables: <c>OBJECT_ID('#foo')</c>
@@ -67,9 +67,9 @@ internal sealed class ObjectId : Expression
             // type filter (' U ' returns NULL) but case-insensitive ('u' works).
             // Modeled codes today: 'U' (user table), 'FN' (scalar UDF),
             // 'IF' (inline table-valued function), 'V' (view), 'P' (stored
-            // procedure). Other documented codes (TF / TR / ...) return
-            // NULL pending those features.
-            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P"))
+            // procedure), 'TR' (DML trigger). Other documented codes (TF /
+            // ...) return NULL pending those features.
+            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR"))
                 return SqlValue.Null(SqlType.Int32);
         }
 
@@ -117,6 +117,16 @@ internal sealed class ObjectId : Expression
         {
             if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
                 return SqlValue.FromInt32(procedure.ObjectId);
+            if (typeFilter is not null)
+                return SqlValue.Null(SqlType.Int32);
+        }
+
+        // 'TR' / no filter: try DML trigger resolution. Triggers share the
+        // object-name namespace, so the no-filter form falls through here too.
+        if (typeFilter is null || BuiltInToken.Equals(typeFilter, "TR"))
+        {
+            if (runtime.Batch.TryResolveTrigger(parsed, out var trigger))
+                return SqlValue.FromInt32(trigger.ObjectId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }

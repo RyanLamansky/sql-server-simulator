@@ -1408,6 +1408,26 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Resolves <paramref name="name"/> to a registered DML <see cref="Trigger"/>.
+    /// Triggers share the schema's object-name namespace; the lookup falls back
+    /// to <see cref="Database.DefaultSchemaName"/> for the unqualified case.
+    /// Used by <c>OBJECT_ID</c> so the canonical
+    /// <c>OBJECT_DEFINITION(OBJECT_ID('trg'))</c> idiom resolves. DDL triggers
+    /// (database-scoped, not schema-resident) aren't covered here.
+    /// </summary>
+    public bool TryResolveTrigger(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Trigger? trigger)
+    {
+        trigger = null;
+        if (!this.TryResolveSchema(name, out var schema)
+            || !schema.Triggers.TryGetValue(name.Leaf, out trigger))
+        {
+            return false;
+        }
+        this.AcquireStatementLock(trigger.SchemaLock, LockMode.SchemaStability);
+        return true;
+    }
+
+    /// <summary>
     /// Resolves <paramref name="name"/> to a registered user-defined
     /// <see cref="TableType"/>. Like views / procedures (and unlike scalar
     /// UDFs), table types accept 1-part names: probe-confirmed against SQL

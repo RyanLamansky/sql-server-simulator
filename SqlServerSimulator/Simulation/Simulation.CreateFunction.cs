@@ -189,6 +189,7 @@ partial class Simulation
         }
     bodyCaptured:
         var bodyEnd = context.Token.StartIndex;
+        var definitionEnd = context.Token.EndIndex; // include the trailing END keyword
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
@@ -209,7 +210,10 @@ partial class Simulation
             keyConstraints,
             checkConstraints,
             bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow);
+            createDate: context.Batch.CurrentStatement.UtcNow)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+        };
         schema.Functions[functionName.Leaf] = function;
         return true;
     }
@@ -324,6 +328,7 @@ partial class Simulation
         }
     bodyCaptured:
         var bodyEnd = context.Token.StartIndex;
+        var definitionEnd = context.Token.EndIndex; // include the trailing END keyword
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
@@ -342,7 +347,10 @@ partial class Simulation
             returnType,
             returnsNullOnNullInput,
             bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow);
+            createDate: context.Batch.CurrentStatement.UtcNow)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+        };
         schema.Functions[functionName.Leaf] = function;
         return true;
     }
@@ -387,6 +395,9 @@ partial class Simulation
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         var bodyEnd = CaptureInlineTvfBody(context, openedParen);
         var bodyText = commandText[bodyStart..bodyEnd];
+        // For the parenthesized form the cursor sits on the matching `)`; the
+        // stored definition includes it. The bare RETURN form runs to bodyEnd.
+        var definitionEnd = openedParen ? context.Token.EndIndex : bodyEnd;
 
         if (openedParen)
         {
@@ -412,7 +423,10 @@ partial class Simulation
             [.. parameters],
             outputColumns,
             bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow);
+            createDate: context.Batch.CurrentStatement.UtcNow)
+        {
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+        };
         schema.Functions[functionName.Leaf] = function;
         return true;
     }

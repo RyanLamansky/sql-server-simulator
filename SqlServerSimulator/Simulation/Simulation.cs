@@ -514,6 +514,7 @@ public sealed partial class Simulation
         // Snapshot the statement-start line before parser advance — used as
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
+        batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
         batch.CurrentStatement.SuppressErrorReset = false;
         // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
         // clearing here ensures the next statement allocates a new Xid on its
