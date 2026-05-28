@@ -14,8 +14,10 @@ namespace SqlServerSimulator;
 /// result-transparent, so the correctness suite passes either way — these read
 /// the opt-in <see cref="IndexSeekDiagnostics"/> trace (recorded at the single
 /// decision point) to assert the path directly, and check the row results stay
-/// correct under it. Both the non-aggregate and aggregate single-table
-/// projectors — non-aggregate, aggregate, and window — narrow through the seek.
+/// correct under it. All three single-table projectors — non-aggregate,
+/// aggregate, and window — narrow through the seek. IN-list and OR-of-equality
+/// conjuncts decompose through the same path: each candidate becomes one probe
+/// against the per-Heap cache (cartesian-producted across columns).
 /// </summary>
 [TestClass]
 public sealed class IndexSeekTests
@@ -400,6 +402,165 @@ public sealed class IndexSeekTests
         DoesNotContain("Scan(t)", trace);
         HasCount(1, rows);
         AreEqual(50, rows[0]);
+    }
+
+    [TestMethod]
+    public void InList_OnIndexedColumn_Seeks()
+    {
+        // `col IN (a, b, c)` is logically `col=a OR col=b OR col=c` — every
+        // candidate is a stable value, so the seek fires one probe per
+        // candidate and unions the buckets. EF Core's `Contains(...)` against
+        // a small list emits exactly this shape.
+        var (trace, rows) = Run(TableT, "select val from t where id in (1, 3)");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(2, rows);
+        Contains(5, rows);
+        Contains(500, rows);
+    }
+
+    [TestMethod]
+    public void InList_NoMatches_SeeksEmpty()
+    {
+        // Non-matching IN-list probes still seek (every key misses its bucket);
+        // the trace must show Seek (no Scan) and the result is empty.
+        var (trace, rows) = Run(TableT, "select val from t where id in (99, 100)");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void InList_SingleValue_Seeks()
+    {
+        // A one-element IN list is the same shape as a single equality — both
+        // routes (the equality fast path AND the family fast path) should
+        // land on the same single probe.
+        var (trace, rows) = Run(TableT, "select val from t where id in (2)");
+        Contains("Seek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(50, rows[0]);
+    }
+
+    [TestMethod]
+    public void InList_WithNull_SkipsNullKeepsRest()
+    {
+        // A NULL element in the IN list can never match (= against NULL is
+        // UNKNOWN). It's silently dropped from the probe set; the non-NULL
+        // candidates still anchor the seek.
+        var (trace, rows) = Run(TableT, "select val from t where id in (1, null, 3)");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void InList_AllNull_Declines()
+    {
+        // When every IN-list element is NULL there's no usable probe; the
+        // column drops out of the prefix and the seek can't anchor — falls
+        // through to scan.
+        var (trace, rows) = Run(TableT, "select val from t where id in (null, null)");
+        Contains("Scan(t)", trace);
+        DoesNotContain("Seek(t)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void NotIn_Declines()
+    {
+        // `col NOT IN (...)` is AND-of-inequalities, not a positive equality
+        // family — the seek path can't narrow it without sorted-index
+        // support, so it falls through to scan.
+        var (trace, rows) = Run(TableT, "select val from t where id not in (1, 3)");
+        Contains("Scan(t)", trace);
+        DoesNotContain("Seek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(50, rows[0]);
+    }
+
+    [TestMethod]
+    public void OrEqualityChain_OnIndexedColumn_Seeks()
+    {
+        // `col = a OR col = b OR col = c` is equivalent to an IN list and
+        // takes the same multi-probe seek; nested OR-trees flatten through
+        // the recursive TryGetEqualityFamily walk.
+        var (trace, rows) = Run(TableT, "select val from t where id = 1 or id = 3");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void OrEqualityChain_ReversedSides_Seeks()
+    {
+        // Either side of each equality may carry the column; the family
+        // walker accepts both `id = lit` and `lit = id` in the same chain.
+        var (trace, rows) = Run(TableT, "select val from t where 1 = id or id = 3");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void OrEqualityChain_MixedColumns_Declines()
+    {
+        // A single column must anchor the whole chain. `id = 1 OR val = 50`
+        // can't seek (the rows behind `val = 50` aren't indexed by val), so
+        // the family extractor rejects the chain and the path scans.
+        var (trace, rows) = Run(TableT, "select id from t where id = 1 or val = 50");
+        Contains("Scan(t)", trace);
+        DoesNotContain("Seek(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void OrChain_WithNonEqualityLeaf_Declines()
+    {
+        // Non-equality leaves (range, IS NULL, etc.) abort the chain walk —
+        // a single non-positive-equality breaks the family shape, so the
+        // whole conjunct falls through to scan rather than narrowing.
+        var (trace, rows) = Run(TableT, "select id from t where id = 1 or id > 2");
+        Contains("Scan(t)", trace);
+        DoesNotContain("Seek(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void InListCombinedWithEquality_CompositeKeySeeksWholePrefix()
+    {
+        // `a = x AND b IN (y, z)` expands to two probes against a composite
+        // (a, b) key — the prefix width is still 2 (the IN-list is on the
+        // trailing key column), each probe is one cartesian-product tuple.
+        var setup = """
+            create table c (a int not null, b int not null, payload int, constraint pk_c primary key (a, b));
+            insert c values (1, 10, 100), (1, 20, 200), (1, 30, 300), (2, 10, 999)
+            """;
+        var (trace, rows) = Run(setup, "select payload from c where a = 1 and b in (10, 30) order by b");
+        Contains("Seek(c)", trace);
+        Contains("SeekWidth(c,2)", trace);
+        DoesNotContain("Scan(c)", trace);
+        HasCount(2, rows);
+        AreEqual(100, rows[0]);
+        AreEqual(300, rows[1]);
+    }
+
+    [TestMethod]
+    public void InListOnBothCompositeColumns_SeeksCartesian()
+    {
+        // Two IN lists on a composite key drive a cartesian product of
+        // probes: `a IN (1, 2) AND b IN (10, 20)` → four probes against
+        // (a, b). Each probe hits at most one bucket so duplicates can't
+        // appear in the candidate stream.
+        var setup = """
+            create table c (a int not null, b int not null, payload int, constraint pk_c primary key (a, b));
+            insert c values (1, 10, 1), (1, 20, 2), (2, 10, 3), (2, 20, 4), (3, 30, 999)
+            """;
+        var (trace, rows) = Run(setup, "select payload from c where a in (1, 2) and b in (10, 20) order by payload");
+        Contains("Seek(c)", trace);
+        Contains("SeekWidth(c,2)", trace);
+        DoesNotContain("Scan(c)", trace);
+        HasCount(4, rows);
     }
 
     [TestMethod]

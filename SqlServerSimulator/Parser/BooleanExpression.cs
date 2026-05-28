@@ -497,6 +497,25 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
+    /// Decomposes this predicate into a list of equality operand pairs when it
+    /// is logically a chain of equalities OR'd together — i.e. an <c>IN</c>
+    /// list (<c>x IN (a, b, c)</c> → three pairs of <c>(x, a)</c> /
+    /// <c>(x, b)</c> / <c>(x, c)</c>) or an <c>OR</c>-tree whose leaves are
+    /// all equality comparisons (<c>x = a OR x = b</c> → two pairs). The
+    /// caller decides whether the pairs share a common operand and whether
+    /// the other side is row-invariant — this method only exposes the shape.
+    /// Returns false for anything else (including <c>NOT IN</c>, mixed-shape
+    /// OR-trees, and ordinary leaves). Equivalent for <c>=</c>-semantics:
+    /// every form treats a NULL on either side of a leaf as UNKNOWN, so the
+    /// equality-seek path's existing NULL-skip applies identically.
+    /// </summary>
+    internal virtual bool TryGetEqualityFamily([NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+    {
+        pairs = null;
+        return false;
+    }
+
+    /// <summary>
     /// Three-valued <c>AND</c>: <c>false AND x = false</c> regardless of
     /// <c>x</c>; <c>true AND x = x</c>; <c>NULL AND NULL = NULL</c>. Short-
     /// circuits when the left side is <c>false</c> — the right side isn't
@@ -555,6 +574,39 @@ internal abstract class BooleanExpression
         {
             left.VisitOperandExpressions(visitor);
             right.VisitOperandExpressions(visitor);
+        }
+
+        // Flatten the OR-tree (any nesting depth) into leaf equality pairs.
+        // Succeeds only when EVERY leaf is itself an equality family — a single
+        // equality compare (one pair), a nested OR-tree (recursed via the
+        // virtual on the child), or an IN list (multiple pairs against a
+        // common LHS). One non-equality leaf aborts the whole walk so the
+        // predicate falls back to scan.
+        internal override bool TryGetEqualityFamily([NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+        {
+            var sink = new List<(Expression Left, Expression Right)>();
+            if (TryAppend(left, sink) && TryAppend(right, sink))
+            {
+                pairs = sink;
+                return true;
+            }
+            pairs = null;
+            return false;
+        }
+
+        private static bool TryAppend(BooleanExpression node, List<(Expression Left, Expression Right)> sink)
+        {
+            if (node.TryGetEqualityOperands(out var le, out var re))
+            {
+                sink.Add((le, re));
+                return true;
+            }
+            if (node.TryGetEqualityFamily(out var nested))
+            {
+                sink.AddRange(nested);
+                return true;
+            }
+            return false;
         }
     }
 
@@ -653,6 +705,23 @@ internal abstract class BooleanExpression
             visitor(source);
             foreach (var candidate in candidates)
                 visitor(candidate);
+        }
+
+        // `source IN (c1, c2, ...)` is logically `source=c1 OR source=c2 OR ...`,
+        // so for the equality-seek path it decomposes into one pair per candidate
+        // against the shared LHS. NOT IN doesn't decompose into positive
+        // equalities (it's an AND-of-inequalities) and falls through to scan.
+        internal override bool TryGetEqualityFamily([NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+        {
+            if (negated)
+            {
+                pairs = null;
+                return false;
+            }
+            pairs = new List<(Expression Left, Expression Right)>(candidates.Length);
+            foreach (var candidate in candidates)
+                pairs.Add((source, candidate));
+            return true;
         }
     }
 

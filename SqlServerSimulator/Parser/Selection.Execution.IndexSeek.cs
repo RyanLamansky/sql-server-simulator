@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
@@ -84,15 +85,20 @@ internal sealed partial class Selection
             excluder.CollectConjuncts(conjuncts);
 
         // Map each indexable column of THIS source carrying a stable-value
-        // equality conjunct to that value side. First writer wins per column; a
-        // redundant second conjunct just stays as a residual filter.
-        var equalities = new Dictionary<int, Expression>();
+        // equality conjunct (or IN-list / OR-of-equalities on the same column)
+        // to its value side(s). First writer wins per column; a redundant
+        // later conjunct just stays as a residual filter.
+        var equalities = new Dictionary<int, Expression[]>();
         foreach (var conjunct in conjuncts)
         {
-            if (!conjunct.TryGetEqualityOperands(out var left, out var right))
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue)
+                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue);
                 continue;
-            _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue)
-                || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue);
+            }
+            if (conjunct.TryGetEqualityFamily(out var family))
+                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue);
         }
 
         if (equalities.Count != 0
@@ -141,38 +147,102 @@ internal sealed partial class Selection
     // source. No evaluation happens here — only the value-side expression is
     // captured; it's run lazily (and once) when a prefix actually selects it.
     private static bool TryRecordColumnEquality(
-        FromSource source, Expression columnSide, Expression valueSide, Dictionary<int, Expression> equalities, bool allowCorrelatedColumnValue)
+        FromSource source, Expression columnSide, Expression valueSide, Dictionary<int, Expression[]> equalities, bool allowCorrelatedColumnValue)
+        => TryIdentifyIndexableColumn(source, columnSide, out var storageOrdinal)
+            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue)
+            && equalities.TryAdd(storageOrdinal, [valueSide]);
+
+    // Records `column IN (v1, v2, ...)` (or the equivalent OR-of-equalities)
+    // for one indexable, non-LOB column of THIS source — every pair in the
+    // family must put the column on one side and a stable value on the other,
+    // and they must all agree on the column. Order within the family is
+    // preserved; duplicates aren't deduplicated (a row matches at most one
+    // probe per column anyway, so duplicate probes just waste a hash lookup).
+    private static bool TryRecordEqualityFamily(
+        FromSource source,
+        List<(Expression Left, Expression Right)> family,
+        Dictionary<int, Expression[]> equalities,
+        bool allowCorrelatedColumnValue)
     {
-        if (columnSide is not Reference columnRef)
+        if (family.Count == 0)
+            return false;
+
+        int? targetStorageOrdinal = null;
+        var values = new Expression[family.Count];
+        for (var i = 0; i < family.Count; i++)
+        {
+            var (left, right) = family[i];
+            if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue, out var ord, out var value)
+                && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue, out ord, out value))
+            {
+                return false;
+            }
+            if (targetStorageOrdinal is { } existing && existing != ord)
+                return false;
+            targetStorageOrdinal = ord;
+            values[i] = value;
+        }
+
+        return equalities.TryAdd(targetStorageOrdinal!.Value, values);
+    }
+
+    private static bool TryExtractColumnAndValue(
+        FromSource source,
+        Expression columnSide,
+        Expression valueSide,
+        bool allowCorrelatedColumnValue,
+        out int storageOrdinal,
+        [NotNullWhen(true)] out Expression? value)
+    {
+        if (TryIdentifyIndexableColumn(source, columnSide, out storageOrdinal)
+            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue))
+        {
+            value = valueSide;
+            return true;
+        }
+        value = null;
+        return false;
+    }
+
+    private static bool TryIdentifyIndexableColumn(FromSource source, Expression candidate, out int storageOrdinal)
+    {
+        storageOrdinal = -1;
+        if (candidate is not Reference columnRef)
             return false;
         var (columnSource, columnIndex) = FindSourceColumn([source], columnRef.ReferencedName);
         if (columnSource != 0)
             return false;
-        var storageOrdinal = source.StorageOrdinals is { } ordinals ? ordinals[columnIndex] : columnIndex;
-        return storageOrdinal >= 0
-            && !source.StoredSchema[storageOrdinal].Type.IsLob
-            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue)
-            && equalities.TryAdd(storageOrdinal, valueSide);
+        var ord = source.StorageOrdinals is { } ordinals ? ordinals[columnIndex] : columnIndex;
+        if (ord < 0 || source.StoredSchema[ord].Type.IsLob)
+            return false;
+        storageOrdinal = ord;
+        return true;
     }
 
     // Picks the index / key whose leading key-column prefix is the longest run
     // of equality columns with usable (non-NULL, collation-compatible, cleanly
     // promoting) probe values, and seeks on that whole prefix. Probe components
-    // are evaluated at most once per column via the local memo.
+    // are evaluated at most once per column via the local memo. When a column
+    // is bound to an IN-list / OR-equality family, every probe expands across
+    // the cartesian product of selected columns — `a IN (1,2) AND b = 3` fires
+    // two probes against the (a,b) composite cache, `a IN (1,2) AND b IN (3,4)`
+    // fires four. A single per-column NULL is skipped silently (never equal
+    // under <c>=</c>); if EVERY probe in a column collapses to NULL the column
+    // declines and the prefix stops there.
     private static bool TrySeekByLongestPrefix(
         FromSource source,
         HeapTable table,
         DataLockPlan plan,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        Dictionary<int, Expression> equalities,
+        Dictionary<int, Expression[]> equalities,
         out IEnumerable<byte[]> seekRows,
         out int width)
     {
         seekRows = [];
         width = 0;
 
-        var resolved = new Dictionary<int, (SqlType Common, SqlValue Probe)?>();
+        var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
 
         var bestLen = 0;
         int[]? bestKeyOrdinals = null;
@@ -211,76 +281,151 @@ internal sealed partial class Selection
 
         var prefix = new int[bestLen];
         var commons = new SqlType[bestLen];
-        var probe = new SqlValue[bestLen];
+        var probesPerColumn = new SqlValue[bestLen][];
         for (var i = 0; i < bestLen; i++)
         {
             prefix[i] = bestKeyOrdinals is { } ko ? ko[i] : bestIndex!.KeyColumns[i].StorageOrdinal;
-            var (common, value) = resolved[prefix[i]]!.Value;
+            var (common, probes) = resolved[prefix[i]]!.Value;
             commons[i] = common;
-            probe[i] = value;
+            probesPerColumn[i] = probes;
         }
 
         var cache = seekCaches.GetValue(table.Heap, static _ => new EqualityIndexCache());
-        var candidates = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(probe));
+        var candidates = new List<(int Page, int Slot)>();
+        foreach (var tuple in CartesianProduct(probesPerColumn))
+        {
+            var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple));
+            if (bucket.Count != 0)
+                candidates.AddRange(bucket);
+        }
+
         seekRows = MaterializeWithLockChecks(table, batch, plan, candidates);
         width = bestLen;
         return true;
 
-        // Resolves (and memoizes) the probe component for one column, but only
-        // for columns that carry a stable-value equality conjunct — others can't
-        // anchor a seek and report as unusable, bounding the prefix there.
-        (SqlType Common, SqlValue Probe)? ResolveComponent(int storageOrdinal)
+        // Resolves (and memoizes) the probe components for one column, but only
+        // for columns that carry a stable-value equality conjunct (or IN-list /
+        // OR family). Others can't anchor a seek and report as unusable,
+        // bounding the prefix there.
+        (SqlType Common, SqlValue[] Probes)? ResolveComponent(int storageOrdinal)
         {
-            if (!equalities.TryGetValue(storageOrdinal, out var valueSide))
+            if (!equalities.TryGetValue(storageOrdinal, out var valueSides))
                 return null;
             if (resolved.TryGetValue(storageOrdinal, out var cached))
                 return cached;
-            var component = EvaluateProbeComponent(source, storageOrdinal, valueSide, batch, outerResolver);
+            var component = EvaluateProbeComponent(source, storageOrdinal, valueSides, batch, outerResolver);
             resolved[storageOrdinal] = component;
             return component;
         }
     }
 
-    // Evaluates a column's equality value side to a promoted probe component, or
-    // null when it can't anchor a seek: a NULL value (never equal under = ), a
-    // cross-collation string compare (the domain reorders), or a promotion /
-    // evaluation that throws. The value side is row-invariant
-    // (IsStableValueSide), so this runs once per column per inner execution.
-    private static (SqlType Common, SqlValue Probe)? EvaluateProbeComponent(
-        FromSource source, int storageOrdinal, Expression valueSide, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    // Yields every cartesian-product tuple across the per-column probe arrays.
+    // For an N-column prefix where the i-th column has c_i probe values, the
+    // total tuple count is the product of the c_i; for the common single-value
+    // case (all c_i == 1) this yields exactly one tuple.
+    private static IEnumerable<SqlValue[]> CartesianProduct(SqlValue[][] perColumn)
+    {
+        var indices = new int[perColumn.Length];
+        while (true)
+        {
+            var tuple = new SqlValue[perColumn.Length];
+            for (var i = 0; i < perColumn.Length; i++)
+                tuple[i] = perColumn[i][indices[i]];
+            yield return tuple;
+
+            var carry = perColumn.Length - 1;
+            while (carry >= 0)
+            {
+                indices[carry]++;
+                if (indices[carry] < perColumn[carry].Length)
+                    break;
+                indices[carry] = 0;
+                carry--;
+            }
+            if (carry < 0)
+                yield break;
+        }
+    }
+
+    // Evaluates a column's equality value side(s) into promoted probe components,
+    // or null when none can anchor a seek: NULL values are skipped (never equal
+    // under = ) and an empty result drops the column; cross-collation string
+    // compares or promotion failures also drop the individual probe. A single
+    // unified promoted type is chosen by promoting pairwise across all surviving
+    // probes — pinning the bucket key to one type. The value side is
+    // row-invariant (IsStableValueSide), so this runs once per column per
+    // inner execution. Duplicates aren't deduplicated; the cache lookup is a
+    // hash hit and duplicate keys just probe the same bucket.
+    private static (SqlType Common, SqlValue[] Probes)? EvaluateProbeComponent(
+        FromSource source, int storageOrdinal, Expression[] valueSides, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var columnType = source.StoredSchema[storageOrdinal].Type;
-        SqlValue value;
-        try
+        var raw = new List<SqlValue>(valueSides.Length);
+        SqlType? common = null;
+
+        foreach (var valueSide in valueSides)
         {
-            value = valueSide.Run(new RuntimeContext(
-                name => outerResolver is { } resolve ? resolve(name) : SqlValue.Null(SqlType.Int32),
-                batch));
-        }
-        catch (SimulatedSqlException)
-        {
-            return null;
+            SqlValue value;
+            try
+            {
+                value = valueSide.Run(new RuntimeContext(
+                    name => outerResolver is { } resolve ? resolve(name) : SqlValue.Null(SqlType.Int32),
+                    batch));
+            }
+            catch (SimulatedSqlException)
+            {
+                continue;
+            }
+
+            if (value.IsNull)
+                continue;
+
+            if (columnType.Category == SqlTypeCategory.String
+                && value.Type.Category == SqlTypeCategory.String
+                && Collation.Resolve(columnType, value.Type) is null)
+            {
+                continue;
+            }
+
+            SqlType promoted;
+            try
+            {
+                promoted = SqlType.Promote(columnType, value.Type);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+            {
+                continue;
+            }
+
+            try
+            {
+                common = common is null ? promoted : SqlType.Promote(common, promoted);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+            {
+                return null;
+            }
+
+            raw.Add(value);
         }
 
-        if (value.IsNull)
+        if (common is null || raw.Count == 0)
             return null;
 
-        if (columnType.Category == SqlTypeCategory.String
-            && value.Type.Category == SqlTypeCategory.String
-            && Collation.Resolve(columnType, value.Type) is null)
+        var probes = new SqlValue[raw.Count];
+        for (var i = 0; i < raw.Count; i++)
         {
-            return null;
+            try
+            {
+                probes[i] = raw[i].CoerceTo(common);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+            {
+                return null;
+            }
         }
 
-        try
-        {
-            var common = SqlType.Promote(columnType, value.Type);
-            return (common, value.CoerceTo(common));
-        }
-        catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
-        {
-            return null;
-        }
+        return (common, probes);
     }
 
     // Yields each candidate row's bytes after running it through the reader's
