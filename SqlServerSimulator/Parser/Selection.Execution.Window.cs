@@ -23,12 +23,11 @@ internal sealed partial class Selection
     /// same OFFSET / TAKE / DISTINCT / ORDER BY post-processing as
     /// <see cref="ProjectBuffered"/>.
     /// </summary>
-    private static IEnumerable<byte[]> ProjectWindowedRows(
+    private static IEnumerable<SqlValue[]> ProjectWindowedRows(
         FromSource[] sources,
         JoinSpec[] joins,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
         string[] outputColumnNames,
         List<OrderBySpec> orderBy,
         bool distinct,
@@ -556,7 +555,7 @@ internal sealed partial class Selection
             windowed = windowed.Take(limit);
 
         foreach (var (projected, _) in windowed)
-            yield return RowEncoder.EncodeRow(outputSchema, projected);
+            yield return projected;
     }
 
     /// <summary>

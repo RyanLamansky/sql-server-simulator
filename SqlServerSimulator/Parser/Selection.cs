@@ -142,7 +142,17 @@ internal sealed partial class Selection
     /// </summary>
     internal List<OrderBySpec>? CursorOrderBy;
 
-    private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource;
+    private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
+
+    /// <summary>
+    /// Fast-path projection producer for the FROM-bearing SELECT (line-205
+    /// dispatch in <c>Selection.Execution.cs</c>): the row is already a
+    /// <see cref="SqlValue"/> array, so the reader's cursor serves cells
+    /// directly and skips the encode-then-re-decode round-trip a byte-row
+    /// would force. Niche producers (set ops, TVFs, OPENJSON, views, …) stay
+    /// on <see cref="rowSource"/>. Exactly one of the two is non-null.
+    /// </summary>
+    private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<SqlValue[]>>? valueRowSource;
 
     private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>> rowSource, bool isAssignmentOnly = false, MultiPartName? intoTarget = null, HeapColumn[]? destColumnSchema = null, ViewUpdatabilityProfile? updatabilityProfile = null, ViewUpdatabilityRejection updatabilityRejection = ViewUpdatabilityRejection.UnsupportedShape)
     {
@@ -152,6 +162,20 @@ internal sealed partial class Selection
         this.HasTopOrOffsetOrFetch = hasTopOrOffsetOrFetch;
         this.IsAssignmentOnly = isAssignmentOnly;
         this.rowSource = rowSource;
+        this.IntoTarget = intoTarget;
+        this.DestColumnSchema = destColumnSchema;
+        this.UpdatabilityProfile = updatabilityProfile;
+        this.UpdatabilityRejection = updatabilityProfile is null ? updatabilityRejection : ViewUpdatabilityRejection.None;
+    }
+
+    private Selection(SqlType[] schema, string[] columnNames, bool hasOrderBy, bool hasTopOrOffsetOrFetch, Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<SqlValue[]>> valueRowSource, bool isAssignmentOnly = false, MultiPartName? intoTarget = null, HeapColumn[]? destColumnSchema = null, ViewUpdatabilityProfile? updatabilityProfile = null, ViewUpdatabilityRejection updatabilityRejection = ViewUpdatabilityRejection.UnsupportedShape)
+    {
+        this.Schema = schema;
+        this.ColumnNames = columnNames;
+        this.HasOrderBy = hasOrderBy;
+        this.HasTopOrOffsetOrFetch = hasTopOrOffsetOrFetch;
+        this.IsAssignmentOnly = isAssignmentOnly;
+        this.valueRowSource = valueRowSource;
         this.IntoTarget = intoTarget;
         this.DestColumnSchema = destColumnSchema;
         this.UpdatabilityProfile = updatabilityProfile;
@@ -197,7 +221,9 @@ internal sealed partial class Selection
     /// per-batch / per-session / per-database access.
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
-        new(this.Schema, this.ColumnNames, this.rowSource(batch, outerResolver));
+        this.valueRowSource is { } values
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver))
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver));
 
     /// <summary>
     /// Creates a <see cref="Selection"/> from a series of tokens. Follows the

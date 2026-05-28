@@ -207,10 +207,10 @@ internal sealed partial class Selection
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
             (batch, outerResolver) =>
             aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputSchema, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
+                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
                 : windows.Count > 0
-                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
-                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),
+                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),
             isAssignmentOnly,
             intoTarget,
             destColumnSchema,
@@ -259,12 +259,11 @@ internal sealed partial class Selection
         return (profile, ViewUpdatabilityRejection.None);
     }
 
-    private static IEnumerable<byte[]> ProjectSqlRows(
+    private static IEnumerable<SqlValue[]> ProjectSqlRows(
         FromSource[] sources,
         JoinSpec[] joins,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
         string[] outputColumnNames,
         List<OrderBySpec> orderBy,
         bool distinct,
@@ -276,8 +275,8 @@ internal sealed partial class Selection
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0
-            ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, batch, outerResolver)
-            : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
+            ? ProjectStreaming(sources, joins, expressions, excluders, topCount, offsetCount, fetchCount, batch, outerResolver)
+            : ProjectBuffered(sources, joins, expressions, excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
     }
 
     /// <summary>
@@ -286,7 +285,7 @@ internal sealed partial class Selection
     /// they're mutually exclusive at parse time (Msg 10741), so callers
     /// pass <c>topCount ?? fetchCount</c> here.
     /// </summary>
-    private static IEnumerable<byte[]> ApplyOffsetTake(IEnumerable<byte[]> rows, int? offsetCount, int? topOrFetch)
+    private static IEnumerable<T> ApplyOffsetTake<T>(IEnumerable<T> rows, int? offsetCount, int? topOrFetch)
     {
         if (offsetCount is { } offset && offset > 0)
             rows = rows.Skip(offset);
@@ -295,12 +294,11 @@ internal sealed partial class Selection
         return rows;
     }
 
-    private static IEnumerable<byte[]> ProjectStreaming(
+    private static IEnumerable<SqlValue[]> ProjectStreaming(
         FromSource[] sources,
         JoinSpec[] joins,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
         int? topCount,
         int? offsetCount,
         int? fetchCount,
@@ -308,7 +306,7 @@ internal sealed partial class Selection
     {
         return ApplyOffsetTake(InnerStream(), offsetCount, topCount ?? fetchCount);
 
-        IEnumerable<byte[]> InnerStream()
+        IEnumerable<SqlValue[]> InnerStream()
         {
             foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
@@ -336,17 +334,16 @@ internal sealed partial class Selection
                 for (var i = 0; i < expressions.Count; i++)
                     projected[i] = expressions[i].Run(new RuntimeContext(ResolveColumn, batch));
 
-                yield return RowEncoder.EncodeRow(outputSchema, projected);
+                yield return projected;
             }
         }
     }
 
-    private static IEnumerable<byte[]> ProjectBuffered(
+    private static IEnumerable<SqlValue[]> ProjectBuffered(
         FromSource[] sources,
         JoinSpec[] joins,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
-        SqlType[] outputSchema,
         string[] outputColumnNames,
         List<OrderBySpec> orderBy,
         bool distinct,
@@ -404,6 +401,6 @@ internal sealed partial class Selection
             windowed = windowed.Take(limit);
 
         foreach (var (projected, _) in windowed)
-            yield return RowEncoder.EncodeRow(outputSchema, projected);
+            yield return projected;
     }
 }

@@ -456,7 +456,7 @@ partial class Simulation
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
 
         if (affected.Count == 0)
-            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, []);
+            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>());
 
         // SNAPSHOT isolation write-conflict: each affected row must have
         // a live version no newer than my snapshot, otherwise Msg 3960

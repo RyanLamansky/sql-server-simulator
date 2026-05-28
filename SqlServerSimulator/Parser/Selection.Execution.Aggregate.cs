@@ -25,13 +25,12 @@ internal sealed partial class Selection
     /// GROUP BY the output is exactly one row even for empty input (SQL
     /// Server's implicit-empty-GROUP-BY rule).
     /// </summary>
-    private static List<byte[]> BuildAggregateProjectionRows(
+    private static List<SqlValue[]> BuildAggregateProjectionRows(
         FromSource[] sources,
         JoinSpec[] joins,
         Func<MultiPartName, SqlType> resolveColumnType,
         List<Expression> expressions,
         FromClause fromClause,
-        SqlType[] outputSchema,
         string[] outputColumnNames,
         List<OrderBySpec> orderByItems,
         List<AggregateExpression> aggregates,
@@ -103,7 +102,7 @@ internal sealed partial class Selection
             ? (IReadOnlyList<Expression[]>)fromClause.GroupingSets
             : [[]];
 
-        var output = new List<(SqlValue[] OrderKeys, byte[] Row)>();
+        var output = new List<(SqlValue[] OrderKeys, SqlValue[] Row)>();
         foreach (var groupingSet in effectiveSets)
         {
             var groups = new Dictionary<SqlValueKey, GroupState>();
@@ -271,7 +270,7 @@ internal sealed partial class Selection
                             : orderByItems[k].Expr!.Run(new RuntimeContext(name => ResolveOrderName(projected, name), batch));
                     }
 
-                    output.Add((orderKeys, RowEncoder.EncodeRow(outputSchema, projected)));
+                    output.Add((orderKeys, projected));
                 }
                 finally
                 {
@@ -287,7 +286,7 @@ internal sealed partial class Selection
         if (orderByItems.Count > 0)
             output.Sort((a, b) => CompareOrderKeys(a.OrderKeys, b.OrderKeys, orderByItems));
 
-        IEnumerable<(SqlValue[] OrderKeys, byte[] Row)> limited = output;
+        IEnumerable<(SqlValue[] OrderKeys, SqlValue[] Row)> limited = output;
         if (topCount is { } topLimit)
             limited = limited.Take(topLimit);
         if (offsetCount is { } offset && offset > 0)

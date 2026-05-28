@@ -3,20 +3,117 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Tabular query result whose rows are encoded byte arrays in the page-row
-/// format. The reader navigates the row's bytes directly via
-/// <see cref="RowDecoder"/> on each accessor call, never
-/// rehydrating the row into <see cref="SqlValue"/>[].
+/// Tabular query result over one of two row representations: encoded
+/// <c>byte[]</c> rows in the page-row format (the niche producers — set ops,
+/// TVFs, OPENJSON, views, …), or already-projected <see cref="SqlValue"/>[]
+/// rows (the FROM-bearing SELECT projection path). The <c>SqlValue[]</c> form
+/// lets the reader's cursor serve cells directly, skipping the
+/// encode-then-re-decode round-trip a projected SELECT would otherwise pay
+/// (the projection computes the values, and the cursor would decode them right
+/// back). <see cref="RowBytes"/> stays available for the byte-consuming paths
+/// (INSERT…SELECT, SELECT INTO, set-op operands, subqueries); it encodes the
+/// <see cref="SqlValue"/>[] form lazily, so those callers pay exactly what they
+/// did before and the reader path pays neither encode nor re-decode.
 /// </summary>
-internal sealed class SimulatedSqlResultSet(SqlType[] schema, string[] columnNames, IEnumerable<byte[]> rowBytes) : SimulatedQueryResult
+internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
 {
-    public override string[] ColumnNames => columnNames;
+    private readonly SqlType[] schema;
+    private readonly string[] columnNames;
+    private readonly IEnumerable<byte[]>? rowBytes;
+    private readonly IEnumerable<SqlValue[]>? rowValues;
 
-    public override SqlType[] Schema => schema;
+    public SimulatedSqlResultSet(SqlType[] schema, string[] columnNames, IEnumerable<byte[]> rowBytes)
+    {
+        this.schema = schema;
+        this.columnNames = columnNames;
+        this.rowBytes = rowBytes;
+    }
 
-    public IEnumerable<byte[]> RowBytes => rowBytes;
+    public SimulatedSqlResultSet(SqlType[] schema, string[] columnNames, IEnumerable<SqlValue[]> rowValues)
+    {
+        this.schema = schema;
+        this.columnNames = columnNames;
+        this.rowValues = rowValues;
+    }
 
-    public override RowCursor CreateCursor() => new SqlValueCursor(schema, rowBytes.GetEnumerator());
+    public override string[] ColumnNames => this.columnNames;
+
+    public override SqlType[] Schema => this.schema;
+
+    public IEnumerable<byte[]> RowBytes => this.rowBytes
+        ?? this.rowValues!.Select(values => RowEncoder.EncodeRow(this.schema, values));
+
+    public override RowCursor CreateCursor() => this.rowValues is { } values
+        ? new ValueArrayCursor(this.schema.Length, values.GetEnumerator())
+        : new SqlValueCursor(this.schema, this.rowBytes!.GetEnumerator());
+
+    /// <summary>
+    /// Cursor over already-projected <see cref="SqlValue"/>[] rows — the
+    /// indexer returns the stored value directly, no per-cell decode. Shares
+    /// the peek-and-buffer <see cref="HasRows"/> shape with
+    /// <see cref="SqlValueCursor"/>.
+    /// </summary>
+    private sealed class ValueArrayCursor(int fieldCount, IEnumerator<SqlValue[]> source) : RowCursor
+    {
+        private SqlValue[]? buffered;
+        private SqlValue[]? current;
+        private bool peeked;
+        private bool sourceDone;
+        private bool everHadRows;
+
+        public override int FieldCount => fieldCount;
+
+        public override bool HasRows
+        {
+            get
+            {
+                if (everHadRows)
+                    return true;
+                if (peeked || sourceDone)
+                    return false;
+                peeked = true;
+                if (source.MoveNext())
+                {
+                    buffered = source.Current;
+                    everHadRows = true;
+                    return true;
+                }
+                sourceDone = true;
+                return false;
+            }
+        }
+
+        public override bool MoveNext()
+        {
+            if (buffered is not null)
+            {
+                current = buffered;
+                buffered = null;
+                return true;
+            }
+            if (sourceDone)
+            {
+                current = null;
+                return false;
+            }
+            peeked = true;
+            if (source.MoveNext())
+            {
+                current = source.Current;
+                everHadRows = true;
+                return true;
+            }
+            sourceDone = true;
+            current = null;
+            return false;
+        }
+
+        public override SqlValue this[int ordinal] => current is null
+            ? throw new InvalidOperationException("No current row.")
+            : current[ordinal];
+
+        protected override void DisposeCore() => source.Dispose();
+    }
 
     /// <summary>
     /// Cursor over a result-set's row bytes. Owns a single-row lookahead so
