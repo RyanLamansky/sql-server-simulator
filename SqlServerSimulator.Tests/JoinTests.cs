@@ -607,4 +607,56 @@ public sealed class JoinTests
             insert r values (1), (3);
             select count(*) from l full outer join r on l.k = r.k
             """));
+
+    /// <summary>
+    /// Filter-then-join with an indexed inner takes the per-outer seek path; the
+    /// result must match the hash path exactly (3 children of the filtered parent).
+    /// </summary>
+    [TestMethod]
+    public void InnerJoin_FilterThenIndexedInner_SeekPath_ReturnsCorrectRows()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table p (id int not null primary key, label varchar(20));
+            create table c (cid int not null primary key, pid int, amt int);
+            create index ix_c_pid on c (pid);
+            insert p values (1, 'a'), (2, 'b');
+            insert c values (10, 1, 100), (11, 1, 200), (12, 1, 300), (13, 2, 999);
+            select count(*) from p join c on c.pid = p.id where p.id = 1
+            """));
+
+    /// <summary>
+    /// LEFT JOIN on the seek path still NULL-extends an outer row whose seek
+    /// finds no inner match.
+    /// </summary>
+    [TestMethod]
+    public void LeftJoin_FilterThenIndexedInner_SeekPath_NullExtendsUnmatched()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table p (id int not null primary key);
+            create table c (cid int not null primary key, pid int);
+            create index ix_c_pid on c (pid);
+            insert p values (1), (2), (3);
+            insert c values (10, 1), (11, 2)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand(
+            "select c.cid from p left join c on c.pid = p.id where p.id = 3").ExecuteReader();
+        IsTrue(reader.Read());
+        IsTrue(reader.IsDBNull(0));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// A large unfiltered outer exceeds the per-outer-seek cap and falls back to
+    /// the hash build; every parent's single child must still match (200 rows).
+    /// </summary>
+    [TestMethod]
+    public void InnerJoin_LargeOuter_IndexedInner_HashFallback_ReturnsCorrectRows()
+        => AreEqual(200, new Simulation().ExecuteScalar("""
+            create table p (id int not null primary key);
+            create table c (cid int not null primary key, pid int);
+            create index ix_c_pid on c (pid);
+            declare @i int = 1;
+            while @i <= 200 begin insert p values (@i); insert c values (@i, @i); set @i += 1; end;
+            select count(*) from p join c on c.pid = p.id
+            """));
 }

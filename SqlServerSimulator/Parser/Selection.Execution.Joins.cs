@@ -130,13 +130,17 @@ internal sealed partial class Selection
         var equiPlan = join.Kind is JoinKind.Inner or JoinKind.Left or JoinKind.Right or JoinKind.Full
             ? TryPlanEquiJoin(join, sources, level)
             : null;
-        JoinDiagnostics.Sink?.Add(equiPlan is null
-            ? $"{join.Kind}:NestedLoops"
-            : $"{join.Kind}:HashMatch(keys={equiPlan.Keys.Length},residual={equiPlan.Residual.Length})");
+        // INNER / LEFT equi-joins decide hash-vs-seek dynamically inside
+        // EquiJoinSeekOrHash (which logs its own strategy); only the other
+        // paths' strategy is fixed here.
+        if (equiPlan is null)
+            JoinDiagnostics.Sink?.Add($"{join.Kind}:NestedLoops");
+        else if (join.Kind is JoinKind.Right or JoinKind.Full)
+            JoinDiagnostics.Sink?.Add($"{join.Kind}:HashMatch(keys={equiPlan.Keys.Length},residual={equiPlan.Residual.Length})");
         return (join.Kind, equiPlan) switch
         {
-            (JoinKind.Inner, { } p) => HashEquiJoin(left, right, p, tuple, level, batch, resolve, emitUnmatchedLeft: false, emitUnmatchedRight: false),
-            (JoinKind.Left, { } p) => HashEquiJoin(left, right, p, tuple, level, batch, resolve, emitUnmatchedLeft: true, emitUnmatchedRight: false),
+            (JoinKind.Inner, { } p) => EquiJoinSeekOrHash(left, right, p, join, tuple, level, batch, resolve, emitUnmatchedLeft: false),
+            (JoinKind.Left, { } p) => EquiJoinSeekOrHash(left, right, p, join, tuple, level, batch, resolve, emitUnmatchedLeft: true),
             (JoinKind.Right, { } p) => HashEquiJoin(left, right, p, tuple, level, batch, resolve, emitUnmatchedLeft: false, emitUnmatchedRight: true),
             (JoinKind.Full, { } p) => HashEquiJoin(left, right, p, tuple, level, batch, resolve, emitUnmatchedLeft: true, emitUnmatchedRight: true),
             (JoinKind.Inner or JoinKind.Cross or JoinKind.CrossApply, _) => InnerOrCross(left, right, join, tuple, level, batch, resolve),
@@ -446,6 +450,145 @@ internal sealed partial class Selection
     {
         var (source, _) = FindSourceColumn(sources, reference.ReferencedName);
         return source < 0 || source > level ? 0 : source < level ? -1 : 1;
+    }
+
+    private static readonly JoinSpec[] NoJoins = [];
+
+    /// <summary>
+    /// Outer-row cap for choosing the per-outer index-seek strategy. A small
+    /// outer set joined to an indexed inner wins big from seeking the inner per
+    /// outer row — the inner's per-<c>Heap</c> seek cache builds once and
+    /// persists across outer rows and across query executions, whereas
+    /// <see cref="HashEquiJoin"/> rebuilds its dictionary over the whole inner
+    /// every execution. Above the cap the hash build's O(L+R) wins (per-outer
+    /// seek-call overhead would dominate a large outer), so the join falls back.
+    /// </summary>
+    private const int SeekOuterRowCap = 128;
+
+    /// <summary>
+    /// INNER / LEFT equi-join that adaptively chooses between a per-outer index
+    /// seek on the inner and the hash build. Buffers the outer up to
+    /// <see cref="SeekOuterRowCap"/>; if the outer stays small <b>and</b> the
+    /// inner is a base table the equality keys can seek (probed once on the
+    /// first outer row — the decline conditions are value-independent), it seeks
+    /// the inner per outer row and re-checks the full ON predicate as a residual
+    /// filter (result-transparent). Otherwise it replays the buffered outer rows
+    /// (then the remainder) into <see cref="HashEquiJoin"/>, so a large outer or
+    /// an unindexed inner never regresses. RIGHT / FULL stay on the hash path
+    /// (their unmatched-right tracking needs the inner materialized regardless).
+    /// </summary>
+    private static IEnumerable<byte[]?[]> EquiJoinSeekOrHash(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        EquiJoinPlan plan,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve,
+        bool emitUnmatchedLeft)
+    {
+        void LogHash() => JoinDiagnostics.Sink?.Add($"{join.Kind}:HashMatch(keys={plan.Keys.Length},residual={plan.Residual.Length})");
+
+        // Only a re-enumerable base table can be seeked per outer row.
+        if (right.BackingTable is null || right.LateralPlan is not null)
+        {
+            LogHash();
+            foreach (var t in HashEquiJoin(left, right, plan, tuple, level, batch, resolve, emitUnmatchedLeft, emitUnmatchedRight: false))
+                yield return t;
+            yield break;
+        }
+
+        var buffer = new List<byte[]?[]>();
+        using var le = left.GetEnumerator();
+        var overflow = false;
+        while (le.MoveNext())
+        {
+            var snap = new byte[]?[level];
+            Array.Copy(tuple, snap, level);
+            buffer.Add(snap);
+            if (buffer.Count > SeekOuterRowCap)
+            {
+                overflow = true;
+                break;
+            }
+        }
+
+        // Large outer: hash, replaying the buffered rows then the remainder.
+        if (overflow)
+        {
+            LogHash();
+            foreach (var t in HashEquiJoin(ReplayThenContinue(buffer, le, tuple, level), right, plan, tuple, level, batch, resolve, emitUnmatchedLeft, emitUnmatchedRight: false))
+                yield return t;
+            yield break;
+        }
+
+        if (buffer.Count == 0)
+            yield break;
+
+        // Probe seekability on the first buffered outer row. MaybeApplyIndexSeek
+        // returns the same FromSource on decline, a narrowed one on seek; the
+        // decline is value-independent so this one probe settles the strategy.
+        Array.Copy(buffer[0], tuple, level);
+        var firstSeek = MaybeApplyIndexSeek([right], NoJoins, [join.OnPredicate!], batch, resolve);
+        if (ReferenceEquals(firstSeek[0], right))
+        {
+            LogHash();
+            foreach (var t in HashEquiJoin(Replay(buffer, tuple, level), right, plan, tuple, level, batch, resolve, emitUnmatchedLeft, emitUnmatchedRight: false))
+                yield return t;
+            yield break;
+        }
+
+        JoinDiagnostics.Sink?.Add($"{join.Kind}:NestedLoopIndexSeek(keys={plan.Keys.Length})");
+        var runtime = new RuntimeContext(resolve, batch);
+        for (var i = 0; i < buffer.Count; i++)
+        {
+            Array.Copy(buffer[i], tuple, level);
+            var seeked = i == 0 ? firstSeek : MaybeApplyIndexSeek([right], NoJoins, [join.OnPredicate!], batch, resolve);
+            var matched = false;
+            foreach (var row in seeked[0].Rows)
+            {
+                tuple[level] = row;
+                if (join.OnPredicate!.Run(runtime) == true)
+                {
+                    matched = true;
+                    yield return tuple;
+                }
+            }
+
+            if (emitUnmatchedLeft && !matched)
+            {
+                tuple[level] = null;
+                yield return tuple;
+            }
+
+            tuple[level] = null;
+        }
+    }
+
+    // Replays buffered outer-slot snapshots into the shared tuple, one yield
+    // each — the enumerable form HashEquiJoin's probe phase consumes.
+    private static IEnumerable<byte[]?[]> Replay(List<byte[]?[]> buffer, byte[]?[] tuple, int level)
+    {
+        foreach (var snap in buffer)
+        {
+            Array.Copy(snap, tuple, level);
+            yield return tuple;
+        }
+    }
+
+    // Replay then drain the remaining outer enumerator (positioned just past the
+    // last buffered row), so the hash path sees the full outer stream in order.
+    private static IEnumerable<byte[]?[]> ReplayThenContinue(List<byte[]?[]> buffer, IEnumerator<byte[]?[]> rest, byte[]?[] tuple, int level)
+    {
+        foreach (var snap in buffer)
+        {
+            Array.Copy(snap, tuple, level);
+            yield return tuple;
+        }
+
+        while (rest.MoveNext())
+            yield return tuple;
     }
 
     /// <summary>

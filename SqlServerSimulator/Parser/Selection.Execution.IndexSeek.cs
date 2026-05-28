@@ -41,7 +41,8 @@ internal sealed partial class Selection
         JoinSpec[] joins,
         List<BooleanExpression> excluders,
         BatchContext batch,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        Func<MultiPartName, SqlValue>? outerResolver,
+        bool allowCorrelatedColumnValue = true)
     {
         if (sources.Length != 1 || joins.Length != 0 || excluders.Count == 0)
             return sources;
@@ -90,8 +91,8 @@ internal sealed partial class Selection
         {
             if (!conjunct.TryGetEqualityOperands(out var left, out var right))
                 continue;
-            _ = TryRecordColumnEquality(source, left, right, equalities)
-                || TryRecordColumnEquality(source, right, left, equalities);
+            _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue)
+                || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue);
         }
 
         if (equalities.Count != 0
@@ -112,11 +113,35 @@ internal sealed partial class Selection
         return sources;
     }
 
+    /// <summary>
+    /// Pushes single-source WHERE equality predicates (<c>leftmostCol = literal /
+    /// variable</c>) down onto the leftmost FROM source of a multi-source query,
+    /// seeking it before the join runs. The leftmost source is always preserved
+    /// (never the NULL-supplied side of an outer join), so narrowing it can't
+    /// change join semantics, and the conjuncts stay in the residual WHERE.
+    /// Probe values are restricted to non-column constants/variables — a
+    /// not-yet-joined sibling column isn't resolvable pre-join. Shrinking the
+    /// driving rowset is what lets <see cref="EquiJoinSeekOrHash"/> seek the
+    /// inner per outer row for the common filter-then-join shape.
+    /// </summary>
+    private static FromSource[] NarrowLeftmostJoinSource(
+        FromSource[] sources, List<BooleanExpression> excluders, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        if (sources.Length < 2 || excluders.Count == 0)
+            return sources;
+        var seeked = MaybeApplyIndexSeek([sources[0]], NoJoins, excluders, batch, outerResolver, allowCorrelatedColumnValue: false);
+        if (ReferenceEquals(seeked[0], sources[0]))
+            return sources;
+        var result = (FromSource[])sources.Clone();
+        result[0] = seeked[0];
+        return result;
+    }
+
     // Records `column = stableValue` for an indexable, non-LOB column of THIS
     // source. No evaluation happens here — only the value-side expression is
     // captured; it's run lazily (and once) when a prefix actually selects it.
     private static bool TryRecordColumnEquality(
-        FromSource source, Expression columnSide, Expression valueSide, Dictionary<int, Expression> equalities)
+        FromSource source, Expression columnSide, Expression valueSide, Dictionary<int, Expression> equalities, bool allowCorrelatedColumnValue)
     {
         if (columnSide is not Reference columnRef)
             return false;
@@ -126,7 +151,7 @@ internal sealed partial class Selection
         var storageOrdinal = source.StorageOrdinals is { } ordinals ? ordinals[columnIndex] : columnIndex;
         return storageOrdinal >= 0
             && !source.StoredSchema[storageOrdinal].Type.IsLob
-            && IsStableValueSide(valueSide, source)
+            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue)
             && equalities.TryAdd(storageOrdinal, valueSide);
     }
 
@@ -279,7 +304,11 @@ internal sealed partial class Selection
     // session variable, or a column resolving to some OTHER source (an outer /
     // correlated reference). Anything else (arithmetic, non-deterministic or
     // side-effecting functions, subqueries, or a column of THIS source) declines.
-    private static bool IsStableValueSide(Expression expression, FromSource source)
+    // <paramref name="allowCorrelatedColumnValue"/> is false when narrowing the
+    // leftmost source of a multi-source FROM <i>before</i> the join runs: a
+    // not-yet-joined sibling column isn't resolvable then, so only literals /
+    // variables / parameters qualify as the probe value.
+    private static bool IsStableValueSide(Expression expression, FromSource source, bool allowCorrelatedColumnValue = true)
     {
         while (expression.PureConversionOperand is { } inner)
             expression = inner;
@@ -287,7 +316,7 @@ internal sealed partial class Selection
         {
             Value => true,
             VariableReference => true,
-            Reference reference => FindSourceColumn([source], reference.ReferencedName).SourceIndex < 0,
+            Reference reference => allowCorrelatedColumnValue && FindSourceColumn([source], reference.ReferencedName).SourceIndex < 0,
             _ => false,
         };
     }

@@ -16,20 +16,24 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class JoinStrategyTests
 {
-    private static List<string> CaptureStrategies(string joinQuery)
+    private const string DefaultSetup = """
+        create table a (id int, name varchar(20));
+        create table b (id int, a_id int);
+        insert a values (1, 'one'), (2, 'two');
+        insert b values (10, 1), (11, 2)
+        """;
+
+    private static List<string> CaptureStrategies(string joinQuery) => CaptureStrategies(DefaultSetup, joinQuery);
+
+    private static List<string> CaptureStrategies(string setup, string joinQuery)
     {
         var sim = new Simulation();
         var connection = sim.CreateDbConnection();
         connection.Open();
-        using (var setup = connection.CreateCommand())
+        using (var setupCmd = connection.CreateCommand())
         {
-            setup.CommandText = """
-                create table a (id int, name varchar(20));
-                create table b (id int, a_id int);
-                insert a values (1, 'one'), (2, 'two');
-                insert b values (10, 1), (11, 2)
-                """;
-            _ = setup.ExecuteNonQuery();
+            setupCmd.CommandText = setup;
+            _ = setupCmd.ExecuteNonQuery();
         }
 
         JoinDiagnostics.Sink = [];
@@ -46,6 +50,16 @@ public sealed class JoinStrategyTests
             JoinDiagnostics.Sink = null;
         }
     }
+
+    // Parent p (PK id) + child c with a nonclustered index on the join key (pid);
+    // 200 parents so an unfiltered outer exceeds the per-outer-seek row cap.
+    private const string IndexedSetup = """
+        create table p (id int not null primary key, label varchar(20));
+        create table c (cid int not null primary key, pid int, amt int);
+        create index ix_c_pid on c (pid);
+        declare @i int = 1;
+        while @i <= 200 begin insert p values (@i, 'p'); insert c values (@i, @i, @i * 10); set @i += 1; end
+        """;
 
     [TestMethod]
     public void EquiJoin_TakesHashPath()
@@ -71,4 +85,35 @@ public sealed class JoinStrategyTests
     public void CrossJoin_UsesNestedLoops()
         => Contains("Cross:NestedLoops",
             CaptureStrategies("select a.id from a cross join b"));
+
+    /// <summary>
+    /// WHERE p.id = 5 pushes down to seek the leftmost to one row, then the
+    /// inner (indexed on pid) is seeked per outer row instead of hash-built.
+    /// </summary>
+    [TestMethod]
+    public void FilterThenJoin_SmallOuter_IndexedInner_SeeksPerOuter()
+        => Contains("Inner:NestedLoopIndexSeek(keys=1)",
+            CaptureStrategies(IndexedSetup, "select p.label, c.amt from p join c on c.pid = p.id where p.id = 5"));
+
+    [TestMethod]
+    public void LeftFilterThenJoin_SmallOuter_IndexedInner_SeeksPerOuter()
+        => Contains("Left:NestedLoopIndexSeek(keys=1)",
+            CaptureStrategies(IndexedSetup, "select p.label, c.amt from p left join c on c.pid = p.id where p.id = 5"));
+
+    /// <summary>
+    /// No WHERE filter: 200 outer rows exceed the seek cap, so the join keeps
+    /// the O(L+R) hash build rather than 200 per-outer seeks.
+    /// </summary>
+    [TestMethod]
+    public void LargeOuter_IndexedInner_FallsBackToHash()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
+            CaptureStrategies(IndexedSetup, "select p.label, c.amt from p join c on c.pid = p.id"));
+
+    /// <summary>
+    /// a/b are unindexed, so the inner can't seek on the join key — hash.
+    /// </summary>
+    [TestMethod]
+    public void SmallOuter_UnindexedInner_FallsBackToHash()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
+            CaptureStrategies("select a.id from a join b on a.id = b.a_id where a.id = 1"));
 }

@@ -274,6 +274,7 @@ internal sealed partial class Selection
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
+        sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0
             ? ProjectStreaming(sources, joins, expressions, excluders, outputSchema, topCount, offsetCount, fetchCount, batch, outerResolver)
             : ProjectBuffered(sources, joins, expressions, excluders, outputSchema, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
