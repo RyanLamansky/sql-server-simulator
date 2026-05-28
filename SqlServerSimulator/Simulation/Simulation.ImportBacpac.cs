@@ -53,5 +53,9 @@ partial class Simulation
         var database = new Database(databaseName, this.ServerCollation);
         Databases.Add(databaseName, database);
         BacpacReader.Load(stream, this, database, maxDegreeOfParallelism, result);
+        // The new database adds schema not visible to any plan parsed before
+        // this call; bump so a stale cache entry parsed under the prior
+        // version misses lookup and re-parses.
+        BumpSchemaVersion();
     }
 }

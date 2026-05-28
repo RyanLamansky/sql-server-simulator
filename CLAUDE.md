@@ -159,6 +159,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **`ALTER TABLE` ADD/DROP/ALTER COLUMN + CONSTRAINT (incl. trust toggling)** → [`alter-table.md`](docs/claude/alter-table.md).
 - **`CREATE INDEX` (UNIQUE / CLUSTERED / INCLUDE / WHERE filter), `sys.indexes`** → [`indexes.md`](docs/claude/indexes.md).
 - **Table hints (`WITH (NOLOCK …)`) + statement `OPTION (…)` hints** → [`query-hints.md`](docs/claude/query-hints.md).
+- **Per-`Simulation` plan cache** (single-SELECT `Selection` reuse keyed by text + db + parameter-type signature, `SchemaVersion`-stamped invalidation, inline-in-the-SELECT-arm promotion because the iterator's post-yield code is unreachable on a non-draining `ExecuteReader`; `VariableReference` Run-time slot lookup is the load-bearing co-fix) → [`plan-cache.md`](docs/claude/plan-cache.md).
 - **Locking, MVCC, SNAPSHOT/RCSI, deadlock/timeout, lock-related DMVs** → [`locking.md`](docs/claude/locking.md).
 - **`hierarchyid` data type** (incl. deferred byte-identical CAST research notes) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`, principal DDL, fixed-principal seed, principal scalars (`USER_ID` / `SUSER_ID` / `DATABASE_PRINCIPAL_ID` / `USER_NAME` / `SUSER_NAME` / `SUSER_SNAME` / `CURRENT_USER` / `SESSION_USER` / `SYSTEM_USER` / `ORIGINAL_LOGIN` / `HAS_PERMS_BY_NAME` / `IS_MEMBER` / `IS_ROLEMEMBER` / `IS_SRVROLEMEMBER`)** → [`permissions.md`](docs/claude/permissions.md).

@@ -242,6 +242,51 @@ internal sealed class BatchContext
     public bool HasDispatchedStatement;
 
     /// <summary>
+    /// Set <see langword="true"/> when this batch's parse captures state
+    /// that can't be reused across invocations:
+    /// <list type="bullet">
+    ///   <item><see cref="TryResolveTable"/> hands back a session- or
+    ///   batch-local table — a local <c>#temp</c>, a global <c>##gtemp</c>,
+    ///   or a <c>@t</c> table variable (the resolved <see cref="HeapTable"/>
+    ///   instance is meaningful only to this session / batch).</item>
+    ///   <item>The FROM-less SELECT path
+    ///   (<c>BuildSynthesizedSqlRow</c>) evaluated the projection list at
+    ///   parse time and baked the resulting <see cref="SqlValue"/>s into the
+    ///   row source — replaying the cached plan would emit those stale
+    ///   values instead of fresh <c>NEWID()</c> / <c>GETDATE()</c> /
+    ///   <c>@@TRANCOUNT</c> / <c>NEXT VALUE FOR seq</c> results.</item>
+    /// </list>
+    /// The plan-cache promotion check reads this flag and skips caching
+    /// when set. The name is left general because the underlying
+    /// "non-cacheable" semantic is what matters at the promotion site —
+    /// either condition disqualifies a batch identically.
+    /// </summary>
+    public bool HasSessionScopedReference;
+
+    /// <summary>Plan-cache key component: the command text this batch was
+    /// constructed for. Set by <c>CreateResultSetsForCommand</c> when the
+    /// batch is plan-cache-eligible (non-empty text + live connection +
+    /// current database), <see langword="null"/> otherwise. The SELECT arm
+    /// reads all four components to build the lookup key for inline cache
+    /// promotion (the iterator's post-foreach code is unreachable from a
+    /// non-draining ExecuteReader consumer).</summary>
+    public string? PlanCacheCommandText;
+
+    /// <summary>Plan-cache key component: the current database name at
+    /// batch start. See <see cref="PlanCacheCommandText"/>.</summary>
+    public string? PlanCacheDatabaseName;
+
+    /// <summary>Plan-cache key component: the canonical parameter type
+    /// signature built from the command's <see cref="DbCommand.Parameters"/>
+    /// collection. See <see cref="PlanCacheCommandText"/>.</summary>
+    public string? PlanCacheParameterSignature;
+
+    /// <summary>Plan-cache key component: the <see cref="Simulation.SchemaVersion"/>
+    /// snapshot at batch start. Compared against the live value at promotion
+    /// time so a DDL that fired mid-batch declines caching the entry.</summary>
+    public long PlanCacheSchemaVersion;
+
+    /// <summary>
     /// Active error context inside a <c>CATCH</c> block — set when the
     /// associated <c>TRY</c> body's dispatch caught a
     /// <see cref="SimulatedSqlException"/>, cleared when the enclosing
@@ -1234,7 +1279,11 @@ internal sealed class BatchContext
         {
             // Temp tables are session-local; no other connection can DROP
             // them, so Sch-S acquisition is unnecessary (and would be a
-            // self-conflict-free no-op anyway).
+            // self-conflict-free no-op anyway). Session-scoped: the parsed
+            // Selection binds the specific HeapTable instance from THIS
+            // connection's TempTables dict, so a cross-session plan-cache
+            // replay would project the wrong table.
+            this.HasSessionScopedReference = true;
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
         }
 
@@ -1245,14 +1294,20 @@ internal sealed class BatchContext
             // same as `##q`). Sch-S acquisition is skipped — the connection-
             // dispose cleanup is the only DDL that races with reads, and it
             // walks the dict under TryRemove which is atomic against
-            // resolution lookups.
+            // resolution lookups. The binding still captures a specific
+            // HeapTable instance whose drop/recreate cycle isn't
+            // SchemaVersion-tracked, so the plan-cache treats it as
+            // session-scoped and declines.
+            this.HasSessionScopedReference = true;
             return this.Connection.Simulation.GlobalTempTables.TryGetValue(name.Leaf, out table);
         }
 
         // Table-variable routing: @-prefixed leaves are per-batch, 1-part-only
         // (probe-confirmed: dbo.@t raises Msg 102 at parse). Dict key is the
         // @-stripped name (matches Variables dict convention). Table variables
-        // are per-batch — no concurrency, no Sch-S.
+        // are per-batch — no concurrency, no Sch-S. Strictly batch-scoped, so
+        // any cached plan referencing one is invalid the moment it leaves the
+        // owning batch.
         if (IsTableVariableName(name.Leaf))
         {
             if (name.Count > 1)
@@ -1260,6 +1315,7 @@ internal sealed class BatchContext
                 table = null;
                 return false;
             }
+            this.HasSessionScopedReference = true;
             return this.TableVariables.TryGetValue(name.Leaf[1..], out table);
         }
 

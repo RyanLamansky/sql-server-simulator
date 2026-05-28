@@ -76,6 +76,10 @@ partial class Simulation
             throw new NotSupportedException($"sp_addlinkedserver '{server}' has no corresponding registered target Simulation; call Simulation.AddRemoteSimulation(\"{server}\", target) from the host code before activating the linked server.");
 
         simulation.ActiveLinkedServers[server] = new LinkedServer(server, target, srvProduct, provider, dataSource);
+        // Activating (or re-activating) a linked server changes how
+        // four-part-name FROM clauses bind at parse time; cached plans
+        // parsed before this call must be invalidated.
+        simulation.BumpSchemaVersion();
     }
 
     /// <summary>
@@ -121,6 +125,9 @@ partial class Simulation
 
         if (!batch.Connection.Simulation.ActiveLinkedServers.TryRemove(server, out _))
             throw SimulatedSqlException.LinkedServerDoesNotExist(server);
+        // Dropping a linked server removes a four-part-name binding;
+        // cached plans referencing it would re-resolve incorrectly.
+        batch.Connection.Simulation.BumpSchemaVersion();
     }
 
     /// <summary>

@@ -59,6 +59,11 @@ public sealed partial class Simulation
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(target);
         this.AvailableRemotes[name] = target;
+        // Changing or replacing a remote binding can alter what an active
+        // linked-server name resolves to at the next sp_addlinkedserver
+        // call; invalidate any cached plan that may have captured the prior
+        // resolution.
+        BumpSchemaVersion();
     }
 
     /// <summary>
@@ -248,6 +253,70 @@ public sealed partial class Simulation
     internal readonly LockManager LockManager = new();
 
     /// <summary>
+    /// Monotonic counter bumped by every successful CREATE / DROP / ALTER
+    /// statement, plus <c>ImportBacpac</c>. Reads via <c>Volatile.Read</c>
+    /// for cache-version comparisons; writes via
+    /// <see cref="Interlocked.Increment(ref long)"/>. The
+    /// <see cref="planCache"/> stamps each stored <see cref="Selection"/>
+    /// with the version it was parsed under, and a lookup whose live version
+    /// differs treats the entry as stale and re-parses.
+    /// </summary>
+    internal long SchemaVersion;
+
+    /// <summary>
+    /// Per-instance parse-result cache for single-SELECT command batches
+    /// (the EF-query shape). Keyed by (<see cref="DbCommand.CommandText"/>,
+    /// current database name, parameter type signature); the entry records
+    /// the parsed <see cref="Selection"/> and the <see cref="SchemaVersion"/>
+    /// it was parsed under, so a DDL bump invalidates without per-entry walk.
+    /// Capped at <see cref="PlanCacheCapacity"/>: once full, new entries are
+    /// silently dropped (the working set for a stable EF app is dozens of
+    /// queries, so the cap is mostly defensive). Bypassed for batches that
+    /// reference session-scoped tables (<c>#temp</c>, <c>##gtemp</c>,
+    /// <c>@t</c>), contain DDL, or aren't a single top-level SELECT — the
+    /// candidate is captured by the dispatch loop and dropped on any
+    /// disqualifying condition.
+    /// </summary>
+    private readonly ConcurrentDictionary<PlanCacheKey, PlanCacheEntry> planCache = new();
+
+    private const int PlanCacheCapacity = 1024;
+
+    /// <summary>Test-observable: total hits on the plan cache since
+    /// construction. Incremented after a key match against a non-stale
+    /// entry, just before <c>ReplayCachedSelection</c> is called.</summary>
+    internal long PlanCacheHits;
+
+    /// <summary>Test-observable: total misses on the plan cache where an
+    /// eligible command text fell through to the full parse path (either no
+    /// key, no entry, or a stale-version entry). Incremented exactly once
+    /// per eligible call that doesn't hit.</summary>
+    internal long PlanCacheMisses;
+
+    /// <summary>Test-observable: live count of entries in the plan cache.</summary>
+    internal int PlanCacheCount => this.planCache.Count;
+
+    /// <summary>Cache key for <see cref="planCache"/>. The schema-version
+    /// is intentionally NOT part of the key — it sits on the entry so a stale
+    /// lookup overwrites in place rather than orphaning entries on every DDL.</summary>
+    private readonly record struct PlanCacheKey(string CommandText, string DatabaseName, string ParameterSignature);
+
+    /// <summary>Cache entry: the parsed <see cref="Selection"/> plus the
+    /// <see cref="SchemaVersion"/> active when it was parsed.</summary>
+    private sealed class PlanCacheEntry(Selection plan, long schemaVersionAtParse)
+    {
+        public readonly Selection Plan = plan;
+        public readonly long SchemaVersionAtParse = schemaVersionAtParse;
+    }
+
+    /// <summary>
+    /// Increments <see cref="SchemaVersion"/>, signaling that any cached
+    /// <see cref="Selection"/> parsed under the prior version is potentially
+    /// stale. Called by the Create / Drop / Alter dispatch arm and by
+    /// <c>ImportBacpac</c>.
+    /// </summary>
+    internal void BumpSchemaVersion() => Interlocked.Increment(ref this.SchemaVersion);
+
+    /// <summary>
     /// Allocates the next session id (SPID) for a freshly-constructed
     /// <see cref="SimulatedDbConnection"/>. Used to fill the <c>Process ID
     /// &lt;N&gt;</c> slot in Msg 1205 (deadlock victim) and to identify
@@ -333,7 +402,39 @@ public sealed partial class Simulation
             yield break;
         }
 
+        // Plan-cache fast path: a single-SELECT batch parsed once under the
+        // current schema version replays without tokenizing or re-parsing.
+        // Eligibility is gated by TryBuildPlanCacheKey (non-empty text, live
+        // connection) and the entry's recorded schema version must match the
+        // current one — a stale entry falls through to the standard dispatch
+        // and overwrites itself on the way out (the SELECT arm of
+        // DispatchOneStatementCore does the inline promotion).
+        var cacheKey = TryBuildPlanCacheKey(command);
+        var schemaVersionAtStart = Volatile.Read(ref this.SchemaVersion);
+        if (cacheKey is { } key
+            && this.planCache.TryGetValue(key, out var entry)
+            && entry.SchemaVersionAtParse == schemaVersionAtStart)
+        {
+            _ = Interlocked.Increment(ref this.PlanCacheHits);
+            foreach (var outcome in ReplayCachedSelection(command, entry.Plan))
+                yield return outcome;
+            yield break;
+        }
+        if (cacheKey is not null)
+            _ = Interlocked.Increment(ref this.PlanCacheMisses);
+
         var batch = new BatchContext(command);
+        // Stash the prepared cache-key components on the batch so the SELECT
+        // arm can promote inline (the iterator's post-foreach code is
+        // unreachable when the consumer disposes the reader without draining
+        // — the common path for a one-result-set ExecuteReader call).
+        if (cacheKey is { } prepared)
+        {
+            batch.PlanCacheCommandText = prepared.CommandText;
+            batch.PlanCacheDatabaseName = prepared.DatabaseName;
+            batch.PlanCacheParameterSignature = prepared.ParameterSignature;
+            batch.PlanCacheSchemaVersion = schemaVersionAtStart;
+        }
         try
         {
             var context = batch.Parser;
@@ -348,6 +449,114 @@ public sealed partial class Simulation
             // before fully draining the iterator (ExecuteScalar reads one row
             // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
             // fired before the first SELECT silently vanishes.
+            batch.FlushPrintMessages();
+        }
+    }
+
+    /// <summary>
+    /// Promotes a freshly-parsed top-level <see cref="Selection"/> into the
+    /// per-instance plan cache when the batch context's stashed key
+    /// components are set and the live <see cref="SchemaVersion"/> still
+    /// matches the version captured at batch start. Called from the SELECT
+    /// arm of <see cref="DispatchOneStatementCore"/> AFTER row materialization
+    /// but BEFORE the iterator yields the outcome — so the entry is in the
+    /// cache by the time the consumer sees the first row, even if the
+    /// consumer disposes the reader without draining the rest of the
+    /// iterator. The caller is responsible for the upstream gates (block
+    /// depth, first statement, no session-scoped references, parser at EOB).
+    /// </summary>
+    internal void TryPromoteSelectionToPlanCache(BatchContext batch, Selection selection)
+    {
+        if (batch.PlanCacheCommandText is not { } text) return;
+        if (batch.PlanCacheDatabaseName is not { } dbName) return;
+        if (batch.PlanCacheParameterSignature is not { } paramSig) return;
+        if (Volatile.Read(ref this.SchemaVersion) != batch.PlanCacheSchemaVersion) return;
+        var key = new PlanCacheKey(text, dbName, paramSig);
+        // Refresh-in-place semantics: when a DDL has invalidated the prior
+        // entry under this key, the indexer overwrites without growing the
+        // dictionary. The capacity cap therefore only gates fresh keys, not
+        // re-cached versions of an already-tracked one.
+        if (this.planCache.ContainsKey(key) || this.planCache.Count < PlanCacheCapacity)
+            this.planCache[key] = new PlanCacheEntry(selection, batch.PlanCacheSchemaVersion);
+    }
+
+    /// <summary>
+    /// Builds the plan-cache key for a command, or returns <see langword="null"/>
+    /// when caching can't apply (no text, no connection, no current database).
+    /// The parameter signature folds in each parameter's name, declared
+    /// <see cref="DbParameter.DbType"/>, declared
+    /// <see cref="DbParameter.Size"/> / <see cref="DbParameter.Precision"/> /
+    /// <see cref="DbParameter.Scale"/> in <see cref="DbCommand.Parameters"/>
+    /// declaration order — variations in any of those alter parse-time type
+    /// inference (e.g. result column types when the SELECT projects a
+    /// parameter) and so demand a separate cached plan.
+    /// </summary>
+    private static PlanCacheKey? TryBuildPlanCacheKey(SimulatedDbCommand command)
+        => string.IsNullOrEmpty(command.CommandText)
+            ? null
+            : command.Connection?.CurrentDatabase is { } currentDb
+                && BuildPlanCacheParameterSignature(command) is { } sig
+                    ? new PlanCacheKey(command.CommandText, currentDb.Name, sig)
+                    : null;
+
+    private static string? BuildPlanCacheParameterSignature(SimulatedDbCommand command)
+    {
+        var parameters = command.Parameters;
+        if (parameters.Count == 0)
+            return "";
+        var sb = new System.Text.StringBuilder();
+        foreach (SimulatedDbParameter p in parameters)
+        {
+            if (sb.Length > 0)
+                _ = sb.Append('|');
+            // DbType is a stable shorthand that already covers the type-
+            // inference dimension parser code reads (string vs numeric vs
+            // temporal); precision / scale / size catch the
+            // decimal(p,s) / varchar(n) variants that bind through the same
+            // DbType. ParameterName is included because the parser resolves
+            // VariableReference by name. The getter raises ArgumentException
+            // for an unmapped CLR Value (the TVP IDataReader binding path is
+            // the live case) — returning null bypasses the cache for this
+            // command, which is the right behavior anyway since structured
+            // parameters carry session-scoped data the cache doesn't model.
+            DbType dbType;
+            try
+            {
+                dbType = p.DbType;
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+            _ = sb.Append(p.ParameterName).Append(':').Append((int)dbType).Append(':')
+                .Append(p.Size).Append(':').Append((int)p.Precision).Append(':').Append((int)p.Scale);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Replays a cached <see cref="Selection"/> against a fresh
+    /// <see cref="BatchContext"/> for the incoming command, mirroring the
+    /// SELECT arm of <see cref="DispatchOneStatementCore"/> for outcome
+    /// shape (result-set vs assignment-only NonQuery) and for
+    /// <see cref="SimulatedDbConnection.LastStatementRowCount"/>
+    /// maintenance. Bypasses tokenization and parsing entirely.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelection(SimulatedDbCommand command, Selection selection)
+    {
+        var batch = new BatchContext(command);
+        try
+        {
+            var connection = batch.Connection;
+            var rows = selection.Execute(batch).RowBytes.ToList();
+            connection.LastStatementRowCount = rows.Count;
+            yield return selection.IsAssignmentOnly
+                ? new SimulatedNonQuery(rows.Count)
+                : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
+            WriteBackOutputParameters(batch);
+        }
+        finally
+        {
             batch.FlushPrintMessages();
         }
     }
@@ -674,6 +883,24 @@ public sealed partial class Simulation
                     outcome = selection.IsAssignmentOnly
                         ? new SimulatedNonQuery(rows.Count)
                         : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
+
+                    // Plan-cache promotion inline before the yield. Gates:
+                    // top-level (BlockDepth == 0 → not inside IF / WHILE /
+                    // BEGIN…END / TRY/CATCH); first top-level statement
+                    // (!HasDispatchedStatement, which the outer dispatch
+                    // loop sets AFTER this method returns); shape (not
+                    // assignment-only — those yield NonQuery and aren't worth
+                    // caching); no session-scoped table reference; parser at
+                    // EOB (no trailing statements). The promote helper then
+                    // re-checks schema version and cap before adding.
+                    if (batch.BlockDepth == 0
+                        && !batch.HasDispatchedStatement
+                        && !selection.IsAssignmentOnly
+                        && !batch.HasSessionScopedReference
+                        && context.Token is null)
+                    {
+                        TryPromoteSelectionToPlanCache(batch, selection);
+                    }
                     yield return outcome;
                     break;
                 }
@@ -833,12 +1060,23 @@ public sealed partial class Simulation
                 }
                 break;
 
-            case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
-            case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
-            case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
             case ReservedKeyword { Keyword: Keyword.Drop } when TryParseDrop(context):
             case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
+                // DDL invalidates every cached plan parsed under the prior
+                // schema version. Skip-mode statements don't actually execute
+                // the DDL (their parse-only walk has no schema effect), so the
+                // bump is gated on !IsSkipping.
+                if (!batch.IsSkipping)
+                {
+                    BumpSchemaVersion();
+                    connection.LastStatementRowCount = 0;
+                }
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
+            case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
+            case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
             case ReservedKeyword { Keyword: Keyword.Grant } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant):
             case ReservedKeyword { Keyword: Keyword.Revoke } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke):

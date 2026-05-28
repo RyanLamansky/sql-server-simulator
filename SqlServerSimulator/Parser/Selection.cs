@@ -1899,6 +1899,13 @@ internal sealed partial class Selection
     /// </summary>
     private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget)
     {
+        // The FROM-less SELECT path bakes projection values at parse time
+        // (see the Run-then-GetSqlType loop below) — replaying that closure
+        // across invocations would emit the same stale NEWID / GETDATE /
+        // @@TRANCOUNT / NEXT VALUE FOR result every call. Disqualify the
+        // batch from plan-cache promotion.
+        parseBatch.HasSessionScopedReference = true;
+
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
         var columnNames = new string[expressions.Count];
