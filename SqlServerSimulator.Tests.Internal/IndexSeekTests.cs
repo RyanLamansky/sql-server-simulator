@@ -15,7 +15,7 @@ namespace SqlServerSimulator;
 /// the opt-in <see cref="IndexSeekDiagnostics"/> trace (recorded at the single
 /// decision point) to assert the path directly, and check the row results stay
 /// correct under it. Both the non-aggregate and aggregate single-table
-/// projectors narrow through the seek; the window projector doesn't.
+/// projectors — non-aggregate, aggregate, and window — narrow through the seek.
 /// </summary>
 [TestClass]
 public sealed class IndexSeekTests
@@ -385,6 +385,21 @@ public sealed class IndexSeekTests
         DoesNotContain("Scan(t)", trace);
         HasCount(1, rows);
         AreEqual(1, rows[0]);
+    }
+
+    [TestMethod]
+    public void WindowProjection_EqualityFilter_Seeks()
+    {
+        // The window projector narrows its buffered input through the same
+        // seek as the row / aggregate projectors. Without this, an OVER clause
+        // silently defeats a perfectly sargable WHERE (the regression that
+        // was making running-total-per-parent EF queries scan the table).
+        var (trace, rows) = Run(TableT,
+            "select val, sum(val) over (order by id) from t where id = 2");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(1, rows);
+        AreEqual(50, rows[0]);
     }
 
     [TestMethod]

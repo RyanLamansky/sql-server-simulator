@@ -39,6 +39,17 @@ internal sealed partial class Selection
         SqlType[] windowResultTypes,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
+        // Equality-seek narrowing before the window buffer fills: a window
+        // query with a point-equality WHERE on an indexable column
+        // (e.g. `... OVER (...) FROM t WHERE indexedcol = @v`) should seek
+        // to its few rows and window over those — not full-scan the table.
+        // Mirrors the row / aggregate projection paths and reuses the
+        // persistent per-Heap seek cache, so the OVER clause no longer
+        // defeats the seek (`customer.running_total` on AW dropped ~100× in
+        // the workload bench).
+        sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
+        sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
+
         // Step 1: buffer post-WHERE tuples. The same byte[]?[] instance is
         // reused across yields by EnumerateJoinedRows, so each entry is
         // cloned. For each buffered tuple, also pre-compute every window's
