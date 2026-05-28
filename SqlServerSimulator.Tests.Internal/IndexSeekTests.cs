@@ -14,8 +14,8 @@ namespace SqlServerSimulator;
 /// result-transparent, so the correctness suite passes either way — these read
 /// the opt-in <see cref="IndexSeekDiagnostics"/> trace (recorded at the single
 /// decision point) to assert the path directly, and check the row results stay
-/// correct under it. Queries here are non-aggregate projections on purpose: the
-/// aggregate / window projectors don't flow through the seek-bearing path.
+/// correct under it. Both the non-aggregate and aggregate single-table
+/// projectors narrow through the seek; the window projector doesn't.
 /// </summary>
 [TestClass]
 public sealed class IndexSeekTests
@@ -348,6 +348,18 @@ public sealed class IndexSeekTests
         Contains("Scan(t)", trace);
         DoesNotContain("Seek(t)", trace);
         HasCount(1, rows);
+    }
+
+    [TestMethod]
+    public void AggregateProjection_EqualityFilter_Seeks()
+    {
+        // The aggregate projector narrows its buffered input through the same
+        // seek as the row projector — SELECT agg(...) WHERE indexedcol = x seeks.
+        var (trace, rows) = Run(TableT, "select count(*) from t where id = 2");
+        Contains("Seek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(1, rows);
+        AreEqual(1, rows[0]);
     }
 
     [TestMethod]

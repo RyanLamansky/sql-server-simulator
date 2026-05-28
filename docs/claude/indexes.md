@@ -31,7 +31,7 @@ The cache is a **read-only acceleration structure, not a maintained index**: buc
 - **tx-scoped row-lock plans** (`REPEATABLE READ` / `SERIALIZABLE` / `UPDLOCK` / `HOLDLOCK` …), where the scan deliberately locks every row it reads to end of transaction;
 - non-base-table sources (derived tables, table variables, `FOR SYSTEM_TIME`), a WHERE with no equality conjunct on any index's leading column, range predicates (`>` / `<` / `BETWEEN`), and `NULL` / non-resolvable-collation value sides.
 
-Not modeled: range seeks, ORDER BY elimination, and seek acceleration of the aggregate projection path (`SELECT COUNT(*) … WHERE indexedcol = x` still scans — only the non-aggregate `ProjectSqlRows` path seeks). Equi-joins are unaffected: they already take the O(L+R) hash path.
+Both the non-aggregate (`ProjectSqlRows`) and aggregate (`BuildAggregateProjectionRows`) projectors narrow a single-base-table source through the seek, so `SELECT COUNT(*) … WHERE indexedcol = x` seeks like its non-aggregate counterpart. Not modeled: range seeks and ORDER BY elimination. Equi-joins are unaffected: they take the O(L+R) hash path and don't seek the inner side, so a join whose outer is already filtered to a few rows still builds a hash over the full inner table rather than seeking it per outer row.
 
 ## Storage
 

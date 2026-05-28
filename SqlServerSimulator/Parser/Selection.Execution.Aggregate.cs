@@ -59,6 +59,14 @@ internal sealed partial class Selection
             return new(keyValues: new SqlValue[keyArity], aggregators: freshAggregators);
         }
 
+        // Narrow a single-base-table source by an equality seek when WHERE
+        // carries an indexable conjunct — the same acceleration the
+        // non-aggregate projector applies. The matched conjuncts stay in
+        // Excluders as residual filters below, so the aggregate sees exactly
+        // the WHERE-passing rows (e.g. SELECT SUM(x) ... WHERE indexedcol = @v
+        // seeks instead of scanning the whole heap).
+        sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver);
+
         // Buffer WHERE-passing rows once. `EnumerateJoinedRows` mutates a
         // single shared tuple array in place across iterations, so each
         // accepted row gets snapshotted (the inner byte[] references are
