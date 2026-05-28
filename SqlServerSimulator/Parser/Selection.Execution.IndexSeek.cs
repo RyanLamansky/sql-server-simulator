@@ -302,12 +302,16 @@ internal sealed partial class Selection
     // first — `id = CAST(@v AS bigint)` is as stable as `id = @v`, matching real
     // SQL Server keeping the cast sargable. The stable leaves are a literal, a
     // session variable, or a column resolving to some OTHER source (an outer /
-    // correlated reference). Anything else (arithmetic, non-deterministic or
-    // side-effecting functions, subqueries, or a column of THIS source) declines.
+    // correlated reference). An arithmetic node (which is how the parser
+    // represents a negative literal: `-1` is `0 - 1`) is stable when both its
+    // operands are — a deterministic operator over row-invariant operands is
+    // itself row-invariant, so `id = -1` / `id = @v + 1` seek too, and the
+    // recursion still excludes a column of THIS source or a non-deterministic /
+    // side-effecting function / subquery leaf (those decline).
     // <paramref name="allowCorrelatedColumnValue"/> is false when narrowing the
     // leftmost source of a multi-source FROM <i>before</i> the join runs: a
     // not-yet-joined sibling column isn't resolvable then, so only literals /
-    // variables / parameters qualify as the probe value.
+    // variables / parameters (and arithmetic over them) qualify as the probe value.
     private static bool IsStableValueSide(Expression expression, FromSource source, bool allowCorrelatedColumnValue = true)
     {
         while (expression.PureConversionOperand is { } inner)
@@ -317,6 +321,7 @@ internal sealed partial class Selection
             Value => true,
             VariableReference => true,
             Reference reference => allowCorrelatedColumnValue && FindSourceColumn([source], reference.ReferencedName).SourceIndex < 0,
+            TwoSidedExpression arithmetic => arithmetic.BothOperandsMatch(operand => IsStableValueSide(operand, source, allowCorrelatedColumnValue)),
             _ => false,
         };
     }

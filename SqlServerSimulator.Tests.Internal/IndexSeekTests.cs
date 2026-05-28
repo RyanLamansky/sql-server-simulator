@@ -74,6 +74,31 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
+    public void NegativeLiteralEquality_Seeks()
+    {
+        // `-1` parses as `0 - 1` (a TwoSidedExpression), not a folded literal,
+        // so the stable-value test must recurse into the arithmetic node to keep
+        // it sargable — otherwise a negative-key equality silently full-scans.
+        var (trace, rows) = Run(
+            "create table t (id int not null primary key, val int not null); insert t values (-1, 5), (2, 50), (3, 500)",
+            "select val from t where id = -1");
+        Contains("Seek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(5, rows[0]);
+    }
+
+    [TestMethod]
+    public void ConstantArithmeticEquality_Seeks()
+    {
+        // A deterministic arithmetic node over row-invariant operands is itself
+        // a row-invariant probe value — `id = 1 + 1` seeks the same as `id = 2`.
+        var (trace, rows) = Run(TableT, "select val from t where id = 1 + 1");
+        Contains("Seek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(50, rows[0]);
+    }
+
+    [TestMethod]
     public void NonUniqueIndexLeadingColumn_Seeks()
     {
         var (trace, rows) = Run("""

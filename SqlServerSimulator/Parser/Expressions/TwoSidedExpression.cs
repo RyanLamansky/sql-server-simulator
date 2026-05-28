@@ -414,6 +414,15 @@ internal abstract class TwoSidedExpression : Expression
 
     internal sealed override string DebugDisplay() => $"{left.DebugDisplay()} {Operator} {right.DebugDisplay()}";
 
+    /// <summary>
+    /// True when <paramref name="predicate"/> holds for both operands. Lets a
+    /// caller classify the whole expression structurally — e.g. the index-seek
+    /// stable-value test, where a deterministic arithmetic node over two
+    /// row-invariant operands is itself a row-invariant probe value — without
+    /// exposing the operand fields.
+    /// </summary>
+    internal bool BothOperandsMatch(Func<Expression, bool> predicate) => predicate(this.left) && predicate(this.right);
+
     internal sealed override void VisitColumnReferences(Action<MultiPartName> visit)
     {
         this.left.VisitColumnReferences(visit);
