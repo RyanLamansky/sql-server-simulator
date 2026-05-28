@@ -142,6 +142,33 @@ without taking the lock manager's gate; only mutations to a
 IX / SIX / S / U / X. Distinct from the inherited
 `SchemaObject.SchemaLock` which carries only Sch-S / Sch-M.
 
+## Lock-free read fast path
+
+Every grant / release / probe funnels through `LockManager`'s single
+gate, so under heavy concurrent reads a per-row gate acquisition would
+serialize the workers. The READ COMMITTED row-conflict check
+(`BatchContext.TouchRowForRead`) avoids the gate on the common path via
+`HeapTable.ActiveDataWriters` — an `Interlocked` count of connections
+currently holding a data-`Exclusive` lock anywhere on the table (a row-X
+or the table-X). `LockManager` increments it on an `Exclusive` grant and
+decrements on the final release of one, keyed by a `LockResource.OwningTable`
+back-reference set when the resource is interned. The reader:
+
+1. `Volatile.Read`s the count; if 0, no row is X-locked, so every row is
+   committed-readable — return immediately, **no `RowLocks` intern, no gate**.
+2. If non-zero, look up the specific row with `RowLocks.TryGetValue` (still
+   no intern — a row with no interned entry has no holder, so it reads
+   through); only when an entry exists does it probe under the gate and
+   wait / READPAST-skip as before.
+
+Counting only `Exclusive` (U is `S`-compatible; IX / SIX are table-level
+intent the row probe already ignores) keeps the visible behavior identical
+to the always-probe path — it only elides gate traffic when no X exists.
+Snapshot / RCSI reads never reach this path (they resolve through the
+version store), so the fast path is a pure READ COMMITTED non-snapshot win.
+The `ActiveDataWriters` invariant (0 at rest, follows the X through commit /
+rollback / escalation) is guarded by `LockResourceTests.ActiveDataWriters_*`.
+
 ## Escalation
 
 `SimulatedDbTransaction.RowLockCountsByTable` tracks the per-tx

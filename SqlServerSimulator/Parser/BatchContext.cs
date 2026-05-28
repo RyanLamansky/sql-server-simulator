@@ -771,7 +771,21 @@ internal sealed class BatchContext
         var connection = this.Connection;
         if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
             return true;
-        var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
+        // Lock-free table-level gate: with no data-X held anywhere on the
+        // table, every row is committed-readable, so skip the per-row lock-
+        // resource intern and the manager gate entirely. This is the
+        // read-mostly common path — under concurrency it keeps readers off
+        // the single LockManager gate, which a per-row probe would otherwise
+        // serialize on. A row-X grant increments ActiveDataWriters under the
+        // gate before the writer mutates the heap, so a zero read here means
+        // no conflicting writer had started.
+        if (Volatile.Read(ref table.ActiveDataWriters) == 0)
+            return true;
+        // A writer is somewhere on the table; check this specific row. Use a
+        // non-interning lookup — a row with no holder interned can't be in
+        // conflict, so reading it through costs no allocation and no gate.
+        if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
+            return true;
         var manager = connection.Simulation.LockManager;
         if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection))
             return true;

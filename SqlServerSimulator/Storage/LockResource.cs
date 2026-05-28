@@ -55,6 +55,16 @@ internal sealed class LockResource
     public readonly List<Hold> Holders = [];
 
     /// <summary>
+    /// The table this resource locks (a row lock or the
+    /// <see cref="HeapTable.TableDataLock"/>), or <c>null</c> for resources
+    /// not tied to a heap table (e.g. <see cref="Schemas.SchemaObject.SchemaLock"/>).
+    /// Set at interning time so <see cref="LockManager"/> can maintain the
+    /// owning table's <see cref="HeapTable.ActiveDataWriters"/> count without
+    /// re-deriving the table on every grant / release.
+    /// </summary>
+    public HeapTable? OwningTable;
+
+    /// <summary>
     /// One owner's hold on this resource, with re-entrance count. Stored
     /// as a struct in <see cref="Holders"/>; same-owner / same-mode re-
     /// acquires bump <see cref="Count"/> instead of appending a second
@@ -72,10 +82,15 @@ internal sealed class LockResource
 /// Per-<see cref="Simulation"/> lock coordinator. Owns the single gate
 /// every Acquire / Release operation serializes through, plus the
 /// cycle-detection walker. The single-gate model trades raw concurrency
-/// for simplicity — at the simulator's "tens of connections per Simulation"
-/// scale, the gate isn't a bottleneck, and centralizing the synchronization
-/// makes cross-resource cycle detection straightforward (every connection's
-/// wait state is readable consistently under the same lock).
+/// for simplicity: centralizing the synchronization makes cross-resource
+/// cycle detection straightforward (every connection's wait state is
+/// readable consistently under the same lock). Because every grant /
+/// release / probe funnels through one monitor, it does serialize under
+/// heavy concurrent contention — so the hot read path stays off it: a
+/// READ COMMITTED row read consults the lock-free
+/// <see cref="HeapTable.ActiveDataWriters"/> count first and touches the
+/// gate only when a data-X is actually held somewhere on the table
+/// (snapshot / RCSI reads bypass it entirely via the version store).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -249,6 +264,8 @@ internal sealed class LockManager
                     if (hold.Count == 0)
                     {
                         resource.Holders.RemoveAt(i);
+                        if (mode == LockMode.Exclusive && resource.OwningTable is { } table)
+                            _ = Interlocked.Decrement(ref table.ActiveDataWriters);
                         Monitor.PulseAll(this.gate);
                     }
                     else
@@ -279,6 +296,8 @@ internal sealed class LockManager
                 return false;
         }
         resource.Holders.Add(new LockResource.Hold(owner, mode, 1));
+        if (mode == LockMode.Exclusive && resource.OwningTable is { } table)
+            _ = Interlocked.Increment(ref table.ActiveDataWriters);
         return true;
     }
 

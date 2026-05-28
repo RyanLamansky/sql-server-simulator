@@ -236,6 +236,40 @@ public sealed class LockResourceTests
             IsEmpty(resource.Holders);
     }
 
+    [TestMethod]
+    public void ActiveDataWriters_TracksUncommittedRowX_ResetsAtCommit()
+    {
+        // The READ COMMITTED reader's lock-free fast path keys off this
+        // per-table count: an uncommitted INSERT's row-X must lift it to 1,
+        // and COMMIT must return it to 0 so subsequent readers skip the gate
+        // again. A leak here is a silent throughput regression (readers stay
+        // on the slow per-row probe), invisible to the behavioral suite.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        AreEqual(0, table.ActiveDataWriters);
+        ExecuteNonQuery(conn, "begin tran; insert t values (1)");
+        AreEqual(1, table.ActiveDataWriters);
+        ExecuteNonQuery(conn, "commit tran");
+        AreEqual(0, table.ActiveDataWriters);
+    }
+
+    [TestMethod]
+    public void ActiveDataWriters_ResetsAtRollback()
+    {
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        ExecuteNonQuery(conn, "begin tran; insert t values (1)");
+        AreEqual(1, table.ActiveDataWriters);
+        ExecuteNonQuery(conn, "rollback tran");
+        AreEqual(0, table.ActiveDataWriters);
+    }
+
     private static void ExecuteNonQuery(Simulation sim, string sql)
     {
         using var conn = sim.CreateDbConnection();

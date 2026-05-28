@@ -21,6 +21,7 @@ internal sealed class HeapTable : SchemaObject
         this.IsTableVariable = isTableVariable;
         this.IsTableValuedParameter = isTableValuedParameter;
         this.PeriodColumns = periodColumns;
+        this.TableDataLock.OwningTable = this;
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -331,11 +332,25 @@ internal sealed class HeapTable : SchemaObject
     public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), LockResource> RowLocks = new();
 
     /// <summary>
+    /// Count of connections currently holding a data-<see cref="LockMode.Exclusive"/>
+    /// lock anywhere on this table (a per-row lock or the
+    /// <see cref="TableDataLock"/>). Maintained by <see cref="LockManager"/>
+    /// via <see cref="System.Threading.Interlocked"/> under its gate; read
+    /// lock-free with <c>Volatile.Read</c> by the READ COMMITTED reader's
+    /// per-row conflict check (<c>BatchContext.TouchRowForRead</c>). When
+    /// zero, every row is committed-readable, so the reader skips the per-row
+    /// lock-resource intern and the manager gate entirely — the common
+    /// read-mostly path.
+    /// </summary>
+    public int ActiveDataWriters;
+
+    /// <summary>
     /// Returns the <see cref="LockResource"/> for <paramref name="pageIndex"/>
-    /// / <paramref name="slotIndex"/>, allocating one on first reference.
+    /// / <paramref name="slotIndex"/>, allocating one (back-referenced to this
+    /// table) on first reference.
     /// </summary>
     public LockResource GetOrCreateRowLock(int pageIndex, int slotIndex) =>
-        this.RowLocks.GetOrAdd((pageIndex, slotIndex), static _ => new LockResource());
+        this.RowLocks.GetOrAdd((pageIndex, slotIndex), static (_, t) => new LockResource { OwningTable = t }, this);
 
     /// <summary>
     /// Table-level data lock used when an INSERT / UPDATE / DELETE / MERGE
