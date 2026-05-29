@@ -37,7 +37,7 @@ internal sealed class DateAdd : Expression
         if (value.IsNull || n.IsNull)
             return SqlValue.Null(value.Type);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "dateadd");
-        var nInt = n.CoerceTo(SqlType.Int32).AsInt32;
+        var nInt = DatePartKinds.CoerceCount(n, value.Type);
         return DatePartKinds.Add(this.kind, value, nInt);
     }
 

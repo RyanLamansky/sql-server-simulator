@@ -171,6 +171,17 @@ public sealed class BuiltInFunctionTests
         => AreEqual("abc", ExecuteScalar("select replace('abc', '', 'X')"));
 
     [TestMethod]
+    [DataRow("dateadd(second, 9223372036854775807, getdate())")]
+    [DataRow("dateadd(year, 2147483648, getdate())")]
+    [DataRow("dateadd(day, 9999999999, getdate())")]
+    public void DateAddCountOutOfIntRange_RaisesMsg517(string expression)
+    {
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select {expression}"));
+        AreEqual(517, ex.Number);
+        Assert.Contains("caused an overflow", ex.Message);
+    }
+
+    [TestMethod]
     public void FunctionOfColumn_FromTable()
     {
         // Regression: Expression.Parse used to advance past the function's

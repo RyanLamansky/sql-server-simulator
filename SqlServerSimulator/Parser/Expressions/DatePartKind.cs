@@ -351,6 +351,26 @@ internal static class DatePartKinds
     }
 
     /// <summary>
+    /// Coerces a DATEADD count to <c>int</c>. A value outside int range can
+    /// only push the result past the date type's representable range, which
+    /// SQL Server reports as the same Msg 517 date overflow <see cref="Add"/>
+    /// raises — not an int-conversion error (probe-confirmed across second /
+    /// day / year). Without this, the bigint-to-int narrowing would leak a
+    /// raw <see cref="OverflowException"/>.
+    /// </summary>
+    public static int CoerceCount(SqlValue number, SqlType targetType)
+    {
+        try
+        {
+            return number.CoerceTo(SqlType.Int32).AsInt32;
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.DateAddOverflow(FamilyRootName(targetType));
+        }
+    }
+
+    /// <summary>
     /// Returns the result of <paramref name="value"/> + <paramref name="n"/>
     /// units of <paramref name="kind"/>, preserving the input's SQL type.
     /// Out-of-range output raises Msg 517. Caller must have already validated
