@@ -1613,4 +1613,105 @@ public sealed class IndexSeekTests
         Exec(c, "delete from p where id = 1");
         AreEqual("12,13", Seq(ReadRows(c, "select id from ch order by id")));
     }
+
+    // ---- UPDATE / DELETE target scans ride the same per-Heap seek cache
+    // (Selection.SeekMutationTarget). A single-table UPDATE / DELETE does no
+    // query-path seek of its own, so any CacheBuild / CacheReplay during one is
+    // the mutation target seek; a full scan touches the cache not at all. The
+    // mutation loop re-runs the full WHERE per row, so the seek only narrows. ----
+
+    private static List<string> ExecTraced(SimulatedDbConnection c, string sql)
+    {
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            Exec(c, sql);
+            return IndexSeekDiagnostics.Sink;
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    private static SimulatedDbConnection FreshT()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, TableT);
+        return c;
+    }
+
+    [TestMethod]
+    public void UpdateByPrimaryKey_SeeksTarget()
+    {
+        var c = FreshT();
+        Contains("CacheBuild", ExecTraced(c, "update t set val = 999 where id = 2"));
+        AreEqual(999, Convert.ToInt32(ReadVal(c, "select val from t where id = 2")));
+        AreEqual("5,500", Seq(ReadRows(c, "select val from t where id <> 2 order by id")));
+    }
+
+    [TestMethod]
+    public void DeleteByPrimaryKey_SeeksTarget()
+    {
+        var c = FreshT();
+        Contains("CacheBuild", ExecTraced(c, "delete from t where id = 2"));
+        AreEqual("1,3", Seq(ReadRows(c, "select id from t order by id")));
+    }
+
+    [TestMethod]
+    public void DeleteByRange_RangeSeeksTarget()
+    {
+        var c = FreshT();
+        Contains("CacheBuild", ExecTraced(c, "delete from t where id >= 2"));
+        AreEqual("1", Seq(ReadRows(c, "select id from t order by id")));
+    }
+
+    [TestMethod]
+    public void DeleteByInList_SeeksTarget()
+    {
+        var c = FreshT();
+        Contains("CacheBuild", ExecTraced(c, "delete from t where id in (1, 3)"));
+        AreEqual("2", Seq(ReadRows(c, "select id from t order by id")));
+    }
+
+    [TestMethod]
+    public void UpdateOnUnindexedColumn_FullScans()
+    {
+        var c = FreshT();
+        // val carries no key / index, so nothing seekable — the mutation keeps
+        // its full scan and never touches the seek cache.
+        DoesNotContain("CacheBuild", ExecTraced(c, "update t set val = 0 where val = 50"));
+        AreEqual(0, Convert.ToInt32(ReadVal(c, "select val from t where id = 2")));
+    }
+
+    [TestMethod]
+    public void UpdateSeek_ResidualWhereStillExcludes()
+    {
+        var c = FreshT();
+        // id = 2 seeks the single row, but the residual val > 1000 conjunct
+        // (re-checked in the mutation loop) excludes it: zero rows updated.
+        Exec(c, "update t set val = 7 where id = 2 and val > 1000");
+        AreEqual(50, Convert.ToInt32(ReadVal(c, "select val from t where id = 2")));
+    }
+
+    [TestMethod]
+    public void UpdateSeek_ReplaysDelta_NoWarmup()
+    {
+        var c = FreshT();
+        Exec(c, "update t set val = val where id = 1"); // warms the seek cache
+        Exec(c, "insert t values (4, 40)");             // moves the mutation generation
+        var trace = ExecTraced(c, "update t set val = 111 where id = 4");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual(111, Convert.ToInt32(ReadVal(c, "select val from t where id = 4")));
+    }
+
+    [TestMethod]
+    public void DeleteSeek_NoMatch_LeavesTableIntact()
+    {
+        var c = FreshT();
+        Exec(c, "delete from t where id = 99");
+        AreEqual("1,2,3", Seq(ReadRows(c, "select id from t order by id")));
+    }
 }

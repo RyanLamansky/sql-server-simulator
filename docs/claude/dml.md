@@ -2,6 +2,7 @@
 
 ## UPDATE / DELETE
 - Bare `UPDATE table SET ... [WHERE]` and `DELETE [FROM] table [WHERE]`.
+- **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use. The mutation loop re-runs the full WHERE per row (residual filter) and X-locks only the rows it commits, so it's a pure narrowing; positioned (`WHERE CURRENT OF`) mutations keep the scan. See [`indexes.md`](indexes.md#update--delete-target-seeking). The multi-table (joined) form and `MERGE` are not seek-narrowed.
 - Multi-table syntax (`UPDATE alias SET ... FROM <sources> [WHERE]`, `DELETE FROM alias FROM <sources> [WHERE]`) — the EF7+ `ExecuteUpdate`/`ExecuteDelete` shape. Target identified by leading-identifier match against each source's `FromSource.Qualifier`; missing match → Msg 208.
 - **Joined UPDATE/DELETE: each unique target row processed exactly once.** When the same target matches multiple join tuples, SQL Server uses the *first* matching tuple's RHS for SET. The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map. LEFT JOIN with no right-side match still surfaces the target (RHS sees NULL).
 - **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).

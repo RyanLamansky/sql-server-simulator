@@ -155,7 +155,32 @@ internal sealed partial class Selection
         bool allowCorrelatedColumnValue,
         out IEnumerable<byte[]> seekRows)
     {
-        seekRows = [];
+        if (!TryComputeRangeCandidates(source, table, batch, outerResolver, conjuncts, allowCorrelatedColumnValue, out var candidates))
+        {
+            seekRows = [];
+            return false;
+        }
+
+        seekRows = snapshotXid is { } sx
+            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
+            : MaterializeWithLockChecks(table, batch, plan, candidates);
+        return true;
+    }
+
+    // Address-only core of the single-column leading range seek, shared by the
+    // query path (TrySeekByRange) and the mutation path. Returns true with the
+    // in-range (page, slot) candidates (possibly empty — a NULL bound seeks to
+    // nothing), or false when no range bound lands on a leading key column.
+    private static bool TryComputeRangeCandidates(
+        FromSource source,
+        HeapTable table,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        List<BooleanExpression> conjuncts,
+        bool allowCorrelatedColumnValue,
+        out List<(int Page, int Slot)> candidates)
+    {
+        candidates = [];
 
         var bounds = new Dictionary<int, RangeBoundExprs>();
         foreach (var conjunct in conjuncts)
@@ -221,13 +246,9 @@ internal sealed partial class Selection
             upperValue = upperValue.CoerceTo(common);
 
         var cache = HeapSeekCache.For(table.Heap);
-        var candidates = cache.RangeScan(
+        candidates = cache.RangeScan(
             table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
             hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive);
-
-        seekRows = snapshotXid is { } sx
-            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates);
         return true;
     }
 
@@ -1053,7 +1074,35 @@ internal sealed partial class Selection
         out IEnumerable<byte[]> seekRows,
         out int width)
     {
-        seekRows = [];
+        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, out var candidates, out width))
+        {
+            seekRows = [];
+            return false;
+        }
+
+        seekRows = snapshotXid is { } sx
+            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
+            : MaterializeWithLockChecks(table, batch, plan, candidates);
+        return true;
+    }
+
+    // Computes the seek-narrowed (page, slot) candidate addresses for the longest
+    // usable equality prefix across this table's keys / indexes — the address-only
+    // core shared by the query path (TrySeekByLongestPrefix wraps it in the lock /
+    // snapshot read materializer) and the mutation path (which materializes them as
+    // live rewrite targets). Probe components evaluate at most once per column; see
+    // TrySeekByLongestPrefix's doc for the prefix / cartesian rules. Returns false
+    // (prefix length 0) when no column carries a usable probe.
+    private static bool TryComputeEqualityCandidates(
+        FromSource source,
+        HeapTable table,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        Dictionary<int, Expression[]> equalities,
+        out List<(int Page, int Slot)> candidates,
+        out int width)
+    {
+        candidates = [];
         width = 0;
 
         var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
@@ -1105,7 +1154,6 @@ internal sealed partial class Selection
         }
 
         var cache = HeapSeekCache.For(table.Heap);
-        var candidates = new List<(int Page, int Slot)>();
         foreach (var tuple in CartesianProduct(probesPerColumn))
         {
             var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple));
@@ -1113,9 +1161,6 @@ internal sealed partial class Selection
                 candidates.AddRange(bucket);
         }
 
-        seekRows = snapshotXid is { } sx
-            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates);
         width = bestLen;
         return true;
 
@@ -1262,6 +1307,94 @@ internal sealed partial class Selection
                 continue;
             if (batch.TouchRowForRead(table, page, slot, plan) && table.Heap.ReadSlotBytes(page, slot) is { } bytes)
                 yield return bytes;
+        }
+    }
+
+    /// <summary>
+    /// Seek-narrowed live <c>(page, slot, bytes)</c> rows for a single-table
+    /// UPDATE / DELETE target whose WHERE carries an indexable equality (literal /
+    /// variable / arithmetic value — never a correlated column, since a single-
+    /// table mutation has no outer row), IN-list / OR family, composite leading
+    /// prefix, or single leading-column range. Returns <c>null</c> when nothing
+    /// seekable is present, so the caller keeps its full
+    /// <see cref="Heap.EnumerateRowsWithAddress"/> scan. The result is an exact
+    /// match set for the seekable conjuncts only; the mutation loop re-runs the
+    /// full predicate per row (its residual filter), so a partly-seekable WHERE
+    /// stays correct and a stale cache entry is discarded there — the same
+    /// residual-filter contract as the query path. No lock / snapshot wrapper: the
+    /// mutation reads live addresses (exactly what the scan it replaces does) and
+    /// X-locks only the rows it commits, so narrowing the candidate set never
+    /// changes the lock footprint.
+    /// </summary>
+    internal static IEnumerable<(int Page, int Slot, byte[] Bytes)>? SeekMutationTarget(
+        HeapTable table, BooleanExpression where, BatchContext batch)
+    {
+        var source = BuildBaseTableSeekSource(table);
+
+        var conjuncts = new List<BooleanExpression>();
+        where.CollectConjuncts(conjuncts);
+
+        var equalities = new Dictionary<int, Expression[]>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue: false)
+                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue: false);
+                continue;
+            }
+            if (conjunct.TryGetEqualityFamily(out var family))
+                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
+        }
+
+        if (equalities.Count != 0
+            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, out var eqCandidates, out _))
+        {
+            return MaterializeMutationCandidates(table, eqCandidates);
+        }
+
+        if (TryComputeRangeCandidates(source, table, batch, outerResolver: null, conjuncts, allowCorrelatedColumnValue: false, out var rangeCandidates))
+            return MaterializeMutationCandidates(table, rangeCandidates);
+
+        // No seekable equality or range conjunct: caller keeps its full scan.
+        return null;
+    }
+
+    // Minimal single-source view of a base table for the mutation seek: real
+    // column names + storage metadata so TryIdentifyIndexableColumn resolves the
+    // WHERE's column references, qualified by the table's own name (the only
+    // qualifier a single-table UPDATE / DELETE WHERE can use). The Rows stream is
+    // unused — the seek reads addresses straight from the heap's cache.
+    private static FromSource BuildBaseTableSeekSource(HeapTable table)
+    {
+        var columnNames = new string[table.Columns.Length];
+        for (var i = 0; i < columnNames.Length; i++)
+            columnNames[i] = table.Columns[i].Name;
+        return new FromSource(
+            qualifier: table.Name,
+            columnNames: columnNames,
+            columns: table.Columns,
+            storedSchema: table.StoredColumns,
+            storageOrdinals: table.StorageOrdinals,
+            lobStore: table.Heap,
+            rows: []);
+    }
+
+    // The mutation analogue of MaterializeWithLockChecks: dedup + tombstone-skip
+    // over the seeked candidates, yielding each live row's address and bytes. No
+    // per-row lock touch (the mutation path X-locks only what it commits) and no
+    // live-key verify (the mutation loop's full-predicate re-check is the residual
+    // filter, exactly as the query path leans on its residual WHERE).
+    private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MaterializeMutationCandidates(
+        HeapTable table, IReadOnlyList<(int Page, int Slot)> candidates)
+    {
+        var seen = new HashSet<(int, int)>();
+        foreach (var (page, slot) in candidates)
+        {
+            if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
+                continue;
+            if (table.Heap.ReadSlotBytes(page, slot) is { } bytes)
+                yield return (page, slot, bytes);
         }
     }
 

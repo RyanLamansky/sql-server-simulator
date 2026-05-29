@@ -121,7 +121,15 @@ partial class Simulation
         var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
         var needsFullForHistory = table.SystemVersioning is not null;
         var needsFullForFk = table.IncomingForeignKeys.Count > 0;
-        foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
+
+        // Seek the target when WHERE carries an indexable equality / range
+        // (positioned DELETE leaves where null, so it keeps the full scan — the
+        // cursor already fixed one row). The loop re-runs WHERE below, so the
+        // seek only narrows the rows considered.
+        var rowSource = where is not null
+            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? table.Heap.EnumerateRowsWithAddress()
+            : table.Heap.EnumerateRowsWithAddress();
+        foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
             if (positionedCursor is not null && !CursorRowMatches(positionedCursor, (pageIndex, slotIndex)))

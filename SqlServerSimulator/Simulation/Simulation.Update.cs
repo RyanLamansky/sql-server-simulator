@@ -206,7 +206,13 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 
-        foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
+        // Seek the target when WHERE carries an indexable equality / range
+        // (positioned UPDATE leaves where null, so it keeps the full scan). The
+        // loop re-runs WHERE below, so the seek only narrows the rows considered.
+        var rowSource = where is not null
+            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? table.Heap.EnumerateRowsWithAddress()
+            : table.Heap.EnumerateRowsWithAddress();
+        foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
             // cursor is sitting on, identified by its stable heap address.
