@@ -326,6 +326,12 @@ internal sealed partial class Selection
 
         private readonly SqlValue[] values = values;
 
+        /// <summary>The number of tuple components (key columns) in this key.</summary>
+        internal int ComponentCount => this.values.Length;
+
+        /// <summary>The component at <paramref name="index"/> — used by the range-seek ordered comparer.</summary>
+        internal SqlValue ComponentAt(int index) => this.values[index];
+
         public bool Equals(SqlValueKey other)
         {
             if (this.values.Length != other.values.Length)

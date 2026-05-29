@@ -18,8 +18,10 @@ namespace SqlServerSimulator.Storage;
 /// per-table hash index instead of a full scan (see
 /// <c>Selection.Execution.IndexSeek.cs</c>) — the path that collapses
 /// correlated <c>EXISTS</c> / <c>IN</c> / scalar subqueries from O(outer ×
-/// inner) toward linear. Range seeks, composite-key seeks beyond the leading
-/// column, and ORDER BY elimination are not modeled. UNIQUE indexes also
+/// inner) toward linear. A range bound on the leading key column
+/// (<c>col &gt; v</c> / <c>col BETWEEN lo AND hi</c>) likewise narrows to a
+/// range seek over an incrementally-maintained ordered view; ORDER BY
+/// elimination is not modeled. UNIQUE indexes also
 /// enforce the same multiset rule the existing UNIQUE constraint path uses
 /// (one NULL allowed, second NULL raises Msg 2601), plus the filter-aware
 /// extension when <see cref="Filter"/> is non-null: only rows for which the

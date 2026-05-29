@@ -6,6 +6,20 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
+/// The four ordering comparison operators, exposed by
+/// <see cref="BooleanExpression.TryGetRangeOperands"/> so the index-seek planner
+/// can recognize a range predicate (<c>col &gt; v</c>, <c>col BETWEEN lo AND hi</c>)
+/// on a leading key column without reaching into the private comparison hierarchy.
+/// </summary>
+internal enum RangeComparison
+{
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+}
+
+/// <summary>
 /// A specific type of expression used in WHERE clauses and similar branching scenarios.
 /// </summary>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
@@ -516,6 +530,36 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
+    /// Exposes the operands and operator when this predicate is an ordering
+    /// comparison (<c>&gt;</c> / <c>&gt;=</c> / <c>&lt;</c> / <c>&lt;=</c>);
+    /// returns false otherwise. Lets the index-seek planner recognize a range
+    /// bound (<c>col &gt; v</c> or <c>v &lt; col</c>) on a key column. The caller
+    /// normalizes which side is the column and flips the operator accordingly.
+    /// </summary>
+    internal virtual bool TryGetRangeOperands([NotNullWhen(true)] out Expression? left, out RangeComparison op, [NotNullWhen(true)] out Expression? right)
+    {
+        left = null;
+        right = null;
+        op = RangeComparison.Greater;
+        return false;
+    }
+
+    /// <summary>
+    /// Exposes the value and the inclusive lower / upper bounds when this
+    /// predicate is a non-negated <c>value BETWEEN lower AND upper</c>; returns
+    /// false otherwise (<c>NOT BETWEEN</c> is the non-contiguous complement, so
+    /// it declines). Lets the index-seek planner treat BETWEEN as a two-sided
+    /// inclusive range on a key column.
+    /// </summary>
+    internal virtual bool TryGetBetweenOperands([NotNullWhen(true)] out Expression? value, [NotNullWhen(true)] out Expression? lower, [NotNullWhen(true)] out Expression? upper)
+    {
+        value = null;
+        lower = null;
+        upper = null;
+        return false;
+    }
+
+    /// <summary>
     /// Three-valued <c>AND</c>: <c>false AND x = false</c> regardless of
     /// <c>x</c>; <c>true AND x = x</c>; <c>NULL AND NULL = NULL</c>. Short-
     /// circuits when the left side is <c>false</c> — the right side isn't
@@ -782,6 +826,14 @@ internal abstract class BooleanExpression
             visitor(lower);
             visitor(upper);
         }
+
+        internal override bool TryGetBetweenOperands([NotNullWhen(true)] out Expression? v, [NotNullWhen(true)] out Expression? lo, [NotNullWhen(true)] out Expression? hi)
+        {
+            // NOT BETWEEN is the non-contiguous complement (two open ranges), not
+            // a single seekable range, so only the positive form exposes bounds.
+            (v, lo, hi) = (value, lower, upper);
+            return !negated;
+        }
     }
 
     /// <summary>
@@ -1033,6 +1085,12 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "greater than", static (l, r) => l.CompareTo(r) > 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
+
+        internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
+        {
+            (l, op, r) = (left, RangeComparison.Greater, right);
+            return true;
+        }
     }
 
     private sealed class GreaterThanOrEqualExpression(Expression left, Expression right) : CompareExpression(left, right)
@@ -1041,6 +1099,12 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} >= {right.DebugDisplay()}";
+
+        internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
+        {
+            (l, op, r) = (left, RangeComparison.GreaterOrEqual, right);
+            return true;
+        }
     }
 
     private sealed class LessThanExpression(Expression left, Expression right) : CompareExpression(left, right)
@@ -1049,6 +1113,12 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "less than", static (l, r) => l.CompareTo(r) < 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
+
+        internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
+        {
+            (l, op, r) = (left, RangeComparison.Less, right);
+            return true;
+        }
     }
 
     private sealed class LessThanOrEqualExpression(Expression left, Expression right) : CompareExpression(left, right)
@@ -1057,6 +1127,12 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <= {right.DebugDisplay()}";
+
+        internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
+        {
+            (l, op, r) = (left, RangeComparison.LessOrEqual, right);
+            return true;
+        }
     }
 
     /// <summary>

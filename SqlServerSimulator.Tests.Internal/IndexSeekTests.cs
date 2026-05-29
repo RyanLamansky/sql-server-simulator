@@ -360,15 +360,6 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void RangePredicate_Declines()
-    {
-        var (trace, rows) = Run(TableT, "select id from t where id > 1");
-        Contains("Scan(t)", trace);
-        DoesNotContain("Seek(t)", trace);
-        HasCount(2, rows);
-    }
-
-    [TestMethod]
     public void NonIndexedColumn_Declines()
     {
         var (trace, rows) = Run(TableT, "select id from t where val = 50");
@@ -843,5 +834,212 @@ public sealed class IndexSeekTests
             Exec(c, $"insert t values ({i}, {i * 100})");
             AreEqual(i * 100, ReadVal(c, $"select val from t where id = {i}"));
         }
+    }
+
+    // ---- range seeks on a leading key column (>, >=, <, <=, BETWEEN). The bound
+    // conjunct stays residual, so the seek only narrows; results match a scan. ----
+
+    [TestMethod]
+    public void GreaterThan_OnPrimaryKey_RangeSeeks()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id > 1");
+        Contains("RangeSeek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        HasCount(2, rows);
+        Contains(2, rows);
+        Contains(3, rows);
+    }
+
+    [TestMethod]
+    public void GreaterOrEqual_OnPrimaryKey_RangeSeeks()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id >= 2");
+        Contains("RangeSeek(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void LessThan_OnPrimaryKey_RangeSeeks()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id < 3");
+        Contains("RangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(1, rows);
+        Contains(2, rows);
+    }
+
+    [TestMethod]
+    public void LessOrEqual_OnPrimaryKey_RangeSeeks()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id <= 2");
+        Contains("RangeSeek(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void Between_OnPrimaryKey_RangeSeeksInclusiveBothEnds()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id between 2 and 3");
+        Contains("RangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(2, rows);
+        Contains(3, rows);
+    }
+
+    [TestMethod]
+    public void TwoSidedRange_OnPrimaryKey_RangeSeeks()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id > 1 and id < 3");
+        Contains("RangeSeek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(2, rows[0]);
+    }
+
+    [TestMethod]
+    public void ReversedOperandOrder_RangeSeeks()
+    {
+        // `2 < id` is `id > 2` — the planner flips the operator when the column
+        // is on the right.
+        var (trace, rows) = Run(TableT, "select id from t where 2 < id");
+        Contains("RangeSeek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(3, rows[0]);
+    }
+
+    [TestMethod]
+    public void RangeOnSecondaryIndexLeadingColumn_RangeSeeks()
+    {
+        var (trace, rows) = Run("""
+            create table c (id int not null, pid int not null);
+            create index ix_c_pid on c (pid);
+            insert c values (1, 10), (2, 20), (3, 30), (4, 5)
+            """, "select id from c where pid >= 20");
+        Contains("RangeSeek(c)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void RangeOnNonIndexedColumn_Declines()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where val > 100");
+        Contains("Scan(t)", trace);
+        DoesNotContain("RangeSeek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(3, rows[0]);
+    }
+
+    [TestMethod]
+    public void EqualityPrefixThenRange_TakesEqualitySeek_NotRange()
+    {
+        // index (a, b): a = 1 AND b > 10 — the equality path seeks on the leading
+        // column a (width 1) and the range on b stays residual. The single
+        // leading-column range path doesn't fire here.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, v int not null, primary key (a, b));
+            insert t values (1, 10, 100), (1, 20, 200), (1, 30, 300), (2, 10, 400)
+            """, "select v from t where a = 1 and b > 10");
+        Contains("SeekWidth(t,1)", trace);
+        DoesNotContain("RangeSeek(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void NullBound_RangeSeeksToEmpty()
+    {
+        // `id > @null` is UNKNOWN for every row, so the range matches nothing — a
+        // valid (empty) seek rather than a scan.
+        var (trace, rows) = Run(TableT, "declare @v int = null; select id from t where id > @v");
+        Contains("RangeSeek(t)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void OutOfDomainUpperBound_PromotesUp_ReturnsAll()
+    {
+        // bigint bound wider than the int column: promotion is upward, so the
+        // comparison is exact and every row qualifies.
+        var (trace, rows) = Run(TableT, "select id from t where id < 9999999999");
+        Contains("RangeSeek(t)", trace);
+        HasCount(3, rows);
+    }
+
+    [TestMethod]
+    public void EmptyRange_LowerAboveUpper_RangeSeeksToEmpty()
+    {
+        var (trace, rows) = Run(TableT, "select id from t where id > 5 and id < 2");
+        Contains("RangeSeek(t)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void StringRange_CaseInsensitiveCollation_RangeSeeks()
+    {
+        var (trace, rows) = Run("""
+            create table t (code varchar(10) not null primary key);
+            insert t values ('apple'), ('mango'), ('pear')
+            """, "select code from t where code >= 'm'");
+        Contains("RangeSeek(t)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void DateRange_HalfOpenInterval_RangeSeeks()
+    {
+        // The canonical clustered-key range: created >= @from AND created < @to.
+        var (trace, rows) = Run("""
+            create table e (created date not null primary key, label varchar(10) not null);
+            insert e values ('2026-01-01', 'a'), ('2026-02-01', 'b'), ('2026-03-01', 'c')
+            """, "select label from e where created >= '2026-01-15' and created < '2026-03-01'");
+        Contains("RangeSeek(e)", trace);
+        HasCount(1, rows);
+        AreEqual("b", rows[0]);
+    }
+
+    [TestMethod]
+    public void RangeAfterWarmup_ReplaysDelta_SortedViewStaysCurrent()
+    {
+        // The lazily-built sorted view must be maintained incrementally: a row
+        // inserted after the range warm-up must appear in a later range scan via
+        // the journal replay, not a rebuild.
+        var (trace, rows) = WarmMutateProbe(
+            TableT, "select id from t where id > 0", "insert t values (4, 40)", "select id from t where id >= 3");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        Contains("RangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(3, rows);
+        Contains(4, rows);
+    }
+
+    [TestMethod]
+    public void RangeCorrectUnderManyMutations_MatchesIndependentBaseline()
+    {
+        // Stress the incrementally-maintained sorted view: interleave inserts,
+        // key-changing updates, and deletes, then confirm a range seek matches a
+        // brute-force filter over a no-WHERE full read (which doesn't seek).
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (id int not null primary key, val int not null)");
+        Exec(c, "insert t (id, val) select value, value from generate_series(1, 40)");
+        _ = ReadVal(c, "select id from t where id > 0");
+        Exec(c, "delete from t where id between 10 and 20");
+        Exec(c, "update t set id = id + 100 where id between 30 and 35");
+        Exec(c, "insert t values (5000, 0)");
+
+        var expected = new List<int>();
+        foreach (var o in ReadRows(c, "select id from t"))
+        {
+            var x = Convert.ToInt32(o);
+            if (x is > 25 and < 5001)
+                expected.Add(x);
+        }
+
+        var actual = new List<int>();
+        foreach (var o in ReadRows(c, "select id from t where id > 25 and id < 5001"))
+            actual.Add(Convert.ToInt32(o));
+
+        expected.Sort();
+        actual.Sort();
+        AreEqual(string.Join(",", expected), string.Join(",", actual));
     }
 }

@@ -101,17 +101,241 @@ internal sealed partial class Selection
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},{width})");
-            return
-            [
-                new FromSource(
-                    source.Qualifier, source.ColumnNames, source.Columns, source.StoredSchema,
-                    source.StorageOrdinals, source.LobStore, seekRows, source.LateralPlan,
-                    source.BackingTable, source.BackingView),
-            ];
+            return SeekedSource(source, seekRows);
+        }
+
+        // No equality seek — try a range seek on a leading key column
+        // (col > v / col BETWEEN lo AND hi / a one-sided bound). The matched
+        // bound conjunct(s) stay in the residual WHERE, so the range only
+        // narrows the candidate set.
+        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, conjuncts, allowCorrelatedColumnValue, out var rangeRows))
+        {
+            IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
+            IndexSeekDiagnostics.Sink?.Add($"RangeSeek({table.Name})");
+            IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},1)");
+            return SeekedSource(source, rangeRows);
         }
 
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
         return sources;
+    }
+
+    // Wraps a narrowed row stream back into a single-source array, preserving the
+    // original source's column / storage / view metadata.
+    private static FromSource[] SeekedSource(FromSource source, IEnumerable<byte[]> rows) =>
+    [
+        new FromSource(
+            source.Qualifier, source.ColumnNames, source.Columns, source.StoredSchema,
+            source.StorageOrdinals, source.LobStore, rows, source.LateralPlan,
+            source.BackingTable, source.BackingView),
+    ];
+
+    // The lower / upper bound expressions collected for one column from range
+    // conjuncts. First writer wins per side: a redundant second bound (e.g. a
+    // looser `col > 0` alongside `col > 5`) stays as a residual filter.
+    private sealed class RangeBoundExprs
+    {
+        public Expression? Lower;
+        public bool LowerInclusive;
+        public Expression? Upper;
+        public bool UpperInclusive;
+    }
+
+    /// <summary>
+    /// Narrows a single-base-table scan to a range seek when WHERE carries a
+    /// range bound (<c>col &gt; v</c> / <c>col &lt;= v</c> / <c>col BETWEEN lo AND
+    /// hi</c>, either operand order) on the <b>leading</b> key column of some
+    /// index or key, and the bound value(s) are stable. Single leading-column
+    /// range only; a range on a non-leading column, or an equality-prefix
+    /// continued by a range, isn't narrowed here (the equality path takes the
+    /// prefix it can and the range stays residual). The bound conjuncts remain in
+    /// the residual WHERE, so the seek only narrows the candidate set.
+    /// </summary>
+    private static bool TrySeekByRange(
+        FromSource source,
+        HeapTable table,
+        DataLockPlan plan,
+        BatchContext batch,
+        long? snapshotXid,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        List<BooleanExpression> conjuncts,
+        bool allowCorrelatedColumnValue,
+        out IEnumerable<byte[]> seekRows)
+    {
+        seekRows = [];
+
+        var bounds = new Dictionary<int, RangeBoundExprs>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetRangeOperands(out var left, out var op, out var right))
+            {
+                if (TryIdentifyIndexableColumn(source, left, out var leftOrd) && IsStableValueSide(right, source, allowCorrelatedColumnValue))
+                    RecordBound(bounds, leftOrd, op, right);
+                else if (TryIdentifyIndexableColumn(source, right, out var rightOrd) && IsStableValueSide(left, source, allowCorrelatedColumnValue))
+                    RecordBound(bounds, rightOrd, FlipComparison(op), left);
+                continue;
+            }
+
+            if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
+                && TryIdentifyIndexableColumn(source, value, out var betweenOrd)
+                && IsStableValueSide(lower, source, allowCorrelatedColumnValue)
+                && IsStableValueSide(upper, source, allowCorrelatedColumnValue))
+            {
+                RecordBound(bounds, betweenOrd, RangeComparison.GreaterOrEqual, lower);
+                RecordBound(bounds, betweenOrd, RangeComparison.LessOrEqual, upper);
+            }
+        }
+
+        if (bounds.Count == 0 || FindRangeLeadingOrdinal(table, bounds) is not { } ordinal)
+            return false;
+
+        var bound = bounds[ordinal];
+        var columnType = source.StoredSchema[ordinal].Type;
+
+        // Evaluate present bounds, unify their promoted type with the column's, and
+        // coerce both to it. A NULL bound makes every comparison UNKNOWN, so the
+        // range matches nothing — a valid (empty) seek. A promotion / collation
+        // failure declines to the full scan.
+        SqlType? common = null;
+        SqlValue lowerValue = default, upperValue = default;
+        if (bound.Lower is { } lowerExpr)
+        {
+            switch (EvaluateBound(lowerExpr, columnType, batch, outerResolver, out lowerValue, out var lowerCommon))
+            {
+                case BoundEval.Decline: return false;
+                case BoundEval.Null: return true;
+                default: common = lowerCommon; break;
+            }
+        }
+        if (bound.Upper is { } upperExpr)
+        {
+            switch (EvaluateBound(upperExpr, columnType, batch, outerResolver, out upperValue, out var upperCommon))
+            {
+                case BoundEval.Decline: return false;
+                case BoundEval.Null: return true;
+                default: common = common is null ? upperCommon : SqlType.Promote(common, upperCommon); break;
+            }
+        }
+
+        if (common is null)
+            return false;
+
+        var hasLower = bound.Lower is not null;
+        var hasUpper = bound.Upper is not null;
+        if (hasLower)
+            lowerValue = lowerValue.CoerceTo(common);
+        if (hasUpper)
+            upperValue = upperValue.CoerceTo(common);
+
+        var cache = seekCaches.GetValue(table.Heap, static _ => new EqualityIndexCache());
+        var candidates = cache.RangeScan(
+            table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
+            hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive);
+
+        seekRows = snapshotXid is { } sx
+            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
+            : MaterializeWithLockChecks(table, batch, plan, candidates);
+        return true;
+    }
+
+    // Records one bound for a column, first-writer-wins per side.
+    private static void RecordBound(Dictionary<int, RangeBoundExprs> bounds, int ordinal, RangeComparison op, Expression valueSide)
+    {
+        if (!bounds.TryGetValue(ordinal, out var bound))
+            bounds[ordinal] = bound = new RangeBoundExprs();
+        switch (op)
+        {
+            case RangeComparison.Greater when bound.Lower is null:
+                (bound.Lower, bound.LowerInclusive) = (valueSide, false);
+                break;
+            case RangeComparison.GreaterOrEqual when bound.Lower is null:
+                (bound.Lower, bound.LowerInclusive) = (valueSide, true);
+                break;
+            case RangeComparison.Less when bound.Upper is null:
+                (bound.Upper, bound.UpperInclusive) = (valueSide, false);
+                break;
+            case RangeComparison.LessOrEqual when bound.Upper is null:
+                (bound.Upper, bound.UpperInclusive) = (valueSide, true);
+                break;
+        }
+    }
+
+    // Flips a comparison whose column is on the right (`v < col` ≡ `col > v`).
+    private static RangeComparison FlipComparison(RangeComparison op) => op switch
+    {
+        RangeComparison.Greater => RangeComparison.Less,
+        RangeComparison.GreaterOrEqual => RangeComparison.LessOrEqual,
+        RangeComparison.Less => RangeComparison.Greater,
+        _ => RangeComparison.GreaterOrEqual,
+    };
+
+    // The leading storage ordinal of the first key / index whose lead column
+    // carries a bound, or null if none does. Keys (PK / UNIQUE) are preferred
+    // over CREATE INDEX entries, matching the equality path's order.
+    private static int? FindRangeLeadingOrdinal(HeapTable table, Dictionary<int, RangeBoundExprs> bounds)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.StorageOrdinals.Length > 0 && bounds.ContainsKey(key.StorageOrdinals[0]))
+                return key.StorageOrdinals[0];
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.KeyColumns.Length > 0 && bounds.ContainsKey(index.KeyColumns[0].StorageOrdinal))
+                return index.KeyColumns[0].StorageOrdinal;
+        }
+        return null;
+    }
+
+    private enum BoundEval
+    {
+        Decline,
+        Null,
+        Value,
+    }
+
+    // Evaluates a bound expression and promotes it against the column type.
+    // Decline → fall back to the scan (collation / promotion failure, or a
+    // SimulatedSqlException while evaluating). Null → the bound is NULL, so the
+    // range matches nothing. Value → `value` (coerced to `common`) is usable.
+    private static BoundEval EvaluateBound(
+        Expression expr, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, out SqlValue value, out SqlType common)
+    {
+        value = default;
+        common = columnType;
+        SqlValue evaluated;
+        try
+        {
+            evaluated = expr.Run(new RuntimeContext(
+                name => outerResolver is { } resolve ? resolve(name) : SqlValue.Null(SqlType.Int32),
+                batch));
+        }
+        catch (SimulatedSqlException)
+        {
+            return BoundEval.Decline;
+        }
+
+        if (evaluated.IsNull)
+            return BoundEval.Null;
+
+        if (columnType.Category == SqlTypeCategory.String
+            && evaluated.Type.Category == SqlTypeCategory.String
+            && Collation.Resolve(columnType, evaluated.Type) is null)
+        {
+            return BoundEval.Decline;
+        }
+
+        try
+        {
+            common = SqlType.Promote(columnType, evaluated.Type);
+            value = evaluated.CoerceTo(common);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+        {
+            return BoundEval.Decline;
+        }
+
+        return BoundEval.Value;
     }
 
     /// <summary>
@@ -571,30 +795,53 @@ internal sealed partial class Selection
         {
             lock (this.gate)
             {
-                var lead = ordinals[0];
-                if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Matches(ordinals, commons))
-                {
-                    if (entry.Generation != heap.MutationGeneration)
-                    {
-                        var events = heap.SnapshotSeekJournalSince(entry.Generation, out var currentGen);
-                        if (events is not null)
-                        {
-                            IndexSeekDiagnostics.Sink?.Add("CacheReplay");
-                            entry.Apply(events, schema, lobStore, currentGen);
-                        }
-                        else
-                        {
-                            entry = this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
-                        }
-                    }
-                }
-                else
-                {
-                    entry = this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
-                }
-
+                var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
                 return entry.Buckets.TryGetValue(probeKey, out var bucket) ? bucket : Empty;
             }
+        }
+
+        // Single-column range scan: resolves the [ordinal] entry (build / replay,
+        // same as an equality seek on that one column), then unions the row
+        // addresses whose key falls within the bounds. An absent lower/upper means
+        // unbounded on that side. Returns a freshly-built list, so the caller can
+        // enumerate it after the lock is released.
+        public List<(int Page, int Slot)> RangeScan(
+            Heap heap, HeapColumn[] schema, Heap? lobStore, int ordinal, SqlType common,
+            bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+        {
+            lock (this.gate)
+            {
+                var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
+                return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+            }
+        }
+
+        // Resolves the cache entry for a prefix: reuses it (replaying the journal
+        // delta when the heap moved on), or rebuilds from a scan when the prefix /
+        // promoted types differ or the delta can't be replayed. Caller holds the gate.
+        private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
+        {
+            var lead = ordinals[0];
+            if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Matches(ordinals, commons))
+            {
+                if (entry.Generation != heap.MutationGeneration)
+                {
+                    var events = heap.SnapshotSeekJournalSince(entry.Generation, out var currentGen);
+                    if (events is not null)
+                    {
+                        IndexSeekDiagnostics.Sink?.Add("CacheReplay");
+                        entry.Apply(events, schema, lobStore, currentGen);
+                    }
+                    else
+                    {
+                        entry = this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
+                    }
+                }
+
+                return entry;
+            }
+
+            return this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
         }
 
         private CacheEntry Rebuild(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, int lead)
@@ -649,6 +896,17 @@ internal sealed partial class Selection
             bucket.Add(rid);
         }
 
+        // Orders single-component keys by their one value. Range entries are
+        // always single-column (prefix [ordinal]) and every key in one entry is
+        // coerced to the same promoted type, so a direct CompareTo is a total
+        // order — exactly what SortedSet needs.
+        private sealed class SingleComponentComparer : IComparer<SqlValueKey>
+        {
+            public static readonly SingleComponentComparer Instance = new();
+
+            public int Compare(SqlValueKey x, SqlValueKey y) => x.ComponentAt(0).CompareTo(y.ComponentAt(0));
+        }
+
         private sealed class CacheEntry(
             long generation, int[] ordinals, SqlType[] commons, Dictionary<SqlValueKey, List<(int Page, int Slot)>> buckets)
         {
@@ -656,6 +914,12 @@ internal sealed partial class Selection
             public readonly Dictionary<SqlValueKey, List<(int Page, int Slot)>> Buckets = buckets;
             private readonly int[] ordinals = ordinals;
             private readonly SqlType[] commons = commons;
+
+            // Ordered view of the bucket keys, built lazily on the first range scan
+            // and then maintained in lockstep with Buckets (a key joins / leaves it
+            // exactly when its bucket appears / empties). Null until a range scan
+            // needs it, so equality-only workloads never pay for it.
+            private SortedSet<SqlValueKey>? sortedKeys;
 
             // Reuse is sound only when the cached prefix is the same column
             // sequence promoted to the same types as the incoming probe.
@@ -687,7 +951,7 @@ internal sealed partial class Selection
                     {
                         case Heap.SeekJournalKind.Insert:
                             if (TryComputeKey(e.NewImage, this.ordinals, this.commons, schema, lobStore, out var insertKey))
-                                AddRid(this.Buckets, insertKey, (e.Page, e.Slot));
+                                this.AddRid(insertKey, (e.Page, e.Slot));
                             break;
                         case Heap.SeekJournalKind.Delete:
                             if (TryComputeKey(e.OldImage, this.ordinals, this.commons, schema, lobStore, out var deleteKey))
@@ -697,12 +961,25 @@ internal sealed partial class Selection
                             if (TryComputeKey(e.OldImage, this.ordinals, this.commons, schema, lobStore, out var oldKey))
                                 this.RemoveRid(oldKey, (e.Page, e.Slot));
                             if (TryComputeKey(e.NewImage, this.ordinals, this.commons, schema, lobStore, out var newKey))
-                                AddRid(this.Buckets, newKey, (e.Page, e.Slot));
+                                this.AddRid(newKey, (e.Page, e.Slot));
                             break;
                     }
                 }
 
                 this.Generation = currentGen;
+            }
+
+            // Instance add that keeps the lazily-built sorted view in sync — a key
+            // joins sortedKeys exactly when its bucket is first created.
+            private void AddRid(SqlValueKey key, (int Page, int Slot) rid)
+            {
+                if (!this.Buckets.TryGetValue(key, out var bucket))
+                {
+                    this.Buckets[key] = bucket = [];
+                    _ = this.sortedKeys?.Add(key);
+                }
+
+                bucket.Add(rid);
             }
 
             private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
@@ -711,8 +988,53 @@ internal sealed partial class Selection
                 {
                     _ = bucket.Remove(rid);
                     if (bucket.Count == 0)
+                    {
                         _ = this.Buckets.Remove(key);
+                        _ = this.sortedKeys?.Remove(key);
+                    }
                 }
+            }
+
+            private SortedSet<SqlValueKey> EnsureSorted()
+            {
+                if (this.sortedKeys is null)
+                {
+                    this.sortedKeys = new SortedSet<SqlValueKey>(SingleComponentComparer.Instance);
+                    foreach (var key in this.Buckets.Keys)
+                        _ = this.sortedKeys.Add(key);
+                }
+
+                return this.sortedKeys;
+            }
+
+            // Unions the row addresses whose single-column key lies within the
+            // bounds. An absent bound is unbounded on that side (Min / Max of the
+            // ordered set); an exclusive bound drops the matching endpoint key.
+            // SortedSet.GetViewBetween gives the in-range keys in O(log k + matches).
+            public List<(int Page, int Slot)> RangeCandidates(
+                bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+            {
+                var sorted = this.EnsureSorted();
+                var result = new List<(int Page, int Slot)>();
+                if (sorted.Count == 0)
+                    return result;
+
+                var lowerKey = hasLower ? new SqlValueKey([lower]) : sorted.Min;
+                var upperKey = hasUpper ? new SqlValueKey([upper]) : sorted.Max;
+                if (SingleComponentComparer.Instance.Compare(lowerKey, upperKey) > 0)
+                    return result;
+
+                foreach (var key in sorted.GetViewBetween(lowerKey, upperKey))
+                {
+                    if (hasLower && !lowerInclusive && SingleComponentComparer.Instance.Compare(key, lowerKey) == 0)
+                        continue;
+                    if (hasUpper && !upperInclusive && SingleComponentComparer.Instance.Compare(key, upperKey) == 0)
+                        continue;
+                    if (this.Buckets.TryGetValue(key, out var bucket))
+                        result.AddRange(bucket);
+                }
+
+                return result;
             }
         }
     }
