@@ -366,23 +366,33 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Eliminates the ORDER BY sort for the common clustered-key shape: a single
-    /// base table ordered by one <b>NOT NULL leading key column</b>, ASC or DESC.
-    /// Produces the source rows in key order (ascending, or reversed for DESC) so
-    /// the caller can stream them through projection without buffering + sorting —
-    /// the residual WHERE and projection preserve order, and OFFSET / FETCH / TOP
-    /// then read only the rows they need. A same-column range bound (<c>… WHERE id
-    /// &gt; 100 ORDER BY id</c>) folds into the scan, so it stays range-narrowed
-    /// <i>and</i> ordered.
+    /// Eliminates the ORDER BY sort when the requested order matches the key order
+    /// of some index / key — streaming the source in key order instead of
+    /// buffering and sorting. Covers three shapes, all reusing the same
+    /// incrementally-maintained ordered view:
+    /// <list type="bullet">
+    /// <item>a single NOT NULL leading key column (<c>ORDER BY id</c>), optionally
+    /// range-narrowed on that same column (<c>… WHERE id &gt; 100 ORDER BY id</c>);</item>
+    /// <item>a multi-column leading prefix (<c>ORDER BY a, b</c> against a key on
+    /// <c>(a, b, …)</c>), every order column NOT NULL;</item>
+    /// <item>an equality prefix continued by the order columns (<c>WHERE a = @x
+    /// ORDER BY b</c> against <c>(a, b)</c>) — the seek positions on <c>a = @x</c>
+    /// and the trailing key columns emerge already ordered, so the sort vanishes
+    /// and the scan touches only the matching group; a folded range on the first
+    /// order column narrows it further (<c>WHERE a = @x AND b &gt; 5 ORDER BY b</c>).</item>
+    /// </list>
     /// <para>
-    /// Declines (leaving the buffered sort in place) for anything the ordered scan
-    /// can't reproduce exactly: a nullable order column (its NULL-key rows aren't
-    /// in the ordered view), multiple ORDER BY items, an expression / ordinal sort
-    /// key, DISTINCT, a SNAPSHOT / RCSI read (the version-chain sweep can't stay
-    /// ordered), a tx-scoped row-lock plan, or a competing equality / other-column
-    /// seek (preferring that narrower seek + a small sort). ORDER BY elimination is
-    /// the one optimization that's observable if wrong, so the bar to apply it is
-    /// deliberately high.
+    /// All order directions must agree (all ASC → forward, all DESC → reversed) —
+    /// a mixed-direction sort declines, since the value-ordered view can't serve
+    /// it. Also declines for an ordinal / expression sort key, a nullable order
+    /// column (its NULL-key rows aren't in the view), DISTINCT, a SNAPSHOT / RCSI
+    /// read (the version-chain sweep can't stay ordered), a tx-scoped row-lock
+    /// plan, or a competing equality / range seek on a leading key column the
+    /// chosen prefix doesn't consume (the narrower seek + a small sort wins).
+    /// Every matched conjunct stays in <paramref name="excluders"/> as a residual
+    /// filter, so the ordered scan can only narrow the row source — never reorder
+    /// or drop a row. ORDER BY elimination is the one optimization observable if
+    /// wrong, so the bar to apply it is deliberately high.
     /// </para>
     /// </summary>
     private static bool TryApplyOrderedScan(
@@ -395,7 +405,7 @@ internal sealed partial class Selection
         out FromSource[] orderedSources)
     {
         orderedSources = sources;
-        if (sources.Length != 1 || joins.Length != 0 || orderBy.Count != 1)
+        if (sources.Length != 1 || joins.Length != 0 || orderBy.Count == 0)
             return false;
         var source = sources[0];
         if (source.BackingTable is not { } table || source.LateralPlan is not null)
@@ -408,114 +418,285 @@ internal sealed partial class Selection
         if (batch.ResolveSnapshotXidForRead(table) is not null)
             return false;
 
-        var spec = orderBy[0];
-        if (spec.IsOrdinal || spec.Expr is not { } orderExpr
-            || !TryIdentifyIndexableColumn(source, orderExpr, out var ordinal)
-            || source.StoredSchema[ordinal].Nullable
-            || !IsLeadingKeyColumn(table, ordinal))
+        // Parse ORDER BY into a column-ordinal list under one shared direction.
+        // Any ordinal / expression key, LOB column, or mixed direction declines.
+        var descending = orderBy[0].Descending;
+        var orderOrds = new int[orderBy.Count];
+        for (var i = 0; i < orderBy.Count; i++)
         {
-            return false;
+            var spec = orderBy[i];
+            if (spec.IsOrdinal || spec.Descending != descending || spec.Expr is not { } orderExpr
+                || !TryIdentifyIndexableColumn(source, orderExpr, out orderOrds[i]))
+            {
+                return false;
+            }
         }
 
         var conjuncts = new List<BooleanExpression>();
         foreach (var excluder in excluders)
             excluder.CollectConjuncts(conjuncts);
 
-        // Scan the conjuncts: decline if a competing seek exists (any equality on a
-        // leading key column, or a range on a leading key column other than the
-        // order column — the narrower seek + a small sort beats a whole-column
-        // ordered scan), and fold a same-column range into the ordered scan bounds.
-        var sameColumnBounds = new RangeBoundExprs();
+        // Columns pinned to a single stable equality value can both anchor the
+        // seek prefix and drop out of the sort (they're constant within the
+        // result), so strip them from the order list. The surviving order columns
+        // must be NOT NULL — a NULL-key row isn't in the ordered view, so an
+        // eliminated sort would lose it.
+        var pins = CollectSingleValuePins(source, conjuncts);
+        var effective = new List<int>(orderOrds.Length);
+        foreach (var ord in orderOrds)
+        {
+            if (!pins.ContainsKey(ord))
+                effective.Add(ord);
+        }
+
+        if (effective.Count == 0)
+            return false;
+        foreach (var ord in effective)
+        {
+            if (source.StoredSchema[ord].Nullable)
+                return false;
+        }
+
+        // Pick the index / key whose leading prefix is a pinned run followed by
+        // exactly the effective order columns. Largest pinned run wins (narrowest
+        // seek); keys before indexes.
+        if (!TryFindOrderedSeekPrefix(table, pins, [.. effective], out var fullPrefix, out var pinnedLength))
+            return false;
+
+        // Scan the conjuncts: decline if a competing seek (equality / IN / range)
+        // sits on a leading key column the chosen prefix doesn't consume, and fold
+        // a range on the first order column into the scan bounds. Pinned columns
+        // are consumed; everything else stays residual.
+        var firstOrderOrdinal = fullPrefix[pinnedLength];
+        var consumed = new HashSet<int>();
+        for (var i = 0; i < pinnedLength; i++)
+            _ = consumed.Add(fullPrefix[i]);
+        var orderColumnBounds = new RangeBoundExprs();
         foreach (var conjunct in conjuncts)
         {
-            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            if (conjunct.TryGetEqualityOperands(out var eqLeft, out var eqRight))
             {
-                if (IsLeadingSeekColumn(source, table, left, right) || IsLeadingSeekColumn(source, table, right, left))
+                if (IsUnconsumedLeadingSeek(source, table, eqLeft, eqRight, consumed)
+                    || IsUnconsumedLeadingSeek(source, table, eqRight, eqLeft, consumed))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (conjunct.TryGetEqualityFamily(out var family))
+            {
+                // An IN-list / OR-family on the first order column lets the
+                // composite equality seek pin one column past this ordered
+                // prefix (a = @x AND b IN (…) ORDER BY b → a width-2 (a, b)
+                // seek), narrower than scanning the whole pinned group, so
+                // prefer it. A family on a leading key column is likewise a
+                // competing seek.
+                if (IsFamilyOnColumn(source, family, firstOrderOrdinal) || IsLeadingKeyFamily(source, table, family))
                     return false;
                 continue;
             }
 
-            if (conjunct.TryGetEqualityFamily(out _))
-                return false;
-
-            if (conjunct.TryGetRangeOperands(out var rangeLeft, out var rangeOp, out var rangeRight))
+            if (conjunct.TryGetRangeOperands(out var rangeLeft, out var rangeOp, out var rangeRight)
+                && TryNormalizeRangeBound(source, rangeLeft, rangeOp, rangeRight, out var boundOrd, out var boundOp, out var boundValue))
             {
-                if (TryNormalizeRangeBound(source, rangeLeft, rangeOp, rangeRight, out var boundOrd, out var boundOp, out var boundValue))
-                {
-                    if (boundOrd != ordinal)
-                    {
-                        if (IsLeadingKeyColumn(table, boundOrd))
-                            return false;
-                    }
-                    else
-                    {
-                        RecordBound(sameColumnBounds, boundOp, boundValue);
-                    }
-                }
-
+                if (boundOrd == firstOrderOrdinal)
+                    RecordBound(orderColumnBounds, boundOp, boundValue);
+                else if (!consumed.Contains(boundOrd) && IsLeadingKeyColumn(table, boundOrd))
+                    return false;
                 continue;
             }
 
             if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
                 && TryIdentifyIndexableColumn(source, value, out var betweenOrd))
             {
-                if (betweenOrd != ordinal)
+                if (betweenOrd == firstOrderOrdinal && IsStableValueSide(lower, source) && IsStableValueSide(upper, source))
                 {
-                    if (IsLeadingKeyColumn(table, betweenOrd))
-                        return false;
+                    RecordBound(orderColumnBounds, RangeComparison.GreaterOrEqual, lower);
+                    RecordBound(orderColumnBounds, RangeComparison.LessOrEqual, upper);
                 }
-                else if (IsStableValueSide(lower, source) && IsStableValueSide(upper, source))
+                else if (betweenOrd != firstOrderOrdinal && !consumed.Contains(betweenOrd) && IsLeadingKeyColumn(table, betweenOrd))
                 {
-                    RecordBound(sameColumnBounds, RangeComparison.GreaterOrEqual, lower);
-                    RecordBound(sameColumnBounds, RangeComparison.LessOrEqual, upper);
+                    return false;
                 }
             }
         }
 
-        var columnType = source.StoredSchema[ordinal].Type;
-        var common = columnType;
-        bool hasLower = false, hasUpper = false, lowerInclusive = false, upperInclusive = false;
-        SqlValue lowerValue = default, upperValue = default;
-        if (sameColumnBounds.Lower is { } lowerExpr)
+        // Resolve per-column promoted types and the pinned probe values: pinned
+        // columns promote against their equality value (matching the equality
+        // seek), order columns use their own type, and the first order column
+        // additionally promotes against a folded range bound. A NULL pinned probe
+        // or range bound seeks to empty; a collation / promotion failure declines.
+        var commons = new SqlType[fullPrefix.Length];
+        var prefixValues = new SqlValue[pinnedLength];
+        for (var i = 0; i < pinnedLength; i++)
         {
-            switch (EvaluateBound(lowerExpr, columnType, batch, outerResolver, out lowerValue, out var lowerCommon))
+            var ord = fullPrefix[i];
+            switch (EvaluateBound(pins[ord], source.StoredSchema[ord].Type, batch, outerResolver, out var pinnedValue, out var pinnedCommon))
             {
                 case BoundEval.Decline: return false;
                 case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
-                default: common = lowerCommon; hasLower = true; lowerInclusive = sameColumnBounds.LowerInclusive; break;
+                default: commons[i] = pinnedCommon; prefixValues[i] = pinnedValue; break;
             }
         }
-        if (sameColumnBounds.Upper is { } upperExpr)
+
+        for (var i = pinnedLength; i < fullPrefix.Length; i++)
+            commons[i] = source.StoredSchema[fullPrefix[i]].Type;
+
+        var orderColumnType = commons[pinnedLength];
+        bool hasLower = false, hasUpper = false, lowerInclusive = false, upperInclusive = false;
+        SqlValue lowerValue = default, upperValue = default;
+        if (orderColumnBounds.Lower is { } lowerExpr)
         {
-            switch (EvaluateBound(upperExpr, columnType, batch, outerResolver, out upperValue, out var upperCommon))
+            switch (EvaluateBound(lowerExpr, orderColumnType, batch, outerResolver, out lowerValue, out var lowerCommon))
             {
                 case BoundEval.Decline: return false;
                 case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
-                default: common = hasLower ? SqlType.Promote(common, upperCommon) : upperCommon; hasUpper = true; upperInclusive = sameColumnBounds.UpperInclusive; break;
+                default: commons[pinnedLength] = lowerCommon; hasLower = true; lowerInclusive = orderColumnBounds.LowerInclusive; break;
+            }
+        }
+        if (orderColumnBounds.Upper is { } upperExpr)
+        {
+            switch (EvaluateBound(upperExpr, commons[pinnedLength], batch, outerResolver, out upperValue, out var upperCommon))
+            {
+                case BoundEval.Decline: return false;
+                case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
+                default: commons[pinnedLength] = hasLower ? SqlType.Promote(commons[pinnedLength], upperCommon) : upperCommon; hasUpper = true; upperInclusive = orderColumnBounds.UpperInclusive; break;
             }
         }
         if (hasLower)
-            lowerValue = lowerValue.CoerceTo(common);
+            lowerValue = lowerValue.CoerceTo(commons[pinnedLength]);
         if (hasUpper)
-            upperValue = upperValue.CoerceTo(common);
+            upperValue = upperValue.CoerceTo(commons[pinnedLength]);
 
         var cache = seekCaches.GetValue(table.Heap, static _ => new EqualityIndexCache());
-        var candidates = cache.OrderedScan(
-            table.Heap, source.StoredSchema, source.LobStore, ordinal, common, spec.Descending,
-            hasLower, lowerValue, lowerInclusive, hasUpper, upperValue, upperInclusive);
+        var candidates = cache.OrderedSeek(
+            table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons, descending,
+            prefixValues, hasLower, lowerValue, lowerInclusive, hasUpper, upperValue, upperInclusive);
 
         IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
         orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, candidates));
         return true;
     }
 
+    // This source's columns pinned to a single stable equality value (column =
+    // literal / variable / outer-ref). IN-list / OR families and the second of
+    // two equalities on one column are excluded — only a single value can anchor
+    // the ordered seek's prefix (a multi-value IN fans into several ordered runs
+    // that would need merging, deferred). The value expression is captured, not
+    // evaluated.
+    private static Dictionary<int, Expression> CollectSingleValuePins(FromSource source, List<BooleanExpression> conjuncts)
+    {
+        var pins = new Dictionary<int, Expression>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (!conjunct.TryGetEqualityOperands(out var left, out var right))
+                continue;
+            if (TryIdentifyIndexableColumn(source, left, out var leftOrd) && IsStableValueSide(right, source))
+                _ = pins.TryAdd(leftOrd, right);
+            else if (TryIdentifyIndexableColumn(source, right, out var rightOrd) && IsStableValueSide(left, source))
+                _ = pins.TryAdd(rightOrd, left);
+        }
+
+        return pins;
+    }
+
+    // The storage-ordinal sequence of every key / index, keys first. Used to
+    // match an ORDER BY (after pinned-column stripping) against a leading prefix.
+    private static IEnumerable<int[]> EnumerateKeyOrdinals(HeapTable table)
+    {
+        foreach (var key in table.KeyConstraints)
+            yield return key.StorageOrdinals;
+        foreach (var index in table.Indexes)
+        {
+            var ordinals = new int[index.KeyColumns.Length];
+            for (var i = 0; i < ordinals.Length; i++)
+                ordinals[i] = index.KeyColumns[i].StorageOrdinal;
+            yield return ordinals;
+        }
+    }
+
+    // Finds the key / index whose leading prefix is a run of pinned columns
+    // followed by exactly the effective order columns (in order). Returns that
+    // full prefix (pinned ++ order) and the pinned-run length. The pinned run is
+    // taken greedily from the front; the largest pinned run across all keys wins
+    // (narrowest seek), keys preferred over indexes on a tie.
+    private static bool TryFindOrderedSeekPrefix(
+        HeapTable table, Dictionary<int, Expression> pins, int[] effective, out int[] fullPrefix, out int pinnedLength)
+    {
+        fullPrefix = [];
+        pinnedLength = 0;
+        var bestPinned = -1;
+        foreach (var ordinals in EnumerateKeyOrdinals(table))
+        {
+            var pinned = 0;
+            while (pinned < ordinals.Length && pins.ContainsKey(ordinals[pinned]))
+                pinned++;
+            if (pinned + effective.Length > ordinals.Length)
+                continue;
+
+            var matches = true;
+            for (var i = 0; i < effective.Length; i++)
+            {
+                if (ordinals[pinned + i] != effective[i])
+                {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches && pinned > bestPinned)
+            {
+                bestPinned = pinned;
+                pinnedLength = pinned;
+                fullPrefix = ordinals[..(pinned + effective.Length)];
+            }
+        }
+
+        return bestPinned >= 0;
+    }
+
     // True when `columnSide` is a leading key column of THIS source carrying a
-    // stable-value equality — a competing seek that should win over an ordered
-    // scan. Used to decline ORDER BY elimination.
-    private static bool IsLeadingSeekColumn(FromSource source, HeapTable table, Expression columnSide, Expression valueSide) =>
+    // stable-value equality whose ordinal the chosen seek prefix doesn't consume
+    // — a competing seek that should win over an ordered scan.
+    private static bool IsUnconsumedLeadingSeek(
+        FromSource source, HeapTable table, Expression columnSide, Expression valueSide, HashSet<int> consumed) =>
         TryIdentifyIndexableColumn(source, columnSide, out var ord)
+        && !consumed.Contains(ord)
         && IsLeadingKeyColumn(table, ord)
         && IsStableValueSide(valueSide, source);
+
+    // True when an IN-list / OR-equality family targets the given column ordinal
+    // of THIS source with a stable value on the other side.
+    private static bool IsFamilyOnColumn(FromSource source, List<(Expression Left, Expression Right)> family, int ordinal)
+    {
+        foreach (var (left, right) in family)
+        {
+            if (TryIdentifyIndexableColumn(source, left, out var leftOrd) && leftOrd == ordinal && IsStableValueSide(right, source))
+                return true;
+            if (TryIdentifyIndexableColumn(source, right, out var rightOrd) && rightOrd == ordinal && IsStableValueSide(left, source))
+                return true;
+        }
+
+        return false;
+    }
+
+    // True when an IN-list / OR-equality family targets a leading key column of
+    // THIS source — a competing seek (single-value pins are consumed as the
+    // prefix, so a family ordinal is never already consumed).
+    private static bool IsLeadingKeyFamily(FromSource source, HeapTable table, List<(Expression Left, Expression Right)> family)
+    {
+        foreach (var (left, right) in family)
+        {
+            if (TryIdentifyIndexableColumn(source, left, out var leftOrd) && IsLeadingKeyColumn(table, leftOrd) && IsStableValueSide(right, source))
+                return true;
+            if (TryIdentifyIndexableColumn(source, right, out var rightOrd) && IsLeadingKeyColumn(table, rightOrd) && IsStableValueSide(left, source))
+                return true;
+        }
+
+        return false;
+    }
 
     private static bool IsLeadingKeyColumn(HeapTable table, int storageOrdinal)
     {
@@ -1012,20 +1193,24 @@ internal sealed partial class Selection
             }
         }
 
-        // Ordered single-column scan for ORDER BY elimination: the in-range keys
-        // (whole column when unbounded) of the [ordinal] entry, ascending or — for
-        // a DESC order — reversed. Reuses the same ordered view RangeScan builds,
-        // so it inherits the incremental no-warm-up maintenance. Reversing the flat
-        // ascending list flips key order (within-key tie order is arbitrary either
-        // way, matching ORDER BY's unspecified tie-break).
-        public List<(int Page, int Slot)> OrderedScan(
-            Heap heap, HeapColumn[] schema, Heap? lobStore, int ordinal, SqlType common, bool descending,
-            bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+        // Ordered scan for ORDER BY elimination over the composite prefix
+        // <paramref name="ordinals"/> (pinned equality columns followed by the
+        // order columns). The pinned prefix values in <paramref name="prefix"/>
+        // (empty for a pure ORDER BY) select the contiguous equality run; the
+        // optional bounds add a range on the first order column. Rows come out in
+        // ascending key order, or — for an all-DESC order — reversed. Reuses the
+        // same ordered view the equality / range seeks build, inheriting the
+        // incremental no-warm-up maintenance. Reversing the flat ascending list
+        // flips key order (within-key tie order is arbitrary either way, matching
+        // ORDER BY's unspecified tie-break).
+        public List<(int Page, int Slot)> OrderedSeek(
+            Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool descending,
+            SqlValue[] prefix, bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
         {
             lock (this.gate)
             {
-                var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
-                var ordered = entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+                var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
+                var ordered = entry.OrderedCandidates(prefix, hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
                 if (descending)
                     ordered.Reverse();
                 return ordered;
@@ -1112,15 +1297,30 @@ internal sealed partial class Selection
             bucket.Add(rid);
         }
 
-        // Orders single-component keys by their one value. Range entries are
-        // always single-column (prefix [ordinal]) and every key in one entry is
-        // coerced to the same promoted type, so a direct CompareTo is a total
-        // order — exactly what SortedSet needs.
-        private sealed class SingleComponentComparer : IComparer<SqlValueKey>
+        // Orders key tuples component-by-component, comparing only as far as the
+        // shorter of the two (so a shorter prefix-probe key sorts equal to every
+        // full key sharing that prefix — the basis of the equality-prefix ordered
+        // seek's GetViewBetween(prefix, prefix)). Within one entry every key has
+        // the same arity and every component is coerced to the entry's promoted
+        // type, so over the set's own elements this is a total order — exactly
+        // what SortedSet needs; the ragged-arity case only ever arises for the
+        // synthetic bound keys passed to GetViewBetween, never set members.
+        private sealed class KeyTupleComparer : IComparer<SqlValueKey>
         {
-            public static readonly SingleComponentComparer Instance = new();
+            public static readonly KeyTupleComparer Instance = new();
 
-            public int Compare(SqlValueKey x, SqlValueKey y) => x.ComponentAt(0).CompareTo(y.ComponentAt(0));
+            public int Compare(SqlValueKey x, SqlValueKey y)
+            {
+                var n = Math.Min(x.ComponentCount, y.ComponentCount);
+                for (var i = 0; i < n; i++)
+                {
+                    var c = x.ComponentAt(i).CompareTo(y.ComponentAt(i));
+                    if (c != 0)
+                        return c;
+                }
+
+                return 0;
+            }
         }
 
         private sealed class CacheEntry(
@@ -1215,7 +1415,7 @@ internal sealed partial class Selection
             {
                 if (this.sortedKeys is null)
                 {
-                    this.sortedKeys = new SortedSet<SqlValueKey>(SingleComponentComparer.Instance);
+                    this.sortedKeys = new SortedSet<SqlValueKey>(KeyTupleComparer.Instance);
                     foreach (var key in this.Buckets.Keys)
                         _ = this.sortedKeys.Add(key);
                 }
@@ -1223,34 +1423,67 @@ internal sealed partial class Selection
                 return this.sortedKeys;
             }
 
-            // Unions the row addresses whose single-column key lies within the
-            // bounds. An absent bound is unbounded on that side (Min / Max of the
-            // ordered set); an exclusive bound drops the matching endpoint key.
-            // SortedSet.GetViewBetween gives the in-range keys in O(log k + matches).
+            // Single-column range seek: the in-range keys of a one-column entry,
+            // in ascending order. Thin wrapper over the prefix-aware form with an
+            // empty (whole-entry) prefix.
             public List<(int Page, int Slot)> RangeCandidates(
-                bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+                bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive) =>
+                this.OrderedCandidates([], hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+
+            // Unions the row addresses whose key starts with <paramref name="prefix"/>
+            // (the pinned equality components, possibly empty) and whose first
+            // post-prefix component lies within the optional bounds, in ascending
+            // key order. With an empty prefix and no bounds this is the whole entry
+            // in order (pure multi-column ORDER BY); with a prefix it's the
+            // contiguous equality run ordered by the trailing key columns
+            // (WHERE a = @x ORDER BY b); bounds add a range on the first post-prefix
+            // column (WHERE a = @x AND b > 5 ORDER BY b). An absent bound is
+            // unbounded on that side; an exclusive bound drops the matching endpoint.
+            // SortedSet.GetViewBetween gives the in-range keys in O(log n + matches).
+            public List<(int Page, int Slot)> OrderedCandidates(
+                SqlValue[] prefix, bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
             {
                 var sorted = this.EnsureSorted();
                 var result = new List<(int Page, int Slot)>();
                 if (sorted.Count == 0)
                     return result;
 
-                var lowerKey = hasLower ? new SqlValueKey([lower]) : sorted.Min;
-                var upperKey = hasUpper ? new SqlValueKey([upper]) : sorted.Max;
-                if (SingleComponentComparer.Instance.Compare(lowerKey, upperKey) > 0)
+                var lowerKey = BoundKey(prefix, hasLower, lower) ?? sorted.Min;
+                var upperKey = BoundKey(prefix, hasUpper, upper) ?? sorted.Max;
+                if (KeyTupleComparer.Instance.Compare(lowerKey, upperKey) > 0)
                     return result;
 
+                var boundComponent = prefix.Length;
                 foreach (var key in sorted.GetViewBetween(lowerKey, upperKey))
                 {
-                    if (hasLower && !lowerInclusive && SingleComponentComparer.Instance.Compare(key, lowerKey) == 0)
+                    if (hasLower && !lowerInclusive && key.ComponentAt(boundComponent).CompareTo(lower) == 0)
                         continue;
-                    if (hasUpper && !upperInclusive && SingleComponentComparer.Instance.Compare(key, upperKey) == 0)
+                    if (hasUpper && !upperInclusive && key.ComponentAt(boundComponent).CompareTo(upper) == 0)
                         continue;
                     if (this.Buckets.TryGetValue(key, out var bucket))
                         result.AddRange(bucket);
                 }
 
                 return result;
+            }
+
+            // Synthesizes a GetViewBetween bound: the pinned prefix with the bound
+            // value appended (arity prefix+1) when a bound is present; the prefix
+            // alone (arity prefix) when not but the prefix is non-empty — under the
+            // ragged-arity comparer that sorts equal to every key sharing the
+            // prefix, selecting the whole equality run; null (caller uses Min / Max)
+            // when neither prefix nor bound constrains that side.
+            private static SqlValueKey? BoundKey(SqlValue[] prefix, bool hasBound, SqlValue bound)
+            {
+                if (hasBound)
+                {
+                    var components = new SqlValue[prefix.Length + 1];
+                    Array.Copy(prefix, components, prefix.Length);
+                    components[prefix.Length] = bound;
+                    return new SqlValueKey(components);
+                }
+
+                return prefix.Length > 0 ? new SqlValueKey(prefix) : null;
             }
         }
     }

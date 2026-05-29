@@ -20,9 +20,10 @@ namespace SqlServerSimulator.Storage;
 /// correlated <c>EXISTS</c> / <c>IN</c> / scalar subqueries from O(outer ×
 /// inner) toward linear. A range bound on the leading key column
 /// (<c>col &gt; v</c> / <c>col BETWEEN lo AND hi</c>) likewise narrows to a
-/// range seek over an incrementally-maintained ordered view, and a single
-/// NOT-NULL leading-key-column <c>ORDER BY</c> streams in key order instead of
-/// sorting (ORDER BY elimination). UNIQUE indexes also
+/// range seek over an incrementally-maintained ordered view, and an <c>ORDER
+/// BY</c> matching a NOT-NULL leading prefix (one or several columns, optionally
+/// after an equality-pinned prefix) streams in key order instead of sorting
+/// (ORDER BY elimination). UNIQUE indexes also
 /// enforce the same multiset rule the existing UNIQUE constraint path uses
 /// (one NULL allowed, second NULL raises Msg 2601), plus the filter-aware
 /// extension when <see cref="Filter"/> is non-null: only rows for which the

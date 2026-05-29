@@ -1094,6 +1094,125 @@ public sealed class IndexSeekTests
         AreEqual("10,20,30", Seq(rows));
     }
 
+    [TestMethod]
+    public void EqualityPrefixThenOrderBySuffix_Eliminates()
+    {
+        // WHERE a = 1 ORDER BY b on PK (a, b): the seek positions on a = 1 and
+        // the trailing key column emerges already ordered — no buffered sort, and
+        // only the a = 1 group is touched (a = 2 rows are interleaved in heap
+        // order to prove the scan doesn't drag them in).
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (2, 5), (1, 30), (1, 10), (2, 1), (1, 20)
+            """, "select b from t where a = 1 order by b");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("10,20,30", Seq(rows));
+    }
+
+    [TestMethod]
+    public void EqualityPrefixThenOrderBySuffixDescending_Eliminates()
+    {
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (2, 5), (1, 30), (1, 10), (1, 20)
+            """, "select b from t where a = 1 order by b desc");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("30,20,10", Seq(rows));
+    }
+
+    [TestMethod]
+    public void EqualityPrefixWithRedundantOrderColumn_Eliminates()
+    {
+        // ORDER BY a, b with a pinned to a constant ≡ ORDER BY b: a is stripped as
+        // a constant, leaving b as the effective order column.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 30), (1, 10), (2, 99), (1, 20)
+            """, "select b from t where a = 1 order by a, b");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("10,20,30", Seq(rows));
+    }
+
+    [TestMethod]
+    public void EqualityPrefixAndRangeOnOrderColumn_EliminatesAndNarrows()
+    {
+        // WHERE a = 1 AND b >= 20 AND b < 40 ORDER BY b: the pinned a = 1 prefix
+        // plus a folded range on b stream the matching slice already ordered.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 10), (1, 20), (1, 30), (1, 40), (2, 25)
+            """, "select b from t where a = 1 and b >= 20 and b < 40 order by b");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("20,30", Seq(rows));
+    }
+
+    [TestMethod]
+    public void MultiColumnOrderByDescending_Eliminates_Reversed()
+    {
+        // ORDER BY a DESC, b DESC reverses the ascending composite view.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (2, 1), (1, 2), (1, 1), (2, 2)
+            """, "select 10 * a + b from t order by a desc, b desc");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("22,21,12,11", Seq(rows));
+    }
+
+    [TestMethod]
+    public void EqualityPrefixNullProbe_ReturnsEmpty()
+    {
+        // a = NULL matches nothing; the ordered seek resolves to an empty stream.
+        // (a is a nullable leading index column, not a PK column.)
+        var (_, rows) = Run("""
+            create table t (a int null, b int not null);
+            create index ix on t (a, b);
+            insert t values (1, 10), (1, 20)
+            """, "select b from t where a = null order by b");
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void EqualityPrefixOrderedScanCorrectAfterMutations()
+    {
+        // The composite ordered view feeding an equality-prefix scan must stay
+        // current under the incremental journal: warm, mutate, then a later
+        // WHERE a = 1 ORDER BY b reflects the changes in order.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (a int not null, b int not null, primary key (a, b))");
+        Exec(c, "insert t values (1, 30), (1, 10), (2, 5), (1, 20)");
+        _ = ReadRows(c, "select b from t where a = 1 order by b");
+        Exec(c, "insert t values (1, 5), (2, 1)");
+        Exec(c, "delete from t where a = 1 and b = 20");
+        Exec(c, "update t set b = 15 where a = 1 and b = 30");
+        var rows = ReadRows(c, "select b from t where a = 1 order by b");
+        AreEqual("5,10,15", Seq(rows));
+    }
+
+    [TestMethod]
+    public void MultiColumnOrderByDifferential_MatchesIndependentSort()
+    {
+        // Cross-check an eliminated composite ORDER BY against a C# sort over a
+        // no-WHERE read (which doesn't eliminate). 1000 * a + b fully encodes the
+        // (a, b) order (b < 1000), so sorting the integer equals ORDER BY a, b.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (id int not null primary key, a int not null, b int not null)");
+        Exec(c, "create index ix on t (a, b)");
+        Exec(c, "insert t (id, a, b) select value, (value * 7919) % 17, (value * 104729) % 97 from generate_series(1, 300)");
+
+        var expected = new List<int>();
+        foreach (var o in ReadRows(c, "select 1000 * a + b from t"))
+            expected.Add(Convert.ToInt32(o));
+        expected.Sort();
+
+        var actual = new List<int>();
+        foreach (var o in ReadRows(c, "select 1000 * a + b from t order by a, b"))
+            actual.Add(Convert.ToInt32(o));
+
+        AreEqual(string.Join(",", expected), string.Join(",", actual));
+    }
+
     // ---- declines (keeps the buffered sort), still correct order ----
 
     [TestMethod]
@@ -1119,13 +1238,15 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void MultiColumnOrderBy_Declines()
+    public void MultiColumnOrderBy_OnCompositeKey_Eliminates()
     {
+        // ORDER BY a, b matches the (a, b) PK leading prefix, both NOT NULL, so
+        // the composite ordered view streams in key order — no buffered sort.
         var (trace, rows) = Run("""
             create table t (a int not null, b int not null, primary key (a, b));
             insert t values (2, 1), (1, 2), (1, 1)
             """, "select a from t order by a, b");
-        DoesNotContain("OrderedScan(t)", trace);
+        Contains("OrderedScan(t)", trace);
         AreEqual("1,1,2", Seq(rows));
     }
 
@@ -1135,6 +1256,46 @@ public sealed class IndexSeekTests
         var (trace, rows) = Run(ScrambledT, "select distinct id from t order by id");
         DoesNotContain("OrderedScan(t)", trace);
         AreEqual("1,2,3,4,5", Seq(rows));
+    }
+
+    [TestMethod]
+    public void MixedDirectionMultiColumnOrderBy_Declines()
+    {
+        // a ASC, b DESC can't be served by the single ascending-by-value
+        // composite view (only all-ASC or all-DESC), so elimination declines.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 2), (1, 1), (2, 1)
+            """, "select 10 * a + b from t order by a asc, b desc");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual("12,11,21", Seq(rows));
+    }
+
+    [TestMethod]
+    public void MultiColumnOrderByNullableSuffix_Declines()
+    {
+        // b is nullable, so its NULL-key rows aren't in the composite view —
+        // elimination declines and the sort puts the NULL first.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int null);
+            create index ix on t (a, b);
+            insert t values (1, 30), (1, null), (1, 10)
+            """, "select b from t where a = 1 order by b");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual(",10,30", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByColumnsNotMatchingKeyOrder_Declines()
+    {
+        // ORDER BY b, a doesn't match the (a, b) key order, so no ordered view
+        // serves it.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 2), (2, 1), (1, 1)
+            """, "select 10 * a + b from t order by b, a");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual("11,21,12", Seq(rows));
     }
 
     [TestMethod]
