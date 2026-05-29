@@ -109,7 +109,7 @@ partial class Simulation
 
     /// <summary>
     /// Resolves the <c>DBCC SHRINKDATABASE</c> first argument to a database: a
-    /// bare / bracketed name routes through <see cref="Simulation.Databases"/>
+    /// bare / bracketed name routes through <see cref="Databases"/>
     /// (Msg 2520 on miss), a numeric database-id through the same 1-based
     /// name-ordered id convention <see cref="DbId"/> uses.
     /// </summary>

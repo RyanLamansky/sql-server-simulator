@@ -335,7 +335,7 @@ internal sealed class HeapTable : SchemaObject
     /// Count of connections currently holding a data-<see cref="LockMode.Exclusive"/>
     /// lock anywhere on this table (a per-row lock or the
     /// <see cref="TableDataLock"/>). Maintained by <see cref="LockManager"/>
-    /// via <see cref="System.Threading.Interlocked"/> under its gate; read
+    /// via <see cref="Interlocked"/> under its gate; read
     /// lock-free with <c>Volatile.Read</c> by the READ COMMITTED reader's
     /// per-row conflict check (<c>BatchContext.TouchRowForRead</c>). When
     /// zero, every row is committed-readable, so the reader skips the per-row

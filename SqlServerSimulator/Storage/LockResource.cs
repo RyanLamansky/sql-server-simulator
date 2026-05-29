@@ -57,7 +57,7 @@ internal sealed class LockResource
     /// <summary>
     /// The table this resource locks (a row lock or the
     /// <see cref="HeapTable.TableDataLock"/>), or <c>null</c> for resources
-    /// not tied to a heap table (e.g. <see cref="Schemas.SchemaObject.SchemaLock"/>).
+    /// not tied to a heap table (e.g. <see cref="SchemaObject.SchemaLock"/>).
     /// Set at interning time so <see cref="LockManager"/> can maintain the
     /// owning table's <see cref="HeapTable.ActiveDataWriters"/> count without
     /// re-deriving the table on every grant / release.

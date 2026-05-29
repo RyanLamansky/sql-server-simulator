@@ -92,6 +92,22 @@ partial class Simulation
             if (context.Token is Numeric { Value: { IsNull: false, Type: var t } literal } && t == SqlType.Int32)
                 context.Connection.LockTimeoutMillis = literal.AsInt32;
         }
+
+        // CONTEXT_INFO carries semantic effect: store the binary value,
+        // right-padded / truncated to exactly 128 bytes (SQL Server's
+        // fixed buffer), surfaced by CONTEXT_INFO(). The literal-binary form
+        // is handled here; a `@var` value side isn't accepted by the SET
+        // value parser (parse-and-discard heritage) — that shape stays unmodeled.
+        if (firstName.Equals("CONTEXT_INFO", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
+        {
+            if (context.Token is Literal { Value: { IsNull: false } binary })
+            {
+                var source = binary.AsBytes;
+                var buffer = new byte[128];
+                Array.Copy(source, buffer, Math.Min(source.Length, 128));
+                context.Connection.ContextInfo = buffer;
+            }
+        }
         return true;
     }
 

@@ -291,6 +291,28 @@ public sealed class SimulatedDbConnection : DbConnection
     internal string? IdentityInsertTable;
 
     /// <summary>
+    /// Per-session key/value store backing <c>SESSION_CONTEXT(key)</c> and
+    /// <c>sp_set_session_context</c>. Keys are case-sensitive (<see cref="StringComparer.Ordinal"/>),
+    /// matching SQL Server's binary key comparison regardless of database
+    /// collation (probe-confirmed: a key set as <c>TenantId</c> isn't readable
+    /// as <c>tenantid</c>). Each entry carries the stored value (type-preserved,
+    /// though <c>SESSION_CONTEXT</c> surfaces it as nvarchar since the simulator
+    /// has no <c>sql_variant</c>) and whether it was set <c>@read_only = 1</c>
+    /// — a read-only key rejects further writes with Msg 15664. Session-scoped:
+    /// lives for the connection's lifetime, persisting across batches.
+    /// </summary>
+    internal readonly Dictionary<string, (SqlValue Value, bool ReadOnly)> SessionContext = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Backs <c>CONTEXT_INFO()</c> / <c>SET CONTEXT_INFO</c>. Null until the
+    /// first <c>SET CONTEXT_INFO</c>; once set, a 128-byte buffer (SQL Server
+    /// right-pads or truncates the supplied binary to exactly 128 bytes, so
+    /// <c>DATALENGTH(CONTEXT_INFO())</c> is always 128 after a set).
+    /// Session-scoped.
+    /// </summary>
+    internal byte[]? ContextInfo;
+
+    /// <summary>
     /// Active session-scoped trace flags toggled via <c>DBCC TRACEON(N)</c>
     /// / <c>DBCC TRACEOFF(N)</c>. The simulator doesn't model the separate
     /// global scope; <c>WITH -1</c> isn't honored. Lives per connection so

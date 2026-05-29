@@ -735,6 +735,7 @@ internal abstract class Expression
             12 => uppercaseName switch
             {
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
+                "CONTEXT_INFO" => new ContextInfoFunction(context),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),
                 "ERROR_NUMBER" => new ErrorNumberFunction(context),
                 "PERCENT_RANK" => WindowExpression.ParsePercentRank(context),
@@ -775,6 +776,7 @@ internal abstract class Expression
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
                 "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),
                 "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
+                "SESSION_CONTEXT" => new SessionContext(context),
                 _ => null
             },
             16 => uppercaseName switch
@@ -798,6 +800,8 @@ internal abstract class Expression
             },
             18 => uppercaseName switch
             {
+                "CONNECTIONPROPERTY" => new ConnectionProperty(context),
+                "CURRENT_REQUEST_ID" => new CurrentRequestId(context),
                 "DATABASEPROPERTYEX" => new DatabasePropertyEx(context),
                 "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
                 "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
@@ -812,6 +816,7 @@ internal abstract class Expression
             },
             22 => uppercaseName switch
             {
+                "CURRENT_TRANSACTION_ID" => new CurrentTransactionId(context),
                 "SMALLDATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.SmallDateTimeFromParts),
                 _ => null
             },

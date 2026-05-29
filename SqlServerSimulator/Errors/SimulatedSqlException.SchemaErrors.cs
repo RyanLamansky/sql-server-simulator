@@ -38,6 +38,22 @@ partial class SimulatedSqlException
         new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15664: a <c>sp_set_session_context</c> call
+    /// targeted a key previously set with <c>@read_only = 1</c> in this
+    /// session. Wording probe-confirmed against SQL Server 2025. Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException SessionContextKeyIsReadOnly(string key) =>
+        new($"Cannot set key '{key}' in the session context. The key has been set as read_only for this session.", 15664, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 225: the parameters supplied to a system
+    /// procedure are not valid — raised here for a NULL / missing <c>@key</c>
+    /// to <c>sp_set_session_context</c>. Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException InvalidProcedureParameters(string procedureName) =>
+        new($"The parameters supplied for the procedure \"{procedureName}\" are not valid.", 225, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2520: <c>DBCC SHRINKDATABASE(&lt;name&gt;)</c>
     /// names a database not present in this <see cref="Simulation"/>. Distinct
     /// from the <c>USE</c> path's Msg 911 — DBCC reports its own wording.

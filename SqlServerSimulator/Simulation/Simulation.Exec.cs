@@ -130,6 +130,12 @@ partial class Simulation
                 yield return outcome;
             yield break;
         }
+        if (dbCollation.Equals(procName.Leaf, "sp_set_session_context"))
+        {
+            foreach (var outcome in InvokeSpSetSessionContext(batch))
+                yield return outcome;
+            yield break;
+        }
         if (dbCollation.Equals(procName.Leaf, "sp_addlinkedsrvlogin")
             || dbCollation.Equals(procName.Leaf, "sp_droplinkedsrvlogin")
             || dbCollation.Equals(procName.Leaf, "sp_serveroption"))

@@ -153,6 +153,18 @@ Constants whose values don't carry real session/server identity in the simulator
 
 Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catalog-views.md`](catalog-views.md).
 
+## Session-state store: `SESSION_CONTEXT` / `CONTEXT_INFO` / connection scalars
+
+These carry real per-session state on `SimulatedDbConnection` (not placeholder constants), so values persist across batches on the same connection and reset with a new connection.
+
+- **`sp_set_session_context @key, @value [, @read_only]`** + **`SESSION_CONTEXT(N'key')`** — per-session key/value store (backs multi-tenant / row-level-security patterns). Named and positional argument forms both work. Keys are **case-sensitive** (ordinal — `TenantId` ≠ `tenantid`, matching SQL Server's binary key comparison regardless of database collation). A missing key reads as NULL; a NULL key argument to `SESSION_CONTEXT` raises **Msg 8116** (`session_context` lowercase in the wording). `sp_set_session_context` with a NULL `@key` raises **Msg 225**; re-setting a key previously stored with `@read_only = 1` raises **Msg 15664**. Real SQL Server preserves the stored value's type via `sql_variant`; the simulator has no `sql_variant`, so `SESSION_CONTEXT` surfaces the value as **nvarchar** (the same proxy `SERVERPROPERTY` uses). The common `WHERE int_col = SESSION_CONTEXT(N'key')` shape still works because the comparison path coerces the nvarchar probe to the column's type.
+- **`CONTEXT_INFO()`** + **`SET CONTEXT_INFO <binary>`** — the legacy single 128-byte slot. NULL until set; once set, SQL Server stores exactly 128 bytes (right-padded / truncated), so `DATALENGTH(CONTEXT_INFO())` is always 128 afterward. Only the literal-binary `SET` form is modeled — a `@var` value side isn't accepted by the SET value parser.
+- **`CONNECTIONPROPERTY(name)`** — nvarchar proxy (sql_variant in real). Probe-confirmed `net_transport` = `'TCP'`, `protocol_type` = `'TSQL'`; `auth_scheme` / `physical_net_transport` report placeholder constants; address/port properties and unknown names return NULL.
+- **`CURRENT_TRANSACTION_ID()`** — bigint, approximated by the database's monotonic commit counter (a plausible increasing value, not a stable per-transaction id — apps use it for correlation, not correctness).
+- **`CURRENT_REQUEST_ID()`** — int, returns 0 (the simulator doesn't multiplex requests per session; probe-confirmed value for a single-request session).
+
+**`SESSION_ID()` is deliberately not modeled** — it's not a box-product function (raises Msg 195 on SQL Server 2025; it's a dedicated-SQL-pool / cloud surface). `@@SPID` is the box session-id mechanism.
+
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution. Yields one row per substring split on the single-character separator.
 
