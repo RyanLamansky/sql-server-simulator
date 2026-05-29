@@ -41,9 +41,11 @@ internal sealed class Numeric : Token
             var integerPart = number[..dotIndex].TrimStart('0').Length;
             var fractionalPart = number.Length - dotIndex - 1;
             var precision = Math.Max(1, integerPart) + fractionalPart;
-            // Defensive cap: literals beyond decimal(38, *) would round
-            // through .NET decimal anyway; the 28-digit limit lives in
-            // DecimalSqlType.Get.
+            // A literal carrying more than 38 significant digits exceeds the
+            // numeric type's maximum precision — SQL Server reports Msg 1007
+            // rather than letting it reach the type factory.
+            if (precision > 38)
+                throw SimulatedSqlException.NumberOutOfRangeForNumeric(number.ToString());
             var scale = fractionalPart;
             var parsed = decimal.Parse(number, NumberStyles.Float, CultureInfo.InvariantCulture);
             this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(precision, scale), parsed);

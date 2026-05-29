@@ -162,7 +162,17 @@ internal abstract class TwoSidedExpression : Expression
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(common);
 
-        var result = compute(ToInt64(left), ToInt64(right));
+        long result;
+        try
+        {
+            result = compute(ToInt64(left), ToInt64(right));
+        }
+        catch (DivideByZeroException)
+        {
+            // Integer / and % by zero. Other operators routed through this
+            // method never divide, so the catch is specific to those two.
+            throw SimulatedSqlException.DivideByZero();
+        }
         return common == SqlType.Bit ? SqlValue.FromBoolean(result != 0)
             : common == SqlType.TinyInt ? SqlValue.FromByte((byte)result)
             : common == SqlType.SmallInt ? SqlValue.FromInt16((short)result)

@@ -108,11 +108,67 @@ public sealed class BuiltInFunctionTests
     [DataRow("left('abc', -1)")]
     [DataRow("right('abc', -1)")]
     [DataRow("substring('abc', 1, -1)")]
-    public void NegativeLength_RaisesMsg537(string expression)
+    public void NegativeLength_RaisesMsg536(string expression)
     {
-        var ex = Throws<DbException>(() => ExecuteScalar($"select {expression}"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select {expression}"));
+        AreEqual(536, ex.Number);
         Assert.Contains("Invalid length parameter", ex.Message);
     }
+
+    [TestMethod]
+    [DataRow("1/0")]
+    [DataRow("1%0")]
+    [DataRow("cast(1 as bigint) / 0")]
+    [DataRow("10 % cast(0 as bigint)")]
+    [DataRow("isnull(1/0, 0)")]
+    public void IntegerDivideByZero_RaisesMsg8134(string expression)
+    {
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select {expression}"));
+        AreEqual(8134, ex.Number);
+        Assert.Contains("Divide by zero", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("left('abc', 2147483648)")]
+    [DataRow("right('abc', 2147483648)")]
+    public void IntArgumentOverflow_RaisesMsg8115(string expression)
+    {
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select {expression}"));
+        AreEqual(8115, ex.Number);
+        Assert.Contains("Arithmetic overflow", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("substring('abc', -2147483648, 2147483647)", "")]
+    [DataRow("substring('abc', 2147483647, 2147483647)", "")]
+    [DataRow("substring('abcdef', 0, 3)", "ab")]
+    [DataRow("substring('abcdef', -2, 5)", "ab")]
+    public void Substring_ClampsExtremesInsteadOfThrowing(string expression, string expected)
+        => AreEqual(expected, ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    [DataRow("switchoffset(sysdatetimeoffset(), 9999)")]
+    [DataRow("switchoffset(sysdatetimeoffset(), '+20:00')")]
+    [DataRow("todatetimeoffset(getdate(), 9999)")]
+    [DataRow("todatetimeoffset(getdate(), -2000)")]
+    public void OffsetOutOfRange_RaisesMsg9812(string expression)
+    {
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select {expression}"));
+        AreEqual(9812, ex.Number);
+        Assert.Contains("timezone provided to builtin function", ex.Message);
+    }
+
+    [TestMethod]
+    public void DecimalLiteralBeyondMaxPrecision_RaisesMsg1007()
+    {
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select 1.23456789012345678901234567890123456789012"));
+        AreEqual(1007, ex.Number);
+        Assert.Contains("out of the range for numeric representation", ex.Message);
+    }
+
+    [TestMethod]
+    public void ReplaceWithEmptySearch_ReturnsInputUnchanged()
+        => AreEqual("abc", ExecuteScalar("select replace('abc', '', 'X')"));
 
     [TestMethod]
     public void FunctionOfColumn_FromTable()

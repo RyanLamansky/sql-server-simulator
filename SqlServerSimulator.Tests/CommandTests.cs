@@ -62,6 +62,17 @@ public class CommandTests
     }
 
     [TestMethod]
+    public void CancelAndPrepareAreNoOps()
+    {
+        using var connection = CreateOpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "select 1";
+        command.Cancel();
+        command.Prepare();
+        AreEqual(1, command.ExecuteScalar());
+    }
+
+    [TestMethod]
     public void TransactionPassThrough()
     {
         using var connection = CreateOpenConnection();

@@ -41,6 +41,23 @@ internal static class StringScalars
     }
 
     /// <summary>
+    /// Narrows a LEFT / RIGHT length argument to <c>int</c>. A value outside
+    /// int range (e.g. a bigint literal) raises Msg 8115 — matching SQL
+    /// Server — instead of leaking .NET's <see cref="OverflowException"/>.
+    /// </summary>
+    public static int CoerceLengthArgument(SqlValue count)
+    {
+        try
+        {
+            return count.CoerceTo(SqlType.Int32).AsInt32;
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(SqlType.Int32.SqlServerName);
+        }
+    }
+
+    /// <summary>
     /// Returns the projection-schema string type for a string scalar
     /// applied to an input typed at <paramref name="sourceType"/>. String
     /// sources pass through (the function preserves the input type);

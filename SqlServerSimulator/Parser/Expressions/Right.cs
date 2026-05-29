@@ -28,9 +28,9 @@ internal sealed class Right : Expression
             return SqlValue.Null(StringScalars.ResolveResultType(rawSource.Type, runtime.Batch));
         var s = StringScalars.CoerceToVarchar(rawSource, runtime.Batch, "right");
 
-        var len = n.CoerceTo(SqlType.Int32).AsInt32;
+        var len = StringScalars.CoerceLengthArgument(n);
         if (len < 0)
-            throw SimulatedSqlException.NegativeLengthNotAllowed("RIGHT");
+            throw SimulatedSqlException.NegativeLengthNotAllowed("right", 6);
 
         var input = s.AsString;
         var result = s.Type.Collation?.IsSupplementaryCharacterAware == true

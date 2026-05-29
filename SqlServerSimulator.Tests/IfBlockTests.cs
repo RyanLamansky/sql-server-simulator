@@ -366,15 +366,16 @@ public sealed class IfBlockTests
             """));
 
     /// <summary>
-    /// Cond eval errors propagate when the IF is reached. Real SQL Server
-    /// surfaces divide-by-zero in a cond as Msg 8134; the simulator's runtime
-    /// surfaces a raw <see cref="DivideByZeroException"/> (pre-existing
-    /// fidelity gap — same as the gap documented for TRY_CAST).
+    /// Cond eval errors propagate when the IF is reached. Divide-by-zero in a
+    /// cond surfaces as Msg 8134, matching SQL Server.
     /// </summary>
     [TestMethod]
     public void CondEvalError_PropagatesAsRuntimeError()
-        => Throws<DivideByZeroException>(() => new Simulation().ExecuteNonQuery(
+    {
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery(
             "if 1/0 = 0 select 'ran'"));
+        AreEqual(8134, ex.Number);
+    }
 
     /// <summary>
     /// A taken branch propagates errors normally — a CHECK violation in the

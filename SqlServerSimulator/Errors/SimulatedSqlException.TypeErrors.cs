@@ -245,10 +245,8 @@ partial class SimulatedSqlException
         new("Cannot convert a char value to money. The char value has incorrect syntax.", 235, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 8134: division by zero in decimal / float /
-    /// money arithmetic. Integer division currently falls through .NET's
-    /// <see cref="DivideByZeroException"/> path; future integer-division
-    /// alignment can reuse this factory.
+    /// Mimics SQL Server error 8134: division by zero in integer, decimal,
+    /// float, or money arithmetic.
     /// </summary>
     internal static SimulatedSqlException DivideByZero() =>
         new("Divide by zero error encountered.", 8134, 16, 1);
@@ -415,11 +413,29 @@ partial class SimulatedSqlException
         new($"The data types {FamilyRootName(a)} and {FamilyRootName(b)} are incompatible in the {operatorName} operator.", 402, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 537: a length / count argument to a string
-    /// function (LEFT, RIGHT, SUBSTRING) was negative.
+    /// Mimics SQL Server error 536: a length / count argument to a string
+    /// function (left, right, substring) was negative. The function name is
+    /// lowercase in the message and the state varies by function (6 for
+    /// left / right, 8 for substring), verified against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException NegativeLengthNotAllowed(string function) =>
-        new($"Invalid length parameter passed to the {function} function.", 537, 16, 3);
+    internal static SimulatedSqlException NegativeLengthNotAllowed(string function, byte state) =>
+        new($"Invalid length parameter passed to the {function} function.", 536, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 1007: a numeric literal carries more than 38
+    /// significant digits, exceeding the maximum precision of the numeric
+    /// representation. Class 15 — raised while reading the literal.
+    /// </summary>
+    internal static SimulatedSqlException NumberOutOfRangeForNumeric(string literal) =>
+        new($"The number '{literal}' is out of the range for numeric representation (maximum precision 38).", 1007, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 9812: the offset passed to SWITCHOFFSET /
+    /// TODATETIMEOFFSET falls outside the legal ±14:00 range. The builtin
+    /// function name appears lowercase in the message.
+    /// </summary>
+    internal static SimulatedSqlException InvalidTimeZone(string function) =>
+        new($"The timezone provided to builtin function {function} is invalid.", 9812, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 6522: an input to a hierarchyid method

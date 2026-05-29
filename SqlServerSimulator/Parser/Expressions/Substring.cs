@@ -44,25 +44,30 @@ internal sealed class Substring : Expression
         var startIndex = startValue.CoerceTo(SqlType.Int32).AsInt32;
         var len = lengthValue.CoerceTo(SqlType.Int32).AsInt32;
         if (len < 0)
-            throw SimulatedSqlException.NegativeLengthNotAllowed("SUBSTRING");
+            throw SimulatedSqlException.NegativeLengthNotAllowed("substring", 8);
 
         var input = s.AsString;
         // SQL Server: if start <= 0, the leading |start - 1| characters of the
         // requested window fall before the string and are truncated. Indexing
         // is code-unit-based under non-SC collations and codepoint-based
         // under _SC_; the arithmetic is identical, only the unit of "input
-        // length" and the final slice differ.
-        var zeroBased = startIndex - 1;
-        var effectiveStart = Math.Max(0, zeroBased);
-        var effectiveLength = Math.Max(0, len + Math.Min(0, zeroBased));
+        // length" and the final slice differ. The window math runs in long so
+        // int.MinValue / int.MaxValue arguments can't overflow — SQL Server
+        // clamps them to an empty result rather than erroring.
+        var zeroBased = (long)startIndex - 1;
+        var effectiveStart = Math.Max(0L, zeroBased);
+        var effectiveLength = Math.Max(0L, len + Math.Min(0L, zeroBased));
         var isSc = s.Type.Collation?.IsSupplementaryCharacterAware == true;
-        var inputUnits = isSc ? SupplementaryCharacters.CodepointCount(input) : input.Length;
-        effectiveLength = Math.Min(effectiveLength, Math.Max(0, inputUnits - effectiveStart));
+        long inputUnits = isSc ? SupplementaryCharacters.CodepointCount(input) : input.Length;
+        effectiveStart = Math.Min(effectiveStart, inputUnits);
+        effectiveLength = Math.Min(effectiveLength, inputUnits - effectiveStart);
 
+        var sliceStart = (int)effectiveStart;
+        var sliceLength = (int)effectiveLength;
         if (!isSc)
-            return SqlValue.FromString(s.Type, input.Substring(effectiveStart, effectiveLength));
-        var startCu = SupplementaryCharacters.CodepointToCodeUnit(input, effectiveStart);
-        var endCu = SupplementaryCharacters.CodepointToCodeUnit(input, effectiveStart + effectiveLength);
+            return SqlValue.FromString(s.Type, input.Substring(sliceStart, sliceLength));
+        var startCu = SupplementaryCharacters.CodepointToCodeUnit(input, sliceStart);
+        var endCu = SupplementaryCharacters.CodepointToCodeUnit(input, sliceStart + sliceLength);
         return SqlValue.FromString(s.Type, input[startCu..endCu]);
     }
 

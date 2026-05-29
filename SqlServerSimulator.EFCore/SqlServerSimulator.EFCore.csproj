@@ -26,6 +26,9 @@
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <RootNamespace>SqlServerSimulator.EFCore</RootNamespace>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- The simulator package ships on its own; the EF Core adapter is not
+         published separately. Excluded from `dotnet pack` output. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

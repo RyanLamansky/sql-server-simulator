@@ -57,11 +57,13 @@ sealed class SimulatedContext(Simulation simulation) : DbContext
 }
 ```
 
+<!-- Not shipping this until someone asks for it.
 The companion `SqlServerSimulator.EFCore` package adds `UseSqlServerSimulator(...)` for entities that use CLR/store-type pairs whose EF default mappings downcast to `SqlParameter` (`DateOnly`/`DateTime`→`date`/`smalldatetime`, `TimeOnly`/`TimeSpan`→`time(N)`, `decimal`→`money`/`smallmoney`). Without it, those mappings throw at SaveChanges. The base-ADO.NET types in the example above don't need it.
+-->
 
 ## Fidelity
 
-Behavior was probed against a live SQL Server reference instance before being modeled. SQL Server's quirks, inconsistencies, and suprises are mostly preserved. Error messages usually match.
+Behavior was probed against a live SQL Server reference instance before being modeled. SQL Server's quirks, inconsistencies, and surprises are mostly preserved. Error messages usually match.
 
 Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations, change tracking, and the SaveChanges pipeline all flow through unchanged.
 

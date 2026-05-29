@@ -117,7 +117,7 @@ internal sealed class SwitchOffset : Expression
         var off = this.offsetArg.Run(runtime);
         if (off.IsNull)
             return SqlValue.Null(v.Type);
-        var offsetMinutes = ParseOffsetMinutes(off);
+        var offsetMinutes = ParseOffsetMinutes(off, "switchoffset");
         var adjusted = v.AsDateTimeOffset.ToOffset(TimeSpan.FromMinutes(offsetMinutes));
         return SqlValue.FromDateTimeOffset(v.Type, adjusted);
     }
@@ -144,6 +144,20 @@ internal sealed class SwitchOffset : Expression
                     + int.Parse(s[(colonIdx + 1)..], System.Globalization.CultureInfo.InvariantCulture));
         }
         return v.CoerceTo(SqlType.Int32).AsInt32;
+    }
+
+    /// <summary>
+    /// Parses the offset and enforces SQL Server's legal ±14:00 range,
+    /// raising Msg 9812 (named for <paramref name="functionName"/>) when it
+    /// is exceeded — instead of letting <see cref="DateTimeOffset"/> throw an
+    /// internal <see cref="ArgumentOutOfRangeException"/>.
+    /// </summary>
+    internal static int ParseOffsetMinutes(SqlValue v, string functionName)
+    {
+        var minutes = ParseOffsetMinutes(v);
+        return minutes is < -840 or > 840
+            ? throw SimulatedSqlException.InvalidTimeZone(functionName)
+            : minutes;
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
@@ -184,7 +198,7 @@ internal sealed class ToDateTimeOffset : Expression
         var off = this.offsetArg.Run(runtime);
         if (off.IsNull)
             return SqlValue.Null(ResultType);
-        var offsetMinutes = SwitchOffset.ParseOffsetMinutes(off);
+        var offsetMinutes = SwitchOffset.ParseOffsetMinutes(off, "todatetimeoffset");
         var dt = v.Type == SqlType.DateTime ? v.AsDateTime
             : v.Type == SqlType.SmallDateTime ? v.AsSmallDateTime
             : v.Type is DateTime2SqlType ? v.AsDateTime2

@@ -99,8 +99,15 @@ public sealed class SimulatedDbCommand : DbCommand
         }
     }
 
-    /// <inheritdoc/>
-    public override void Cancel() => throw new NotImplementedException();
+    /// <summary>
+    /// No-op. <c>SqlCommand.Cancel()</c> sends a server "attention" token that
+    /// abandons in-flight result production; it never closes the reader. The
+    /// simulator executes synchronously in-process, so a command's result set
+    /// is conceptually complete by the time it returns — there is nothing in
+    /// flight to interrupt, matching SqlClient's behavior when <c>Cancel()</c>
+    /// is called with nothing to cancel.
+    /// </summary>
+    public override void Cancel() { }
 
     /// <inheritdoc/>
     public override int ExecuteNonQuery() => simulation
@@ -118,8 +125,12 @@ public sealed class SimulatedDbCommand : DbCommand
         return !reader.Read() ? null : reader[0];
     }
 
-    /// <inheritdoc/>
-    public override void Prepare() => throw new NotImplementedException();
+    /// <summary>
+    /// No-op. Statement preparation is a server-side execution-plan
+    /// optimization with no observable effect on results; the simulator parses
+    /// each execution directly. A future build could cache the parsed plan here.
+    /// </summary>
+    public override void Prepare() { }
 
     /// <inheritdoc/>
     protected override DbParameter CreateDbParameter() => new SimulatedDbParameter();

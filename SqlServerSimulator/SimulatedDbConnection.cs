@@ -336,26 +336,42 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <inheritdoc/>
     [AllowNull]
-    public override string ConnectionString { get => ""; set => throw new NotImplementedException(); }
+    public override string ConnectionString
+    {
+        get => "";
+        set => throw new NotSupportedException("A simulated connection has no connection string; it is bound to its Simulation at creation via Simulation.CreateDbConnection().");
+    }
 
     /// <inheritdoc/>
-    public override string Database => "master";
+    public override string Database => this.CurrentDatabase.Name;
 
     /// <inheritdoc/>
     public override string DataSource => "simulator";
 
     /// <inheritdoc/>
-    public override string ServerVersion => "16.0.0";
+    public override string ServerVersion => "17.0.0";
 
     private ConnectionState state;
 
     /// <inheritdoc/>
     public override ConnectionState State => this.state;
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Switches <see cref="CurrentDatabase"/> to the named database, the
+    /// ADO.NET equivalent of issuing <c>USE &lt;db&gt;</c> on this connection.
+    /// A missing database raises Msg 911 (the same error the <c>USE</c> path
+    /// reports); a null/empty/whitespace name raises <see cref="ArgumentException"/>,
+    /// matching SqlClient. Like <c>USE</c>, the switch is not transactional.
+    /// </summary>
     public override void ChangeDatabase(string databaseName)
     {
-        throw new NotImplementedException();
+        if (string.IsNullOrWhiteSpace(databaseName))
+            throw new ArgumentException("Database cannot be null, the empty string, or string of only whitespace.", nameof(databaseName));
+
+        if (!this.Simulation.Databases.TryGetValue(databaseName, out var target))
+            throw SimulatedSqlException.DatabaseDoesNotExist(databaseName);
+
+        this.CurrentDatabase = target;
     }
 
     /// <inheritdoc/>

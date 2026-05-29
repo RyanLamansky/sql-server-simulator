@@ -36,7 +36,12 @@ internal sealed class Replace : Expression
         var i = StringScalars.CoerceToVarchar(rawInput, runtime.Batch, "replace", argumentIndex: 1);
         var o = StringScalars.CoerceToVarchar(rawOld, runtime.Batch, "replace", argumentIndex: 2);
         var n = StringScalars.CoerceToVarchar(rawNew, runtime.Batch, "replace", argumentIndex: 3);
-        var replaced = i.AsString.Replace(o.AsString, n.AsString, StringComparison.InvariantCultureIgnoreCase);
+        var oldString = o.AsString;
+        // SQL Server returns the input unchanged for an empty search string;
+        // .NET's String.Replace rejects it with ArgumentException.
+        var replaced = oldString.Length == 0
+            ? i.AsString
+            : i.AsString.Replace(oldString, n.AsString, StringComparison.InvariantCultureIgnoreCase);
         return SqlValue.FromString(i.Type, replaced);
     }
 
