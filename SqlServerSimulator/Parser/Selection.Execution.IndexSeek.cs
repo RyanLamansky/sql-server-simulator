@@ -243,6 +243,11 @@ internal sealed partial class Selection
     {
         if (!bounds.TryGetValue(ordinal, out var bound))
             bounds[ordinal] = bound = new RangeBoundExprs();
+        RecordBound(bound, op, valueSide);
+    }
+
+    private static void RecordBound(RangeBoundExprs bound, RangeComparison op, Expression valueSide)
+    {
         switch (op)
         {
             case RangeComparison.Greater when bound.Lower is null:
@@ -258,6 +263,28 @@ internal sealed partial class Selection
                 (bound.Upper, bound.UpperInclusive) = (valueSide, true);
                 break;
         }
+    }
+
+    // Normalizes a range conjunct to (column ordinal, operator, value): the column
+    // may be on either side (the operator flips when it's on the right). Returns
+    // false when neither side is an indexable column of this source with a stable
+    // value on the other.
+    private static bool TryNormalizeRangeBound(
+        FromSource source, Expression left, RangeComparison op, Expression right,
+        out int ordinal, out RangeComparison normalizedOp, out Expression value)
+    {
+        if (TryIdentifyIndexableColumn(source, left, out ordinal) && IsStableValueSide(right, source))
+        {
+            (normalizedOp, value) = (op, right);
+            return true;
+        }
+        if (TryIdentifyIndexableColumn(source, right, out ordinal) && IsStableValueSide(left, source))
+        {
+            (normalizedOp, value) = (FlipComparison(op), left);
+            return true;
+        }
+        (normalizedOp, value) = (op, left);
+        return false;
     }
 
     // Flips a comparison whose column is on the right (`v < col` ≡ `col > v`).
@@ -339,8 +366,177 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Eliminates the ORDER BY sort for the common clustered-key shape: a single
+    /// base table ordered by one <b>NOT NULL leading key column</b>, ASC or DESC.
+    /// Produces the source rows in key order (ascending, or reversed for DESC) so
+    /// the caller can stream them through projection without buffering + sorting —
+    /// the residual WHERE and projection preserve order, and OFFSET / FETCH / TOP
+    /// then read only the rows they need. A same-column range bound (<c>… WHERE id
+    /// &gt; 100 ORDER BY id</c>) folds into the scan, so it stays range-narrowed
+    /// <i>and</i> ordered.
+    /// <para>
+    /// Declines (leaving the buffered sort in place) for anything the ordered scan
+    /// can't reproduce exactly: a nullable order column (its NULL-key rows aren't
+    /// in the ordered view), multiple ORDER BY items, an expression / ordinal sort
+    /// key, DISTINCT, a SNAPSHOT / RCSI read (the version-chain sweep can't stay
+    /// ordered), a tx-scoped row-lock plan, or a competing equality / other-column
+    /// seek (preferring that narrower seek + a small sort). ORDER BY elimination is
+    /// the one optimization that's observable if wrong, so the bar to apply it is
+    /// deliberately high.
+    /// </para>
+    /// </summary>
+    private static bool TryApplyOrderedScan(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<OrderBySpec> orderBy,
+        List<BooleanExpression> excluders,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        out FromSource[] orderedSources)
+    {
+        orderedSources = sources;
+        if (sources.Length != 1 || joins.Length != 0 || orderBy.Count != 1)
+            return false;
+        var source = sources[0];
+        if (source.BackingTable is not { } table || source.LateralPlan is not null)
+            return false;
+        if (source.HeapPlan is not { } plan || plan.RowTxScoped)
+            return false;
+        // A SNAPSHOT / RCSI read materializes through the version store, whose
+        // chain sweep appends rows in arbitrary order — an ordered scan couldn't
+        // stay ordered, so sort as before.
+        if (batch.ResolveSnapshotXidForRead(table) is not null)
+            return false;
+
+        var spec = orderBy[0];
+        if (spec.IsOrdinal || spec.Expr is not { } orderExpr
+            || !TryIdentifyIndexableColumn(source, orderExpr, out var ordinal)
+            || source.StoredSchema[ordinal].Nullable
+            || !IsLeadingKeyColumn(table, ordinal))
+        {
+            return false;
+        }
+
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+
+        // Scan the conjuncts: decline if a competing seek exists (any equality on a
+        // leading key column, or a range on a leading key column other than the
+        // order column — the narrower seek + a small sort beats a whole-column
+        // ordered scan), and fold a same-column range into the ordered scan bounds.
+        var sameColumnBounds = new RangeBoundExprs();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                if (IsLeadingSeekColumn(source, table, left, right) || IsLeadingSeekColumn(source, table, right, left))
+                    return false;
+                continue;
+            }
+
+            if (conjunct.TryGetEqualityFamily(out _))
+                return false;
+
+            if (conjunct.TryGetRangeOperands(out var rangeLeft, out var rangeOp, out var rangeRight))
+            {
+                if (TryNormalizeRangeBound(source, rangeLeft, rangeOp, rangeRight, out var boundOrd, out var boundOp, out var boundValue))
+                {
+                    if (boundOrd != ordinal)
+                    {
+                        if (IsLeadingKeyColumn(table, boundOrd))
+                            return false;
+                    }
+                    else
+                    {
+                        RecordBound(sameColumnBounds, boundOp, boundValue);
+                    }
+                }
+
+                continue;
+            }
+
+            if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
+                && TryIdentifyIndexableColumn(source, value, out var betweenOrd))
+            {
+                if (betweenOrd != ordinal)
+                {
+                    if (IsLeadingKeyColumn(table, betweenOrd))
+                        return false;
+                }
+                else if (IsStableValueSide(lower, source) && IsStableValueSide(upper, source))
+                {
+                    RecordBound(sameColumnBounds, RangeComparison.GreaterOrEqual, lower);
+                    RecordBound(sameColumnBounds, RangeComparison.LessOrEqual, upper);
+                }
+            }
+        }
+
+        var columnType = source.StoredSchema[ordinal].Type;
+        var common = columnType;
+        bool hasLower = false, hasUpper = false, lowerInclusive = false, upperInclusive = false;
+        SqlValue lowerValue = default, upperValue = default;
+        if (sameColumnBounds.Lower is { } lowerExpr)
+        {
+            switch (EvaluateBound(lowerExpr, columnType, batch, outerResolver, out lowerValue, out var lowerCommon))
+            {
+                case BoundEval.Decline: return false;
+                case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
+                default: common = lowerCommon; hasLower = true; lowerInclusive = sameColumnBounds.LowerInclusive; break;
+            }
+        }
+        if (sameColumnBounds.Upper is { } upperExpr)
+        {
+            switch (EvaluateBound(upperExpr, columnType, batch, outerResolver, out upperValue, out var upperCommon))
+            {
+                case BoundEval.Decline: return false;
+                case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
+                default: common = hasLower ? SqlType.Promote(common, upperCommon) : upperCommon; hasUpper = true; upperInclusive = sameColumnBounds.UpperInclusive; break;
+            }
+        }
+        if (hasLower)
+            lowerValue = lowerValue.CoerceTo(common);
+        if (hasUpper)
+            upperValue = upperValue.CoerceTo(common);
+
+        var cache = seekCaches.GetValue(table.Heap, static _ => new EqualityIndexCache());
+        var candidates = cache.OrderedScan(
+            table.Heap, source.StoredSchema, source.LobStore, ordinal, common, spec.Descending,
+            hasLower, lowerValue, lowerInclusive, hasUpper, upperValue, upperInclusive);
+
+        IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
+        orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, candidates));
+        return true;
+    }
+
+    // True when `columnSide` is a leading key column of THIS source carrying a
+    // stable-value equality — a competing seek that should win over an ordered
+    // scan. Used to decline ORDER BY elimination.
+    private static bool IsLeadingSeekColumn(FromSource source, HeapTable table, Expression columnSide, Expression valueSide) =>
+        TryIdentifyIndexableColumn(source, columnSide, out var ord)
+        && IsLeadingKeyColumn(table, ord)
+        && IsStableValueSide(valueSide, source);
+
+    private static bool IsLeadingKeyColumn(HeapTable table, int storageOrdinal)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.StorageOrdinals.Length > 0 && key.StorageOrdinals[0] == storageOrdinal)
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.KeyColumns.Length > 0 && index.KeyColumns[0].StorageOrdinal == storageOrdinal)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Pushes single-source WHERE equality predicates (<c>leftmostCol = literal /
     /// variable</c>) down onto the leftmost FROM source of a multi-source query,
+    /// seeking it before the join runs. The leftmost source is always preserved
+    /// (never the NULL-supplied side of an outer join), so narrowing it can't
     /// seeking it before the join runs. The leftmost source is always preserved
     /// (never the NULL-supplied side of an outer join), so narrowing it can't
     /// change join semantics, and the conjuncts stay in the residual WHERE.
@@ -813,6 +1009,26 @@ internal sealed partial class Selection
             {
                 var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
                 return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+            }
+        }
+
+        // Ordered single-column scan for ORDER BY elimination: the in-range keys
+        // (whole column when unbounded) of the [ordinal] entry, ascending or — for
+        // a DESC order — reversed. Reuses the same ordered view RangeScan builds,
+        // so it inherits the incremental no-warm-up maintenance. Reversing the flat
+        // ascending list flips key order (within-key tie order is arbitrary either
+        // way, matching ORDER BY's unspecified tie-break).
+        public List<(int Page, int Slot)> OrderedScan(
+            Heap heap, HeapColumn[] schema, Heap? lobStore, int ordinal, SqlType common, bool descending,
+            bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+        {
+            lock (this.gate)
+            {
+                var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
+                var ordered = entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+                if (descending)
+                    ordered.Reverse();
+                return ordered;
             }
         }
 

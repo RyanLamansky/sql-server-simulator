@@ -272,6 +272,16 @@ internal sealed partial class Selection
         int? fetchCount,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
+        // ORDER BY elimination: when the sort matches a NOT-NULL leading-key
+        // column, enumerate the source in key order and stream (no buffer + sort).
+        // Residual WHERE and projection preserve order; OFFSET / FETCH / TOP then
+        // read only the rows they need.
+        if (!distinct && orderBy.Count > 0
+            && TryApplyOrderedScan(sources, joins, orderBy, excluders, batch, outerResolver, out var orderedSources))
+        {
+            return ProjectStreaming(orderedSources, joins, expressions, excluders, topCount, offsetCount, fetchCount, batch, outerResolver);
+        }
+
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0

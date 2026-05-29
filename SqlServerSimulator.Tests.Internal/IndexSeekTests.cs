@@ -1011,6 +1011,187 @@ public sealed class IndexSeekTests
         Contains(4, rows);
     }
 
+    // ---- ORDER BY elimination: a single NOT-NULL leading-key-column sort
+    // streams in key order instead of buffering + sorting. Observable if wrong,
+    // so these assert the exact output sequence, not just the trace. The setup
+    // inserts in scrambled order so heap order != key order — a wrong elimination
+    // would surface as heap-order output. ----
+
+    private const string ScrambledT = """
+        create table t (id int not null primary key, val int not null);
+        insert t values (3, 30), (1, 10), (2, 20), (5, 50), (4, 40)
+        """;
+
+    private static string Seq(List<object?> rows) => string.Join(",", rows);
+
+    [TestMethod]
+    public void OrderByPrimaryKey_Eliminates_AscendingOrder()
+    {
+        var (trace, rows) = Run(ScrambledT, "select id from t order by id");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("1,2,3,4,5", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByPrimaryKeyDescending_Eliminates_DescendingOrder()
+    {
+        var (trace, rows) = Run(ScrambledT, "select id from t order by id desc");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("5,4,3,2,1", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByWithOffsetFetch_Eliminates_StreamsCorrectPage()
+    {
+        var (trace, rows) = Run(ScrambledT, "select id from t order by id offset 2 rows fetch next 2 rows only");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("3,4", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByWithTop_Eliminates_StreamsTopN()
+    {
+        var (trace, rows) = Run(ScrambledT, "select top 2 id from t order by id");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("1,2", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByDescWithTop_Eliminates_StreamsTopN()
+    {
+        var (trace, rows) = Run(ScrambledT, "select top 2 id from t order by id desc");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("5,4", Seq(rows));
+    }
+
+    [TestMethod]
+    public void RangeAndOrderBySameColumn_EliminatesAndNarrows()
+    {
+        var (trace, rows) = Run(ScrambledT, "select id from t where id >= 2 and id < 5 order by id");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("2,3,4", Seq(rows));
+    }
+
+    [TestMethod]
+    public void ResidualFilterOnOtherColumn_StillEliminatesOrder()
+    {
+        // val is not indexed, so it doesn't compete with the order column — the
+        // ordered scan streams by id and filters val as a residual.
+        var (trace, rows) = Run(ScrambledT, "select id from t where val >= 20 order by id");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("2,3,4,5", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByOnSecondaryIndexColumn_Eliminates()
+    {
+        var (trace, rows) = Run("""
+            create table t (id int not null, pid int not null);
+            create index ix on t (pid);
+            insert t values (1, 30), (2, 10), (3, 20)
+            """, "select pid from t order by pid");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("10,20,30", Seq(rows));
+    }
+
+    // ---- declines (keeps the buffered sort), still correct order ----
+
+    [TestMethod]
+    public void OrderByNullableColumn_Declines_NullsFirst()
+    {
+        // A nullable column's NULL-key rows aren't in the ordered view, so
+        // elimination declines — and the sort puts NULL first (ASC).
+        var (trace, rows) = Run("""
+            create table t (id int not null, n int null);
+            create index ix on t (n);
+            insert t values (1, 30), (2, null), (3, 10)
+            """, "select n from t order by n");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual(",10,30", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByExpression_Declines()
+    {
+        var (trace, rows) = Run(ScrambledT, "select id from t order by id + 0");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual("1,2,3,4,5", Seq(rows));
+    }
+
+    [TestMethod]
+    public void MultiColumnOrderBy_Declines()
+    {
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (2, 1), (1, 2), (1, 1)
+            """, "select a from t order by a, b");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual("1,1,2", Seq(rows));
+    }
+
+    [TestMethod]
+    public void DistinctOrderBy_Declines()
+    {
+        var (trace, rows) = Run(ScrambledT, "select distinct id from t order by id");
+        DoesNotContain("OrderedScan(t)", trace);
+        AreEqual("1,2,3,4,5", Seq(rows));
+    }
+
+    [TestMethod]
+    public void EqualityOnOtherIndexedColumn_DeclinesOrderElimination_PrefersSeek()
+    {
+        // status has its own index — the equality seek on it beats an ordered
+        // scan of the whole table, so order elimination declines and the result
+        // still comes back correctly ordered.
+        var (trace, rows) = Run("""
+            create table t (id int not null primary key, status int not null);
+            create index ix on t (status);
+            insert t values (3, 9), (1, 9), (2, 7)
+            """, "select id from t where status = 9 order by id");
+        DoesNotContain("OrderedScan(t)", trace);
+        Contains("Seek(t)", trace);
+        AreEqual("1,3", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByEliminationCorrectAfterWarmupAndMutations()
+    {
+        // The ordered view feeding elimination must stay current under the
+        // incremental journal: warm, then insert / delete / key-update, then a
+        // later ORDER BY must reflect them in order.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, ScrambledT);
+        _ = ReadRows(c, "select id from t order by id");
+        Exec(c, "insert t values (10, 100)");
+        Exec(c, "delete from t where id = 3");
+        Exec(c, "update t set id = 0 where id = 5");
+        var rows = ReadRows(c, "select id from t order by id");
+        AreEqual("0,1,2,4,10", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByEliminationDifferential_MatchesIndependentSort()
+    {
+        // Cross-check eliminated ORDER BY against a C# sort of a no-WHERE read
+        // (which doesn't eliminate) over a non-trivial scrambled dataset.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (id int not null primary key, val int not null)");
+        Exec(c, "insert t (id, val) select (value * 7919) % 1000 + 1, value from generate_series(1, 400)");
+
+        var expected = new List<int>();
+        foreach (var o in ReadRows(c, "select id from t"))
+            expected.Add(Convert.ToInt32(o));
+        expected.Sort();
+
+        var actual = new List<int>();
+        foreach (var o in ReadRows(c, "select id from t order by id"))
+            actual.Add(Convert.ToInt32(o));
+
+        AreEqual(string.Join(",", expected), string.Join(",", actual));
+    }
+
     [TestMethod]
     public void RangeCorrectUnderManyMutations_MatchesIndependentBaseline()
     {
