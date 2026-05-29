@@ -63,22 +63,17 @@ internal sealed partial class Selection
             return sources;
         }
 
-        // A snapshot / RCSI reader's visible version can carry a different key
-        // than the live heap row, so a current-heap index could miss it — but
-        // only once the table actually has version chains. With an empty version
-        // store every row is implicitly committed at Xmin 0 (visible to every
-        // snapshot) and the live heap IS the visible version, so the seek is
-        // safe; this is the common case for read-mostly / bacpac-loaded data,
-        // where declining would force a full scan on every point lookup.
-        // ResolveSnapshotXidForRead is called unconditionally for its side
-        // effects (pins the statement/tx snapshot xid, registers the active
-        // snapshot reader) — the row-touch path relies on that bookkeeping
-        // whether the read seeks or scans.
-        if (batch.ResolveSnapshotXidForRead(table) is not null && !table.RowVersions.IsEmpty)
-        {
-            IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-            return sources;
-        }
+        // A snapshot / RCSI reader sees the version visible at its snapshot, not
+        // necessarily the live heap row. ResolveSnapshotXidForRead returns that
+        // snapshot xid (and pins the statement / tx snapshot as a side effect the
+        // row-touch path relies on whether the read seeks or scans). When it's
+        // non-null the seek still runs, but materializes each candidate through
+        // the version store and additionally sweeps the rows carrying a version
+        // chain — those are the only rows whose snapshot-visible key can differ
+        // from their live key, so a live-key-only seek could miss them. With an
+        // empty version store the sweep is empty and every candidate resolves to
+        // its live bytes. See MaterializeSnapshotCandidates.
+        var snapshotXid = batch.ResolveSnapshotXidForRead(table);
 
         var conjuncts = new List<BooleanExpression>();
         foreach (var excluder in excluders)
@@ -102,7 +97,7 @@ internal sealed partial class Selection
         }
 
         if (equalities.Count != 0
-            && TrySeekByLongestPrefix(source, table, plan, batch, outerResolver, equalities, out var seekRows, out var width))
+            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, out var seekRows, out var width))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},{width})");
@@ -234,6 +229,7 @@ internal sealed partial class Selection
         HeapTable table,
         DataLockPlan plan,
         BatchContext batch,
+        long? snapshotXid,
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, Expression[]> equalities,
         out IEnumerable<byte[]> seekRows,
@@ -299,7 +295,9 @@ internal sealed partial class Selection
                 candidates.AddRange(bucket);
         }
 
-        seekRows = MaterializeWithLockChecks(table, batch, plan, candidates);
+        seekRows = snapshotXid is { } sx
+            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
+            : MaterializeWithLockChecks(table, batch, plan, candidates);
         width = bestLen;
         return true;
 
@@ -437,6 +435,56 @@ internal sealed partial class Selection
         foreach (var (page, slot) in candidates)
         {
             if (batch.TouchRowForRead(table, page, slot, plan) && table.Heap.ReadSlotBytes(page, slot) is { } bytes)
+                yield return bytes;
+        }
+    }
+
+    // Snapshot / RCSI candidate materialization. Mirrors the snapshot branch of
+    // BatchContext.WrapWithRowConflictChecks, but over the seeked candidate set
+    // rather than the whole heap. Two sources, deduplicated by slot:
+    //   1. Bucket candidates — live rows whose CURRENT key matched the probe.
+    //      Each resolves to the version visible at the snapshot (live bytes when
+    //      the row carries no chain), or drops out when not visible.
+    //   2. Version-chain sweep — every slot in RowVersions. These are the only
+    //      rows whose snapshot-visible key can differ from their live key (so a
+    //      live-key-only bucket lookup could miss them) plus tombstoned slots
+    //      whose pre-delete version a pre-delete snapshot still sees. Bounded by
+    //      |RowVersions|, which a read-mostly RCSI workload keeps small (the GC
+    //      trims versions no open snapshot needs). The whole-table scan this
+    //      replaces already walks RowVersions in its own second pass, so the
+    //      seek is never more expensive than the scan it supplants.
+    // The matched equality conjuncts stay in the residual WHERE, so any candidate
+    // whose resolved version doesn't actually match the probe is filtered there.
+    private static IEnumerable<byte[]> MaterializeSnapshotCandidates(
+        HeapTable table, BatchContext batch, long snapshotXid, IReadOnlyList<(int Page, int Slot)> bucketCandidates)
+    {
+        var tx = batch.Connection.CurrentTransaction;
+        var seen = new HashSet<(int, int)>();
+
+        foreach (var (page, slot) in bucketCandidates)
+        {
+            if (!seen.Add((page, slot)))
+                continue;
+            if (table.Heap.ReadSlotBytes(page, slot) is { } live
+                && Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx) is { } resolved)
+            {
+                yield return resolved;
+            }
+        }
+
+        foreach (var kv in table.RowVersions)
+        {
+            var page = kv.Key.PageIndex;
+            var slot = kv.Key.SlotIndex;
+            if (!seen.Add((page, slot)))
+                continue;
+
+            var resolved = table.Heap.IsSlotTombstoned(page, slot)
+                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, snapshotXid, tx)
+                : table.Heap.ReadSlotBytes(page, slot) is { } live
+                    ? Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx)
+                    : null;
+            if (resolved is { } bytes)
                 yield return bytes;
         }
     }

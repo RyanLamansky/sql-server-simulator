@@ -578,12 +578,13 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void RcsiRead_WithLiveVersionChain_Declines()
+    public void RcsiRead_WithLiveVersionChain_Seeks()
     {
-        // An open writer leaves a version chain on the table, so an RCSI
-        // reader's visible version can diverge from the live heap row — the
-        // seek declines back to the full scan, and the reader still sees the
-        // pre-write committed value.
+        // An open writer leaves a version chain on the table. The RCSI reader
+        // still seeks (it no longer declines table-wide on any version chain),
+        // materializing each candidate through the version store: it sees the
+        // pre-write committed value of the row the writer touched and the
+        // unaffected value of another, both via the seek.
         var sim = new Simulation();
         using var reader = sim.CreateDbConnection();
         reader.Open();
@@ -602,21 +603,84 @@ public sealed class IndexSeekTests
         IndexSeekDiagnostics.Sink = [];
         try
         {
-            using var command = reader.CreateCommand();
-            command.CommandText = "select val from t where id = 2";
-            using var r = command.ExecuteReader();
-            var rows = new List<object?>();
-            while (r.Read())
-                rows.Add(r.GetValue(0));
-            Contains("Scan(t)", IndexSeekDiagnostics.Sink);
-            DoesNotContain("Seek(t)", IndexSeekDiagnostics.Sink);
-            HasCount(1, rows);
-            AreEqual(50, rows[0]);
+            AreEqual(50, ReadVal(reader, "select val from t where id = 2"));
+            Contains("Seek(t)", IndexSeekDiagnostics.Sink);
+            DoesNotContain("Scan(t)", IndexSeekDiagnostics.Sink);
+
+            // The touched row reads its last-committed value (5), not the
+            // writer's uncommitted 999 — resolved through the version store on
+            // the seek path.
+            AreEqual(5, ReadVal(reader, "select val from t where id = 1"));
         }
         finally
         {
             IndexSeekDiagnostics.Sink = null;
         }
+    }
+
+    [TestMethod]
+    public void SnapshotRead_AfterCommittedKeyChange_SeekStaysCorrect()
+    {
+        // The false-negative case the table-wide decline used to guard against:
+        // a committed UPDATE moves a row's PRIMARY KEY (2 -> 99) after a SNAPSHOT
+        // reader pins its snapshot. The reader must still find the row by its
+        // old key (the live heap no longer has id = 2, so the bucket misses it —
+        // the version-chain sweep is what recovers it) and must NOT see it under
+        // the new key (the snapshot predates that commit). Both stay seeks.
+        var sim = new Simulation();
+        using var reader = sim.CreateDbConnection();
+        reader.Open();
+        using (var setup = reader.CreateCommand())
+        {
+            setup.CommandText =
+                $"alter database simulated set allow_snapshot_isolation on; {TableT}";
+            _ = setup.ExecuteNonQuery();
+        }
+
+        // Pin the snapshot before the writer commits.
+        Exec(reader, "set transaction isolation level snapshot");
+        Exec(reader, "begin tran");
+        _ = ReadVal(reader, "select count(*) from t");
+
+        using (var writer = sim.CreateDbConnection())
+        {
+            writer.Open();
+            Exec(writer, "update t set id = 99 where id = 2");
+        }
+
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            // Old key still resolves to the snapshot-visible row (val 50).
+            AreEqual(50, ReadVal(reader, "select val from t where id = 2"));
+            // New key is invisible to this snapshot — found in the live bucket
+            // but the resolved version carries the old key, so the residual
+            // WHERE drops it.
+            IsNull(ReadVal(reader, "select val from t where id = 99"));
+            Contains("Seek(t)", IndexSeekDiagnostics.Sink);
+            DoesNotContain("Scan(t)", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+
+        Exec(reader, "commit");
+    }
+
+    private static void Exec(SimulatedDbConnection c, string sql)
+    {
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        _ = cmd.ExecuteNonQuery();
+    }
+
+    private static object? ReadVal(SimulatedDbConnection c, string sql)
+    {
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? (r.IsDBNull(0) ? null : r.GetValue(0)) : null;
     }
 
     [TestMethod]
