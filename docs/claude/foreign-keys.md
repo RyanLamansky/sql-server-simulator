@@ -63,12 +63,14 @@ After per-row check + key validation, `EnforceOutgoingForeignKeys` walks `table.
 - A NULL in any child FK column **skips the check** (probe-confirmed — applies to partial NULL in composite FKs too).
 - A non-NULL tuple that doesn't match any row of the parent on the FK's referenced columns → Msg 547 with the FK name and the parent's qualified table reference. Single-column FK appends `, column 'X'`; composite FK omits the column phrase. Self-referencing FK substitutes `FOREIGN KEY SAME TABLE` for `FOREIGN KEY`.
 
+`ReferencedRowExists` **seeks** the parent rather than scanning it: the referenced columns are always a PK/UNIQUE key, so it probes the parent's per-`Heap` [`HeapSeekCache`](indexes.md) on those columns (the parent's own index, incrementally maintained) and verifies each candidate against live bytes — there's no residual WHERE to discard the cache's stale-entry false-positives, so the verify is mandatory. Bulk child inserts against a large parent drop from O(children × parent) to one parent-index build plus O(1) per insert (measured ~67× faster for 2 000 inserts against a 20 000-row parent, and the ratio grows with parent size). A computed (non-stored) referenced column falls back to the full scan. The full→storage ordinal map is `HeapTable.StorageOrdinals[fullOrdinal]`.
+
 ### Parent side (DELETE / UPDATE / MERGE-DELETE / MERGE-UPDATE)
 
 After parent-side mutations, `EnforceIncomingForeignKeys` (for DELETE) and `EnforceIncomingFkOnUpdate` (for UPDATE) walk `table.IncomingForeignKeys`. For each FK:
 
 - **UPDATE-side filter**: rows whose referenced-column tuple didn't change are skipped (a non-PK update on the parent is a no-op for the FK).
-- For each parent row whose values were affected, scan the child table's heap for rows whose FK tuple matches the parent's old value.
+- For each parent row whose values were affected, find the child rows whose FK tuple matches the parent's old value via `MatchChildRowsToParents`: it **seeks** the child's `HeapSeekCache` on the FK columns once per affected parent key (verifying each candidate against live bytes, de-duplicating by address), falling back to a single full child scan only when an FK column isn't stored. Unlike real SQL Server — where an un-indexed FK child column forces a table scan on every parent delete (the classic "always index your FKs" pitfall) — the simulator builds the FK-column index on first touch and amortizes it, so cascades stay fast regardless of declared indexes (a performance divergence, not an observable-behavior one; the result set is identical).
 - If matches exist, dispatch on the FK's `DeleteAction` (for DELETE) or `UpdateAction` (for UPDATE):
 
 | Action | Behavior |

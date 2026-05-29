@@ -1517,4 +1517,100 @@ public sealed class IndexSeekTests
         actual.Sort();
         AreEqual(string.Join(",", expected), string.Join(",", actual));
     }
+
+    // ---- foreign-key enforcement rides the same per-Heap seek cache (shared via
+    // HeapSeekCache.For). An INSERT … VALUES does no query-path seek, so any
+    // CacheBuild / CacheReplay during a child insert is the parent-existence
+    // seek; a no-WHERE parent delete does no query-path seek either, isolating
+    // the cascade's child-lookup seek. ----
+
+    [TestMethod]
+    public void ForeignKeyChildInsert_SeeksParentExistence()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table p (id int not null primary key);
+            create table ch (id int not null primary key, pid int not null references p(id));
+            insert p values (1), (2), (3)
+            """);
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            Exec(c, "insert ch values (10, 2)");
+            // INSERT VALUES has no SELECT/WHERE to seek, so this is the FK
+            // parent-existence seek building the parent's id index.
+            Contains("CacheBuild", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    [TestMethod]
+    public void ForeignKeyChildInsert_ReplaysParentDelta_NoWarmup()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table p (id int not null primary key);
+            create table ch (id int not null primary key, pid int not null references p(id));
+            insert p values (1), (2)
+            """);
+        Exec(c, "insert ch values (10, 1)"); // builds the parent seek cache
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            Exec(c, "insert p values (3)");      // moves the parent's mutation generation
+            Exec(c, "insert ch values (11, 3)"); // parent-existence seek replays the delta
+            Contains("CacheReplay", IndexSeekDiagnostics.Sink);
+            DoesNotContain("CacheBuild", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    [TestMethod]
+    public void ForeignKeyCascadeDelete_SeeksChildren()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table p (id int not null primary key);
+            create table ch (id int not null primary key, pid int not null references p(id) on delete cascade);
+            insert p values (1), (2);
+            insert ch values (10, 1), (11, 1), (12, 2)
+            """);
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            // No WHERE → the parent delete itself doesn't seek, so the cache
+            // activity is the cascade seeking children by their pid.
+            Exec(c, "delete from p");
+            Contains("CacheBuild", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+        AreEqual(0, Convert.ToInt32(ReadVal(c, "select count(*) from ch")));
+    }
+
+    [TestMethod]
+    public void ForeignKeyCascadeDelete_SelectiveParent_CorrectChildrenRemain()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table p (id int not null primary key);
+            create table ch (id int not null primary key, pid int not null references p(id) on delete cascade);
+            insert p values (1), (2), (3);
+            insert ch values (10, 1), (11, 1), (12, 2), (13, 3)
+            """);
+        Exec(c, "delete from p where id = 1");
+        AreEqual("12,13", Seq(ReadRows(c, "select id from ch order by id")));
+    }
 }

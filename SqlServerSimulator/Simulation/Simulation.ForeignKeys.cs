@@ -116,21 +116,12 @@ partial class Simulation
         int depth)
     {
         // Find every child row whose FK columns match one of the parent's
-        // affected keys. Linear scan over the child table per parent key (the
-        // simulator has no indexes; matches existing PK/UQ enforcement cost).
+        // affected keys, seeking the child's FK columns per parent key when they
+        // are stored (else one full scan). Materialized before any cascade
+        // mutation touches the heap.
         var matchingChildRows = new List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)>();
-        foreach (var (rowBytes, pageIndex, slotIndex) in EnumerateChildRows(fk.ChildTable))
-        {
-            var childFull = DecodeFullRow(fk.ChildTable, rowBytes);
-            foreach (var parentOld in affectedParentOldRows)
-            {
-                if (FkTuplesMatch(fk, childFull, parentOld))
-                {
-                    matchingChildRows.Add((pageIndex, slotIndex, childFull));
-                    break;
-                }
-            }
-        }
+        foreach (var (pageIndex, slotIndex, childFull, _) in MatchChildRowsToParents(fk, affectedParentOldRows))
+            matchingChildRows.Add((pageIndex, slotIndex, childFull));
         if (matchingChildRows.Count == 0)
             return;
 
@@ -186,10 +177,21 @@ partial class Simulation
 
     /// <summary>
     /// Probes the parent table for a row whose referenced-column tuple equals
-    /// the child row's FK-column tuple. Linear scan; returns at first match.
+    /// the child row's FK-column tuple. Seeks the parent's per-<see cref="Heap"/>
+    /// cache on the referenced columns — always a PK/UNIQUE key, so the entry is
+    /// the parent's own index — verifying each candidate against live bytes;
+    /// falls back to a full scan only when a referenced column isn't physically
+    /// stored (a computed key column).
     /// </summary>
     private static bool ReferencedRowExists(ForeignKey fk, SqlValue[] childFull)
     {
+        if (TryMapFkColumnsToStorage(fk.ReferencedTable, fk.ReferencedColumnOrdinals, out var refStorageOrdinals, out var commons)
+            && TryBuildFkProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe))
+        {
+            return HeapSeekCache.For(fk.ReferencedTable.Heap)
+                .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe);
+        }
+
         foreach (var rowBytes in fk.ReferencedTable.Heap.EnumerateRows())
         {
             var parentFull = DecodeFullRow(fk.ReferencedTable, rowBytes);
@@ -207,6 +209,94 @@ partial class Simulation
             if (match) return true;
         }
         return false;
+    }
+
+    // Maps a foreign key's full column ordinals to the heap's storage ordinals
+    // and resolves the per-column key type (the stored column's type) the seek
+    // cache indexes by. Returns false when any FK column isn't physically stored
+    // (a computed key column) — the caller then falls back to a scan.
+    private static bool TryMapFkColumnsToStorage(HeapTable table, int[] fullOrdinals, out int[] storageOrdinals, out SqlType[] commons)
+    {
+        storageOrdinals = new int[fullOrdinals.Length];
+        commons = new SqlType[fullOrdinals.Length];
+        for (var i = 0; i < fullOrdinals.Length; i++)
+        {
+            var storage = table.StorageOrdinals[fullOrdinals[i]];
+            if (storage < 0)
+            {
+                (storageOrdinals, commons) = ([], []);
+                return false;
+            }
+
+            storageOrdinals[i] = storage;
+            commons[i] = table.StoredColumns[storage].Type;
+        }
+
+        return true;
+    }
+
+    // Builds a seek probe key from one side's row values at the paired ordinals,
+    // coerced to the seeked side's key types. Returns false when any value is
+    // NULL — no row matches a NULL key under FK equality semantics.
+    private static bool TryBuildFkProbe(SqlValue[] sourceFull, int[] sourceOrdinals, SqlType[] commons, out SqlValueKey probe)
+    {
+        var components = new SqlValue[sourceOrdinals.Length];
+        for (var i = 0; i < sourceOrdinals.Length; i++)
+        {
+            var value = sourceFull[sourceOrdinals[i]];
+            if (value.IsNull)
+            {
+                probe = default;
+                return false;
+            }
+
+            components[i] = value.CoerceTo(commons[i]);
+        }
+
+        probe = new SqlValueKey(components);
+        return true;
+    }
+
+    // Matches child rows against a set of parent key tuples, pairing each match
+    // with the index of the parent key it matched. Seeks the child's per-Heap
+    // cache on the FK columns per parent key (verifying each candidate against
+    // live bytes, de-duplicating by address) when those columns are stored — the
+    // child seek is index-gated by nothing more than "are the columns stored,"
+    // so it amortizes across repeated cascades; otherwise one full child scan,
+    // matching every row against every parent key.
+    private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
+        ForeignKey fk, IReadOnlyList<SqlValue[]> parentKeyRows)
+    {
+        if (TryMapFkColumnsToStorage(fk.ChildTable, fk.ChildColumnOrdinals, out var childStorageOrdinals, out var commons))
+        {
+            var cache = HeapSeekCache.For(fk.ChildTable.Heap);
+            var seen = new HashSet<(int, int)>();
+            for (var p = 0; p < parentKeyRows.Count; p++)
+            {
+                if (!TryBuildFkProbe(parentKeyRows[p], fk.ReferencedColumnOrdinals, commons, out var probe))
+                    continue;
+                foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
+                {
+                    if (seen.Add((page, slot)))
+                        yield return (page, slot, DecodeFullRow(fk.ChildTable, bytes), p);
+                }
+            }
+
+            yield break;
+        }
+
+        foreach (var (rowBytes, pageIndex, slotIndex) in EnumerateChildRows(fk.ChildTable))
+        {
+            var childFull = DecodeFullRow(fk.ChildTable, rowBytes);
+            for (var p = 0; p < parentKeyRows.Count; p++)
+            {
+                if (FkTuplesMatch(fk, childFull, parentKeyRows[p]))
+                {
+                    yield return (pageIndex, slotIndex, childFull, p);
+                    break;
+                }
+            }
+        }
     }
 
     private static SimulatedSqlException BuildChildSideViolation(ForeignKey fk, ParserContext context, string verb)
@@ -314,20 +404,15 @@ partial class Simulation
             if (changedPairs.Count == 0)
                 continue;
 
-            // Find matching child rows for the OLD parent keys.
+            // Find matching child rows for the OLD parent keys (seek per key when
+            // the FK columns are stored), pairing each with the matched key's NEW
+            // parent values so the cascade can rewrite the child FK.
+            var oldKeys = new List<SqlValue[]>(changedPairs.Count);
+            foreach (var (oldFull, _) in changedPairs)
+                oldKeys.Add(oldFull);
             var matching = new List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[] ParentNew)>();
-            foreach (var (rowBytes, pageIndex, slotIndex) in EnumerateChildRows(fk.ChildTable))
-            {
-                var childFull = DecodeFullRow(fk.ChildTable, rowBytes);
-                foreach (var (oldFull, newFull) in changedPairs)
-                {
-                    if (FkTuplesMatch(fk, childFull, oldFull))
-                    {
-                        matching.Add((pageIndex, slotIndex, childFull, newFull));
-                        break;
-                    }
-                }
-            }
+            foreach (var (pageIndex, slotIndex, childFull, parentIndex) in MatchChildRowsToParents(fk, oldKeys))
+                matching.Add((pageIndex, slotIndex, childFull, changedPairs[parentIndex].New));
             if (matching.Count == 0)
                 continue;
 
