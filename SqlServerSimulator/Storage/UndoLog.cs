@@ -108,6 +108,20 @@ internal sealed class UndoLog
     {
         for (var i = this.entries.Count - 1; i >= position; i--)
             this.entries[i].Undo();
+
+        // Undo rewinds heap state by mutating pages directly — it produces no
+        // reversing seek-journal events and doesn't advance MutationGeneration,
+        // so a seek cache built mid-transaction would otherwise carry the
+        // rolled-back rows. Invalidate each touched heap's journal once so the
+        // next seek rebuilds from the rewound state (the agreed rollback safety
+        // valve for the incrementally-maintained equality-seek cache).
+        HashSet<Heap>? touched = null;
+        for (var i = position; i < this.entries.Count; i++)
+        {
+            if (this.entries[i].AffectedHeap is { } heap && (touched ??= []).Add(heap))
+                heap.InvalidateSeekJournal();
+        }
+
         this.entries.RemoveRange(position, this.entries.Count - position);
     }
 
@@ -166,6 +180,13 @@ internal sealed class UndoLog
         public abstract void Undo();
 
         /// <summary>
+        /// The heap this entry mutates, or null for entries that touch no heap
+        /// (temp-table DDL). <see cref="RollbackTo"/> uses it to invalidate each
+        /// affected heap's seek journal exactly once after a rollback.
+        /// </summary>
+        public virtual Heap? AffectedHeap => null;
+
+        /// <summary>
         /// Runs when the enclosing transaction commits. Default no-op; the
         /// slot-mutation entries override it to reclaim superseded LOB chains.
         /// </summary>
@@ -181,6 +202,8 @@ internal sealed class UndoLog
         public readonly int PageIndex = pageIndex;
         public readonly int SlotIndex = slotIndex;
         public readonly bool FreeOnCommit = freeOnCommit;
+
+        public override Heap? AffectedHeap => this.Heap;
 
         public override void Undo()
         {
@@ -245,6 +268,8 @@ internal sealed class UndoLog
         public readonly (int Page, int Slot) SecondaryTarget = secondaryTarget;
         public readonly bool FreeOnCommit = freeOnCommit;
 
+        public override Heap? AffectedHeap => this.Heap;
+
         public override void Undo()
         {
             var page = this.Heap.Pages[this.PageIndex];
@@ -300,6 +325,8 @@ internal sealed class UndoLog
         public readonly int SlotIndex = slotIndex;
         public readonly (int Page, int Slot) Target = target;
 
+        public override Heap? AffectedHeap => this.Heap;
+
         public override void Undo()
         {
             this.Heap.Pages[this.PageIndex].UndeleteSlot(this.SlotIndex);
@@ -343,6 +370,8 @@ internal sealed class UndoLog
     /// </summary>
     private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) : UndoEntry
     {
+        public override Heap? AffectedHeap => heap;
+
         public override void Undo()
         {
             heap.Pages.Clear();

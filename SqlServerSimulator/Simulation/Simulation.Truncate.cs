@@ -89,6 +89,9 @@ partial class Simulation
         table.Heap.ForwardTargets.Clear();
         table.Heap.ClearFreeLobPages();
         table.Heap.ClearReclaimablePages();
+        // The page-swap rewinds heap state without going through Insert / DeleteAt,
+        // so force any live seek cache to rebuild against the now-empty heap.
+        table.Heap.InvalidateSeekJournal();
         for (var i = 0; i < identitySnapshots.Count; i++)
             identitySnapshots[i].State.Restore(null);
 

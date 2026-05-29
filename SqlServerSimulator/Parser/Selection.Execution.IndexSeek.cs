@@ -432,8 +432,16 @@ internal sealed partial class Selection
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
         HeapTable table, BatchContext batch, DataLockPlan plan, IReadOnlyList<(int Page, int Slot)> candidates)
     {
+        // Dedup + tombstone-skip mirror the full scan's EnumerateRowsWithAddress
+        // (which skips tombstoned / forward-target slots and yields each row once)
+        // and neutralize the incrementally-maintained cache's only imprecision: a
+        // not-yet-applied or mis-keyed Delete can leave a tombstoned address in a
+        // bucket, and a double-applied Insert can list one twice.
+        var seen = new HashSet<(int, int)>();
         foreach (var (page, slot) in candidates)
         {
+            if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
+                continue;
             if (batch.TouchRowForRead(table, page, slot, plan) && table.Heap.ReadSlotBytes(page, slot) is { } bytes)
                 yield return bytes;
         }
@@ -520,19 +528,38 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Lazy leading-prefix equality index for one <see cref="Heap"/>: maps a
-    /// promoted key tuple to the row addresses carrying it. Keyed by the leading
-    /// key-column ordinal; the entry remembers the full prefix (ordinals +
-    /// promoted types) it was built for and rebuilds from a full scan when the
-    /// heap's <see cref="Heap.MutationGeneration"/> moves or the requested prefix
-    /// differs. Buckets hold row addresses, not row bytes, so the cache costs a
-    /// few words per row rather than a copy of the table.
+    /// Incrementally-maintained leading-prefix equality index for one
+    /// <see cref="Heap"/>: maps a promoted key tuple to the row addresses
+    /// carrying it. Keyed by the leading key-column ordinal; the entry remembers
+    /// the full prefix (ordinals + promoted types) it was built for. The first
+    /// seek builds an entry from a full scan and activates the heap's seek
+    /// journal (<see cref="Heap.ActivateSeekJournal"/>); thereafter, when the
+    /// heap's <see cref="Heap.MutationGeneration"/> has moved, the entry applies
+    /// the journal delta (<see cref="Heap.SnapshotSeekJournalSince"/>) rather than
+    /// rebuilding — the "no warm-up" path. A full rebuild happens only when the
+    /// requested prefix differs, the journal can't cover the delta (a large bulk
+    /// mutation trimmed it, or a rollback / TRUNCATE invalidated it), or the heap
+    /// was never journaled.
+    /// <para>
+    /// Buckets hold row addresses, not row bytes, so the cache costs a few words
+    /// per row rather than a copy of the table. The seek keeps every matched
+    /// equality conjunct in the residual WHERE, so a stale bucket membership is
+    /// only ever a harmless false-positive (filtered there); the maintenance only
+    /// has to avoid dropping a live candidate — inserts and update-new-keys
+    /// recompute from live row bytes, so those adds are always present.
+    /// </para>
     /// </summary>
     private sealed class EqualityIndexCache
     {
         private static readonly List<(int Page, int Slot)> Empty = [];
 
         private readonly Dictionary<int, CacheEntry> byLeadOrdinal = [];
+
+        // Build / replay / read are serialized: the per-Heap cache is shared
+        // across connections, so two readers can seek the same heap at once, and
+        // a returned bucket is copied out under this lock by the caller's
+        // AddRange before any concurrent mutation can patch it.
+        private readonly Lock gate = new();
 
         public List<(int Page, int Slot)> Seek(
             Heap heap,
@@ -542,56 +569,90 @@ internal sealed partial class Selection
             SqlType[] commons,
             SqlValueKey probeKey)
         {
-            var lead = ordinals[0];
-            if (!this.byLeadOrdinal.TryGetValue(lead, out var entry)
-                || entry.Generation != heap.MutationGeneration
-                || !entry.Matches(ordinals, commons))
+            lock (this.gate)
             {
-                entry = Build(heap, schema, lobStore, ordinals, commons);
-                this.byLeadOrdinal[lead] = entry;
-            }
+                var lead = ordinals[0];
+                if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Matches(ordinals, commons))
+                {
+                    if (entry.Generation != heap.MutationGeneration)
+                    {
+                        var events = heap.SnapshotSeekJournalSince(entry.Generation, out var currentGen);
+                        if (events is not null)
+                        {
+                            IndexSeekDiagnostics.Sink?.Add("CacheReplay");
+                            entry.Apply(events, schema, lobStore, currentGen);
+                        }
+                        else
+                        {
+                            entry = this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
+                        }
+                    }
+                }
+                else
+                {
+                    entry = this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
+                }
 
-            return entry.Buckets.TryGetValue(probeKey, out var bucket) ? bucket : Empty;
+                return entry.Buckets.TryGetValue(probeKey, out var bucket) ? bucket : Empty;
+            }
         }
 
-        private static CacheEntry Build(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
+        private CacheEntry Rebuild(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, int lead)
         {
+            // Activate journaling and capture the build generation BEFORE scanning,
+            // so any mutation that lands during the scan is journaled at a later
+            // generation and replayed on the next seek — never silently missed.
+            // (A write the scan happened to also see just replays as a harmless
+            // re-add; the residual WHERE and the materializer's dedup absorb it.)
+            IndexSeekDiagnostics.Sink?.Add("CacheBuild");
+            var buildGen = heap.ActivateSeekJournal();
             var buckets = new Dictionary<SqlValueKey, List<(int Page, int Slot)>>();
             foreach (var (page, slot, bytes) in heap.EnumerateRowsWithAddress())
             {
-                var components = new SqlValue[ordinals.Length];
-                var anyNull = false;
-                for (var i = 0; i < ordinals.Length; i++)
-                {
-                    var value = RowDecoder.DecodeColumn(schema, bytes, ordinals[i], lobStore);
-                    if (value.IsNull)
-                    {
-                        anyNull = true;
-                        break;
-                    }
-
-                    components[i] = value.CoerceTo(commons[i]);
-                }
-
-                // A NULL in any key component can never equal a non-NULL probe
-                // (the probe components are all non-NULL by construction), so the
-                // row joins no bucket.
-                if (anyNull)
-                    continue;
-
-                var key = new SqlValueKey(components);
-                if (!buckets.TryGetValue(key, out var bucket))
-                    buckets[key] = bucket = [];
-                bucket.Add((page, slot));
+                if (TryComputeKey(bytes, ordinals, commons, schema, lobStore, out var key))
+                    AddRid(buckets, key, (page, slot));
             }
 
-            return new CacheEntry(heap.MutationGeneration, (int[])ordinals.Clone(), (SqlType[])commons.Clone(), buckets);
+            var entry = new CacheEntry(buildGen, (int[])ordinals.Clone(), (SqlType[])commons.Clone(), buckets);
+            this.byLeadOrdinal[lead] = entry;
+            return entry;
+        }
+
+        // Decodes this entry's key tuple from a row image, coercing each component
+        // to the entry's promoted type. Returns false when any component is NULL —
+        // a NULL key can never equal a (non-NULL by construction) probe, so the
+        // row joins no bucket.
+        private static bool TryComputeKey(
+            ReadOnlySpan<byte> image, int[] ordinals, SqlType[] commons, HeapColumn[] schema, Heap? lobStore, out SqlValueKey key)
+        {
+            var components = new SqlValue[ordinals.Length];
+            for (var i = 0; i < ordinals.Length; i++)
+            {
+                var value = RowDecoder.DecodeColumn(schema, image, ordinals[i], lobStore);
+                if (value.IsNull)
+                {
+                    key = default;
+                    return false;
+                }
+
+                components[i] = value.CoerceTo(commons[i]);
+            }
+
+            key = new SqlValueKey(components);
+            return true;
+        }
+
+        private static void AddRid(Dictionary<SqlValueKey, List<(int Page, int Slot)>> buckets, SqlValueKey key, (int Page, int Slot) rid)
+        {
+            if (!buckets.TryGetValue(key, out var bucket))
+                buckets[key] = bucket = [];
+            bucket.Add(rid);
         }
 
         private sealed class CacheEntry(
             long generation, int[] ordinals, SqlType[] commons, Dictionary<SqlValueKey, List<(int Page, int Slot)>> buckets)
         {
-            public readonly long Generation = generation;
+            public long Generation = generation;
             public readonly Dictionary<SqlValueKey, List<(int Page, int Slot)>> Buckets = buckets;
             private readonly int[] ordinals = ordinals;
             private readonly SqlType[] commons = commons;
@@ -609,6 +670,49 @@ internal sealed partial class Selection
                 }
 
                 return true;
+            }
+
+            // Applies the journal delta to this entry's buckets. Insert adds the
+            // new key's address; Delete removes the old key's; Update does both.
+            // A key recomputed from a superseded (Delete / Update-old) image whose
+            // off-row chain was already reclaimed may be wrong, which can only
+            // leave a stale address in a bucket — a false-positive the residual
+            // WHERE and the materializer's tombstone-skip discard. The add side
+            // (Insert / Update-new) decodes a live image, so it never goes wrong.
+            public void Apply(Heap.SeekJournalEvent[] events, HeapColumn[] schema, Heap? lobStore, long currentGen)
+            {
+                foreach (var e in events)
+                {
+                    switch (e.Kind)
+                    {
+                        case Heap.SeekJournalKind.Insert:
+                            if (TryComputeKey(e.NewImage, this.ordinals, this.commons, schema, lobStore, out var insertKey))
+                                AddRid(this.Buckets, insertKey, (e.Page, e.Slot));
+                            break;
+                        case Heap.SeekJournalKind.Delete:
+                            if (TryComputeKey(e.OldImage, this.ordinals, this.commons, schema, lobStore, out var deleteKey))
+                                this.RemoveRid(deleteKey, (e.Page, e.Slot));
+                            break;
+                        case Heap.SeekJournalKind.Update:
+                            if (TryComputeKey(e.OldImage, this.ordinals, this.commons, schema, lobStore, out var oldKey))
+                                this.RemoveRid(oldKey, (e.Page, e.Slot));
+                            if (TryComputeKey(e.NewImage, this.ordinals, this.commons, schema, lobStore, out var newKey))
+                                AddRid(this.Buckets, newKey, (e.Page, e.Slot));
+                            break;
+                    }
+                }
+
+                this.Generation = currentGen;
+            }
+
+            private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
+            {
+                if (this.Buckets.TryGetValue(key, out var bucket))
+                {
+                    _ = bucket.Remove(rid);
+                    if (bucket.Count == 0)
+                        _ = this.Buckets.Remove(key);
+                }
             }
         }
     }

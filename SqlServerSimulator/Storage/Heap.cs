@@ -57,13 +57,147 @@ internal sealed class Heap
     /// UPDATE path may bump multiple times (its internal Insert + Delete each
     /// contribute) and that's fine — read-side equality-seek caches (see
     /// <c>Selection.Execution.IndexSeek.cs</c>) only check whether anything
-    /// changed, so any-positive delta forces a rebuild. Not a transactional
-    /// value: it advances on the physical mutation and never rolls back (a
-    /// rolled-back insert/delete/update still bumped it, which only forces a
-    /// harmless cache rebuild). Mutations on a given table are lock-serialized,
-    /// so this needs no interlocking.
+    /// changed, so any-positive delta forces a rebuild or — once the seek
+    /// journal is active (see <see cref="seekJournal"/>) — a delta replay.
+    /// Not a transactional value: it advances on the physical mutation and
+    /// never rolls back. Mutations on a given table are lock-serialized, so
+    /// this needs no interlocking.
     /// </summary>
     public long MutationGeneration;
+
+    /// <summary>
+    /// Visible-row mutation kind recorded in the <see cref="seekJournal"/>.
+    /// <see cref="Insert"/> carries the inserted image; <see cref="Delete"/>
+    /// the pre-delete image; <see cref="Update"/> both (so a replay computes the
+    /// old and new key without re-reading the live slot, which may have moved on).
+    /// </summary>
+    internal enum SeekJournalKind : byte
+    {
+        Insert,
+        Delete,
+        Update,
+    }
+
+    /// <summary>
+    /// One visible-row mutation, tagged with the <see cref="MutationGeneration"/>
+    /// it produced. Addresses are the row's stable visible Rid — a forwarding
+    /// UPDATE's internal target Insert / old-target Delete are deliberately NOT
+    /// journaled (they carry <c>journalEvent: false</c>); only the visible slot's
+    /// before/after images are. <see cref="OldImage"/> is null for an Insert;
+    /// <see cref="NewImage"/> is null for a Delete.
+    /// </summary>
+    internal readonly record struct SeekJournalEvent(long Generation, SeekJournalKind Kind, int Page, int Slot, byte[]? OldImage, byte[]? NewImage);
+
+    private readonly Lock seekJournalGate = new();
+
+    /// <summary>
+    /// Bounded log of visible-row mutations since the seek cache went live,
+    /// enabling the per-<see cref="Heap"/> equality-seek cache to apply a delta
+    /// rather than rebuild from a full scan on every mutation — the "no warm-up"
+    /// path. Null until <see cref="ActivateSeekJournal"/> runs on the first seek
+    /// against this heap, so a never-queried (write-only) table pays nothing.
+    /// Trimmed to <see cref="MaxSeekJournalEvents"/>; older events fall off and
+    /// advance <see cref="seekJournalDroppedThroughGen"/>, which forces a full
+    /// rebuild for any cache that fell too far behind (a large bulk mutation, or
+    /// a heap that wasn't seeked for a long time). A rollback or ALTER clears it
+    /// via <see cref="InvalidateSeekJournal"/>.
+    /// </summary>
+    private Queue<SeekJournalEvent>? seekJournal;
+
+    /// <summary>
+    /// Highest <see cref="MutationGeneration"/> whose journal event has been
+    /// dropped (trimmed or invalidated). A cache whose last-seen generation is
+    /// below this can't replay the delta — it's missing dropped events — so it
+    /// rebuilds from a scan.
+    /// </summary>
+    private long seekJournalDroppedThroughGen;
+
+    /// <summary>
+    /// True once the first seek activated journaling. Read on the hot write path
+    /// to decide whether to capture before/after images; <c>volatile</c> so the
+    /// activation by a reader thread is visible to writer threads. When false,
+    /// <see cref="Insert"/> / <see cref="DeleteAt"/> / <see cref="UpdateAt"/>
+    /// skip all journal work.
+    /// </summary>
+    private volatile bool seekJournalActive;
+
+    private const int MaxSeekJournalEvents = 512;
+
+    /// <summary>
+    /// Turns on the seek journal (idempotent) and returns the current
+    /// <see cref="MutationGeneration"/> for the caller to stamp on the cache
+    /// entry it's about to build. Activation happens-before the returned
+    /// generation, so any mutation that lands after this call is journaled at a
+    /// later generation and replayed into the cache on a later seek — the cache
+    /// never silently misses a write. Called by the seek cache the first time it
+    /// builds an entry for this heap.
+    /// </summary>
+    internal long ActivateSeekJournal()
+    {
+        lock (this.seekJournalGate)
+        {
+            this.seekJournal ??= new Queue<SeekJournalEvent>();
+            this.seekJournalActive = true;
+            return this.MutationGeneration;
+        }
+    }
+
+    /// <summary>
+    /// Returns the journal events with <see cref="SeekJournalEvent.Generation"/>
+    /// greater than <paramref name="sinceGen"/> (in mutation order), or null when
+    /// the cache can't safely replay — either journaling isn't active or
+    /// <paramref name="sinceGen"/> predates a dropped event. A null result tells
+    /// the caller to rebuild from a full scan. <paramref name="currentGen"/> is
+    /// the generation the events bring the cache up to.
+    /// </summary>
+    internal SeekJournalEvent[]? SnapshotSeekJournalSince(long sinceGen, out long currentGen)
+    {
+        lock (this.seekJournalGate)
+        {
+            currentGen = this.MutationGeneration;
+            if (this.seekJournal is null || sinceGen < this.seekJournalDroppedThroughGen)
+                return null;
+            var result = new List<SeekJournalEvent>();
+            foreach (var e in this.seekJournal)
+            {
+                if (e.Generation > sinceGen)
+                    result.Add(e);
+            }
+            return [.. result];
+        }
+    }
+
+    /// <summary>
+    /// Drops the entire journal and advances <see cref="seekJournalDroppedThroughGen"/>
+    /// to the current generation, so every existing cache rebuilds on its next
+    /// seek. Called when a rollback rewinds heap state without producing
+    /// reversing journal events (<see cref="UndoLog"/> mutates pages directly),
+    /// and by ALTER paths that rewrite the heap's columns underneath the cache.
+    /// Journaling stays active — the rebuild re-bases the cache cleanly.
+    /// </summary>
+    internal void InvalidateSeekJournal()
+    {
+        if (!this.seekJournalActive)
+            return;
+        lock (this.seekJournalGate)
+        {
+            this.MutationGeneration++;
+            this.seekJournalDroppedThroughGen = this.MutationGeneration;
+            this.seekJournal?.Clear();
+        }
+    }
+
+    private void RecordSeekJournalEvent(SeekJournalKind kind, int page, int slot, byte[]? oldImage, byte[]? newImage)
+    {
+        lock (this.seekJournalGate)
+        {
+            if (this.seekJournal is not { } journal)
+                return;
+            journal.Enqueue(new SeekJournalEvent(this.MutationGeneration, kind, page, slot, oldImage, newImage));
+            while (journal.Count > MaxSeekJournalEvents)
+                this.seekJournalDroppedThroughGen = Math.Max(this.seekJournalDroppedThroughGen, journal.Dequeue().Generation);
+        }
+    }
 
     /// <summary>
     /// Appends a row's encoded bytes to the heap. The active (last) page is
@@ -73,7 +207,14 @@ internal sealed class Heap
     /// columns off-row to honor that cap; this method only enforces it as
     /// a defensive guard against bypassed callers.
     /// </summary>
-    public (int PageIndex, int SlotIndex) Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null)
+    public (int PageIndex, int SlotIndex) Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null) =>
+        this.InsertCore(row, undoLog, journalEvent: true);
+
+    // journalEvent is false for the forwarding-UPDATE path's internal target
+    // insert — that target is a relocated payload, not a new visible row, so it
+    // must not produce a seek-journal Insert; the visible slot's key change rides
+    // the Update event UpdateAt records instead.
+    private (int PageIndex, int SlotIndex) InsertCore(ReadOnlySpan<byte> row, UndoLog? undoLog, bool journalEvent)
     {
         if (row.Length > MaxRowSize)
             throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; the encoder should have pushed variable-length columns off-row.");
@@ -108,6 +249,8 @@ internal sealed class Heap
         var slotIndex = this.Pages[pageIndex].SlotCount - 1;
         this.MutationGeneration++;
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
+        if (journalEvent && this.seekJournalActive)
+            this.RecordSeekJournalEvent(SeekJournalKind.Insert, pageIndex, slotIndex, oldImage: null, newImage: row.ToArray());
         return (pageIndex, slotIndex);
     }
 
@@ -321,8 +464,15 @@ internal sealed class Heap
     /// forward pointer, not a row, so they must never be decoded for LOB heads.
     /// Rollback resurrects both slots and re-registers the target.
     /// </remarks>
-    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false)
+    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false) =>
+        this.DeleteAtCore(pageIndex, slotIndex, undoLog, reclaimSuperseded, journalEvent: true);
+
+    // journalEvent is false for the forwarding-UPDATE path's internal old-target
+    // delete — the old target is a superseded relocated payload, not the removal
+    // of a visible row, so it must not produce a seek-journal Delete.
+    private void DeleteAtCore(int pageIndex, int slotIndex, UndoLog? undoLog, bool reclaimSuperseded, bool journalEvent)
     {
+        var oldImage = journalEvent && this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         this.MutationGeneration++;
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
@@ -333,10 +483,14 @@ internal sealed class Heap
             undoLog?.RecordForwardedPointerDelete(this, pageIndex, slotIndex, target);
             page.DeleteSlot(slotIndex);
             _ = this.ForwardTargets.Remove(target);
+            if (oldImage is not null)
+                this.RecordSeekJournalEvent(SeekJournalKind.Delete, pageIndex, slotIndex, oldImage, newImage: null);
             return;
         }
         undoLog?.RecordDelete(this, pageIndex, slotIndex, reclaimSuperseded);
         page.DeleteSlot(slotIndex);
+        if (oldImage is not null)
+            this.RecordSeekJournalEvent(SeekJournalKind.Delete, pageIndex, slotIndex, oldImage, newImage: null);
     }
 
     /// <summary>
@@ -363,12 +517,20 @@ internal sealed class Heap
     /// </remarks>
     public void UpdateAt(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
+        // The visible Rid (pageIndex, slotIndex) is stable across an UPDATE even
+        // when the payload relocates (the original slot keeps its forward bit),
+        // so the seek journal records one Update at that address. Capture the
+        // pre-UPDATE visible image before the mutation; the internal target
+        // Insert / old-target Delete the relocating paths run are NOT journaled.
+        var oldImage = this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
             this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
         else
             this.UpdateDirect(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
         this.MutationGeneration++;
+        if (oldImage is not null)
+            this.RecordSeekJournalEvent(SeekJournalKind.Update, pageIndex, slotIndex, oldImage, newRow.ToArray());
     }
 
     private void UpdateDirect(HeapPage page, int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog, bool reclaimSuperseded)
@@ -383,7 +545,7 @@ internal sealed class Heap
         else
         {
             var oldBytes = page.ReadSlotBytes(slotIndex)!;
-            var target = this.Insert(newRow, undoLog);
+            var target = this.InsertCore(newRow, undoLog, journalEvent: false);
             undoLog?.RecordForwardInstall(this, pageIndex, slotIndex, oldBytes, target, reclaimSuperseded);
             this.Pages[pageIndex].InstallForward(slotIndex, target);
             _ = this.ForwardTargets.Add(target);
@@ -409,8 +571,8 @@ internal sealed class Heap
             // never clears; the row keeps its visible identity. The old target's
             // superseded chains ride its Delete entry (reclaimSuperseded passed
             // through); the new target's ride its Insert entry.
-            var newTarget = this.Insert(newRow, undoLog);
-            this.DeleteAt(oldTarget.PageIndex, oldTarget.SlotIndex, undoLog, reclaimSuperseded);
+            var newTarget = this.InsertCore(newRow, undoLog, journalEvent: false);
+            this.DeleteAtCore(oldTarget.PageIndex, oldTarget.SlotIndex, undoLog, reclaimSuperseded, journalEvent: false);
             undoLog?.RecordForwardRetarget(this, originalPageIndex, originalSlotIndex, oldTarget, newTarget);
             originalPage.RewriteForward(originalSlotIndex, newTarget);
             _ = this.ForwardTargets.Remove(oldTarget);

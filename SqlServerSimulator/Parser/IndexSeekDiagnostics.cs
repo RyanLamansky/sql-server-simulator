@@ -16,7 +16,10 @@ internal static class IndexSeekDiagnostics
     /// <summary>
     /// Per-thread decision log: <c>Seek(table)</c> when a scan narrows to an
     /// index seek, <c>Scan(table)</c> when an eligible single-base-table scan
-    /// keeps its full scan. A test assigns a fresh list, drives a query to
+    /// keeps its full scan, plus the per-Heap cache's own maintenance trace —
+    /// <c>CacheBuild</c> when a seek (re)builds an entry from a full scan and
+    /// <c>CacheReplay</c> when it instead applies the incremental journal delta
+    /// (the "no warm-up" path). A test assigns a fresh list, drives a query to
     /// completion on the same thread (execution is synchronous and in-process),
     /// then inspects the entries. Null disables capture.
     /// </summary>

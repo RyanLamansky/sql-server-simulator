@@ -691,4 +691,157 @@ public sealed class IndexSeekTests
         DoesNotContain("Seek(t)", trace);
         HasCount(1, rows);
     }
+
+    // ---- incremental maintenance (no warm-up): the per-Heap cache applies the
+    // mutation journal delta instead of rebuilding on every write. CacheReplay /
+    // CacheBuild trace which path a seek took; CacheBuild means a full scan
+    // rebuild, CacheReplay means the incremental delta. ----
+
+    private static List<object?> ReadRows(SimulatedDbConnection c, string sql)
+    {
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        using var r = cmd.ExecuteReader();
+        var rows = new List<object?>();
+        while (r.Read())
+            rows.Add(r.IsDBNull(0) ? null : r.GetValue(0));
+        return rows;
+    }
+
+    // Opens a connection, runs setup, warms the per-Heap seek cache (the warm
+    // seek builds the entry and activates the journal — untraced, Sink is null),
+    // runs `mutate`, then captures `probe`'s trace + first-column rows. The
+    // captured read exercises the incrementally-maintained cache.
+    private static (List<string> Trace, List<object?> Rows) WarmMutateProbe(string setup, string warm, string mutate, string probe)
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, setup);
+        _ = ReadVal(c, warm);
+        Exec(c, mutate);
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            return (IndexSeekDiagnostics.Sink, ReadRows(c, probe));
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    [TestMethod]
+    public void InsertAfterWarmup_ReplaysDelta_FindsNewRow()
+    {
+        var (trace, rows) = WarmMutateProbe(
+            TableT, "select val from t where id = 1", "insert t values (4, 40)", "select val from t where id = 4");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        Contains("Seek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(40, rows[0]);
+    }
+
+    [TestMethod]
+    public void UpdateIndexedKeyAfterWarmup_RowLeavesOldBucket()
+    {
+        // In-place key change: the row must vanish from the old key's bucket and
+        // appear under the new one, all via the Update journal event's
+        // remove-old / add-new.
+        var (trace, rows) = WarmMutateProbe(
+            TableT, "select val from t where id = 1", "update t set id = 99 where id = 2", "select val from t where id = 2");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void UpdateIndexedKeyAfterWarmup_RowFoundUnderNewKey()
+    {
+        var (trace, rows) = WarmMutateProbe(
+            TableT, "select val from t where id = 1", "update t set id = 99 where id = 2", "select val from t where id = 99");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        HasCount(1, rows);
+        AreEqual(50, rows[0]);
+    }
+
+    [TestMethod]
+    public void DeleteAfterWarmup_ReplaysDelta_RowGone()
+    {
+        var (trace, rows) = WarmMutateProbe(
+            TableT, "select val from t where id = 1", "delete from t where id = 2", "select val from t where id = 2");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void RolledBackInsert_InvalidatesJournal_RebuildsAndExcludes()
+    {
+        // Rollback rewinds the heap by mutating pages directly (no reversing
+        // journal events), so it invalidates the journal — the next seek must
+        // rebuild from the rewound state and not surface the rolled-back row.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, TableT);
+        _ = ReadVal(c, "select val from t where id = 1");
+        Exec(c, "begin tran");
+        Exec(c, "insert t values (4, 40)");
+        Exec(c, "rollback");
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            var rows = ReadRows(c, "select val from t where id = 4");
+            Contains("CacheBuild", IndexSeekDiagnostics.Sink);
+            DoesNotContain("CacheReplay", IndexSeekDiagnostics.Sink);
+            IsEmpty(rows);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    [TestMethod]
+    public void TruncateAfterWarmup_InvalidatesJournal_Rebuilds()
+    {
+        var (trace, rows) = WarmMutateProbe(
+            TableT, "select val from t where id = 1", "truncate table t", "select val from t where id = 2");
+        Contains("CacheBuild", trace);
+        DoesNotContain("CacheReplay", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void BulkInsertBeyondJournalCap_FallsBackToRebuild()
+    {
+        // The journal is bounded; a single insert that overruns the cap drops the
+        // oldest events and advances the dropped-through generation past the warm
+        // cache's, forcing a rebuild — which still returns the correct row.
+        var (trace, rows) = WarmMutateProbe(
+            TableT,
+            "select val from t where id = 1",
+            "insert t (id, val) select value, value * 10 from generate_series(1000, 1800)",
+            "select val from t where id = 1500");
+        Contains("CacheBuild", trace);
+        Contains("Seek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(15000, rows[0]);
+    }
+
+    [TestMethod]
+    public void InterleavedInsertSeekLoop_NeverStale()
+    {
+        // Each insert/seek cycle must see the row just inserted — the regression
+        // an incrementally-maintained cache risks is a stale read after a write.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (id int not null primary key, val int not null)");
+        for (var i = 1; i <= 50; i++)
+        {
+            Exec(c, $"insert t values ({i}, {i * 100})");
+            AreEqual(i * 100, ReadVal(c, $"select val from t where id = {i}"));
+        }
+    }
 }
