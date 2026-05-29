@@ -498,6 +498,15 @@ internal abstract class BooleanExpression
     internal virtual void CollectConjuncts(List<BooleanExpression> sink) => sink.Add(this);
 
     /// <summary>
+    /// Flattens a top-level <c>OR</c> chain into its individual disjunct terms,
+    /// appending each to <paramref name="sink"/>. A non-<c>OR</c> predicate
+    /// contributes itself. The mirror of <see cref="CollectConjuncts"/>, used to
+    /// recognize the keyset-pagination staircase
+    /// (<c>a &gt; @x OR (a = @x AND b &gt; @y)</c>).
+    /// </summary>
+    internal virtual void CollectDisjuncts(List<BooleanExpression> sink) => sink.Add(this);
+
+    /// <summary>
     /// Exposes the two operands when this predicate is an equality comparison
     /// (<c>=</c>); returns false for every other node. Lets the join planner
     /// recognize <c>left = right</c> conjuncts without reaching into the
@@ -618,6 +627,12 @@ internal abstract class BooleanExpression
         {
             left.VisitOperandExpressions(visitor);
             right.VisitOperandExpressions(visitor);
+        }
+
+        internal override void CollectDisjuncts(List<BooleanExpression> sink)
+        {
+            left.CollectDisjuncts(sink);
+            right.CollectDisjuncts(sink);
         }
 
         // Flatten the OR-tree (any nesting depth) into leaf equality pairs.

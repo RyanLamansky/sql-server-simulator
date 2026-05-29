@@ -1213,6 +1213,124 @@ public sealed class IndexSeekTests
         AreEqual(string.Join(",", expected), string.Join(",", actual));
     }
 
+    // ---- keyset pagination: WHERE a > @x OR (a = @x AND b > @y) ORDER BY a, b
+    // seeks past the cursor instead of scanning + sorting + skipping ----
+
+    [TestMethod]
+    public void KeysetForwardTwoColumn_SeeksPastCursor()
+    {
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (3, 1)
+            """, "select 10 * a + b from t where a > 1 or (a = 1 and b > 2) order by a, b");
+        Contains("OrderedScan(t)", trace);
+        Contains("KeysetSeek(t)", trace);
+        AreEqual("13,21,22,31", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetDescendingTwoColumn_SeeksPastCursor()
+    {
+        // a DESC, b DESC keyset uses the < staircase; the cursor is the exclusive
+        // upper bound, and the ascending in-range list is reversed into the page.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (3, 1)
+            """, "select 10 * a + b from t where a < 3 or (a = 3 and b < 1) order by a desc, b desc");
+        Contains("OrderedScan(t)", trace);
+        Contains("KeysetSeek(t)", trace);
+        AreEqual("22,21,13,12,11", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetThreeColumn_SeeksPastCursor()
+    {
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, c int not null, primary key (a, b, c));
+            insert t values (1, 2, 1), (1, 2, 2), (1, 2, 3), (1, 3, 1), (2, 1, 1)
+            """, "select 100 * a + 10 * b + c from t where a > 1 or (a = 1 and b > 2) or (a = 1 and b = 2 and c > 2) order by a, b, c");
+        Contains("KeysetSeek(t)", trace);
+        // Rows (1,2,3),(1,3,1),(2,1,1) in key order → 100*a + 10*b + c.
+        AreEqual("123,131,211", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetOnNonClusteredCompositeIndex_SeeksPastCursor()
+    {
+        // The cursor seek rides a secondary CREATE INDEX, not just the PK —
+        // acceleration is index-source-agnostic.
+        var (trace, rows) = Run("""
+            create table t (id int not null primary key, a int not null, b int not null);
+            create index ix on t (a, b);
+            insert t values (10, 1, 1), (20, 1, 2), (30, 2, 1), (40, 2, 2), (50, 3, 9)
+            """, "select id from t where a > 2 or (a = 2 and b > 1) order by a, b");
+        Contains("OrderedScan(t)", trace);
+        Contains("KeysetSeek(t)", trace);
+        AreEqual("40,50", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetWithResidualFilter_SeeksAndFilters()
+    {
+        // The keyset OR is one conjunct; an unrelated AND filter stays residual.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, active int not null, primary key (a, b));
+            insert t values (1, 1, 1), (1, 2, 0), (2, 1, 1), (2, 2, 1), (3, 1, 0)
+            """, "select 10 * a + b from t where (a > 1 or (a = 1 and b > 1)) and active = 1 order by a, b");
+        Contains("KeysetSeek(t)", trace);
+        AreEqual("21,22", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetParameterizedCursor_SeeksPastCursor()
+    {
+        // Variables are stable cursor values, the normal pagination shape. The
+        // DECLAREs share the query's batch (Run runs setup separately).
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (1, 1), (1, 2), (2, 1), (2, 2), (3, 1)
+            """, "declare @a int = 2; declare @b int = 1; select 10 * a + b from t where a > @a or (a = @a and b > @b) order by a, b");
+        Contains("KeysetSeek(t)", trace);
+        AreEqual("22,31", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetDifferential_MatchesIndependentFilterAndSort()
+    {
+        // Cross-check the keyset seek against a C# (a, b) > (cursor) filter + sort
+        // over a scrambled non-clustered composite index.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (id int not null primary key, a int not null, b int not null)");
+        Exec(c, "create index ix on t (a, b)");
+        Exec(c, "insert t (id, a, b) select value, (value * 7919) % 23, (value * 104729) % 89 from generate_series(1, 400)");
+
+        var expected = new List<int>();
+        foreach (var (a, b) in ReadPairs(c, "select a, b from t"))
+        {
+            if ((a > 11) || ((a == 11) && (b > 40)))
+                expected.Add((1000 * a) + b);
+        }
+        expected.Sort();
+
+        var actual = new List<int>();
+        foreach (var o in ReadRows(c, "select 1000 * a + b from t where a > 11 or (a = 11 and b > 40) order by a, b"))
+            actual.Add(Convert.ToInt32(o));
+
+        AreEqual(string.Join(",", expected), string.Join(",", actual));
+    }
+
+    private static List<(int A, int B)> ReadPairs(SimulatedDbConnection c, string sql)
+    {
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        using var r = cmd.ExecuteReader();
+        var pairs = new List<(int, int)>();
+        while (r.Read())
+            pairs.Add((Convert.ToInt32(r.GetValue(0)), Convert.ToInt32(r.GetValue(1))));
+        return pairs;
+    }
+
     // ---- declines (keeps the buffered sort), still correct order ----
 
     [TestMethod]
@@ -1283,6 +1401,21 @@ public sealed class IndexSeekTests
             """, "select b from t where a = 1 order by b");
         DoesNotContain("OrderedScan(t)", trace);
         AreEqual(",10,30", Seq(rows));
+    }
+
+    [TestMethod]
+    public void KeysetInconsistentCursorValues_DeclinesKeyset_StillCorrect()
+    {
+        // a > 1 OR (a = 0 AND b > 5) isn't a clean (a, b) > cursor staircase (the
+        // a-value disagrees: 1 vs 0), so the keyset cursor declines — the ordered
+        // scan still runs and the residual OR filters it to the right rows.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, primary key (a, b));
+            insert t values (0, 9), (1, 1), (1, 2), (2, 1)
+            """, "select 10 * a + b from t where a > 1 or (a = 0 and b > 5) order by a, b");
+        DoesNotContain("KeysetSeek(t)", trace);
+        Contains("OrderedScan(t)", trace);
+        AreEqual("9,21", Seq(rows));
     }
 
     [TestMethod]

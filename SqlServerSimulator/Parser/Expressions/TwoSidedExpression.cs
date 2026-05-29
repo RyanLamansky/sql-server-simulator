@@ -43,7 +43,14 @@ internal abstract class TwoSidedExpression : Expression
         if (this.right is not TwoSidedExpression rightTwo || rightTwo.Precedence < this.Precedence)
             return this;
 
+        // Left-rotate so this operator drops below rightTwo's equal-or-looser-
+        // binding one. The rotated-down node (this, now holding the old
+        // rightTwo.left as its right operand) can itself still be mis-grouped when
+        // that operand is another operator chain, so re-adjust it: a single
+        // rotation only fixes the top of a 3+-term right-leaning parse, leaving
+        // e.g. `100*a + 10*b + c` as `(100 * (a + 10*b)) + c` without this step.
         (rightTwo.left, this.right) = (this, rightTwo.left);
+        rightTwo.left = this.AdjustForPrecedence();
         return rightTwo;
     }
 

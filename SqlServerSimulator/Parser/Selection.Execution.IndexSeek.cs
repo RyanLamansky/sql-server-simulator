@@ -570,14 +570,59 @@ internal sealed partial class Selection
         if (hasUpper)
             upperValue = upperValue.CoerceTo(commons[pinnedLength]);
 
+        // Build the composite GetViewBetween bounds. A keyset cursor (a > @x OR
+        // (a = @x AND b > @y) ORDER BY a, b) — only without a pinned prefix or a
+        // same-column range fold, the other ways to bound the leading column —
+        // contributes one exclusive lexicographic bound: the lower for an
+        // ascending order, the upper for a descending one (OrderedSeek reverses
+        // the ascending in-range list into the descending page). Otherwise the
+        // pinned prefix plus the optional single-column range form the bounds.
+        SqlValueKey? lowerKey, upperKey;
+        bool lowerKeyInclusive, upperKeyInclusive;
+        if (pinnedLength == 0 && !hasLower && !hasUpper
+            && TryMatchKeyset(conjuncts, source, fullPrefix, descending, batch, outerResolver, commons, out var cursor))
+        {
+            IndexSeekDiagnostics.Sink?.Add($"KeysetSeek({table.Name})");
+            if (descending)
+                (lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive) = (null, true, cursor, false);
+            else
+                (lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive) = (cursor, false, null, true);
+        }
+        else
+        {
+            lowerKey = ComposeBound(prefixValues, hasLower, lowerValue);
+            lowerKeyInclusive = !hasLower || lowerInclusive;
+            upperKey = ComposeBound(prefixValues, hasUpper, upperValue);
+            upperKeyInclusive = !hasUpper || upperInclusive;
+        }
+
         var cache = seekCaches.GetValue(table.Heap, static _ => new EqualityIndexCache());
         var candidates = cache.OrderedSeek(
             table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons, descending,
-            prefixValues, hasLower, lowerValue, lowerInclusive, hasUpper, upperValue, upperInclusive);
+            lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
 
         IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
         orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, candidates));
         return true;
+    }
+
+    // Builds a GetViewBetween bound: the pinned prefix with the bound value
+    // appended (arity prefix+1) when a bound is present; the prefix alone (arity
+    // prefix) when not but the prefix is non-empty — under the ragged-arity
+    // comparer that sorts equal to every key sharing the prefix, selecting the
+    // whole equality run; null (caller uses Min / Max) when neither prefix nor
+    // bound constrains that side.
+    private static SqlValueKey? ComposeBound(SqlValue[] prefix, bool hasBound, SqlValue bound)
+    {
+        if (hasBound)
+        {
+            var components = new SqlValue[prefix.Length + 1];
+            Array.Copy(prefix, components, prefix.Length);
+            components[prefix.Length] = bound;
+            return new SqlValueKey(components);
+        }
+
+        return prefix.Length > 0 ? new SqlValueKey(prefix) : null;
     }
 
     // This source's columns pinned to a single stable equality value (column =
@@ -696,6 +741,185 @@ internal sealed partial class Selection
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Recognizes a keyset-pagination cursor among the WHERE conjuncts: a single
+    /// disjunction matching the lexicographic staircase
+    /// <c>e0 &gt;op v0 OR (e0 = v0 AND e1 &gt;op v1) OR …</c> over a leading run of
+    /// the order columns <paramref name="orderColumns"/>, where <c>&gt;op</c> is
+    /// <c>&gt;</c> for an ascending order and <c>&lt;</c> for a descending one.
+    /// Returns the composite cursor tuple <c>(v0, …)</c> coerced to the per-column
+    /// promoted types (written into <paramref name="commons"/> for those columns),
+    /// so the ordered seek positions just past it. The matched OR stays in the
+    /// residual WHERE, so the bound is only an accelerator; recognition therefore
+    /// reconciles every term's value for a column (equality and strict factors
+    /// alike) to one agreed value and bails on any mismatch / NULL / non-stable
+    /// operand, guaranteeing the staircase is exactly <c>(e…) &gt;op (v…)</c> with
+    /// no row excluded that the predicate would keep.
+    /// </summary>
+    private static bool TryMatchKeyset(
+        List<BooleanExpression> conjuncts, FromSource source, int[] orderColumns, bool descending,
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, SqlType[] commons, out SqlValueKey cursor)
+    {
+        cursor = default;
+        foreach (var conjunct in conjuncts)
+        {
+            var terms = new List<BooleanExpression>();
+            conjunct.CollectDisjuncts(terms);
+
+            // A single term is just a range / equality (handled elsewhere); the
+            // staircase needs one term per cursor component, so ≥ 2.
+            if (terms.Count >= 2
+                && TryBuildKeysetCursor(terms, source, orderColumns, descending, batch, outerResolver, commons, out cursor))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Validates the staircase structure of one disjunction's terms and, if it
+    // holds over the leading order columns, evaluates + reconciles the cursor
+    // components. Term at depth j must be exactly (e0 = v0 AND … AND e_{j-1} =
+    // v_{j-1} AND e_j >op v_j); depths 0..k-1 must each appear once.
+    private static bool TryBuildKeysetCursor(
+        List<BooleanExpression> terms, FromSource source, int[] orderColumns, bool descending,
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, SqlType[] commons, out SqlValueKey cursor)
+    {
+        cursor = default;
+        var depth = terms.Count;
+        if (depth > orderColumns.Length)
+            return false;
+
+        var valueExprs = new List<Expression>[depth];
+        for (var i = 0; i < depth; i++)
+            valueExprs[i] = [];
+        var coveredDepth = new bool[depth];
+        var wantStrict = descending ? RangeComparison.Less : RangeComparison.Greater;
+
+        foreach (var term in terms)
+        {
+            var factors = new List<BooleanExpression>();
+            term.CollectConjuncts(factors);
+
+            var equalities = new Dictionary<int, Expression>();
+            var strictOrdinal = -1;
+            Expression? strictValue = null;
+            var strictCount = 0;
+            foreach (var factor in factors)
+            {
+                if (factor.TryGetRangeOperands(out var rangeLeft, out var rangeOp, out var rangeRight))
+                {
+                    if (!TryNormalizeRangeBound(source, rangeLeft, rangeOp, rangeRight, out var ord, out var op, out var value) || op != wantStrict)
+                        return false;
+                    (strictOrdinal, strictValue) = (ord, value);
+                    strictCount++;
+                }
+                else if (factor.TryGetEqualityOperands(out var eqLeft, out var eqRight))
+                {
+                    if (TryIdentifyIndexableColumn(source, eqLeft, out var leftOrd) && IsStableValueSide(eqRight, source))
+                        equalities[leftOrd] = eqRight;
+                    else if (TryIdentifyIndexableColumn(source, eqRight, out var rightOrd) && IsStableValueSide(eqLeft, source))
+                        equalities[rightOrd] = eqLeft;
+                    else
+                        return false;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            var j = equalities.Count;
+            if (strictCount != 1 || j >= depth || orderColumns[j] != strictOrdinal || coveredDepth[j])
+                return false;
+
+            // The j equality factors must be exactly e0..e_{j-1}; finding all of
+            // them among `equalities` (which has exactly j entries) proves the set.
+            for (var i = 0; i < j; i++)
+            {
+                if (!equalities.TryGetValue(orderColumns[i], out var equalityValue))
+                    return false;
+                valueExprs[i].Add(equalityValue);
+            }
+
+            valueExprs[j].Add(strictValue!);
+            coveredDepth[j] = true;
+        }
+
+        for (var i = 0; i < depth; i++)
+        {
+            if (!coveredDepth[i])
+                return false;
+        }
+
+        var components = new SqlValue[depth];
+        for (var i = 0; i < depth; i++)
+        {
+            if (!TryReconcileCursorComponent(source, orderColumns[i], valueExprs[i], batch, outerResolver, out commons[i], out components[i]))
+                return false;
+        }
+
+        cursor = new SqlValueKey(components);
+        return true;
+    }
+
+    // Evaluates every value expression pinned to one cursor column, promotes them
+    // to a single common type, and requires they all agree (a clean keyset uses
+    // the same value for a column's equality and strict factors). Declines on a
+    // NULL / non-promotable / disagreeing value — the residual OR then filters the
+    // unaccelerated scan.
+    private static bool TryReconcileCursorComponent(
+        FromSource source, int ordinal, List<Expression> valueExprs,
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, out SqlType common, out SqlValue value)
+    {
+        var columnType = source.StoredSchema[ordinal].Type;
+        common = columnType;
+        value = default;
+
+        var raw = new List<SqlValue>(valueExprs.Count);
+        foreach (var expr in valueExprs)
+        {
+            if (EvaluateBound(expr, columnType, batch, outerResolver, out var evaluated, out var evaluatedCommon) != BoundEval.Value)
+                return false;
+            try
+            {
+                common = SqlType.Promote(common, evaluatedCommon);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+            {
+                return false;
+            }
+
+            raw.Add(evaluated);
+        }
+
+        var have = false;
+        foreach (var v in raw)
+        {
+            SqlValue coerced;
+            try
+            {
+                coerced = v.CoerceTo(common);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+            {
+                return false;
+            }
+
+            if (!have)
+            {
+                (value, have) = (coerced, true);
+            }
+            else if (!value.Equals(coerced))
+            {
+                return false;
+            }
+        }
+
+        return have;
     }
 
     private static bool IsLeadingKeyColumn(HeapTable table, int storageOrdinal)
@@ -1194,23 +1418,25 @@ internal sealed partial class Selection
         }
 
         // Ordered scan for ORDER BY elimination over the composite prefix
-        // <paramref name="ordinals"/> (pinned equality columns followed by the
-        // order columns). The pinned prefix values in <paramref name="prefix"/>
-        // (empty for a pure ORDER BY) select the contiguous equality run; the
-        // optional bounds add a range on the first order column. Rows come out in
-        // ascending key order, or — for an all-DESC order — reversed. Reuses the
-        // same ordered view the equality / range seeks build, inheriting the
-        // incremental no-warm-up maintenance. Reversing the flat ascending list
-        // flips key order (within-key tie order is arbitrary either way, matching
-        // ORDER BY's unspecified tie-break).
+        // <paramref name="ordinals"/>. The optional composite bound keys carve out
+        // a contiguous slice of the ordered view: an equality-pinned prefix sets
+        // lower == upper to the pinned tuple; a same-column range continues that
+        // prefix with one more bounded component; a keyset cursor passes a
+        // lexicographic lower (or, for a descending order, upper) tuple. Rows come
+        // out in ascending key order, or — for an all-DESC order — reversed (the
+        // descending caller passes its cursor as the upper bound, so reversing the
+        // ascending in-range list yields the descending page). Reuses the same
+        // ordered view the equality / range seeks build, inheriting the
+        // incremental no-warm-up maintenance; within-key tie order is arbitrary
+        // either way, matching ORDER BY's unspecified tie-break.
         public List<(int Page, int Slot)> OrderedSeek(
             Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool descending,
-            SqlValue[] prefix, bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
         {
             lock (this.gate)
             {
                 var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
-                var ordered = entry.OrderedCandidates(prefix, hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+                var ordered = entry.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive);
                 if (descending)
                     ordered.Reverse();
                 return ordered;
@@ -1424,66 +1650,49 @@ internal sealed partial class Selection
             }
 
             // Single-column range seek: the in-range keys of a one-column entry,
-            // in ascending order. Thin wrapper over the prefix-aware form with an
-            // empty (whole-entry) prefix.
+            // in ascending order. Thin wrapper that builds arity-1 composite bounds.
             public List<(int Page, int Slot)> RangeCandidates(
                 bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive) =>
-                this.OrderedCandidates([], hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+                this.OrderedCandidates(
+                    hasLower ? new SqlValueKey([lower]) : null, lowerInclusive,
+                    hasUpper ? new SqlValueKey([upper]) : null, upperInclusive);
 
-            // Unions the row addresses whose key starts with <paramref name="prefix"/>
-            // (the pinned equality components, possibly empty) and whose first
-            // post-prefix component lies within the optional bounds, in ascending
-            // key order. With an empty prefix and no bounds this is the whole entry
-            // in order (pure multi-column ORDER BY); with a prefix it's the
-            // contiguous equality run ordered by the trailing key columns
-            // (WHERE a = @x ORDER BY b); bounds add a range on the first post-prefix
-            // column (WHERE a = @x AND b > 5 ORDER BY b). An absent bound is
-            // unbounded on that side; an exclusive bound drops the matching endpoint.
+            // Unions, in ascending key order, the row addresses whose key lies
+            // within the optional composite bounds. Each bound is a (possibly
+            // shorter-than-the-key) tuple compared under the ragged-arity comparer,
+            // so it constrains a leading run of components and an exclusive bound
+            // drops every key sharing that leading run. This one shape serves them
+            // all: a null/null pair is the whole entry in order (pure multi-column
+            // ORDER BY); lower == upper == a pinned tuple is the contiguous equality
+            // run ordered by the trailing key columns (WHERE a = @x ORDER BY b); a
+            // pinned tuple extended by one bounded component is a same-column range
+            // (WHERE a = @x AND b > 5 ORDER BY b); a single exclusive lexicographic
+            // bound is a keyset cursor (WHERE a > @x OR (a = @x AND b > @y)).
             // SortedSet.GetViewBetween gives the in-range keys in O(log n + matches).
             public List<(int Page, int Slot)> OrderedCandidates(
-                SqlValue[] prefix, bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+                SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
             {
                 var sorted = this.EnsureSorted();
                 var result = new List<(int Page, int Slot)>();
                 if (sorted.Count == 0)
                     return result;
 
-                var lowerKey = BoundKey(prefix, hasLower, lower) ?? sorted.Min;
-                var upperKey = BoundKey(prefix, hasUpper, upper) ?? sorted.Max;
+                var lowerKey = lower ?? sorted.Min;
+                var upperKey = upper ?? sorted.Max;
                 if (KeyTupleComparer.Instance.Compare(lowerKey, upperKey) > 0)
                     return result;
 
-                var boundComponent = prefix.Length;
                 foreach (var key in sorted.GetViewBetween(lowerKey, upperKey))
                 {
-                    if (hasLower && !lowerInclusive && key.ComponentAt(boundComponent).CompareTo(lower) == 0)
+                    if (lower is { } lk && !lowerInclusive && KeyTupleComparer.Instance.Compare(key, lk) == 0)
                         continue;
-                    if (hasUpper && !upperInclusive && key.ComponentAt(boundComponent).CompareTo(upper) == 0)
+                    if (upper is { } uk && !upperInclusive && KeyTupleComparer.Instance.Compare(key, uk) == 0)
                         continue;
                     if (this.Buckets.TryGetValue(key, out var bucket))
                         result.AddRange(bucket);
                 }
 
                 return result;
-            }
-
-            // Synthesizes a GetViewBetween bound: the pinned prefix with the bound
-            // value appended (arity prefix+1) when a bound is present; the prefix
-            // alone (arity prefix) when not but the prefix is non-empty — under the
-            // ragged-arity comparer that sorts equal to every key sharing the
-            // prefix, selecting the whole equality run; null (caller uses Min / Max)
-            // when neither prefix nor bound constrains that side.
-            private static SqlValueKey? BoundKey(SqlValue[] prefix, bool hasBound, SqlValue bound)
-            {
-                if (hasBound)
-                {
-                    var components = new SqlValue[prefix.Length + 1];
-                    Array.Copy(prefix, components, prefix.Length);
-                    components[prefix.Length] = bound;
-                    return new SqlValueKey(components);
-                }
-
-                return prefix.Length > 0 ? new SqlValueKey(prefix) : null;
             }
         }
     }
