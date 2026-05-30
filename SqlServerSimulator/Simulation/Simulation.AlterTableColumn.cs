@@ -47,7 +47,7 @@ partial class Simulation
         var heapColumns = new List<HeapColumn?>();
         var explicitNull = new List<bool>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
-        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
+        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
 

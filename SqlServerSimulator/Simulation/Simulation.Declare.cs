@@ -303,7 +303,7 @@ partial class Simulation
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
-        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
+        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
 
         if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed))
             throw SimulatedSqlException.SyntaxErrorNear(context);

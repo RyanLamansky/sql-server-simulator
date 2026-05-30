@@ -114,6 +114,46 @@ public sealed class CreateIndexTests
             select has_filter from sys.indexes where name = 'ix_filter'
             """)!);
 
+    // sys.indexes.filter_definition normalization — every expected string is
+    // verbatim from SQL Server 2025: columns bracketed, numerics parenthesized
+    // (literal scale preserved), strings quoted (N-prefixed for nvarchar
+    // literals), operators space-free, AND / IS [NOT] NULL / IN uppercase-spaced.
+    [TestMethod]
+    [DataRow("status = 1", "([status]=(1))")]
+    [DataRow("status <> 1", "([status]<>(1))")]
+    [DataRow("status >= 5 and status <= 10", "([status]>=(5) AND [status]<=(10))")]
+    [DataRow("code is not null", "([code] IS NOT NULL)")]
+    [DataRow("code is null", "([code] IS NULL)")]
+    [DataRow("status = 1 and code is not null", "([status]=(1) AND [code] IS NOT NULL)")]
+    [DataRow("name = 'abc'", "([name]='abc')")]
+    [DataRow("uname = N'abc'", "([uname]=N'abc')")]
+    [DataRow("x = -1", "([x]=(-1))")]
+    [DataRow("status in (1, 2, 3)", "([status] IN ((1), (2), (3)))")]
+    [DataRow("nm = 0.10", "([nm]=(0.10))")]
+    public void CreateIndex_FilterDefinition_NormalizedLikeSqlServer(string filter, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (id int not null primary key, status int, code int,
+                            name varchar(50), uname nvarchar(50), x int, nm decimal(10, 2));
+            create unique index ix on t(id) where {filter};
+            select filter_definition from sys.indexes where name = 'ix'
+            """));
+
+    // A predicate outside the renderable filtered grammar (OR — which a real
+    // server rejects at CREATE, but the simulator's looser parser accepts):
+    // has_filter stays set, filter_definition degrades to NULL rather than
+    // emitting a non-canonical rendering.
+    [TestMethod]
+    public void CreateIndex_FilterDefinition_UnrenderablePredicate_IsNull()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, status int);
+            create unique index ix on t(id) where status = 1 or status = 2
+            """);
+        IsTrue((bool)sim.ExecuteScalar("select has_filter from sys.indexes where name = 'ix'")!);
+        AreEqual(0, sim.ExecuteScalar("select count(filter_definition) from sys.indexes where name = 'ix'"));
+    }
+
     [TestMethod]
     public void CreateIndex_WithOptionsClause_Accepted()
         => AreEqual(1, new Simulation().ExecuteScalar("""

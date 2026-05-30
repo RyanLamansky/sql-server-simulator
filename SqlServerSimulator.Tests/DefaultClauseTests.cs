@@ -169,4 +169,26 @@ public sealed class DefaultClauseTests
         Assert.IsTrue(reader.Read());
         Assert.AreNotEqual(Guid.Empty, reader.GetGuid(0));
     }
+
+    // sys.default_constraints.definition holds the default expression's original
+    // syntax, wrapped in one paren pair (the simulator doesn't re-normalize to
+    // SQL Server's canonical parenthesization — getdate() happens to coincide).
+    [TestMethod]
+    [DataRow("qty int default 0", "(0)")]
+    [DataRow("created datetime default getdate()", "(getdate())")]
+    [DataRow("code int default (1 + 2)", "((1 + 2))")]
+    [DataRow("nm varchar(5) default 'x'", "('x')")]
+    public void DefaultConstraint_Definition_HoldsOriginalSyntax(string column, string expected)
+        => Assert.AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (id int not null primary key, {column});
+            select definition from sys.default_constraints
+            """));
+
+    [TestMethod]
+    public void DefaultConstraint_AlterAddDefault_Definition_HoldsOriginalSyntax()
+        => Assert.AreEqual("(-1)", new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, b int);
+            alter table t add constraint df default (-1) for b;
+            select definition from sys.default_constraints where name = 'df'
+            """));
 }

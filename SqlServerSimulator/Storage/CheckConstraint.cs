@@ -56,10 +56,12 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     public bool IsDisabled;
 
     /// <summary>
-    /// Round-trippable text form of <see cref="Predicate"/> for
-    /// <c>sys.check_constraints.definition</c>. Captured from the parser's
-    /// source text at parse time (canonical form `([col]&gt;(0))`) — real
-    /// SQL Server reformats with the same bracket / paren wrapping.
+    /// Text form of <see cref="Predicate"/> for
+    /// <c>sys.check_constraints.definition</c> — the predicate's original source
+    /// syntax wrapped in one paren pair, captured at CREATE / ALTER time via
+    /// <c>ParserContext.SourceTextFrom</c>. Deliberately not re-normalized into
+    /// SQL Server's canonical <c>([col]&gt;(0))</c> form (see the alter-table doc's
+    /// Definition columns section).
     /// </summary>
     public string? Definition;
 }

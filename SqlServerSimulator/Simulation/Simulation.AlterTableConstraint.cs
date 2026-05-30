@@ -76,9 +76,11 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        var predicateStart = context.Token!.StartIndex;
         var predicate = BooleanExpression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var definition = $"({context.SourceTextFrom(predicateStart)})";
         context.MoveNextOptional();
 
         if (context.Batch.IsSkipping)
@@ -91,6 +93,7 @@ partial class Simulation
         {
             IsSystemNamed = explicitName is null,
             IsNotTrusted = withNoCheck,
+            Definition = definition,
         };
         if (!withNoCheck)
             ValidateExistingRowsForCheckConstraint(context, table, constraint);
@@ -296,6 +299,7 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        var expressionStart = context.Token!.StartIndex;
         // Mark the expression body as a DEFAULT clause so NEWSEQUENTIALID()'s
         // grammar gate accepts it (parity with the inline-DEFAULT path in
         // ParseOneColumnIntoLists). The flag is the only thing distinguishing
@@ -306,6 +310,7 @@ partial class Simulation
         finally { context.InDefaultClause = false; }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var definition = $"({context.SourceTextFrom(expressionStart)})";
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not Name columnNameToken)
@@ -341,7 +346,7 @@ partial class Simulation
             expression,
             context.CurrentDatabase.AllocateObjectId(),
             isSystemNamed: explicitName is null,
-            definition: null);
+            definition: definition);
         return true;
     }
 

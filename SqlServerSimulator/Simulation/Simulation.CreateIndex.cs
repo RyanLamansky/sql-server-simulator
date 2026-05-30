@@ -124,9 +124,11 @@ partial class Simulation
         {
             context.MoveNextRequired();
             filter = BooleanExpression.Parse(context);
-            // filter_definition text capture isn't supported by the parser
-            // surface — the catalog view reports NULL for filtered
-            // indexes' definition until ParserContext gains span tracking.
+            // Render the parsed predicate into SQL Server's normalized
+            // filter_definition form ([col]=(1) AND …) for sys.indexes. Null
+            // when the predicate falls outside the renderable filtered grammar
+            // — exactly the shapes a real server rejects in a filtered index.
+            filterDefinition = filter.RenderFilterDefinition(context.Batch);
         }
 
         // WITH (option = value, …) followed by an optional ON <filegroup>.

@@ -141,16 +141,22 @@ First hit wins (collation-insensitive). Probe-confirmed shapes:
 
 Three new views ship with this bundle:
 
-- **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (1-based ordinal for inline column-level; `0` for table-level), and `definition` (currently NULL — see fidelity gaps).
+- **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (1-based ordinal for inline column-level; `0` for table-level), and `definition` (the predicate's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
 - **`sys.key_constraints`** — one row per PRIMARY KEY / UNIQUE constraint, with `type` = `PK` / `UQ`, `type_desc` = `PRIMARY_KEY_CONSTRAINT` / `UNIQUE_CONSTRAINT`, and `is_system_named` inferred from the auto-name prefix.
-- **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id` and `is_system_named`.
+- **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id`, `is_system_named`, and `definition` (the default expression's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
 
 `sys.foreign_keys.is_not_trusted` / `is_disabled` now read from `ForeignKey.IsNotTrusted` / `IsDisabled`; `sys.check_constraints.is_not_trusted` / `is_disabled` read from the corresponding `CheckConstraint` flags.
+
+## Definition columns
+
+`sys.check_constraints.definition` and `sys.default_constraints.definition` hold the **original source syntax** of the predicate / default expression, captured at CREATE / ALTER time and wrapped in one paren pair — *not* re-normalized into SQL Server's canonical serialization. The capture slices the command text from the expression's first-token `StartIndex` to the lookahead token (`ParserContext.SourceTextFrom`, the same source-span mechanism `OBJECT_DEFINITION` uses for module bodies), so `CHECK (a > 0 and b < 10)` stores `(a > 0 and b < 10)` and `DEFAULT getdate()` stores `(getdate())`.
+
+This **deliberately diverges** from real SQL Server, which re-renders into a normalized canonical form (`([a]>(0) AND [b]<(10))`, `IN` desugared to reversed OR-of-equalities, `BETWEEN` to AND, multiplicative vs additive parenthesization rules, etc.). Matching that byte-for-byte across the full CHECK / DEFAULT expression grammar is a rabbit hole (and needs a per-function canonical-name registry), so the simulator retains the user's syntax instead — readable, round-trip-stable for the simulator's own re-parse, and sufficient for the apps that read these columns. (The narrower `sys.indexes.filter_definition` *is* byte-exact normalized — its filtered-predicate grammar is small enough to render canonically; see [`indexes.md`](indexes.md#filtered-index-filter_definition). The two columns intentionally take different approaches: small fixed grammar → canonical, open-ended grammar → original syntax.) A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)` → `((0))`), matching the user's text plus the convention's outer pair.
 
 ## Fidelity gaps
 
 - **Single primary error instead of error pair** — real SQL Server emits Msg X + trailing Msg 1750 / 3727 (`"Could not create constraint or index"` / `"Could not drop constraint"`); the simulator emits only Msg X. Test code asserting on the primary error number works unchanged.
-- **`sys.check_constraints.definition` / `sys.default_constraints.definition` return NULL** — the simulator stores parsed Expression trees, not source text. Real SQL Server reformats predicates as e.g. `([qty]>(0))`. Adding source-text capture is straightforward (slice the parser's source between balanced parens) but no probed application reads these columns.
+- **`definition` columns hold original syntax, not SQL Server's canonical form** — see [Definition columns](#definition-columns). A schema-diff tool comparing the simulator's `([a]>(0))`-equivalent against a live server's normalized text will see a cosmetic difference even when the predicate is identical.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named. Custom names matching the prefix would report `is_system_named = true` incorrectly. Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
 - **Multi-constraint ADD in one statement** — `ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY (id), CONSTRAINT fk1 FOREIGN KEY (p_id) REFERENCES p(id)` raises `NotSupportedException`. Real SQL Server supports it; EF Migrations doesn't emit it.
 - **`ALTER TABLE … DROP CONSTRAINT name1, , name2`** (empty middle element) — accepted by real SQL Server; the simulator's grammar rejects with Msg 102.

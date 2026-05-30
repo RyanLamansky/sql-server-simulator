@@ -178,6 +178,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public (int Index, Token? Token) SaveCheckpoint() => (this.index, this.Token);
 
     /// <summary>
+    /// Raw source text of the command from <paramref name="startIndex"/> up to the
+    /// current (lookahead) <see cref="Token"/>, trailing whitespace trimmed —
+    /// capturing an expression's original syntax for catalog <c>definition</c>
+    /// columns (CHECK / DEFAULT). Pass the <see cref="Token.StartIndex"/> of the
+    /// expression's first token, snapshotted before parsing; call once the
+    /// expression parse has positioned <see cref="Token"/> on the following token
+    /// (or run off the end, where the slice extends to the command's end).
+    /// </summary>
+    public string SourceTextFrom(int startIndex) =>
+        this.commandText[startIndex..(this.Token?.StartIndex ?? this.commandText.Length)].TrimEnd();
+
+    /// <summary>
     /// Restores a checkpoint captured by <see cref="SaveCheckpoint"/>.
     /// </summary>
     public void RestoreCheckpoint((int Index, Token? Token) checkpoint)

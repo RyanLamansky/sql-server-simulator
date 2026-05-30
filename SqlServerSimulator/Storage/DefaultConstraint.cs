@@ -39,10 +39,12 @@ internal sealed class DefaultConstraint(string name, Expression expression, int 
     public readonly bool IsSystemNamed = isSystemNamed;
 
     /// <summary>
-    /// Round-trippable text form of <see cref="Expression"/> for
-    /// <c>sys.default_constraints.definition</c> (canonical form like
-    /// <c>((0))</c> or <c>('abc')</c>). Null when the expression's source
-    /// text wasn't captured.
+    /// Text form of <see cref="Expression"/> for
+    /// <c>sys.default_constraints.definition</c> — the default expression's
+    /// original source syntax wrapped in one paren pair, captured at CREATE /
+    /// ALTER time via <c>ParserContext.SourceTextFrom</c>. Deliberately not
+    /// re-normalized into SQL Server's canonical form (see the alter-table doc's
+    /// Definition columns section). Null when no default was captured.
     /// </summary>
     public readonly string? Definition = definition;
 }

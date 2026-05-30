@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.Text;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -27,6 +30,98 @@ internal abstract class BooleanExpression
 {
     private protected BooleanExpression()
     {
+    }
+
+    /// <summary>
+    /// Renders this predicate into the normalized form SQL Server stores in
+    /// <c>sys.indexes.filter_definition</c> for a filtered index — columns
+    /// bracketed, numeric constants parenthesized, strings quoted, operators
+    /// space-free (<c>[status]=(1)</c>), and <c>AND</c> / <c>IS [NOT] NULL</c> /
+    /// <c>IN</c> uppercase-spaced — or returns <c>null</c> when the predicate
+    /// falls outside the renderable filtered-predicate grammar (an <c>AND</c> of
+    /// comparison / <c>IS [NOT] NULL</c> / <c>IN</c> over <c>column &lt;op&gt;
+    /// constant</c>). Those excluded shapes — <c>OR</c>, <c>NOT</c>, <c>BETWEEN</c>,
+    /// function calls — are exactly the ones real SQL Server rejects in a filtered
+    /// index, so reporting <c>null</c> for them never hides a definition a real
+    /// server would have stored. The whole predicate is wrapped in one outer pair
+    /// of parens.
+    /// </summary>
+    internal string? RenderFilterDefinition(BatchContext batch)
+    {
+        var sb = new StringBuilder("(");
+        if (!this.TryAppendFilterDefinition(sb, batch))
+            return null;
+        _ = sb.Append(')');
+        return sb.ToString();
+    }
+
+    // Appends this predicate's canonical fragment to `sb`, or returns false when
+    // the node isn't part of the renderable filtered-predicate grammar. Default:
+    // not renderable (OR / NOT / DISTINCT FROM / EXISTS / BETWEEN / quantified).
+    private protected virtual bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch) => false;
+
+    // Renders one comparison / IN operand: a single-part column reference as
+    // [name], or an otherwise constant-foldable side as its literal. Returns
+    // false for anything that isn't a bare column or a constant.
+    private static bool TryAppendFilterOperand(StringBuilder sb, Expression operand, BatchContext batch)
+    {
+        while (operand is Parenthesized paren)
+            operand = paren.Wrapped;
+
+        if (operand is Reference reference && reference.ReferencedName.Count == 1)
+        {
+            _ = sb.Append('[').Append(reference.ReferencedName.Leaf).Append(']');
+            return true;
+        }
+
+        SqlValue value;
+        try
+        {
+            value = operand.Run(new RuntimeContext(static _ => throw new NotSupportedException(), batch));
+        }
+        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+        {
+            return false;
+        }
+
+        if (FormatFilterLiteral(value) is not { } literal)
+            return false;
+        _ = sb.Append(literal);
+        return true;
+    }
+
+    // Formats a constant as SQL Server renders it inside filter_definition:
+    // strings quoted (N-prefixed when the literal is national / Unicode), numerics
+    // parenthesized in invariant culture preserving the literal's scale. Returns
+    // null for a NULL literal or a type with no canonical filter rendering
+    // (dates / binary / guid — rare in a filtered predicate), bailing the whole
+    // render to a null definition.
+    private static string? FormatFilterLiteral(SqlValue value)
+    {
+        if (value.IsNull)
+            return null;
+
+        var type = value.Type;
+        if (type.Category == SqlTypeCategory.String)
+        {
+            var prefix = type is NVarcharSqlType or NCharSqlType ? "N" : string.Empty;
+            return $"{prefix}'{value.AsString.Replace("'", "''", StringComparison.Ordinal)}'";
+        }
+
+        var text = type switch
+        {
+            _ when type == SqlType.Int32 => value.AsInt32.ToString(CultureInfo.InvariantCulture),
+            _ when type == SqlType.BigInt => value.AsInt64.ToString(CultureInfo.InvariantCulture),
+            _ when type == SqlType.SmallInt => value.AsInt16.ToString(CultureInfo.InvariantCulture),
+            _ when type == SqlType.TinyInt => value.AsByte.ToString(CultureInfo.InvariantCulture),
+            _ when type == SqlType.Bit => value.AsBoolean ? "1" : "0",
+            _ when type == SqlType.Money || type == SqlType.SmallMoney => value.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+            _ when type == SqlType.Float => value.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
+            _ when type == SqlType.Real => value.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
+            DecimalSqlType d => value.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
+            _ => null,
+        };
+        return text is null ? null : $"({text})";
     }
 
     /// <summary>
@@ -601,6 +696,14 @@ internal abstract class BooleanExpression
             left.CollectConjuncts(sink);
             right.CollectConjuncts(sink);
         }
+
+        private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
+        {
+            if (!left.TryAppendFilterDefinition(sb, batch))
+                return false;
+            _ = sb.Append(" AND ");
+            return right.TryAppendFilterDefinition(sb, batch);
+        }
     }
 
     /// <summary>
@@ -685,6 +788,14 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
+
+        private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
+        {
+            if (!TryAppendFilterOperand(sb, source, batch))
+                return false;
+            _ = sb.Append(negated ? " IS NOT NULL" : " IS NULL");
+            return true;
+        }
     }
 
     /// <summary>
@@ -764,6 +875,24 @@ internal abstract class BooleanExpression
             visitor(source);
             foreach (var candidate in candidates)
                 visitor(candidate);
+        }
+
+        private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
+        {
+            // NOT IN isn't part of the filtered-index grammar (real SQL Server
+            // rejects it), so only the positive form renders.
+            if (negated || candidates.Length == 0 || !TryAppendFilterOperand(sb, source, batch))
+                return false;
+            _ = sb.Append(" IN (");
+            for (var i = 0; i < candidates.Length; i++)
+            {
+                if (i > 0)
+                    _ = sb.Append(", ");
+                if (!TryAppendFilterOperand(sb, candidates[i], batch))
+                    return false;
+            }
+            _ = sb.Append(')');
+            return true;
         }
 
         // `source IN (c1, c2, ...)` is logically `source=c1 OR source=c2 OR ...`,
@@ -1029,6 +1158,19 @@ internal abstract class BooleanExpression
             visitor(this.left);
             visitor(this.right);
         }
+
+        // The space-free operator token this comparison renders into a filtered-
+        // index definition (=, <>, >, >=, <, <=), or null for shapes with no
+        // canonical filter rendering (LIKE) — those bail the whole render.
+        protected virtual string? FilterOperator => null;
+
+        private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
+        {
+            if (this.FilterOperator is not { } op || !TryAppendFilterOperand(sb, this.left, batch))
+                return false;
+            _ = sb.Append(op);
+            return TryAppendFilterOperand(sb, this.right, batch);
+        }
     }
 
     /// <summary>
@@ -1078,6 +1220,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
 
+        protected override string? FilterOperator => "=";
+
         internal override bool TryGetEqualityOperands([NotNullWhen(true)] out Expression? l, [NotNullWhen(true)] out Expression? r)
         {
             l = left;
@@ -1092,6 +1236,8 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "not equal to", static (l, r) => !l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <> {right.DebugDisplay()}";
+
+        protected override string? FilterOperator => "<>";
     }
 
     private sealed class GreaterThanExpression(Expression left, Expression right) : CompareExpression(left, right)
@@ -1100,6 +1246,8 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "greater than", static (l, r) => l.CompareTo(r) > 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
+
+        protected override string? FilterOperator => ">";
 
         internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
         {
@@ -1115,6 +1263,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} >= {right.DebugDisplay()}";
 
+        protected override string? FilterOperator => ">=";
+
         internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
         {
             (l, op, r) = (left, RangeComparison.GreaterOrEqual, right);
@@ -1129,6 +1279,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
 
+        protected override string? FilterOperator => "<";
+
         internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
         {
             (l, op, r) = (left, RangeComparison.Less, right);
@@ -1142,6 +1294,8 @@ internal abstract class BooleanExpression
             ComparePromoted(left, right, runtime, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <= {right.DebugDisplay()}";
+
+        protected override string? FilterOperator => "<=";
 
         internal override bool TryGetRangeOperands([NotNullWhen(true)] out Expression? l, out RangeComparison op, [NotNullWhen(true)] out Expression? r)
         {

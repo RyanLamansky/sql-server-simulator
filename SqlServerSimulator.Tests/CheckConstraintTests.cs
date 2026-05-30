@@ -296,4 +296,28 @@ public sealed class CheckConstraintTests
             """));
         Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
     }
+
+    // sys.check_constraints.definition holds the predicate's original syntax,
+    // wrapped in one paren pair (the simulator doesn't re-normalize to SQL
+    // Server's canonical [col]=(1)-style form). Covers inline column-level,
+    // table-level, and the broad grammar (OR / IN / functions) that the
+    // filtered-index renderer deliberately doesn't touch.
+    [TestMethod]
+    [DataRow("a int check (a > 0)", "(a > 0)")]
+    [DataRow("a int, b int, check (a > 0 and b < 10)", "(a > 0 and b < 10)")]
+    [DataRow("s varchar(2) check (s in ('A', 'B'))", "(s in ('A', 'B'))")]
+    [DataRow("n varchar(9) check (len(n) > 0 or n is null)", "(len(n) > 0 or n is null)")]
+    public void CheckConstraint_Definition_HoldsOriginalSyntax(string columns, string expected)
+        => Assert.AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (id int not null primary key, {columns});
+            select definition from sys.check_constraints
+            """));
+
+    [TestMethod]
+    public void CheckConstraint_AlterAddCheck_Definition_HoldsOriginalSyntax()
+        => Assert.AreEqual("(b >= a)", new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, a int, b int);
+            alter table t add constraint ck check (b >= a);
+            select definition from sys.check_constraints where name = 'ck'
+            """));
 }

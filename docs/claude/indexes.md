@@ -102,7 +102,7 @@ Phase B (`WHEN NOT MATCHED BY TARGET` → insert unmatched source rows) is uncha
 - `KeyColumns[]` — each entry pairs a storage ordinal with the ASC / DESC flag.
 - `IncludedColumns[]` — storage ordinals for INCLUDE columns; catalog-only.
 - `Filter` (BooleanExpression?) — only honored on UNIQUE indexes.
-- `FilterDefinition` (string?) — text form for `sys.indexes.filter_definition`. Always NULL today (see [Fidelity gaps](#fidelity-gaps)).
+- `FilterDefinition` (string?) — normalized predicate text for `sys.indexes.filter_definition`, rendered at CREATE INDEX time by `BooleanExpression.RenderFilterDefinition` (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)).
 
 PRIMARY KEY / UNIQUE constraints stay in `HeapTable.KeyConstraints`; sys.indexes synthesizes rows for them alongside the user indexes.
 
@@ -132,6 +132,18 @@ Filter evaluation reuses the same `EvaluateIndexFilter` helper — a closure-bas
 ### Filter-aware uniqueness — concrete semantic
 
 A filtered UNIQUE index only constrains rows where `filter` evaluates `true`. Rows where the filter is `false` or `UNKNOWN` (any NULL operand in the predicate, by three-valued logic) bypass the check entirely. This is the standard SQL Server behavior — load-bearing for application patterns like "unique among non-archived rows" or "unique when status is active."
+
+### Filtered-index `filter_definition`
+
+At CREATE INDEX time the parsed `WHERE` predicate is rendered into SQL Server's normalized `sys.indexes.filter_definition` form by `BooleanExpression.RenderFilterDefinition(batch)` (the column was always wired to `Index.FilterDefinition`; before, that field was never populated). The renderer is a `private protected virtual TryAppendFilterDefinition` on `BooleanExpression`, overridden on the renderable filtered-predicate grammar only — `AND`, the six comparisons (`= <> > >= < <=` via a `FilterOperator` token), `IS [NOT] NULL`, and positive `IN`. The canonical form (probe-confirmed verbatim against SQL Server 2025):
+
+- whole predicate wrapped in one outer paren pair; columns bracketed (`[status]`); comparison operators space-free (`[status]=(1)`); `AND` / `IS [NOT] NULL` / `IN` uppercase-spaced;
+- numeric constants parenthesized in invariant culture preserving the **literal's** scale (`amount > 10.5` → `([amount]>(10.5))`, `nm = 0.10` → `([nm]=(0.10))` — the literal's own type, not the column's);
+- string constants quoted, N-prefixed when the literal is national (`uname = N'abc'` → `([uname]=N'abc')`);
+- a negative literal folds correctly — the parser builds `-1` as `0 - 1`, and operand rendering constant-folds the value side via `Run`, so `x = -1` → `([x]=(-1))`;
+- `IN` renders each element parenthesized inside the list (`status in (1,2,3)` → `([status] IN ((1), (2), (3)))`).
+
+Any node outside that grammar returns `false`, so `RenderFilterDefinition` yields NULL and the catalog reports NULL with `has_filter` still set — those shapes (`OR`, `NOT`, `BETWEEN`, function calls) are exactly the ones a real server rejects at CREATE for a filtered index, so a NULL there never hides a definition a real server would have stored. (Two rare literal-typing corners still diverge — see [Fidelity gaps](#fidelity-gaps).)
 
 ## Existing-data validation at CREATE
 
@@ -181,7 +193,7 @@ EF Core's SqlServer provider emits `CREATE INDEX` (and `CREATE UNIQUE INDEX` for
 
 ## Fidelity gaps
 
-- **`filter_definition` always NULL**: real SQL Server stores the parenthesized predicate text. The simulator's `BooleanExpression.Parse` consumes its source text without retaining the span, so the column reports NULL even when `has_filter` is true. Round-trip migrations that diff this column will see a spurious change.
+- **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot. Both are rare in filtered predicates. A predicate the simulator accepts but can't render canonically (an `OR`, `NOT`, `BETWEEN`, or function call — all of which a real server *rejects* at CREATE for a filtered index) reports `filter_definition` NULL with `has_filter` still set.
 - **CLUSTERED keyword is decorative**: `CREATE CLUSTERED INDEX` is accepted but the resulting index reports `type_desc = NONCLUSTERED` in `sys.indexes`. Real SQL Server tracks one clustered index per table (replacing the heap); the simulator has no row-ordered storage to differentiate.
 - **Multiple clustered indexes**: real SQL Server raises Msg 1902 (`Cannot create more than one clustered index on table`). The simulator silently accepts a second CLUSTERED INDEX since clustering is decorative.
 - **WITH options ignored**: `FILLFACTOR`, `IGNORE_DUP_KEY`, `ONLINE`, `MAXDOP`, etc. all parse but have no behavior. `IGNORE_DUP_KEY = ON` notably should downgrade Msg 2601 to a warning + skip — not modeled.

@@ -50,7 +50,7 @@ internal sealed class TableType(
     DateTime createDate,
     HeapColumn[] columns,
     (KeyConstraintKind Kind, string? Name, int[] FullOrdinals)[] pendingKeys,
-    (string? Name, BooleanExpression Predicate, string? InlineColumn)[] pendingChecks)
+    (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
     public Schema Schema = schema;
@@ -86,7 +86,7 @@ internal sealed class TableType(
     /// Pending CHECK specs captured at CREATE TYPE time. Resolved per clone
     /// (same rationale as <see cref="PendingKeys"/>).
     /// </summary>
-    public readonly (string? Name, BooleanExpression Predicate, string? InlineColumn)[] PendingChecks = pendingChecks;
+    public readonly (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] PendingChecks = pendingChecks;
 
     /// <summary>
     /// Materializes a fresh <see cref="HeapTable"/> for one <c>DECLARE @t

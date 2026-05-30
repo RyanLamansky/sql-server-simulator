@@ -73,7 +73,7 @@ partial class Simulation
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
-        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn)>();
+        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
         if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys))
@@ -493,7 +493,7 @@ partial class Simulation
         bool isTableType,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
         List<PendingForeignKey>? pendingForeignKeys = null)
@@ -614,7 +614,7 @@ partial class Simulation
         List<HeapColumn?> heapColumns,
         List<bool> explicitNull,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod,
         List<PendingForeignKey>? pendingForeignKeys,
@@ -710,6 +710,7 @@ partial class Simulation
         IdentityState? identity = null;
         bool? nullable = null;
         Expression? defaultExpression = null;
+        string? defaultDefinition = null;
         var generatedAs = GeneratedAlwaysAsRow.None;
         var isHidden = false;
         string? columnCollation = null;
@@ -778,9 +779,11 @@ partial class Simulation
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
                     context.MoveNextRequired();
+                    var defaultStart = context.Token.StartIndex;
                     context.InDefaultClause = true;
                     try { defaultExpression = Expression.Parse(context); }
                     finally { context.InDefaultClause = false; }
+                    defaultDefinition = $"({context.SourceTextFrom(defaultStart)})";
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null && inlineFkName is null:
                     if (isTableType)
@@ -793,7 +796,8 @@ partial class Simulation
                     switch (context.Token)
                     {
                         case ReservedKeyword { Keyword: Keyword.Check }:
-                            pendingChecks.Add((namedConstraint.Value, ParseInlineCheckPredicate(context), columnName.Value));
+                            var namedCheck = ParseInlineCheckPredicate(context);
+                            pendingChecks.Add((namedConstraint.Value, namedCheck.Predicate, columnName.Value, namedCheck.Definition));
                             continue;
                         case ReservedKeyword { Keyword: Keyword.References }:
                             inlineFkName = namedConstraint.Value;
@@ -809,7 +813,8 @@ partial class Simulation
                     inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Check }:
-                    pendingChecks.Add((null, ParseInlineCheckPredicate(context), columnName.Value));
+                    var inlineCheck = ParseInlineCheckPredicate(context);
+                    pendingChecks.Add((null, inlineCheck.Predicate, columnName.Value, inlineCheck.Definition));
                     continue;
                 case ReservedKeyword { Keyword: Keyword.References } referencesKw when isTableVariable || isTableType:
                     throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
@@ -893,7 +898,7 @@ partial class Simulation
                 defaultExpression,
                 context.CurrentDatabase.AllocateObjectId(),
                 isSystemNamed: true,
-                definition: null);
+                definition: defaultDefinition);
         }
         heapColumns.Add(newColumn);
         explicitNull.Add(nullable == true);
@@ -975,19 +980,25 @@ partial class Simulation
     /// the token on the next un-consumed token (typically a comma or the
     /// column-list's closing paren).
     /// </summary>
-    private static BooleanExpression ParseInlineCheckPredicate(ParserContext context)
+    private static (BooleanExpression Predicate, string Definition) ParseInlineCheckPredicate(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        var predicateStart = context.Token!.StartIndex;
         var predicate = BooleanExpression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // Token sits on the closing `)`, so capture the original predicate text
+        // up to it (sys.check_constraints.definition holds the user's syntax,
+        // wrapped in one paren pair — the simulator doesn't re-normalize to SQL
+        // Server's canonical form).
+        var definition = $"({context.SourceTextFrom(predicateStart)})";
         // Optional advance: CREATE TABLE always has a `)` or constraint after
         // a CHECK predicate; ALTER TABLE ADD COLUMN's inline CHECK may end
         // the statement.
         context.MoveNextOptional();
-        return predicate;
+        return (predicate, definition);
     }
 
     /// <summary>
@@ -1057,7 +1068,7 @@ partial class Simulation
 
     internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
-        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         Database database)
     {
         if (pendingChecks.Count == 0)
@@ -1068,7 +1079,10 @@ partial class Simulation
         {
             var pending = pendingChecks[c];
             var name = pending.Name ?? AutoCheckName(tableName, pending.InlineColumn, c);
-            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId());
+            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId())
+            {
+                Definition = pending.Definition,
+            };
         }
         return resolved;
     }
@@ -1180,7 +1194,7 @@ partial class Simulation
         ParserContext context,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
         List<PendingForeignKey>? pendingForeignKeys = null)
     {
@@ -1196,7 +1210,8 @@ partial class Simulation
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Check }:
-                pendingChecks.Add((constraintName, ParseInlineCheckPredicate(context), null));
+                var tableCheck = ParseInlineCheckPredicate(context);
+                pendingChecks.Add((constraintName, tableCheck.Predicate, null, tableCheck.Definition));
                 return;
             case ReservedKeyword { Keyword: Keyword.Foreign }:
                 ParseTableLevelForeignKey(context, constraintName, heapColumns, pendingForeignKeys);
