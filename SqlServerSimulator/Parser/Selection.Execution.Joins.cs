@@ -455,6 +455,66 @@ internal sealed partial class Selection
     private static readonly JoinSpec[] NoJoins = [];
 
     /// <summary>
+    /// Rewrites a comma-join / explicit <c>CROSS JOIN</c> whose WHERE carries an
+    /// equi-join predicate into an <c>INNER JOIN</c> with that predicate as its
+    /// <c>ON</c>, so the equi-join hash / per-outer-seek machinery (which only
+    /// fires for INNER / LEFT / RIGHT / FULL — a <see cref="JoinKind.Cross"/>
+    /// always falls to the O(L×R) nested loop) accelerates it.
+    /// <c>FROM a, b WHERE a.k = b.k</c> is the textbook equivalent of
+    /// <c>a INNER JOIN b ON a.k = b.k</c>.
+    /// <para>
+    /// Run once at parse time (the join shape is value-independent), so the
+    /// rewritten array is captured in the cached plan. Every pulled conjunct
+    /// <b>stays</b> in <paramref name="excluders"/> as a residual filter — never
+    /// removed — so flipping a Cross level to Inner can only drop rows the WHERE
+    /// would drop anyway: the post-WHERE result is provably unchanged whatever
+    /// outer joins sit elsewhere in the chain. Only Cross levels with no existing
+    /// <c>ON</c> and a re-enumerable (non-lateral) right side are touched; a level
+    /// that already carries an <c>ON</c> is left alone. Returns the same array
+    /// when nothing rewrites — the common single-source / explicit-join case.
+    /// </para>
+    /// </summary>
+    internal static JoinSpec[] RewriteCommaJoinsToEquiJoins(
+        FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> excluders)
+    {
+        if (sources.Length < 2 || excluders.Count == 0)
+            return joins;
+
+        List<BooleanExpression>? conjuncts = null;
+        JoinSpec[]? rewritten = null;
+        for (var level = 1; level < sources.Length; level++)
+        {
+            var join = joins[level - 1];
+            // Only a Cross join with no ON is a candidate; a lateral / derived
+            // right side has no re-enumerable Rows to hash or seek, so leave it
+            // on the nested-loop path.
+            if (join.Kind != JoinKind.Cross || join.OnPredicate is not null || sources[level].LateralPlan is not null)
+                continue;
+
+            if (conjuncts is null)
+            {
+                conjuncts = [];
+                foreach (var excluder in excluders)
+                    excluder.CollectConjuncts(conjuncts);
+            }
+
+            BooleanExpression? on = null;
+            foreach (var conjunct in conjuncts)
+            {
+                if (TryExtractEquiKey(conjunct, sources, level, out _))
+                    on = on is null ? conjunct : BooleanExpression.And(on, conjunct);
+            }
+
+            if (on is null)
+                continue;
+            rewritten ??= (JoinSpec[])joins.Clone();
+            rewritten[level - 1] = new JoinSpec(JoinKind.Inner, on);
+        }
+
+        return rewritten ?? joins;
+    }
+
+    /// <summary>
     /// Outer-row cap for choosing the per-outer index-seek strategy. A small
     /// outer set joined to an indexed inner wins big from seeking the inner per
     /// outer row — the inner's per-<c>Heap</c> seek cache builds once and

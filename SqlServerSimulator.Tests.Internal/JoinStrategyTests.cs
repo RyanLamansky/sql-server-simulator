@@ -87,6 +87,55 @@ public sealed class JoinStrategyTests
             CaptureStrategies("select a.id from a cross join b"));
 
     /// <summary>
+    /// ANSI-89 comma join with an equi-predicate in WHERE: the parser rewrites
+    /// `FROM a, b WHERE a.id = b.a_id` into `a INNER JOIN b ON a.id = b.a_id`,
+    /// so it hashes instead of nested-looping the cross product.
+    /// </summary>
+    [TestMethod]
+    public void CommaJoin_WithEquiPredicate_TakesHashPath()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
+            CaptureStrategies("select a.id from a, b where a.id = b.a_id"));
+
+    /// <summary>
+    /// Explicit CROSS JOIN carrying an equi-predicate in WHERE is the same shape
+    /// post-parse (JoinKind.Cross, null ON) and rewrites identically.
+    /// </summary>
+    [TestMethod]
+    public void ExplicitCrossJoin_WithEquiPredicate_TakesHashPath()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
+            CaptureStrategies("select a.id from a cross join b where a.id = b.a_id"));
+
+    /// <summary>
+    /// A non-equi WHERE term alongside the equi-key isn't pulled into the
+    /// synthesized ON (only equi-keys are) — it stays a post-join WHERE filter,
+    /// so the join's residual count is 0, not 1.
+    /// </summary>
+    [TestMethod]
+    public void CommaJoin_NonEquiTermStaysInWhere_NotPulledToOn()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
+            CaptureStrategies("select a.id from a, b where a.id = b.a_id and b.id > 10"));
+
+    /// <summary>
+    /// No equi-key connects the two comma sources, so there's nothing to pull
+    /// into an ON — the join stays a Cross nested loop (the cross product is
+    /// genuinely required).
+    /// </summary>
+    [TestMethod]
+    public void CommaJoin_NoEquiPredicate_StaysNestedLoops()
+        => Contains("Cross:NestedLoops",
+            CaptureStrategies("select a.id from a, b where a.id <> b.a_id"));
+
+    /// <summary>
+    /// Comma join + WHERE filter on the small outer: after the Cross→Inner
+    /// rewrite the leftmost is seeked to one row and the indexed inner is seeked
+    /// per outer row — same acceleration the explicit-JOIN form already got.
+    /// </summary>
+    [TestMethod]
+    public void CommaJoin_SmallOuter_IndexedInner_SeeksPerOuter()
+        => Contains("Inner:NestedLoopIndexSeek(keys=1)",
+            CaptureStrategies(IndexedSetup, "select p.label, c.amt from p, c where c.pid = p.id and p.id = 5"));
+
+    /// <summary>
     /// WHERE p.id = 5 pushes down to seek the leftmost to one row, then the
     /// inner (indexed on pid) is seeked per outer row instead of hash-built.
     /// </summary>

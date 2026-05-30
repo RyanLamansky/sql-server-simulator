@@ -491,6 +491,72 @@ public sealed class JoinTests
         CollectionAssert.AreEquivalent(new[] { ("a1", "b1", "c1") }, rows);
     }
 
+    // A NULL join key never matches under `=` (NULL = x is UNKNOWN), so the
+    // comma-join's Cross→Inner rewrite must drop those rows — exactly as the
+    // pre-rewrite cross-product-then-WHERE did. b row (13, NULL) and a rows
+    // with no matching b are absent.
+    [TestMethod]
+    public void CommaFrom_NullJoinKey_ExcludedAfterRewrite()
+    {
+        using var connection = SeededAB();
+        _ = connection.CreateCommand("insert b values (13, null, 400)").ExecuteNonQuery();
+        var rows = ReadIntPairs(connection.CreateCommand("select a.id, b.val from a, b where a.id = b.a_id"));
+        CollectionAssert.AreEquivalent(new[] { (1, 100), (1, 200), (2, 300) }, rows);
+    }
+
+    // The comma source's equi-predicate references the NULL-extended side of a
+    // preceding LEFT JOIN. A null-extended b.id makes `b.id = c.id` UNKNOWN, so
+    // those rows drop — identical whether the predicate filters post-cross
+    // (pre-rewrite) or anchors the synthesized INNER JOIN ON (post-rewrite),
+    // because the predicate stays in WHERE as the residual.
+    [TestMethod]
+    public void CommaFrom_AfterLeftJoin_NullExtendedKeyDropsRow()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int, av varchar(10));
+            create table b (id int, bv varchar(10));
+            create table c (id int, cv varchar(10));
+            insert a values (1, 'a1'), (2, 'a2');
+            insert b values (1, 'b1');
+            insert c values (1, 'c1'), (2, 'c2')
+            """);
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand(
+            "select a.av, b.bv, c.cv from a left join b on a.id = b.id, c where b.id = c.id").ExecuteReader();
+        var rows = new List<(string, string, string)>();
+        while (reader.Read())
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        // a2's b is null-extended → b.id = c.id is UNKNOWN → only a1's row survives.
+        CollectionAssert.AreEquivalent(new[] { ("a1", "b1", "c1") }, rows);
+    }
+
+    // A comma source feeding a later LEFT JOIN must still null-extend: the
+    // rewrite only flips the Cross (a,b) level to INNER, leaving the explicit
+    // LEFT JOIN to c untouched, so an a/b pair with no c match keeps its row.
+    [TestMethod]
+    public void CommaFrom_FeedingLeftJoin_StillNullExtends()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (id int, av varchar(10));
+            create table b (id int, j int, bv varchar(10));
+            create table c (k int, cv varchar(10));
+            insert a values (1, 'a1'), (2, 'a2');
+            insert b values (1, 9, 'b1'), (2, 8, 'b2');
+            insert c values (9, 'c9')
+            """);
+
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand(
+            "select a.av, b.bv, c.cv from a, b left join c on b.j = c.k where a.id = b.id order by a.av").ExecuteReader();
+        var rows = new List<(string, string, string?)>();
+        while (reader.Read())
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+        CollectionAssert.AreEqual(new[] { ("a1", "b1", (string?)"c9"), ("a2", "b2", null) }, rows);
+    }
+
     [TestMethod]
     public void CommaFrom_TrailingComma_RaisesSyntaxError()
         => _ = new Simulation().AssertSqlError("""

@@ -112,6 +112,13 @@ internal sealed partial class Selection
     {
         if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null))
             throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
+
+        // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
+        // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
+        // instead of the O(L×R) nested loop. Value-independent, so it's done
+        // once here and the rewritten array is captured in the cached plan.
+        joins = RewriteCommaJoinsToEquiJoins(sources, joins, fromClause.Excluders);
+
         var orderBy = fromClause.OrderBy;
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];

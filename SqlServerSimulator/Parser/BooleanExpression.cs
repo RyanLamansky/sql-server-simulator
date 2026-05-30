@@ -593,6 +593,15 @@ internal abstract class BooleanExpression
     internal virtual void CollectConjuncts(List<BooleanExpression> sink) => sink.Add(this);
 
     /// <summary>
+    /// Combines two predicates with a three-valued <c>AND</c>. Used to
+    /// synthesize an <c>ON</c> predicate from the WHERE conjuncts when a
+    /// comma / <c>CROSS JOIN</c> is rewritten into an equi-join — the result
+    /// re-splits cleanly through <see cref="CollectConjuncts"/>, so the join
+    /// planner recovers the individual key equalities.
+    /// </summary>
+    internal static BooleanExpression And(BooleanExpression left, BooleanExpression right) => new AndExpression(left, right);
+
+    /// <summary>
     /// Flattens a top-level <c>OR</c> chain into its individual disjunct terms,
     /// appending each to <paramref name="sink"/>. A non-<c>OR</c> predicate
     /// contributes itself. The mirror of <see cref="CollectConjuncts"/>, used to
