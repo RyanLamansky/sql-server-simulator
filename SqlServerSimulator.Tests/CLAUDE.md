@@ -21,6 +21,8 @@ public void TableLevel_Composite_Match_Succeeds()
 
 `Simulation.ExecuteScalar` / `ExecuteNonQuery` accept a multi-statement raw string; the final `SELECT`'s first value is the scalar return. Don't split CREATE + INSERT + SELECT into three calls unless a later assertion needs an intermediate observation.
 
+**Batching trap — `ExecuteNonQuery` returns the *sum* of rows-affected across all DML in the batch** (faithful to TDS DONE tokens; DDL like CREATE TABLE doesn't contribute). So `AreEqual(1, sim.ExecuteNonQuery("…; insert 2 rows; delete 1 row"))` measures 3, not the DELETE's 1, and fails for the wrong reason. Safe to fold setup into the asserted call only for `ExecuteScalar` (DML counts don't leak in) and `AssertSqlError` (throws). When the assertion *is* the `ExecuteNonQuery` row count, keep setup in a separate call so the measured statement is isolated.
+
 Canonical example: [`CheckConstraintTests.cs`](CheckConstraintTests.cs). The full set of helpers ships in [`Extensions.cs`](Extensions.cs).
 
 ## Multi-assertion shape
@@ -81,6 +83,12 @@ _ = context.Items.Add(new Item { ... });                  // returns EntityEntry
 ```
 
 `ExecuteScalar` returning `object?` only needs `_ =` when discarded — wrap with `AreEqual(...)` when asserting.
+
+## Collation / Unicode fixtures
+
+- **Literal `N'…'`** for any character with a distinctive visible glyph (`€`, `ƒ`, `Ÿ`, `ア`, `café`) — the literal *is* the explanation, no `U+xxxx` comment needed.
+- **`nchar(N)` (decimal, never `0xNN`)** only for invisible / ambiguous characters: NBSP (U+00A0, renders like a space), Private Use Area (no glyph), surrogate pairs (`nchar(55357) + nchar(56832)` for 😀). Hex `nchar(0x…)` fails — the parser reads `0xNN` as varbinary and the varbinary→int coercion isn't implemented.
+- **Skip the `cast(<literal> as varchar(N))` / `char(N)` on INSERT** — assignment-time coercion handles `N'…'` → `varchar(N)` and `nchar(N)` → `char(N)` automatically; the cast is noise.
 
 ## Probe code is not a style reference
 
