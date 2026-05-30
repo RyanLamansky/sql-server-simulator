@@ -1329,7 +1329,7 @@ internal sealed partial class Selection
     internal static IEnumerable<(int Page, int Slot, byte[] Bytes)>? SeekMutationTarget(
         HeapTable table, BooleanExpression where, BatchContext batch)
     {
-        var source = BuildBaseTableSeekSource(table);
+        var source = BuildBaseTableSeekSource(table, table.Name);
 
         var conjuncts = new List<BooleanExpression>();
         where.CollectConjuncts(conjuncts);
@@ -1360,18 +1360,82 @@ internal sealed partial class Selection
         return null;
     }
 
-    // Minimal single-source view of a base table for the mutation seek: real
-    // column names + storage metadata so TryIdentifyIndexableColumn resolves the
-    // WHERE's column references, qualified by the table's own name (the only
-    // qualifier a single-table UPDATE / DELETE WHERE can use). The Rows stream is
-    // unused — the seek reads addresses straight from the heap's cache.
-    private static FromSource BuildBaseTableSeekSource(HeapTable table)
+    /// <summary>
+    /// A per-source-row target seeker for a MERGE whose <c>ON</c> carries a
+    /// seekable equality on the target's leading key / index prefix — returns
+    /// <c>null</c> when no such equality exists (caller keeps its
+    /// <c>target × source</c> scan). The <c>ON</c> conjunct <c>t.k = s.k</c> is
+    /// the correlated-seek shape: <c>t.k</c> resolves to the (single-source)
+    /// target so it's the column side, <c>s.k</c> doesn't so it's a stable outer
+    /// value — exactly what the SELECT path's correlated subquery seek already
+    /// recognizes (<c>allowCorrelatedColumnValue: true</c>). The returned delegate
+    /// takes one source row's resolver and yields the matching target rows; a NULL
+    /// or non-matching probe yields nothing (a valid empty match for that source).
+    /// The structural test (does some key's lead column carry an equality?) is run
+    /// once here, so per-source the delegate only evaluates probes and seeks. The
+    /// caller still re-runs the full <c>ON</c> predicate per candidate — the seek
+    /// keys on the equality prefix only, so a residual <c>ON</c> term
+    /// (<c>… AND t.active = 1</c>) and a stale cache entry are both filtered there.
+    /// </summary>
+    internal static Func<Func<MultiPartName, SqlValue>, IEnumerable<(int Page, int Slot, byte[] Bytes)>>? TryPrepareMergeTargetSeek(
+        HeapTable table, string? targetQualifier, BooleanExpression on, BatchContext batch)
+    {
+        var source = BuildBaseTableSeekSource(table, targetQualifier);
+
+        var conjuncts = new List<BooleanExpression>();
+        on.CollectConjuncts(conjuncts);
+
+        var equalities = new Dictionary<int, Expression[]>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue: true)
+                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue: true);
+                continue;
+            }
+            if (conjunct.TryGetEqualityFamily(out var family))
+                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: true);
+        }
+
+        return HasSeekableLeadingPrefix(table, equalities) ? Seek : null;
+
+        IEnumerable<(int Page, int Slot, byte[] Bytes)> Seek(Func<MultiPartName, SqlValue> outerResolver) =>
+            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, out var candidates, out _)
+                ? MaterializeMutationCandidates(table, candidates)
+                : [];
+    }
+
+    // True when some key / index's leading column carries a recorded equality —
+    // the structural precondition for a seek (independent of probe values, so a
+    // per-source NULL probe later reads as an empty match, not "unseekable").
+    private static bool HasSeekableLeadingPrefix(HeapTable table, Dictionary<int, Expression[]> equalities)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.StorageOrdinals.Length > 0 && equalities.ContainsKey(key.StorageOrdinals[0]))
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.KeyColumns.Length > 0 && equalities.ContainsKey(index.KeyColumns[0].StorageOrdinal))
+                return true;
+        }
+        return false;
+    }
+
+    // Minimal single-source view of a base table for a seek: real column names +
+    // storage metadata so TryIdentifyIndexableColumn resolves the predicate's
+    // column references, under the given qualifier (the table's own name for a
+    // single-table UPDATE / DELETE, the target alias for a MERGE). The Rows stream
+    // is unused — the seek reads addresses straight from the heap's cache.
+    private static FromSource BuildBaseTableSeekSource(HeapTable table, string? qualifier)
     {
         var columnNames = new string[table.Columns.Length];
         for (var i = 0; i < columnNames.Length; i++)
             columnNames[i] = table.Columns[i].Name;
         return new FromSource(
-            qualifier: table.Name,
+            qualifier: qualifier,
             columnNames: columnNames,
             columns: table.Columns,
             storedSchema: table.StoredColumns,

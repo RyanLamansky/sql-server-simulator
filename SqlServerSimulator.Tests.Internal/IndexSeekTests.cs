@@ -1714,4 +1714,93 @@ public sealed class IndexSeekTests
         Exec(c, "delete from t where id = 99");
         AreEqual("1,2,3", Seq(ReadRows(c, "select id from t order by id")));
     }
+
+    // ---- MERGE inverts its target × source scan into a per-source-row target
+    // seek (Selection.TryPrepareMergeTargetSeek) when the ON carries a seekable
+    // target equality, no NOT MATCHED BY SOURCE clause forces every target to be
+    // visited, and the target isn't a view. A MERGE does no query-path seek of
+    // its own, so a CacheBuild during one is the inverted target seek; the
+    // declined cases (NMBS clause, non-seekable ON) keep the full scan and never
+    // touch the cache. ----
+
+    private static SimulatedDbConnection FreshTarget()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table tgt (id int not null primary key, v int not null);
+            insert tgt values (1, 10), (2, 20), (3, 30)
+            """);
+        return c;
+    }
+
+    [TestMethod]
+    public void MergeOnPrimaryKey_SeeksTarget()
+    {
+        var c = FreshTarget();
+        var trace = ExecTraced(c, """
+            merge tgt as t
+            using (values (2, 200), (4, 400)) as s(id, v) on t.id = s.id
+            when matched then update set v = s.v
+            when not matched then insert (id, v) values (s.id, s.v);
+            """);
+        Contains("CacheBuild", trace);
+        AreEqual(4, Convert.ToInt32(ReadVal(c, "select count(*) from tgt")));
+        AreEqual(200, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2"))); // matched → updated
+        AreEqual(400, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 4"))); // not matched → inserted
+        AreEqual(10, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 1")));  // untouched
+    }
+
+    [TestMethod]
+    public void MergeNotMatchedBySource_FullScans()
+    {
+        var c = FreshTarget();
+        // A NOT MATCHED BY SOURCE clause has to visit every target row, so the
+        // inversion declines and the target × source scan stands — no CacheBuild.
+        var trace = ExecTraced(c, """
+            merge tgt as t
+            using (values (2, 200)) as s(id, v) on t.id = s.id
+            when matched then update set v = s.v
+            when not matched by source then delete;
+            """);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("2", Seq(ReadRows(c, "select id from tgt order by id"))); // 1 and 3 deleted
+        AreEqual(200, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
+    }
+
+    [TestMethod]
+    public void MergeSeek_ResidualOnTerm_Filters()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table tgt (id int not null primary key, active int not null, v int not null);
+            insert tgt values (1, 1, 10), (2, 0, 20)
+            """);
+        // ON seeks id; the residual t.active = 1 (re-checked per candidate)
+        // excludes id = 2, so its source row matches nothing and v stays 20.
+        var trace = ExecTraced(c, """
+            merge tgt as t
+            using (values (1, 100), (2, 200)) as s(id, v) on t.id = s.id and t.active = 1
+            when matched then update set v = s.v;
+            """);
+        Contains("CacheBuild", trace);
+        AreEqual(100, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 1")));
+        AreEqual(20, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
+    }
+
+    [TestMethod]
+    public void MergeNonSeekableOn_FullScans()
+    {
+        var c = FreshTarget();
+        // ON on an unindexed expression (v, no key) — nothing seekable, so the
+        // inversion declines and the scan stands.
+        var trace = ExecTraced(c, """
+            merge tgt as t
+            using (values (20, 999)) as s(v, nv) on t.v = s.v
+            when matched then update set v = s.nv;
+            """);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual(999, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
+    }
 }

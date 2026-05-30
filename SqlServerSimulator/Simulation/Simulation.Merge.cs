@@ -1012,49 +1012,107 @@ partial class Simulation
         var pendingUpdates = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)>();
         var pendingDeletes = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)>();
 
-        // Phase A: target × source scan.
-        foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
+        // Phase A finds, per matched target row, the source rows it matches, then
+        // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. The
+        // target × source scan is O(target × source). When the ON carries a
+        // seekable target equality, no NOT MATCHED BY SOURCE clause forces every
+        // target to be visited, and the target isn't a view (whose column names
+        // don't map to the base heap), the inverted path seeks matching targets
+        // per source row instead and touches only matched targets.
+        var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
+        var targetSeek = sourceView is null && !hasNotMatchedBySource
+            ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
+            : null;
+
+        if (targetSeek is not null)
         {
-            var targetValues = DecodeFullRow(destinationTable, rowBytes);
-            EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
-
-            // View visibility filter: a base row not visible through the
-            // view participates in neither the ON-predicate match nor the
-            // BY-SOURCE enumeration. Mirrors UPDATE / DELETE through view
-            // semantics.
-            if (sourceView?.VisibilityCheck is { } vis && !vis(targetValues, context.Batch))
-                continue;
-
-            // Find all matching source rows.
-            var matchedSources = new List<int>();
+            // Inverted Phase A: per source row, seek the matching target rows and
+            // group them by target address — first-source-wins via source-index
+            // order (sources iterate ascending), heap order restored by the final
+            // (page, slot) sort so the apply order matches the scan path's.
+            var matchedByTarget = new Dictionary<(int Page, int Slot), (List<int> Sources, byte[] Bytes)>();
             for (var si = 0; si < sourceRows.Count; si++)
             {
-                var pred = onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch));
-                if (pred == true)
+                var sourceValues = sourceRows[si];
+                foreach (var (page, slot, rowBytes) in targetSeek(name => ResolveCombined(null, sourceValues, name)))
                 {
-                    matchedSources.Add(si);
+                    var targetValues = DecodeFullRow(destinationTable, rowBytes);
+                    EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+
+                    // The seek matched the equality prefix only; re-run the full ON
+                    // predicate so a residual term (… AND t.active = 1) or a stale
+                    // cache entry can't produce a false match.
+                    if (onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceValues, name), context.Batch)) != true)
+                        continue;
+
                     sourceMatched[si] = true;
+                    if (!matchedByTarget.TryGetValue((page, slot), out var entry))
+                        matchedByTarget[(page, slot)] = entry = ([], rowBytes);
+                    entry.Sources.Add(si);
                 }
             }
 
-            if (matchedSources.Count > 0)
+            foreach (var address in matchedByTarget.Keys.OrderBy(a => a.Page).ThenBy(a => a.Slot))
             {
-                var firstSourceIndex = matchedSources[0];
-                var sourceValues = sourceRows[firstSourceIndex];
+                var (matchedSources, rowBytes) = matchedByTarget[address];
+                var targetValues = DecodeFullRow(destinationTable, rowBytes);
+                EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+                var sourceValues = sourceRows[matchedSources[0]];
                 var chosen = PickClause(whenClauses, WhenClauseKind.Matched, targetValues, sourceValues, context.Batch, ResolveCombined);
                 if (chosen is null)
                     continue;
                 if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
                     throw SimulatedSqlException.MergeMultiMatch();
 
-                ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
+                ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, address.Page, address.Slot, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
             }
-            else
+        }
+        else
+        {
+            // Phase A: target × source scan.
+            foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
             {
-                var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
-                if (chosen is null)
+                var targetValues = DecodeFullRow(destinationTable, rowBytes);
+                EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+
+                // View visibility filter: a base row not visible through the
+                // view participates in neither the ON-predicate match nor the
+                // BY-SOURCE enumeration. Mirrors UPDATE / DELETE through view
+                // semantics.
+                if (sourceView?.VisibilityCheck is { } vis && !vis(targetValues, context.Batch))
                     continue;
-                ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+
+                // Find all matching source rows.
+                var matchedSources = new List<int>();
+                for (var si = 0; si < sourceRows.Count; si++)
+                {
+                    var pred = onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch));
+                    if (pred == true)
+                    {
+                        matchedSources.Add(si);
+                        sourceMatched[si] = true;
+                    }
+                }
+
+                if (matchedSources.Count > 0)
+                {
+                    var firstSourceIndex = matchedSources[0];
+                    var sourceValues = sourceRows[firstSourceIndex];
+                    var chosen = PickClause(whenClauses, WhenClauseKind.Matched, targetValues, sourceValues, context.Batch, ResolveCombined);
+                    if (chosen is null)
+                        continue;
+                    if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
+                        throw SimulatedSqlException.MergeMultiMatch();
+
+                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
+                }
+                else
+                {
+                    var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
+                    if (chosen is null)
+                        continue;
+                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+                }
             }
         }
 
