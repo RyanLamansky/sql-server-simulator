@@ -1015,56 +1015,77 @@ partial class Simulation
         // Phase A finds, per matched target row, the source rows it matches, then
         // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. The
         // target × source scan is O(target × source). When the ON carries a
-        // seekable target equality, no NOT MATCHED BY SOURCE clause forces every
-        // target to be visited, and the target isn't a view (whose column names
+        // seekable target equality and the target isn't a view (whose column names
         // don't map to the base heap), the inverted path seeks matching targets
-        // per source row instead and touches only matched targets.
-        var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
-        var targetSeek = sourceView is null && !hasNotMatchedBySource
+        // per source row instead — turning the match phase into O(source × log
+        // target). With no NOT MATCHED BY SOURCE clause it then touches only the
+        // matched targets; with one (which must visit every target to find the
+        // unmatched ones) it walks the heap once applying the precomputed matches,
+        // dropping the inner source loop either way.
+        var targetSeek = sourceView is null
             ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
             : null;
 
         if (targetSeek is not null)
         {
-            // Inverted Phase A: per source row, seek the matching target rows and
-            // group them by target address — first-source-wins via source-index
-            // order (sources iterate ascending), heap order restored by the final
-            // (page, slot) sort so the apply order matches the scan path's.
-            var matchedByTarget = new Dictionary<(int Page, int Slot), (List<int> Sources, byte[] Bytes)>();
+            var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
+
+            // Match phase: per source row, seek the matching target rows and group
+            // them by target address — first-source-wins via source-index order
+            // (sources iterate ascending). The seek matched the equality prefix
+            // only, so the full ON is re-run per candidate (residual filter — a
+            // term like … AND t.active = 1, or a stale cache entry, is dropped).
+            var matchedByTarget = new Dictionary<(int Page, int Slot), List<int>>();
             for (var si = 0; si < sourceRows.Count; si++)
             {
                 var sourceValues = sourceRows[si];
                 foreach (var (page, slot, rowBytes) in targetSeek(name => ResolveCombined(null, sourceValues, name)))
                 {
-                    var targetValues = DecodeFullRow(destinationTable, rowBytes);
-                    EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
-
-                    // The seek matched the equality prefix only; re-run the full ON
-                    // predicate so a residual term (… AND t.active = 1) or a stale
-                    // cache entry can't produce a false match.
-                    if (onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceValues, name), context.Batch)) != true)
+                    var candidateValues = DecodeFullRow(destinationTable, rowBytes);
+                    EvaluateComputedColumns(destinationTable, candidateValues, context.Batch);
+                    if (onPredicate.Run(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)) != true)
                         continue;
 
                     sourceMatched[si] = true;
-                    if (!matchedByTarget.TryGetValue((page, slot), out var entry))
-                        matchedByTarget[(page, slot)] = entry = ([], rowBytes);
-                    entry.Sources.Add(si);
+                    if (!matchedByTarget.TryGetValue((page, slot), out var sources))
+                        matchedByTarget[(page, slot)] = sources = [];
+                    sources.Add(si);
                 }
             }
 
-            foreach (var address in matchedByTarget.Keys.OrderBy(a => a.Page).ThenBy(a => a.Slot))
+            if (hasNotMatchedBySource)
             {
-                var (matchedSources, rowBytes) = matchedByTarget[address];
-                var targetValues = DecodeFullRow(destinationTable, rowBytes);
-                EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
-                var sourceValues = sourceRows[matchedSources[0]];
-                var chosen = PickClause(whenClauses, WhenClauseKind.Matched, targetValues, sourceValues, context.Batch, ResolveCombined);
-                if (chosen is null)
-                    continue;
-                if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
-                    throw SimulatedSqlException.MergeMultiMatch();
-
-                ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, address.Page, address.Slot, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
+                // Complement pass: every target row in heap order — matched rows take
+                // their precomputed source list, unmatched rows fall to WHEN NOT
+                // MATCHED BY SOURCE. Heap-order interleaving matches the scan path's
+                // discovery order, but with no per-target source loop.
+                foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
+                {
+                    var targetValues = DecodeFullRow(destinationTable, rowBytes);
+                    EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+                    if (matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources))
+                    {
+                        ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, pageIndex, slotIndex, targetValues, sourceRows, matchedSources, ResolveCombined, pendingUpdates, pendingDeletes);
+                    }
+                    else
+                    {
+                        var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
+                        if (chosen is not null)
+                            ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+                    }
+                }
+            }
+            else
+            {
+                // No NOT MATCHED BY SOURCE: visit only matched targets, restoring
+                // heap order via the (page, slot) sort so the apply order matches
+                // the scan path's.
+                foreach (var address in matchedByTarget.Keys.OrderBy(a => a.Page).ThenBy(a => a.Slot))
+                {
+                    var targetValues = DecodeFullRow(destinationTable, destinationTable.Heap.ReadSlotBytes(address.Page, address.Slot)!);
+                    EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+                    ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, address.Page, address.Slot, targetValues, sourceRows, matchedByTarget[address], ResolveCombined, pendingUpdates, pendingDeletes);
+                }
             }
         }
         else
@@ -1168,6 +1189,35 @@ partial class Simulation
             return clause;
         }
         return null;
+    }
+
+    // Applies the WHEN MATCHED action to one matched target row, given the source
+    // rows it matched (in source-index order, first wins). Picks the first
+    // applicable MATCHED clause, enforces the multiple-source-match guard
+    // (Msg 8672 for UPDATE), and queues the action. Shared by both inverted-seek
+    // apply passes (matched-only and the NOT MATCHED BY SOURCE complement scan).
+    private static void ApplyMergeMatched(
+        ParserContext context,
+        HeapTable destinationTable,
+        View? sourceView,
+        List<WhenClause> whenClauses,
+        int pageIndex,
+        int slotIndex,
+        SqlValue[] targetValues,
+        List<SqlValue[]> sourceRows,
+        List<int> matchedSources,
+        Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined,
+        List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
+        List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes)
+    {
+        var sourceValues = sourceRows[matchedSources[0]];
+        var chosen = PickClause(whenClauses, WhenClauseKind.Matched, targetValues, sourceValues, context.Batch, resolveCombined);
+        if (chosen is null)
+            return;
+        if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
+            throw SimulatedSqlException.MergeMultiMatch();
+
+        ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, resolveCombined, pendingUpdates, pendingDeletes);
     }
 
     private static void ApplyChosenMatchedAction(

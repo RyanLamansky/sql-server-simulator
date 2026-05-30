@@ -1752,20 +1752,41 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void MergeNotMatchedBySource_FullScans()
+    public void MergeNotMatchedBySource_SeeksThenComplementScans()
     {
         var c = FreshTarget();
-        // A NOT MATCHED BY SOURCE clause has to visit every target row, so the
-        // inversion declines and the target × source scan stands — no CacheBuild.
+        // A NOT MATCHED BY SOURCE clause must visit every target to find the
+        // unmatched ones, but the match phase still seeks (CacheBuild): the seek
+        // builds matchedByTarget, then one heap pass applies MATCHED to the hits
+        // and BY-SOURCE DELETE to the rest — no per-target source loop.
         var trace = ExecTraced(c, """
             merge tgt as t
             using (values (2, 200)) as s(id, v) on t.id = s.id
             when matched then update set v = s.v
             when not matched by source then delete;
             """);
-        DoesNotContain("CacheBuild", trace);
+        Contains("CacheBuild", trace);
         AreEqual("2", Seq(ReadRows(c, "select id from tgt order by id"))); // 1 and 3 deleted
         AreEqual(200, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
+    }
+
+    [TestMethod]
+    public void MergeNotMatchedBySource_ThreeWay_AllBranchesCorrect()
+    {
+        var c = FreshTarget(); // tgt = (1,10), (2,20), (3,30)
+        // id=2 matched → update; id=4 not matched by target → insert; id=1,3 not
+        // matched by source → delete. Exercises all three branches through the
+        // seek + complement-scan path.
+        Exec(c, """
+            merge tgt as t
+            using (values (2, 222), (4, 444)) as s(id, v) on t.id = s.id
+            when matched then update set v = s.v
+            when not matched then insert (id, v) values (s.id, s.v)
+            when not matched by source then delete;
+            """);
+        AreEqual("2,4", Seq(ReadRows(c, "select id from tgt order by id")));
+        AreEqual(222, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
+        AreEqual(444, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 4")));
     }
 
     [TestMethod]
