@@ -929,18 +929,21 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void EqualityPrefixThenRange_TakesEqualitySeek_NotRange()
+    public void EqualityPrefixThenRange_ExtendsSeekPastPrefix()
     {
-        // index (a, b): a = 1 AND b > 10 — the equality path seeks on the leading
-        // column a (width 1) and the range on b stays residual. The single
-        // leading-column range path doesn't fire here.
+        // key (a, b): a = 1 AND b > 10 — the equality seek on a (width 1)
+        // extends its seek predicate with the range on b, touching only the
+        // in-range slice of a's group instead of leaving the range residual.
         var (trace, rows) = Run("""
             create table t (a int not null, b int not null, v int not null, primary key (a, b));
             insert t values (1, 10, 100), (1, 20, 200), (1, 30, 300), (2, 10, 400)
             """, "select v from t where a = 1 and b > 10");
         Contains("SeekWidth(t,1)", trace);
-        DoesNotContain("RangeSeek(t)", trace);
+        Contains("PrefixRangeSeek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
         HasCount(2, rows);
+        Contains(200, rows);
+        Contains(300, rows);
     }
 
     [TestMethod]
@@ -1009,6 +1012,338 @@ public sealed class IndexSeekTests
         HasCount(2, rows);
         Contains(3, rows);
         Contains(4, rows);
+    }
+
+    // ---- equality-prefix + range continuation (PrefixRangeSeek): a stable
+    // range bound on the key column immediately after the matched equality
+    // prefix extends the seek predicate one column further — a real index
+    // seek's shape (equality prefix, then at most one range column, everything
+    // deeper residual). The bound conjuncts stay in the residual WHERE, so the
+    // extension only narrows; results match a scan. ----
+
+    private const string PrefixRangeT = """
+        create table t (a int not null, b int not null, v int not null, primary key (a, b));
+        insert t values (1, 10, 100), (1, 20, 200), (1, 30, 300), (1, 40, 400), (2, 10, 500), (2, 20, 600)
+        """;
+
+    [TestMethod]
+    public void PrefixRange_Between_InclusiveBothEnds()
+    {
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a = 1 and b between 20 and 30");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(200, rows);
+        Contains(300, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_ExclusiveUpperBound()
+    {
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a = 1 and b < 30");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(100, rows);
+        Contains(200, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_TwoSidedExclusive()
+    {
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a = 1 and b > 10 and b < 40");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(200, rows);
+        Contains(300, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_NeverCrossesIntoSiblingGroup()
+    {
+        // The (a = 2) group also has b = 10..20 — the composite bound keys the
+        // range under the pinned a, so no sibling-group row can leak in.
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a = 2 and b >= 10");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(500, rows);
+        Contains(600, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_TwoEqualitiesThenRange_ExtendsAfterWidthTwo()
+    {
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, c int not null, v int not null, primary key (a, b, c));
+            insert t values (1, 1, 5, 100), (1, 1, 15, 200), (1, 1, 25, 300), (1, 2, 15, 400)
+            """, "select v from t where a = 1 and b = 1 and c >= 15");
+        Contains("SeekWidth(t,2)", trace);
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(200, rows);
+        Contains(300, rows);
+    }
+
+    [TestMethod]
+    public void RangeBeyondContinuationColumn_StaysResidual()
+    {
+        // key (a, b, c): the range sits on c but b has no equality, so the seek
+        // predicate ends at a (width 1) and the c bound stays a residual filter
+        // — matching a real seek predicate, which can't skip a key column.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, c int not null, v int not null, primary key (a, b, c));
+            insert t values (1, 1, 5, 100), (1, 2, 15, 200), (1, 3, 25, 300), (2, 1, 15, 400)
+            """, "select v from t where a = 1 and c >= 15");
+        Contains("SeekWidth(t,1)", trace);
+        DoesNotContain("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(200, rows);
+        Contains(300, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_InListPrefix_SeeksPerProbe()
+    {
+        // The range continuation composes with an IN-list prefix: each probe
+        // value fires its own composite-bounded slice.
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a in (1, 2) and b >= 20");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(4, rows);
+        Contains(200, rows);
+        Contains(300, rows);
+        Contains(400, rows);
+        Contains(600, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_NullBound_SeeksToEmpty()
+    {
+        // b > @null is UNKNOWN for every row — a valid empty seek, narrower
+        // than probing a's whole group.
+        var (trace, rows) = Run(PrefixRangeT, "declare @v int = null; select v from t where a = 1 and b > @v");
+        Contains("PrefixRangeSeek(t)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_ResidualPredicateStillApplies()
+    {
+        // The non-seekable conjunct (v > 250) filters the seeked slice.
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a = 1 and b >= 20 and v > 250");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(300, rows);
+        Contains(400, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_SecondaryIndex_Seeks()
+    {
+        var (trace, rows) = Run("""
+            create table c (id int not null, pid int not null, seq int not null);
+            create index ix_c on c (pid, seq);
+            insert c values (1, 10, 1), (2, 10, 2), (3, 10, 3), (4, 20, 1)
+            """, "select id from c where pid = 10 and seq >= 2");
+        Contains("PrefixRangeSeek(c)", trace);
+        HasCount(2, rows);
+        Contains(2, rows);
+        Contains(3, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_RangeContinuationBreaksTie_PicksExtendingIndex()
+    {
+        // Two indexes match the same-width equality prefix on a; only (a, b)
+        // can extend with the range on b, so it wins the tie.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, c int not null, v int not null);
+            create index ix_ac on t (a, c);
+            create index ix_ab on t (a, b);
+            insert t values (1, 10, 7, 100), (1, 20, 8, 200), (1, 30, 9, 300), (2, 10, 7, 400)
+            """, "select v from t where a = 1 and b > 10");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(2, rows);
+        Contains(200, rows);
+        Contains(300, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_CorrelatedBound_SeeksPerOuterRow()
+    {
+        // The range bound is a correlated outer reference — evaluated per outer
+        // row against the shared per-Heap cache, like correlated equality probes.
+        var (trace, rows) = Run("""
+            create table p (id int not null primary key, threshold int not null);
+            create table c (id int not null, pid int not null, num int not null);
+            create index ix_c on c (pid, num);
+            insert p values (1, 15), (2, 5);
+            insert c values (10, 1, 10), (11, 1, 20), (12, 2, 10), (13, 3, 99)
+            """, "select id from p where exists (select 1 from c where c.pid = p.id and c.num > p.threshold)");
+        Contains("PrefixRangeSeek(c)", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_DateSlicePerCustomer_Seeks()
+    {
+        // The canonical OLTP shape: customer pin + date window on (cust, dt).
+        var (trace, rows) = Run("""
+            create table o (cust int not null, dt date not null, amt int not null, primary key (cust, dt));
+            insert o values (1, '2026-01-05', 10), (1, '2026-02-05', 20), (1, '2026-03-05', 30), (2, '2026-02-05', 40)
+            """, "select amt from o where cust = 1 and dt >= '2026-02-01' and dt < '2026-03-01'");
+        Contains("PrefixRangeSeek(o)", trace);
+        HasCount(1, rows);
+        AreEqual(20, rows[0]);
+    }
+
+    [TestMethod]
+    public void PrefixRange_AggregateProjection_Seeks()
+    {
+        var (trace, rows) = Run(PrefixRangeT, "select sum(v) from t where a = 1 and b >= 20");
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(1, rows);
+        AreEqual(900, rows[0]);
+    }
+
+    [TestMethod]
+    public void PrefixRange_WidenedEntryServesNarrowerSeek_NoRebuildThrash()
+    {
+        // Alternating `a = 1 AND b > 10` (composite (a, b) entry) and `a = 1`
+        // (arity-1 probe) must share one widened cache entry: the narrow probe
+        // reads its arity's lazily-built hash view instead of forcing a rebuild
+        // back to the (a) prefix per query.
+        var (trace, rows) = WarmMutateProbe(
+            PrefixRangeT, "select v from t where a = 1 and b > 10", "insert t values (3, 1, 700)", "select v from t where a = 1");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        Contains("Seek(t)", trace);
+        HasCount(4, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_SmallGroup_ReturnsGroupForResidual()
+    {
+        // Below the group-size threshold the continuation returns the whole
+        // equality group and the residual WHERE applies the range — walking
+        // the ordered view per key costs more than the residual there.
+        var (trace, rows) = Run(PrefixRangeT, "select v from t where a = 1 and b between 20 and 30");
+        Contains("PrefixRangeGroup", trace);
+        DoesNotContain("PrefixRangeSlice", trace);
+        HasCount(2, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_LargeGroup_TakesOrderedSlice()
+    {
+        // A 400-row group exceeds the threshold, so the seek slices the
+        // composite ordered view — only the in-range keys are touched, and the
+        // composite bounds keep the slice inside the pinned group.
+        var (trace, rows) = Run("""
+            create table t (a int not null, b int not null, v int not null, primary key (a, b));
+            insert t select 1, value, value * 10 from generate_series(1, 400);
+            insert t values (2, 105, 9999)
+            """, "select v from t where a = 1 and b between 100 and 110");
+        Contains("PrefixRangeSlice", trace);
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(11, rows);
+        Contains(1000, rows);
+        Contains(1100, rows);
+        DoesNotContain(9999, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_NarrowHashView_MaintainedByReplay_FindsNewRow()
+    {
+        // Builds the widened (a, b) entry, then the arity-1 narrow hash view,
+        // then inserts into the probed group: the journal replay must maintain
+        // the narrow view alongside the buckets — the add side is the one
+        // maintenance direction the residual WHERE can't repair (a missing
+        // candidate is a lost row, not a filtered false-positive).
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, PrefixRangeT);
+        _ = ReadVal(c, "select v from t where a = 1 and b > 10"); // widens the entry to (a, b)
+        _ = ReadVal(c, "select v from t where a = 1");            // builds the arity-1 narrow view
+        Exec(c, "insert t values (1, 50, 700)");
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            var rows = ReadRows(c, "select v from t where a = 1");
+            Contains("CacheReplay", IndexSeekDiagnostics.Sink);
+            DoesNotContain("CacheBuild", IndexSeekDiagnostics.Sink);
+            HasCount(5, rows);
+            Contains(700, rows);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    [TestMethod]
+    public void PrefixRange_NarrowHashView_KeyChangeMovesRowAcrossBuckets()
+    {
+        // The remove direction: a key-moving UPDATE against the widened entry
+        // must relocate the row across narrow-view buckets via the replay.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, PrefixRangeT);
+        _ = ReadVal(c, "select v from t where a = 1 and b > 10");
+        _ = ReadVal(c, "select v from t where a = 1");
+        Exec(c, "update t set a = 3 where a = 1 and b = 40");
+        HasCount(3, ReadRows(c, "select v from t where a = 1"));
+        var moved = ReadRows(c, "select v from t where a = 3");
+        HasCount(1, moved);
+        AreEqual(400, moved[0]);
+    }
+
+    [TestMethod]
+    public void PrefixRange_AfterWarmup_ReplaysDelta()
+    {
+        // The composite ordered view is maintained by the same journal replay as
+        // the hash buckets — a row inserted after warm-up lands in the slice.
+        var (trace, rows) = WarmMutateProbe(
+            PrefixRangeT, "select v from t where a = 1 and b > 10", "insert t values (1, 25, 250)", "select v from t where a = 1 and b > 10");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        Contains("PrefixRangeSeek(t)", trace);
+        HasCount(4, rows);
+        Contains(250, rows);
+    }
+
+    [TestMethod]
+    public void PrefixRange_RcsiRead_MaterializesThroughVersionStore()
+    {
+        // The extended seek rides the same snapshot materializer as the pure
+        // equality seek: an open writer's uncommitted update is invisible, the
+        // pre-write committed values come back through the version store.
+        var sim = new Simulation();
+        using var reader = sim.CreateDbConnection();
+        reader.Open();
+        using (var setup = reader.CreateCommand())
+        {
+            setup.CommandText = $"alter database simulated set read_committed_snapshot on; {PrefixRangeT}";
+            _ = setup.ExecuteNonQuery();
+        }
+
+        using var writer = sim.CreateDbConnection();
+        writer.Open();
+        using var writeCmd = writer.CreateCommand();
+        writeCmd.CommandText = "begin tran; update t set v = 999 where a = 1 and b = 20";
+        _ = writeCmd.ExecuteNonQuery();
+
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            var rows = ReadRows(reader, "select v from t where a = 1 and b >= 20");
+            Contains("PrefixRangeSeek(t)", IndexSeekDiagnostics.Sink);
+            DoesNotContain("Scan(t)", IndexSeekDiagnostics.Sink);
+            HasCount(3, rows);
+            Contains(200, rows);
+            DoesNotContain(999, rows);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
     }
 
     // ---- ORDER BY elimination: a single NOT-NULL leading-key-column sort
@@ -1673,6 +2008,28 @@ public sealed class IndexSeekTests
         var c = FreshT();
         Contains("CacheBuild", ExecTraced(c, "delete from t where id in (1, 3)"));
         AreEqual("2", Seq(ReadRows(c, "select id from t order by id")));
+    }
+
+    [TestMethod]
+    public void UpdateByPrefixRange_SeeksTarget()
+    {
+        // key (a, b): the mutation target seek extends the equality on a with
+        // the range on b, rewriting only the in-range slice of a's group.
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, PrefixRangeT);
+        Contains("CacheBuild", ExecTraced(c, "update t set v = 0 where a = 1 and b >= 20"));
+        AreEqual("100,0,0,0,500,600", Seq(ReadRows(c, "select v from t order by a, b")));
+    }
+
+    [TestMethod]
+    public void DeleteByPrefixRange_SeeksTarget()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, PrefixRangeT);
+        Contains("CacheBuild", ExecTraced(c, "delete from t where a = 1 and b between 20 and 30"));
+        AreEqual("100,400,500,600", Seq(ReadRows(c, "select v from t order by a, b")));
     }
 
     [TestMethod]

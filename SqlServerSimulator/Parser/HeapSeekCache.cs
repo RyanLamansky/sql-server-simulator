@@ -61,7 +61,7 @@ internal sealed class HeapSeekCache
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
-            return entry.Buckets.TryGetValue(probeKey, out var bucket) ? bucket : Empty;
+            return entry.EqualityCandidates(probeKey);
         }
     }
 
@@ -78,6 +78,41 @@ internal sealed class HeapSeekCache
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
             return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+        }
+    }
+
+    // Below this many rids in the equality-prefix group, a range continuation
+    // returns the whole group (the residual WHERE filters it) instead of
+    // slicing the ordered view: enumerating a SortedSet view pays per-node
+    // comparer calls, which for string keys costs about as much as the
+    // residual's per-row filter — measured ~1.3× SLOWER than the plain group
+    // seek on a 211-rid nvarchar group with a 144-key slice. The ordered slice
+    // wins when the group dwarfs that per-key overhead (a 5 000-rid group with
+    // a small date slice measured ~5.6× faster), so small groups skip it.
+    private const int RangeSliceMinGroupRids = 256;
+
+    // Equality-prefix + range-continuation seek: the group of rows matching
+    // the (shorter-than-entry) prefixKey, narrowed to the composite ordered
+    // slice between the bounds when the group is large enough for the slice
+    // to pay (see RangeSliceMinGroupRids). Both shapes over-approximate the
+    // true match set at worst (the caller's residual WHERE filters), so the
+    // threshold is pure cost policy, never correctness.
+    public List<(int Page, int Slot)> PrefixRangeSeek(
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
+        SqlValueKey prefixKey, SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
+    {
+        lock (this.gate)
+        {
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
+            var group = entry.EqualityCandidates(prefixKey);
+            if (group.Count <= RangeSliceMinGroupRids)
+            {
+                IndexSeekDiagnostics.Sink?.Add("PrefixRangeGroup");
+                return [.. group];
+            }
+
+            IndexSeekDiagnostics.Sink?.Add("PrefixRangeSlice");
+            return entry.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive);
         }
     }
 
@@ -134,7 +169,7 @@ internal sealed class HeapSeekCache
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, heap, ordinals, commons);
-            candidates = entry.Buckets.TryGetValue(probeKey, out var bucket) ? [.. bucket] : [];
+            candidates = [.. entry.EqualityCandidates(probeKey)];
         }
 
         var seen = new HashSet<(int, int)>();
@@ -151,13 +186,15 @@ internal sealed class HeapSeekCache
         }
     }
 
-    // Resolves the cache entry for a prefix: reuses it (replaying the journal
-    // delta when the heap moved on), or rebuilds from a scan when the prefix /
-    // promoted types differ or the delta can't be replayed. Caller holds the gate.
+    // Resolves the cache entry for a prefix: reuses it when its prefix covers the
+    // request (replaying the journal delta when the heap moved on), or rebuilds
+    // from a scan when the request isn't covered or the delta can't be replayed.
+    // A journal-fail rebuild keeps the entry's own (possibly wider) prefix, so a
+    // widened entry never narrows back and starts thrashing. Caller holds the gate.
     private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
     {
         var lead = ordinals[0];
-        if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Matches(ordinals, commons))
+        if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Covers(ordinals, commons))
         {
             if (entry.Generation != heap.MutationGeneration)
             {
@@ -169,7 +206,7 @@ internal sealed class HeapSeekCache
                 }
                 else
                 {
-                    entry = this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
+                    entry = this.Rebuild(heap, schema, lobStore, entry.Ordinals, entry.Commons, lead);
                 }
             }
 
@@ -262,8 +299,8 @@ internal sealed class HeapSeekCache
     {
         public long Generation = generation;
         public readonly Dictionary<SqlValueKey, List<(int Page, int Slot)>> Buckets = buckets;
-        private readonly int[] ordinals = ordinals;
-        private readonly SqlType[] commons = commons;
+        public readonly int[] Ordinals = ordinals;
+        public readonly SqlType[] Commons = commons;
 
         // Ordered view of the bucket keys, built lazily on the first range scan
         // and then maintained in lockstep with Buckets (a key joins / leaves it
@@ -271,19 +308,64 @@ internal sealed class HeapSeekCache
         // needs it, so equality-only workloads never pay for it.
         private SortedSet<SqlValueKey>? sortedKeys;
 
-        // Reuse is sound only when the cached prefix is the same column
-        // sequence promoted to the same types as the incoming probe.
-        public bool Matches(int[] requestedOrdinals, SqlType[] requestedCommons)
+        // Hash views for shorter-arity equality probes against this (widened)
+        // entry, keyed by probe arity, each mapping a leading-prefix key to the
+        // union of its full-key buckets. Built lazily on the first probe of an
+        // arity and then maintained in lockstep with Buckets by AddRid /
+        // RemoveRid. Restores the O(1) hash hit a narrow probe had before the
+        // entry widened (walking the ordered view instead measured ~2× on a
+        // 500-row group lookup), at the cost of duplicating the rid lists per
+        // active arity. Null until a narrow probe occurs, so exact-arity
+        // workloads never pay for it.
+        private Dictionary<int, Dictionary<SqlValueKey, List<(int Page, int Slot)>>>? narrowViews;
+
+        // Reuse is sound when the cached prefix COVERS the request: the request's
+        // column sequence and promoted types are a leading prefix of the entry's.
+        // A shorter-arity probe is then served from the ordered view (every key
+        // sharing the probe's leading components sorts equal to it under the
+        // ragged-arity comparer), so an entry widened by an equality+range or
+        // multi-column seek keeps serving the narrower seeks that built it —
+        // alternating `a = @x` / `a = @x AND b > @y` shapes reuse one entry
+        // instead of rebuilding per query.
+        public bool Covers(int[] requestedOrdinals, SqlType[] requestedCommons)
         {
-            if (this.ordinals.Length != requestedOrdinals.Length)
+            if (this.Ordinals.Length < requestedOrdinals.Length)
                 return false;
-            for (var i = 0; i < this.ordinals.Length; i++)
+            for (var i = 0; i < requestedOrdinals.Length; i++)
             {
-                if (this.ordinals[i] != requestedOrdinals[i] || !ReferenceEquals(this.commons[i], requestedCommons[i]))
+                if (this.Ordinals[i] != requestedOrdinals[i] || !ReferenceEquals(this.Commons[i], requestedCommons[i]))
                     return false;
             }
 
             return true;
+        }
+
+        // Equality candidates for a probe of this entry's full arity (one hash
+        // bucket) or a shorter leading prefix (one bucket of the lazily-built
+        // narrow view for that arity) — both O(1) per probe.
+        public List<(int Page, int Slot)> EqualityCandidates(SqlValueKey probeKey)
+        {
+            var buckets = probeKey.ComponentCount == this.Ordinals.Length
+                ? this.Buckets
+                : this.EnsureNarrowView(probeKey.ComponentCount);
+            return buckets.TryGetValue(probeKey, out var bucket) ? bucket : Empty;
+        }
+
+        private Dictionary<SqlValueKey, List<(int Page, int Slot)>> EnsureNarrowView(int arity)
+        {
+            this.narrowViews ??= [];
+            if (!this.narrowViews.TryGetValue(arity, out var view))
+            {
+                this.narrowViews[arity] = view = [];
+                foreach (var (key, bucket) in this.Buckets)
+                {
+                    if (!view.TryGetValue(key.Prefix(arity), out var narrow))
+                        view[key.Prefix(arity)] = narrow = [];
+                    narrow.AddRange(bucket);
+                }
+            }
+
+            return view;
         }
 
         // Applies the journal delta to this entry's buckets. Insert adds the
@@ -300,17 +382,17 @@ internal sealed class HeapSeekCache
                 switch (e.Kind)
                 {
                     case Heap.SeekJournalKind.Insert:
-                        if (TryComputeKey(e.NewImage, this.ordinals, this.commons, schema, lobStore, out var insertKey))
+                        if (TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var insertKey))
                             this.AddRid(insertKey, (e.Page, e.Slot));
                         break;
                     case Heap.SeekJournalKind.Delete:
-                        if (TryComputeKey(e.OldImage, this.ordinals, this.commons, schema, lobStore, out var deleteKey))
+                        if (TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var deleteKey))
                             this.RemoveRid(deleteKey, (e.Page, e.Slot));
                         break;
                     case Heap.SeekJournalKind.Update:
-                        if (TryComputeKey(e.OldImage, this.ordinals, this.commons, schema, lobStore, out var oldKey))
+                        if (TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var oldKey))
                             this.RemoveRid(oldKey, (e.Page, e.Slot));
-                        if (TryComputeKey(e.NewImage, this.ordinals, this.commons, schema, lobStore, out var newKey))
+                        if (TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey))
                             this.AddRid(newKey, (e.Page, e.Slot));
                         break;
                 }
@@ -319,8 +401,8 @@ internal sealed class HeapSeekCache
             this.Generation = currentGen;
         }
 
-        // Instance add that keeps the lazily-built sorted view in sync — a key
-        // joins sortedKeys exactly when its bucket is first created.
+        // Instance add that keeps the lazily-built sorted and narrow views in
+        // sync — a key joins sortedKeys exactly when its bucket is first created.
         private void AddRid(SqlValueKey key, (int Page, int Slot) rid)
         {
             if (!this.Buckets.TryGetValue(key, out var bucket))
@@ -330,6 +412,16 @@ internal sealed class HeapSeekCache
             }
 
             bucket.Add(rid);
+
+            if (this.narrowViews is { } views)
+            {
+                foreach (var (arity, view) in views)
+                {
+                    if (!view.TryGetValue(key.Prefix(arity), out var narrow))
+                        view[key.Prefix(arity)] = narrow = [];
+                    narrow.Add(rid);
+                }
+            }
         }
 
         private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
@@ -341,6 +433,19 @@ internal sealed class HeapSeekCache
                 {
                     _ = this.Buckets.Remove(key);
                     _ = this.sortedKeys?.Remove(key);
+                }
+
+                if (this.narrowViews is { } views)
+                {
+                    foreach (var (arity, view) in views)
+                    {
+                        if (view.TryGetValue(key.Prefix(arity), out var narrow))
+                        {
+                            _ = narrow.Remove(rid);
+                            if (narrow.Count == 0)
+                                _ = view.Remove(key.Prefix(arity));
+                        }
+                    }
                 }
             }
         }

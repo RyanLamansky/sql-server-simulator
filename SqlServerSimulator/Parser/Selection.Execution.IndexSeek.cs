@@ -20,7 +20,11 @@ internal sealed partial class Selection
     /// <c>(a, b, …)</c>), the seek keys on the whole matched prefix — so a
     /// non-selective leading column (a flag, a low-cardinality FK) no longer
     /// drags the whole bucket through the residual filter. The longest usable
-    /// prefix across all keys / indexes wins.
+    /// prefix across all keys / indexes wins. A stable range bound on the key
+    /// column immediately after the prefix extends the seek predicate one
+    /// column further (<c>a = x AND b &gt; 5</c> seeks the in-range slice of
+    /// <c>a</c>'s group) — mirroring a real index seek predicate: an equality
+    /// prefix plus at most one range column, everything deeper residual.
     /// </para>
     /// <para>
     /// Returns the same array when no seek applies. Every matched conjunct is
@@ -89,11 +93,15 @@ internal sealed partial class Selection
                 _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue);
         }
 
+        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue);
+
         if (equalities.Count != 0
-            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, out var seekRows, out var width))
+            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, out var seekRows, out var width, out var rangeExtended))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},{width})");
+            if (rangeExtended)
+                IndexSeekDiagnostics.Sink?.Add($"PrefixRangeSeek({table.Name})");
             return SeekedSource(source, seekRows);
         }
 
@@ -101,7 +109,7 @@ internal sealed partial class Selection
         // (col > v / col BETWEEN lo AND hi / a one-sided bound). The matched
         // bound conjunct(s) stay in the residual WHERE, so the range only
         // narrows the candidate set.
-        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, conjuncts, allowCorrelatedColumnValue, out var rangeRows))
+        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, bounds, out var rangeRows))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"RangeSeek({table.Name})");
@@ -138,11 +146,12 @@ internal sealed partial class Selection
     /// Narrows a single-base-table scan to a range seek when WHERE carries a
     /// range bound (<c>col &gt; v</c> / <c>col &lt;= v</c> / <c>col BETWEEN lo AND
     /// hi</c>, either operand order) on the <b>leading</b> key column of some
-    /// index or key, and the bound value(s) are stable. Single leading-column
-    /// range only; a range on a non-leading column, or an equality-prefix
-    /// continued by a range, isn't narrowed here (the equality path takes the
-    /// prefix it can and the range stays residual). The bound conjuncts remain in
-    /// the residual WHERE, so the seek only narrows the candidate set.
+    /// index or key, and the bound value(s) are stable. This is the no-equality
+    /// fallback: an equality-prefix continued by a range is narrowed by the
+    /// equality path instead (its seek predicate extends one range column past
+    /// the prefix), and a range on a non-leading, non-continuation column stays
+    /// residual. The bound conjuncts remain in the residual WHERE, so the seek
+    /// only narrows the candidate set.
     /// </summary>
     private static bool TrySeekByRange(
         FromSource source,
@@ -151,11 +160,10 @@ internal sealed partial class Selection
         BatchContext batch,
         long? snapshotXid,
         Func<MultiPartName, SqlValue>? outerResolver,
-        List<BooleanExpression> conjuncts,
-        bool allowCorrelatedColumnValue,
+        Dictionary<int, RangeBoundExprs> bounds,
         out IEnumerable<byte[]> seekRows)
     {
-        if (!TryComputeRangeCandidates(source, table, batch, outerResolver, conjuncts, allowCorrelatedColumnValue, out var candidates))
+        if (!TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var candidates))
         {
             seekRows = [];
             return false;
@@ -176,12 +184,36 @@ internal sealed partial class Selection
         HeapTable table,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        List<BooleanExpression> conjuncts,
-        bool allowCorrelatedColumnValue,
+        Dictionary<int, RangeBoundExprs> bounds,
         out List<(int Page, int Slot)> candidates)
     {
         candidates = [];
 
+        if (bounds.Count == 0 || FindRangeLeadingOrdinal(table, bounds) is not { } ordinal)
+            return false;
+
+        var bound = bounds[ordinal];
+        switch (EvaluateRangeBounds(bound, source.StoredSchema[ordinal].Type, batch, outerResolver,
+            out var common, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue))
+        {
+            case BoundEval.Decline: return false;
+            case BoundEval.Null: return true;
+        }
+
+        var cache = HeapSeekCache.For(table.Heap);
+        candidates = cache.RangeScan(
+            table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
+            hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive);
+        return true;
+    }
+
+    // Collects, per indexable column of THIS source, the stable-value range
+    // bounds among the top-level conjuncts (`col > v` / `col <= v` / `col
+    // BETWEEN lo AND hi`, either operand order). First writer wins per side; a
+    // redundant looser bound stays a residual filter.
+    private static Dictionary<int, RangeBoundExprs> CollectRangeBounds(
+        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue)
+    {
         var bounds = new Dictionary<int, RangeBoundExprs>();
         foreach (var conjunct in conjuncts)
         {
@@ -204,52 +236,54 @@ internal sealed partial class Selection
             }
         }
 
-        if (bounds.Count == 0 || FindRangeLeadingOrdinal(table, bounds) is not { } ordinal)
-            return false;
+        return bounds;
+    }
 
-        var bound = bounds[ordinal];
-        var columnType = source.StoredSchema[ordinal].Type;
+    // Evaluates a column's collected range bound(s) against the column type,
+    // unifying their promoted type with the column's and coercing both to it.
+    // Decline → no usable range (promotion / collation failure — fall back);
+    // Null → a NULL bound makes every comparison UNKNOWN, so the range matches
+    // nothing (a valid empty seek); Value → the present bound value(s) are
+    // coerced to <paramref name="common"/> and usable.
+    private static BoundEval EvaluateRangeBounds(
+        RangeBoundExprs bound, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver,
+        out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue)
+    {
+        common = columnType;
+        hasLower = bound.Lower is not null;
+        hasUpper = bound.Upper is not null;
+        lowerValue = default;
+        upperValue = default;
 
-        // Evaluate present bounds, unify their promoted type with the column's, and
-        // coerce both to it. A NULL bound makes every comparison UNKNOWN, so the
-        // range matches nothing — a valid (empty) seek. A promotion / collation
-        // failure declines to the full scan.
-        SqlType? common = null;
-        SqlValue lowerValue = default, upperValue = default;
+        SqlType? unified = null;
         if (bound.Lower is { } lowerExpr)
         {
             switch (EvaluateBound(lowerExpr, columnType, batch, outerResolver, out lowerValue, out var lowerCommon))
             {
-                case BoundEval.Decline: return false;
-                case BoundEval.Null: return true;
-                default: common = lowerCommon; break;
+                case BoundEval.Decline: return BoundEval.Decline;
+                case BoundEval.Null: return BoundEval.Null;
+                default: unified = lowerCommon; break;
             }
         }
         if (bound.Upper is { } upperExpr)
         {
             switch (EvaluateBound(upperExpr, columnType, batch, outerResolver, out upperValue, out var upperCommon))
             {
-                case BoundEval.Decline: return false;
-                case BoundEval.Null: return true;
-                default: common = common is null ? upperCommon : SqlType.Promote(common, upperCommon); break;
+                case BoundEval.Decline: return BoundEval.Decline;
+                case BoundEval.Null: return BoundEval.Null;
+                default: unified = unified is null ? upperCommon : SqlType.Promote(unified, upperCommon); break;
             }
         }
 
-        if (common is null)
-            return false;
+        if (unified is null)
+            return BoundEval.Decline;
 
-        var hasLower = bound.Lower is not null;
-        var hasUpper = bound.Upper is not null;
+        common = unified;
         if (hasLower)
             lowerValue = lowerValue.CoerceTo(common);
         if (hasUpper)
             upperValue = upperValue.CoerceTo(common);
-
-        var cache = HeapSeekCache.For(table.Heap);
-        candidates = cache.RangeScan(
-            table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
-            hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive);
-        return true;
+        return BoundEval.Value;
     }
 
     // Records one bound for a column, first-writer-wins per side.
@@ -1071,10 +1105,12 @@ internal sealed partial class Selection
         long? snapshotXid,
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, Expression[]> equalities,
+        Dictionary<int, RangeBoundExprs> bounds,
         out IEnumerable<byte[]> seekRows,
-        out int width)
+        out int width,
+        out bool rangeExtended)
     {
-        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, out var candidates, out width))
+        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended))
         {
             seekRows = [];
             return false;
@@ -1093,21 +1129,36 @@ internal sealed partial class Selection
     // live rewrite targets). Probe components evaluate at most once per column; see
     // TrySeekByLongestPrefix's doc for the prefix / cartesian rules. Returns false
     // (prefix length 0) when no column carries a usable probe.
+    //
+    // A stable range bound on the key column immediately after the equality
+    // prefix EXTENDS the seek predicate one column further (`a = 1 AND b > 5`
+    // against (a, b) seeks the (a, 5..] slice of the ordered view instead of
+    // dragging a's whole bucket through the residual filter) — mirroring a real
+    // index seek's predicate, which is an equality prefix plus at most one range
+    // column, everything deeper residual. The longest equality prefix still
+    // wins the index choice; a range continuation only breaks ties. A bound
+    // that fails to evaluate falls back to the pure equality seek; a NULL bound
+    // seeks to empty (the range conjunct is UNKNOWN for every row, and it stays
+    // in the residual WHERE).
     private static bool TryComputeEqualityCandidates(
         FromSource source,
         HeapTable table,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, Expression[]> equalities,
+        Dictionary<int, RangeBoundExprs> bounds,
         out List<(int Page, int Slot)> candidates,
-        out int width)
+        out int width,
+        out bool rangeExtended)
     {
         candidates = [];
         width = 0;
+        rangeExtended = false;
 
         var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
 
         var bestLen = 0;
+        var bestContinues = false;
         int[]? bestKeyOrdinals = null;
         Storage.Index? bestIndex = null;
 
@@ -1117,9 +1168,11 @@ internal sealed partial class Selection
             var len = 0;
             while (len < ordinals.Length && ResolveComponent(ordinals[len]) is not null)
                 len++;
-            if (len > bestLen)
+            var continues = len > 0 && len < ordinals.Length && bounds.ContainsKey(ordinals[len]);
+            if (len > bestLen || (len == bestLen && len > 0 && continues && !bestContinues))
             {
                 bestLen = len;
+                bestContinues = continues;
                 bestKeyOrdinals = ordinals;
                 bestIndex = null;
             }
@@ -1131,9 +1184,11 @@ internal sealed partial class Selection
             var len = 0;
             while (len < keyColumns.Length && ResolveComponent(keyColumns[len].StorageOrdinal) is not null)
                 len++;
-            if (len > bestLen)
+            var continues = len > 0 && len < keyColumns.Length && bounds.ContainsKey(keyColumns[len].StorageOrdinal);
+            if (len > bestLen || (len == bestLen && len > 0 && continues && !bestContinues))
             {
                 bestLen = len;
+                bestContinues = continues;
                 bestIndex = index;
                 bestKeyOrdinals = null;
             }
@@ -1154,6 +1209,44 @@ internal sealed partial class Selection
         }
 
         var cache = HeapSeekCache.For(table.Heap);
+        if (bestContinues)
+        {
+            var rangeOrdinal = bestKeyOrdinals is { } ko ? ko[bestLen] : bestIndex!.KeyColumns[bestLen].StorageOrdinal;
+            var bound = bounds[rangeOrdinal];
+            switch (EvaluateRangeBounds(bound, source.StoredSchema[rangeOrdinal].Type, batch, outerResolver,
+                out var rangeCommon, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue))
+            {
+                case BoundEval.Null:
+                    // The range conjunct is UNKNOWN for every row — a valid
+                    // empty seek, narrower than probing the equality prefix.
+                    width = bestLen;
+                    rangeExtended = true;
+                    return true;
+                case BoundEval.Value:
+                    var extendedPrefix = new int[bestLen + 1];
+                    Array.Copy(prefix, extendedPrefix, bestLen);
+                    extendedPrefix[bestLen] = rangeOrdinal;
+                    var extendedCommons = new SqlType[bestLen + 1];
+                    Array.Copy(commons, extendedCommons, bestLen);
+                    extendedCommons[bestLen] = rangeCommon;
+                    foreach (var tuple in CartesianProduct(probesPerColumn))
+                    {
+                        candidates.AddRange(cache.PrefixRangeSeek(
+                            table.Heap, source.StoredSchema, source.LobStore, extendedPrefix, extendedCommons,
+                            new SqlValueKey(tuple),
+                            ComposeBound(tuple, hasLower, lowerValue), !hasLower || bound.LowerInclusive,
+                            ComposeBound(tuple, hasUpper, upperValue), !hasUpper || bound.UpperInclusive));
+                    }
+
+                    width = bestLen;
+                    rangeExtended = true;
+                    return true;
+            }
+
+            // BoundEval.Decline: the bound can't anchor a seek — fall through
+            // to the pure equality seek on the same prefix.
+        }
+
         foreach (var tuple in CartesianProduct(probesPerColumn))
         {
             var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple));
@@ -1315,7 +1408,8 @@ internal sealed partial class Selection
     /// UPDATE / DELETE target whose WHERE carries an indexable equality (literal /
     /// variable / arithmetic value — never a correlated column, since a single-
     /// table mutation has no outer row), IN-list / OR family, composite leading
-    /// prefix, or single leading-column range. Returns <c>null</c> when nothing
+    /// prefix (optionally extended by a range bound on the next key column), or
+    /// single leading-column range. Returns <c>null</c> when nothing
     /// seekable is present, so the caller keeps its full
     /// <see cref="Heap.EnumerateRowsWithAddress"/> scan. The result is an exact
     /// match set for the seekable conjuncts only; the mutation loop re-runs the
@@ -1347,13 +1441,15 @@ internal sealed partial class Selection
                 _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
         }
 
+        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
+
         if (equalities.Count != 0
-            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, out var eqCandidates, out _))
+            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _))
         {
             return MaterializeMutationCandidates(table, eqCandidates);
         }
 
-        if (TryComputeRangeCandidates(source, table, batch, outerResolver: null, conjuncts, allowCorrelatedColumnValue: false, out var rangeCandidates))
+        if (TryComputeRangeCandidates(source, table, batch, outerResolver: null, bounds, out var rangeCandidates))
             return MaterializeMutationCandidates(table, rangeCandidates);
 
         // No seekable equality or range conjunct: caller keeps its full scan.
@@ -1398,10 +1494,11 @@ internal sealed partial class Selection
                 _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: true);
         }
 
+        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: true);
         return HasSeekableLeadingPrefix(table, equalities) ? Seek : null;
 
         IEnumerable<(int Page, int Slot, byte[] Bytes)> Seek(Func<MultiPartName, SqlValue> outerResolver) =>
-            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, out var candidates, out _)
+            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out _, out _)
                 ? MaterializeMutationCandidates(table, candidates)
                 : [];
     }

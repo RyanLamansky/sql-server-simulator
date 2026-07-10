@@ -22,6 +22,9 @@ internal readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey
     /// <summary>The component at <paramref name="index"/> — used by the range-seek ordered comparer.</summary>
     internal SqlValue ComponentAt(int index) => this.values[index];
 
+    /// <summary>A key over the first <paramref name="arity"/> components — the seek cache's narrow-probe view key.</summary>
+    internal SqlValueKey Prefix(int arity) => new(this.values[..arity]);
+
     public bool Equals(SqlValueKey other)
     {
         if (this.values.Length != other.values.Length)
