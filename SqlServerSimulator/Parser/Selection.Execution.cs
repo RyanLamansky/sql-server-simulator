@@ -334,16 +334,22 @@ internal sealed partial class Selection
 
         IEnumerable<SqlValue[]> InnerStream()
         {
+            // Hoisted per-row resolution scaffolding: one mutable-capture
+            // tuple slot, one cached self-referencing resolver lambda, one
+            // RuntimeContext — instead of a fresh closure + several delegates
+            // per row (the allocation profile's dominant entry).
             var memo = new SourceColumnMemo();
+            var currentTuple = default(byte[]?[])!;
+            Func<MultiPartName, SqlValue> resolveColumn = null!;
+            resolveColumn = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveColumn, memo);
+            var rowRuntime = new RuntimeContext(resolveColumn, batch);
             foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
-                var localTuple = tuple;
-                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn, memo);
-
+                currentTuple = tuple;
                 var include = true;
                 foreach (var excluder in excluders)
                 {
-                    if (excluder.Run(new RuntimeContext(ResolveColumn, batch)) != true)
+                    if (excluder.Run(rowRuntime) != true)
                     {
                         include = false;
                         break;
@@ -359,7 +365,7 @@ internal sealed partial class Selection
                 batch.BumpRowStamp();
                 var projected = new SqlValue[expressions.Count];
                 for (var i = 0; i < expressions.Count; i++)
-                    projected[i] = expressions[i].Run(new RuntimeContext(ResolveColumn, batch));
+                    projected[i] = expressions[i].Run(rowRuntime);
 
                 yield return projected;
             }
@@ -381,16 +387,19 @@ internal sealed partial class Selection
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
 
+        // Hoisted per-row resolution scaffolding — see InnerStream above.
         var memo = new SourceColumnMemo();
+        var currentTuple = default(byte[]?[])!;
+        Func<MultiPartName, SqlValue> resolveSource = null!;
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveSource, memo);
+        var rowRuntime = new RuntimeContext(resolveSource, batch);
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
-            var localTuple = tuple;
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
-
+            currentTuple = tuple;
             var include = true;
             foreach (var excluder in excluders)
             {
-                if (excluder.Run(new RuntimeContext(ResolveSource, batch)) != true)
+                if (excluder.Run(rowRuntime) != true)
                 {
                     include = false;
                     break;
@@ -404,9 +413,9 @@ internal sealed partial class Selection
             batch.BumpRowStamp();
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(new RuntimeContext(ResolveSource, batch));
+                projected[i] = expressions[i].Run(rowRuntime);
 
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, ResolveSource);
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, resolveSource);
             buffer.Add((projected, keys));
         }
 

@@ -77,13 +77,20 @@ internal sealed partial class Selection
         var tuple = new byte[]?[sources.Length];
         var memo = new SourceColumnMemo();
 
-        SqlValue Resolve(MultiPartName name) =>
-            ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, Resolve, memo);
+        // Cached self-referencing lambda, NOT a local function: a local
+        // function passed as its own selfRecursive argument allocates a fresh
+        // delegate on every call — one per column resolution per row, the
+        // single largest allocation source of scan-bound queries (41% of
+        // bytes in the allocation profile). The lambda reads itself through
+        // the captured variable, so exactly one delegate exists per
+        // enumeration.
+        Func<MultiPartName, SqlValue> resolve = null!;
+        resolve = name => ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, resolve, memo);
 
         var rowset = EnumerateLeftmost(sources[0], tuple, batch, outerResolver);
         for (var level = 1; level < sources.Length; level++)
         {
-            rowset = ApplyJoin(rowset, sources, joins[level - 1], tuple, level, batch, Resolve, outerResolver);
+            rowset = ApplyJoin(rowset, sources, joins[level - 1], tuple, level, batch, resolve, outerResolver);
         }
         return rowset;
     }
@@ -683,16 +690,23 @@ internal sealed partial class Selection
         // growth churn, which profiling showed as the hash build's dominant
         // cost on a 228k-row build side. Forward links keep probe emission in
         // build order, matching the per-key List's insertion order exactly.
+        // Key computation writes into one reused scratch array per side —
+        // per-row key arrays were the third-largest allocation source in the
+        // profile. A scratch-backed SqlValueKey is safe for transient
+        // dictionary lookups (equality reads the components, nothing retains
+        // them); only the build side's first-occurrence insert stores the key,
+        // so that one path clones the scratch into a stable array.
         var rightRows = new List<byte[]>();
         var next = new List<int>();
         var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
+        var keyScratch = new SqlValue[plan.Keys.Length];
         foreach (var row in right.Rows)
         {
             tuple[level] = row;
             var ordinal = rightRows.Count;
             rightRows.Add(row);
             next.Add(-1);
-            if (TryComputeKey(plan.Keys, runtime, rightSide: true, out var buildKey))
+            if (TryComputeKeyInto(plan.Keys, runtime, rightSide: true, keyScratch, out var buildKey))
             {
                 if (buckets.TryGetValue(buildKey, out var chain))
                 {
@@ -701,7 +715,7 @@ internal sealed partial class Selection
                 }
                 else
                 {
-                    buckets[buildKey] = (ordinal, ordinal);
+                    buckets[new SqlValueKey((SqlValue[])keyScratch.Clone())] = (ordinal, ordinal);
                 }
             }
         }
@@ -712,7 +726,7 @@ internal sealed partial class Selection
         foreach (var _ in left)
         {
             var matchedLeft = false;
-            if (TryComputeKey(plan.Keys, runtime, rightSide: false, out var probeKey)
+            if (TryComputeKeyInto(plan.Keys, runtime, rightSide: false, keyScratch, out var probeKey)
                 && buckets.TryGetValue(probeKey, out var probeChain))
             {
                 for (var ordinal = probeChain.Head; ordinal != -1; ordinal = next[ordinal])
@@ -751,9 +765,15 @@ internal sealed partial class Selection
     /// each key value to its <see cref="EquiKey.Common"/> promotion type.
     /// Returns false (no bucket) the moment any key value is NULL.
     /// </summary>
-    private static bool TryComputeKey(EquiKey[] keys, RuntimeContext runtime, bool rightSide, out SqlValueKey key)
+    private static bool TryComputeKey(EquiKey[] keys, RuntimeContext runtime, bool rightSide, out SqlValueKey key) =>
+        TryComputeKeyInto(keys, runtime, rightSide, new SqlValue[keys.Length], out key);
+
+    // Scratch-buffer form: the returned key wraps <paramref name="values"/>,
+    // so it is valid only until the buffer's next reuse — fine for a
+    // dictionary lookup, which reads the components without retaining them.
+    // A caller that stores the key must clone the buffer first.
+    private static bool TryComputeKeyInto(EquiKey[] keys, RuntimeContext runtime, bool rightSide, SqlValue[] values, out SqlValueKey key)
     {
-        var values = new SqlValue[keys.Length];
         for (var i = 0; i < keys.Length; i++)
         {
             var raw = (rightSide ? keys[i].Right : keys[i].Left).Run(runtime);

@@ -55,18 +55,26 @@ internal sealed partial class Selection
         // cloned. For each buffered tuple, also pre-compute every window's
         // partition + order keys so the per-row resolver doesn't have to
         // be re-bound during window evaluation.
+        // Hoisted per-row resolution scaffolding: one mutable-capture tuple
+        // slot, one cached self-referencing resolver lambda, one
+        // RuntimeContext — instead of a fresh closure + several delegates per
+        // row (the allocation profile's dominant entry). The same slot serves
+        // both this buffering loop (live shared tuple) and the projection
+        // loop at the end (buffered snapshots) — each assigns before resolving.
         var memo = new SourceColumnMemo();
+        var currentTuple = default(byte[]?[])!;
+        Func<MultiPartName, SqlValue> resolveSource = null!;
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveSource, memo);
+        var rowRuntime = new RuntimeContext(resolveSource, batch);
         var buffered = new List<byte[]?[]>();
         var perWindowKeys = new List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]>();
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
-            var localTuple = tuple;
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
-
+            currentTuple = tuple;
             var include = true;
             foreach (var excluder in excluders)
             {
-                if (excluder.Run(new RuntimeContext(ResolveSource, batch)) != true)
+                if (excluder.Run(rowRuntime) != true)
                 {
                     include = false;
                     break;
@@ -81,10 +89,10 @@ internal sealed partial class Selection
                 var win = windows[w];
                 var partitionKeys = new SqlValue[win.PartitionBy.Length];
                 for (var p = 0; p < win.PartitionBy.Length; p++)
-                    partitionKeys[p] = win.PartitionBy[p].Run(new RuntimeContext(ResolveSource, batch));
+                    partitionKeys[p] = win.PartitionBy[p].Run(rowRuntime);
                 var orderKeys = new SqlValue[win.OrderBy.Length];
                 for (var o = 0; o < win.OrderBy.Length; o++)
-                    orderKeys[o] = win.OrderBy[o].Expr!.Run(new RuntimeContext(ResolveSource, batch));
+                    orderKeys[o] = win.OrderBy[o].Expr!.Run(rowRuntime);
                 keys[w] = (partitionKeys, orderKeys);
             }
 
@@ -538,14 +546,12 @@ internal sealed partial class Selection
             for (var w = 0; w < windows.Count; w++)
                 windows[w].BindResult(batch, perWindowResults[w][i]);
 
-            var localTuple = buffered[i];
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
-
+            currentTuple = buffered[i];
             var projected = new SqlValue[expressions.Count];
             for (var j = 0; j < expressions.Count; j++)
-                projected[j] = expressions[j].Run(new RuntimeContext(ResolveSource, batch));
+                projected[j] = expressions[j].Run(rowRuntime);
 
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, ResolveSource);
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, resolveSource);
             projectedBuffer.Add((projected, keys));
         }
 

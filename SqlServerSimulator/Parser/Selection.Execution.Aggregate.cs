@@ -73,16 +73,24 @@ internal sealed partial class Selection
         // accepted row gets snapshotted (the inner byte[] references are
         // immutable, only the outer array slots get rewritten by the join
         // driver). Captured snapshots are then iterated per grouping set.
+        // Row-invariant resolution scaffolding is hoisted out of every per-row
+        // loop below: `currentTuple` is a mutable capture rewritten per row,
+        // and the resolver is a cached self-referencing lambda (see
+        // EnumerateJoinedRows), so each loop allocates one closure + one
+        // delegate + one RuntimeContext TOTAL instead of several per row —
+        // per-row delegate churn dominated the allocation profile.
         var buffered = new List<byte[]?[]>();
+        var currentTuple = default(byte[]?[])!;
+        Func<MultiPartName, SqlValue> resolveColumn = null!;
+        resolveColumn = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveColumn, memo);
+        var rowRuntime = new RuntimeContext(resolveColumn, batch);
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
-            var localTuple = tuple;
-            SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn, memo);
-
+            currentTuple = tuple;
             var include = true;
             foreach (var excluder in fromClause.Excluders)
             {
-                if (excluder.Run(new RuntimeContext(ResolveColumn, batch)) != true)
+                if (excluder.Run(rowRuntime) != true)
                 {
                     include = false;
                     break;
@@ -112,9 +120,7 @@ internal sealed partial class Selection
 
             foreach (var tuple in buffered)
             {
-                var localTuple = tuple;
-                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn, memo);
-
+                currentTuple = tuple;
                 GroupState state;
                 if (groupingSet.Length == 0)
                 {
@@ -124,7 +130,7 @@ internal sealed partial class Selection
                 {
                     var keyValues = new SqlValue[groupingSet.Length];
                     for (var i = 0; i < groupingSet.Length; i++)
-                        keyValues[i] = groupingSet[i].Run(new RuntimeContext(ResolveColumn, batch));
+                        keyValues[i] = groupingSet[i].Run(rowRuntime);
                     var key = new SqlValueKey(keyValues);
                     if (!groups.TryGetValue(key, out state!))
                     {
@@ -146,15 +152,15 @@ internal sealed partial class Selection
                     var aggregate = aggregates[i];
                     if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
                     {
-                        var separatorValue = aggregate.Separator!.Run(new RuntimeContext(ResolveColumn, batch));
+                        var separatorValue = aggregate.Separator!.Run(rowRuntime);
                         stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
 
                         if (aggregate.OrderBy is { } orderBy)
                         {
                             var orderKeys = new SqlValue[orderBy.Count];
                             for (var k = 0; k < orderBy.Count; k++)
-                                orderKeys[k] = orderBy[k].Expr!.Run(new RuntimeContext(ResolveColumn, batch));
-                            stringAgg.AddOrdered(aggregate.Operand!.Run(new RuntimeContext(ResolveColumn, batch)), orderKeys);
+                                orderKeys[k] = orderBy[k].Expr!.Run(rowRuntime);
+                            stringAgg.AddOrdered(aggregate.Operand!.Run(rowRuntime), orderKeys);
                             continue;
                         }
                     }
@@ -166,8 +172,8 @@ internal sealed partial class Selection
                     {
                         var orderKeys = new SqlValue[jsonOrderBy.Count];
                         for (var k = 0; k < jsonOrderBy.Count; k++)
-                            orderKeys[k] = jsonOrderBy[k].Expr!.Run(new RuntimeContext(ResolveColumn, batch));
-                        arrayAgg.AddOrdered(aggregate.Operand!.Run(new RuntimeContext(ResolveColumn, batch)), orderKeys);
+                            orderKeys[k] = jsonOrderBy[k].Expr!.Run(rowRuntime);
+                        arrayAgg.AddOrdered(aggregate.Operand!.Run(rowRuntime), orderKeys);
                         continue;
                     }
 
@@ -176,16 +182,78 @@ internal sealed partial class Selection
                     if (aggregate.Kind == AggregateKind.JsonObjectAgg
                         && state.Aggregators[i] is Aggregators.JsonObjectAggAggregator objectAgg)
                     {
-                        objectAgg.SetKey(aggregate.KeyExpression!.Run(new RuntimeContext(ResolveColumn, batch)));
+                        objectAgg.SetKey(aggregate.KeyExpression!.Run(rowRuntime));
                     }
 
                     var operand = aggregate.Operand;
-                    state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(new RuntimeContext(ResolveColumn, batch)));
+                    state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(rowRuntime));
                 }
             }
 
+            // Per-group resolution scaffolding, hoisted like the per-row loops
+            // above: `currentState` / `currentProjected` are mutable captures
+            // rewritten per group, the resolvers are cached self-referencing
+            // lambdas, and each runtime is allocated once per grouping set —
+            // a large-group-count GROUP BY (one group per customer) evaluated
+            // several expressions per group through fresh delegates otherwise.
+            var currentState = default(GroupState)!;
+            var currentProjected = default(SqlValue[])!;
+            Func<MultiPartName, SqlValue> resolveByGroupKey = null!;
+            resolveByGroupKey = name =>
+            {
+                for (var i = 0; i < groupingSet.Length; i++)
+                {
+                    if (groupingSet[i] is Reference r
+                        && BuiltInToken.Equals(r.Name, name.Leaf))
+                    {
+                        return currentState.KeyValues[i];
+                    }
+                }
+                // Column appears in another grouping set but not this one
+                // — return typed NULL to surface the subtotal/total-row
+                // semantic. The type comes from the column-type resolver.
+                foreach (var expr in fromClause.AllGroupingExpressions)
+                {
+                    if (expr is Reference r
+                        && BuiltInToken.Equals(r.Name, name.Leaf))
+                    {
+                        return SqlValue.Null(expr.GetSqlType(batch, resolveColumnType));
+                    }
+                }
+
+                // Column referenced inside one of this (non-empty) set's
+                // grouping expressions: resolve against the group's
+                // representative row. ResolveAcrossTuple itself falls back
+                // to the outer resolver / Msg 207 when the name isn't a
+                // source column, so this subsumes the outer-or-throw tail.
+                return groupingSet.Length > 0 && currentState.Representative is { } rep
+                    ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, resolveByGroupKey, memo)
+                    : outerResolver is not null
+                        ? outerResolver(name)
+                        : throw SimulatedSqlException.InvalidColumnName(name);
+            };
+            var groupRuntime = new RuntimeContext(resolveByGroupKey, batch);
+
+            // Resolves an ORDER BY item's column references against this
+            // group's output (alias / select-list name first), then through
+            // the grouped-key resolver — so ORDER BY can reference a select
+            // alias, a grouped column, or a grouping expression.
+            SqlValue ResolveOrderName(MultiPartName name)
+            {
+                for (var j = 0; j < outputColumnNames.Length; j++)
+                {
+                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                        return currentProjected[j];
+                }
+
+                return resolveByGroupKey(name);
+            }
+
+            var orderRuntime = new RuntimeContext(ResolveOrderName, batch);
+
             foreach (var (_, state) in groups)
             {
+                currentState = state;
                 for (var i = 0; i < aggregates.Count; i++)
                     aggregates[i].BindResult(batch, state.Aggregators[i].Result());
 
@@ -198,64 +266,14 @@ internal sealed partial class Selection
                 batch.GroupingSetExpressions = groupingSet;
                 batch.AllGroupingExpressions = fromClause.AllGroupingExpressions;
 
-                var capturedSet = groupingSet;
-                SqlValue ResolveByGroupKey(MultiPartName name)
-                {
-                    for (var i = 0; i < capturedSet.Length; i++)
-                    {
-                        if (capturedSet[i] is Reference r
-                            && BuiltInToken.Equals(r.Name, name.Leaf))
-                        {
-                            return state.KeyValues[i];
-                        }
-                    }
-                    // Column appears in another grouping set but not this one
-                    // — return typed NULL to surface the subtotal/total-row
-                    // semantic. The type comes from the column-type resolver.
-                    foreach (var expr in fromClause.AllGroupingExpressions)
-                    {
-                        if (expr is Reference r
-                            && BuiltInToken.Equals(r.Name, name.Leaf))
-                        {
-                            return SqlValue.Null(expr.GetSqlType(batch, resolveColumnType));
-                        }
-                    }
-
-                    // Column referenced inside one of this (non-empty) set's
-                    // grouping expressions: resolve against the group's
-                    // representative row. ResolveAcrossTuple itself falls back
-                    // to the outer resolver / Msg 207 when the name isn't a
-                    // source column, so this subsumes the outer-or-throw tail.
-                    return capturedSet.Length > 0 && state.Representative is { } rep
-                        ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, ResolveByGroupKey, memo)
-                        : outerResolver is not null
-                            ? outerResolver(name)
-                            : throw SimulatedSqlException.InvalidColumnName(name);
-                }
-
-                // Resolves an ORDER BY item's column references against this
-                // group's output (alias / select-list name first), then through
-                // the grouped-key resolver — so ORDER BY can reference a select
-                // alias, a grouped column, or a grouping expression.
-                SqlValue ResolveOrderName(SqlValue[] projectedRow, MultiPartName name)
-                {
-                    for (var j = 0; j < outputColumnNames.Length; j++)
-                    {
-                        if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
-                            return projectedRow[j];
-                    }
-
-                    return ResolveByGroupKey(name);
-                }
-
                 try
                 {
-                    if (fromClause.Having is { } having && having.Run(new RuntimeContext(ResolveByGroupKey, batch)) != true)
+                    if (fromClause.Having is { } having && having.Run(groupRuntime) != true)
                         continue;
 
                     var projected = new SqlValue[expressions.Count];
                     for (var i = 0; i < expressions.Count; i++)
-                        projected[i] = expressions[i].Run(new RuntimeContext(ResolveByGroupKey, batch));
+                        projected[i] = expressions[i].Run(groupRuntime);
 
                     // Aggregate-query ORDER BY: keys are computed here, where
                     // each aggregate is bound and the grouping context is
@@ -263,12 +281,13 @@ internal sealed partial class Selection
                     // OFFSET / FETCH apply. Ordinal items index the output row;
                     // expression items (aggregates, grouped columns, aliases,
                     // grouping expressions) resolve through ResolveOrderName.
+                    currentProjected = projected;
                     var orderKeys = new SqlValue[orderByItems.Count];
                     for (var k = 0; k < orderByItems.Count; k++)
                     {
                         orderKeys[k] = orderByItems[k].IsOrdinal
                             ? projected[orderByItems[k].Ordinal - 1]
-                            : orderByItems[k].Expr!.Run(new RuntimeContext(name => ResolveOrderName(projected, name), batch));
+                            : orderByItems[k].Expr!.Run(orderRuntime);
                     }
 
                     output.Add((orderKeys, projected));
