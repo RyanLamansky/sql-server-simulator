@@ -31,7 +31,6 @@ Buildable now (infrastructure exists):
 Blocked on a larger unmodeled parent feature (shipping a function here implies the parent ships too):
 
 - **Graph** (node/edge tables) — EDGE_ID_FROM_PARTS / GRAPH_ID_FROM_EDGE_ID / GRAPH_ID_FROM_NODE_ID / NODE_ID_FROM_PARTS / OBJECT_ID_FROM_EDGE_ID / OBJECT_ID_FROM_NODE_ID.
-- **Application locks** (sp_getapplock / sp_releaseapplock) — APPLOCK_MODE / APPLOCK_TEST (real apps use these for cross-session coordination).
 - **Change tracking** — CHANGETABLE(CHANGES …) / CHANGETABLE(VERSION …).
 - **Partitioning** — `$PARTITION.partition_function_name(value)`.
 - **CLR assemblies** (`CREATE ASSEMBLY` rejected) — ASSEMBLYPROPERTY.

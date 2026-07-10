@@ -131,6 +131,27 @@ internal sealed class LockResource
 /// holders under the gate, so the snapshot is consistent.
 /// </para>
 /// </remarks>
+/// <summary>
+/// Terminal condition of a <see cref="LockManager.TryAcquire"/> call. The
+/// throwing <see cref="LockManager.Acquire"/> maps <see cref="TimedOut"/> to
+/// Msg 1222 and <see cref="Deadlocked"/> to Msg 1205; the application-lock
+/// path maps all four to <c>sp_getapplock</c> return codes.
+/// </summary>
+internal enum LockAcquireOutcome
+{
+    /// <summary>Granted without blocking (includes same-owner re-entrance).</summary>
+    Granted,
+
+    /// <summary>Granted after at least one wait on the gate.</summary>
+    GrantedAfterWait,
+
+    /// <summary>The timeout elapsed while conflicting holders remained.</summary>
+    TimedOut,
+
+    /// <summary>The caller was chosen as the deadlock victim (same-thread conflict or wait-for cycle).</summary>
+    Deadlocked,
+}
+
 internal sealed class LockManager
 {
     /// <summary>
@@ -154,6 +175,28 @@ internal sealed class LockManager
     /// </exception>
     public void Acquire(LockResource resource, LockMode mode, SimulatedDbConnection owner, int timeoutMillis)
     {
+        switch (this.TryAcquire(resource, mode, owner, timeoutMillis))
+        {
+            case LockAcquireOutcome.TimedOut:
+                throw SimulatedSqlException.LockRequestTimeOutExceeded();
+            case LockAcquireOutcome.Deadlocked:
+                throw SimulatedSqlException.TransactionDeadlocked(owner.Spid);
+        }
+    }
+
+    /// <summary>
+    /// Non-throwing acquire core. Identical semantics to
+    /// <see cref="Acquire"/>, but reports the terminal condition as a
+    /// <see cref="LockAcquireOutcome"/> instead of raising Msg 1222 / 1205 —
+    /// the application-lock path (<c>sp_getapplock</c>) maps outcomes to
+    /// return codes (0 / 1 / -1 / -3) rather than exceptions, matching the
+    /// probe-confirmed behavior that an app-lock timeout and even a
+    /// deadlock-victim selection surface as return codes with no error.
+    /// Distinguishes <see cref="LockAcquireOutcome.GrantedAfterWait"/> from
+    /// an immediate grant for sp_getapplock's return-code 1.
+    /// </summary>
+    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SimulatedDbConnection owner, int timeoutMillis)
+    {
         lock (this.gate)
         {
             // Same-owner / same-mode re-entrance: bump the existing hold's
@@ -167,36 +210,37 @@ internal sealed class LockManager
                     var hold = resource.Holders[i];
                     hold.Count++;
                     resource.Holders[i] = hold;
-                    return;
+                    return LockAcquireOutcome.Granted;
                 }
             }
 
             var deadline = timeoutMillis < 0 ? -1L : Environment.TickCount64 + timeoutMillis;
+            var waited = false;
 
             while (true)
             {
                 if (TryGrant(resource, mode, owner))
-                    return;
+                    return waited ? LockAcquireOutcome.GrantedAfterWait : LockAcquireOutcome.Granted;
 
                 // Same-thread conflict → immediate Msg 1205. This thread
                 // is the executor for both the caller and a conflicting
                 // holder; no progress possible.
                 if (IsConflictingHolderOnSameThread(resource, mode, owner))
-                    throw SimulatedSqlException.TransactionDeadlocked(owner.Spid);
+                    return LockAcquireOutcome.Deadlocked;
 
                 // Cross-thread cycle detection. Walk the wait-for graph
                 // from each conflicting holder; if any walk reaches the
                 // caller, a cycle exists and the caller is the victim.
                 if (WouldCreateCycle(resource, mode, owner))
-                    throw SimulatedSqlException.TransactionDeadlocked(owner.Spid);
+                    return LockAcquireOutcome.Deadlocked;
 
                 // Timeout==0 = fail-fast.
                 if (timeoutMillis == 0)
-                    throw SimulatedSqlException.LockRequestTimeOutExceeded();
+                    return LockAcquireOutcome.TimedOut;
 
                 var remaining = deadline < 0 ? Timeout.Infinite : (int)Math.Max(0, deadline - Environment.TickCount64);
                 if (timeoutMillis > 0 && remaining == 0)
-                    throw SimulatedSqlException.LockRequestTimeOutExceeded();
+                    return LockAcquireOutcome.TimedOut;
 
                 // Mark the caller as waiting on this resource so other
                 // connections' cycle walks can see the edge. Cleared in
@@ -207,8 +251,9 @@ internal sealed class LockManager
                 owner.WaitingForMode = mode;
                 try
                 {
+                    waited = true;
                     if (!Monitor.Wait(this.gate, remaining))
-                        throw SimulatedSqlException.LockRequestTimeOutExceeded();
+                        return LockAcquireOutcome.TimedOut;
                 }
                 finally
                 {

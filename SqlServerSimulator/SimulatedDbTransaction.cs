@@ -67,6 +67,19 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal readonly List<(LockResource Resource, LockMode Mode)> HeldLocks = [];
 
     /// <summary>
+    /// Transaction-owned application locks (<c>sp_getapplock @LockOwner =
+    /// 'Transaction'</c>), one entry per successful acquire. The manager
+    /// holds themselves also ride <see cref="HeldLocks"/> (which releases
+    /// them at transaction end); this parallel ledger carries the
+    /// (principal, resource) identity the owner-scoped views need —
+    /// <c>APPLOCK_MODE</c>, <c>sp_releaseapplock</c>'s not-held check, the
+    /// <c>sys.dm_tran_locks</c> APPLICATION rows. Probe-confirmed lifecycle:
+    /// released on COMMIT and full ROLLBACK, kept across
+    /// rollback-to-savepoint.
+    /// </summary>
+    internal readonly List<AppLockHold> TransactionAppLocks = [];
+
+    /// <summary>
     /// Per-table count of currently-held tx-scoped row locks (row-X, row-U,
     /// row-S-tx-scoped). Bumped at every row-lock acquire site; when a
     /// table's count exceeds <see cref="RowLockEscalationThreshold"/>, the
@@ -250,6 +263,10 @@ public sealed class SimulatedDbTransaction : DbTransaction
             manager.Release(resource, mode, this.Connection);
         }
         this.HeldLocks.Clear();
+        // Transaction-owned application locks release with the transaction —
+        // their manager holds rode the HeldLocks entries above; only the
+        // owner-view ledger needs clearing here.
+        this.TransactionAppLocks.Clear();
         this.RowLockCountsByTable.Clear();
         this.EscalatedTables.Clear();
     }

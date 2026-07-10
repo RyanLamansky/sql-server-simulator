@@ -282,6 +282,35 @@ internal sealed class Database
     /// </summary>
     public readonly List<(int RoleId, int MemberId)> RoleMembers = [];
 
+    /// <summary>
+    /// Application-lock resources (the <c>sp_getapplock</c> family), keyed by
+    /// (database-principal id, resource name). Names compare ordinally —
+    /// case- and trailing-space-sensitive, probe-confirmed — after the caller
+    /// truncates to 255 characters (<c>AppLock.NormalizeResource</c>).
+    /// Interned lazily under the dictionary's own lock via
+    /// <see cref="GetOrCreateApplicationLock"/>; entries are never removed —
+    /// an idle <see cref="LockResource"/> is a few words and the name set is
+    /// small in practice.
+    /// </summary>
+    public readonly Dictionary<(int PrincipalId, string Resource), LockResource> ApplicationLocks = [];
+
+    /// <summary>
+    /// Interns the <see cref="LockResource"/> for one application-lock
+    /// identity, creating it on first use. Distinct principals produce
+    /// distinct resources — a lock held under one principal neither
+    /// conflicts with nor is visible to another principal's same-named lock
+    /// (probe-confirmed).
+    /// </summary>
+    public LockResource GetOrCreateApplicationLock(int principalId, string resource)
+    {
+        lock (this.ApplicationLocks)
+        {
+            if (!this.ApplicationLocks.TryGetValue((principalId, resource), out var existing))
+                this.ApplicationLocks[(principalId, resource)] = existing = new LockResource();
+            return existing;
+        }
+    }
+
     private int nextPrincipalId = 4;
 
     /// <summary>

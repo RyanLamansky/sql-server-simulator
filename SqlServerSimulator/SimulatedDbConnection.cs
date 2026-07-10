@@ -396,6 +396,30 @@ public sealed class SimulatedDbConnection : DbConnection
         this.CurrentDatabase = target;
     }
 
+    /// <summary>
+    /// Session-owned application locks (<c>sp_getapplock @LockOwner =
+    /// 'Session'</c>), one entry per successful acquire (probe-confirmed
+    /// reference counting: N acquires need N releases). Released in bulk at
+    /// <see cref="Close"/> / <see cref="Dispose(bool)"/> — probe-confirmed
+    /// that session-owned locks release when the session ends, surviving any
+    /// number of intervening transactions. Transaction-owned locks live on
+    /// <c>SimulatedDbTransaction.TransactionAppLocks</c> instead.
+    /// </summary>
+    internal readonly List<AppLockHold> SessionAppLocks = [];
+
+    /// <summary>
+    /// Releases every session-owned application lock. Idempotent — the list
+    /// clears — so the <see cref="Close"/>-then-<see cref="Dispose(bool)"/>
+    /// sequence releases once.
+    /// </summary>
+    private void ReleaseSessionAppLocks()
+    {
+        var manager = this.Simulation.LockManager;
+        for (var i = this.SessionAppLocks.Count - 1; i >= 0; i--)
+            manager.Release(this.SessionAppLocks[i].LockResource, this.SessionAppLocks[i].Mode, this);
+        this.SessionAppLocks.Clear();
+    }
+
     /// <inheritdoc/>
     public override void Close()
     {
@@ -404,6 +428,7 @@ public sealed class SimulatedDbConnection : DbConnection
         // explicit using-pattern; this branch covers raw Close() without
         // disposing the transaction first.
         this.CurrentTransaction?.Rollback();
+        this.ReleaseSessionAppLocks();
         this.state = ConnectionState.Closed;
     }
 
@@ -413,6 +438,7 @@ public sealed class SimulatedDbConnection : DbConnection
         if (disposing)
         {
             this.CurrentTransaction?.Dispose();
+            this.ReleaseSessionAppLocks();
             // Local temp tables auto-drop at session close. Clearing the dict
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.

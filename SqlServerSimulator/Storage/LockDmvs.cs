@@ -100,6 +100,40 @@ internal static class LockDmvs
                     yield return row;
             }
         }
+
+        // Application locks (sp_getapplock family). resource_description
+        // follows the probe-confirmed shape `<principal-id>:[<name>]:(<hash>)`;
+        // the 8-hex hash is FNV-1a over the name here, so it won't byte-match
+        // real SQL Server's undocumented hash — the id and bracketed name do.
+        var applicationType = SqlValue.FromNVarchar("APPLICATION");
+        List<((int PrincipalId, string Resource) Key, LockResource Resource)> appLocks;
+        lock (database.ApplicationLocks)
+        {
+            appLocks = new(database.ApplicationLocks.Count);
+            foreach (var kv in database.ApplicationLocks)
+                appLocks.Add((kv.Key, kv.Value));
+        }
+
+        foreach (var (key, resource) in appLocks)
+        {
+            var description = $"{key.PrincipalId}:[{key.Resource}]:({Fnv1a32(key.Resource):x8})";
+            foreach (var row in EmitRowsForResource(applicationType, dbId, description, entityId: 0, resource, waitsByResource, grantStatus, waitStatus))
+                yield return row;
+        }
+    }
+
+    // 32-bit FNV-1a over the resource name's UTF-16 code units, for the
+    // hash slot of an APPLICATION resource_description.
+    private static uint Fnv1a32(string text)
+    {
+        var hash = 2166136261u;
+        foreach (var c in text)
+        {
+            hash ^= c;
+            hash *= 16777619u;
+        }
+
+        return hash;
     }
 
     /// <summary>

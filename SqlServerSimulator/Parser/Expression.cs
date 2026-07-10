@@ -734,6 +734,8 @@ internal abstract class Expression
             },
             12 => uppercaseName switch
             {
+                "APPLOCK_MODE" => new AppLockMode(context),
+                "APPLOCK_TEST" => new AppLockTest(context),
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
                 "CONTEXT_INFO" => new ContextInfoFunction(context),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),

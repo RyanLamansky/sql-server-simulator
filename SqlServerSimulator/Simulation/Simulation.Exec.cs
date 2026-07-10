@@ -136,6 +136,18 @@ partial class Simulation
                 yield return outcome;
             yield break;
         }
+        if (dbCollation.Equals(procName.Leaf, "sp_getapplock"))
+        {
+            foreach (var outcome in InvokeSpGetAppLock(batch, returnCodeVar))
+                yield return outcome;
+            yield break;
+        }
+        if (dbCollation.Equals(procName.Leaf, "sp_releaseapplock"))
+        {
+            foreach (var outcome in InvokeSpReleaseAppLock(batch, returnCodeVar))
+                yield return outcome;
+            yield break;
+        }
         if (dbCollation.Equals(procName.Leaf, "sp_addlinkedsrvlogin")
             || dbCollation.Equals(procName.Leaf, "sp_droplinkedsrvlogin")
             || dbCollation.Equals(procName.Leaf, "sp_serveroption"))
