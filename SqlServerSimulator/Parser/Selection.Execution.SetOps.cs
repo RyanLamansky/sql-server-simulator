@@ -190,16 +190,21 @@ internal sealed partial class Selection
     /// branch's projection so it can reference non-projected source
     /// columns, matching SQL Server's documented behavior.)
     /// </summary>
-    private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy, int? offsetCount, int? fetchCount)
+    private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy, Expression? offsetExpression, Expression? fetchExpression)
     {
         var schema = inner.Schema;
         var columnNames = inner.ColumnNames;
 
         return new Selection(schema, columnNames,
             hasOrderBy: true,
-            hasTopOrOffsetOrFetch: inner.HasTopOrOffsetOrFetch || offsetCount.HasValue || fetchCount.HasValue,
+            hasTopOrOffsetOrFetch: inner.HasTopOrOffsetOrFetch || offsetExpression is not null || fetchExpression is not null,
             (batch, outerResolver) =>
         {
+            // Per-execution count resolution: the expressions may carry
+            // parameters, and this closure replays across executions of a
+            // plan-cached SELECT.
+            var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
+            var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
             var allRows = inner.Execute(batch, outerResolver).RowBytes.ToList();
 
             IEnumerable<byte[]> ordered;

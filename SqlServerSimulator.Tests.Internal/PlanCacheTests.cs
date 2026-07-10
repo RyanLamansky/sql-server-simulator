@@ -316,4 +316,216 @@ public sealed class PlanCacheTests
             AreEqual(entriesBefore, sim.PlanCacheCount);
         }
     }
+
+    // ---- per-execution state on a shared cached plan. A cached Selection is
+    // one object executed by many commands (possibly concurrently), so every
+    // value that varies per execution — TOP / OFFSET / FETCH parameter counts,
+    // RAND draws, the statement clock, aggregate / window bind results — must
+    // live in per-execution scope, never on the plan or its expression tree. ----
+
+    private static int RunCountWithParams(SimulatedDbConnection connection, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+        {
+            var p = command.CreateParameter();
+            p.ParameterName = name;
+            p.Value = value;
+            _ = command.Parameters.Add(p);
+        }
+
+        using var reader = command.ExecuteReader();
+        var rows = 0;
+        while (reader.Read())
+            rows++;
+        return rows;
+    }
+
+    private static object RunScalar(SimulatedDbConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar()!;
+    }
+
+    [TestMethod]
+    public void ParameterizedTop_ReplayResolvesNewValue()
+    {
+        // EF's Take(n) shape: same text, different @p per execution. The TOP
+        // count must resolve against the EXECUTING batch — a parse-time-baked
+        // count would return the first execution's row count forever.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            AreEqual(2, RunCountWithParams(connection, "select top (@p) id from t", ("@p", 2)));
+            var hitsBefore = sim.PlanCacheHits;
+            AreEqual(3, RunCountWithParams(connection, "select top (@p) id from t", ("@p", 3)));
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+            AreEqual(1, RunCountWithParams(connection, "select top (@p) id from t", ("@p", 1)));
+        }
+    }
+
+    [TestMethod]
+    public void ParameterizedOffsetFetch_ReplayResolvesNewValues()
+    {
+        // EF's Skip/Take pagination shape. A parse-time-baked OFFSET/FETCH
+        // pair froze pagination on the first page.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            const string page = "select id from t order by id offset @o rows fetch next @f rows only";
+            AreEqual(1, RunCountWithParams(connection, page, ("@o", 0), ("@f", 1)));
+            var hitsBefore = sim.PlanCacheHits;
+            AreEqual(2, RunCountWithParams(connection, page, ("@o", 1), ("@f", 2)));
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+        }
+    }
+
+    [TestMethod]
+    public void Rand_ReplayDrawsFreshValue()
+    {
+        // RAND() freezes per statement EXECUTION (each row of one execution
+        // sees the call site's single draw), but successive executions of the
+        // cached plan must each draw fresh — instance-cached, the same
+        // "random" value replayed forever.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            var first = (double)RunScalar(connection, "select top 1 rand() from t");
+            var hitsBefore = sim.PlanCacheHits;
+            var second = (double)RunScalar(connection, "select top 1 rand() from t");
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+            AreNotEqual(first, second);
+        }
+    }
+
+    [TestMethod]
+    public void GetDate_ReplayReadsCurrentClock()
+    {
+        // The replay path bypasses the dispatch loop, so it must stamp the
+        // per-statement frame itself — without that, a replayed GETDATE()
+        // reads default(DateTime).
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            _ = RunScalar(connection, "select getdate() from t where id = 1");
+            var hitsBefore = sim.PlanCacheHits;
+            var replayed = (DateTime)RunScalar(connection, "select getdate() from t where id = 1");
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+            IsGreaterThan(DateTime.UtcNow.AddMinutes(-5), replayed);
+        }
+    }
+
+    [TestMethod]
+    public void ConcurrentReplays_AggregateResults_StayIsolated()
+    {
+        // One cached plan, many concurrent executions: per-group SUM / COUNT
+        // results bind into the EXECUTING batch, never onto the shared
+        // expression instances — instance-bound results cross-contaminated
+        // concurrent readers (measured ~1% of reads returning another
+        // execution's group value before the fix).
+        var sim = new Simulation();
+        using var setup = sim.CreateDbConnection();
+        {
+            setup.Open();
+            using var ddl = setup.CreateCommand();
+            ddl.CommandText = """
+                create table s (g int not null, v int not null);
+                insert s select value % 10, value from generate_series(1, 500)
+                """;
+            _ = ddl.ExecuteNonQuery();
+            var expected = RunScalar(setup, "select sum(v) from s where g = 3").ToString();
+
+            var wrong = 0;
+            _ = Parallel.For(0, 8, _ =>
+            {
+                using var c = sim.CreateDbConnection();
+                c.Open();
+                for (var i = 0; i < 200; i++)
+                {
+                    using var cmd = c.CreateCommand();
+                    cmd.CommandText = "select g, sum(v) from s group by g order by sum(v) desc";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        if (r.GetInt32(0) == 3 && Convert.ToInt64(r.GetValue(1)).ToString() != expected)
+                            _ = Interlocked.Increment(ref wrong);
+                    }
+                }
+            });
+            AreEqual(0, wrong);
+        }
+    }
+
+    [TestMethod]
+    public void ConcurrentReplays_WindowResults_StayIsolated()
+    {
+        // Same isolation contract for window functions (SUM OVER running
+        // totals), whose per-row bind is even more interleaving-prone than
+        // the per-group aggregate bind.
+        var sim = new Simulation();
+        using var setup = sim.CreateDbConnection();
+        {
+            setup.Open();
+            using var ddl = setup.CreateCommand();
+            ddl.CommandText = """
+                create table s (g int not null, v int not null);
+                insert s select value % 10, value from generate_series(1, 500)
+                """;
+            _ = ddl.ExecuteNonQuery();
+            const string query = "select max(rq) from (select sum(v) over (order by g, v) as rq from s) x";
+            var expected = RunScalar(setup, query).ToString();
+
+            var wrong = 0;
+            _ = Parallel.For(0, 8, _ =>
+            {
+                using var c = sim.CreateDbConnection();
+                c.Open();
+                for (var i = 0; i < 150; i++)
+                {
+                    using var cmd = c.CreateCommand();
+                    cmd.CommandText = query;
+                    if (cmd.ExecuteScalar()!.ToString() != expected)
+                        _ = Interlocked.Increment(ref wrong);
+                }
+            });
+            AreEqual(0, wrong);
+        }
+    }
+
+    [TestMethod]
+    public void RecursiveCte_NotCached_EitherAnchorShape()
+    {
+        // A recursive-CTE plan rebinds CteBinding.CurrentIterationRows at
+        // execution time, so a cached copy replayed concurrently would
+        // cross-feed iteration rowsets between commands. Both anchor shapes
+        // must decline promotion: the FROM-less anchor via
+        // BuildSynthesizedSqlRow's disqualifier, the FROM-ful anchor via the
+        // recursive-CTE builder's own. Depth still resolves per execution.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            const string fromless = "with r as (select 1 as n union all select n + 1 from r where n < @d) select count(*) from r";
+            const string fromful = "with r as (select id as n from t where id = 1 union all select n + 1 from r where n < @d) select count(*) from r";
+            var hitsBefore = sim.PlanCacheHits;
+            var entriesBefore = sim.PlanCacheCount;
+            foreach (var query in new[] { fromless, fromful })
+            {
+                foreach (var depth in new[] { 7, 12 })
+                {
+                    using var cmd = connection.CreateCommand();
+                    cmd.CommandText = query;
+                    var p = cmd.CreateParameter();
+                    p.ParameterName = "@d";
+                    p.Value = depth;
+                    _ = cmd.Parameters.Add(p);
+                    AreEqual(depth, Convert.ToInt32(cmd.ExecuteScalar()!));
+                }
+            }
+
+            AreEqual(hitsBefore, sim.PlanCacheHits);
+            AreEqual(entriesBefore, sim.PlanCacheCount);
+        }
+    }
 }

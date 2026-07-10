@@ -40,10 +40,11 @@ internal enum AggregateKind
 /// <para>
 /// <see cref="Operand"/> is null only for <c>COUNT(*)</c> and
 /// <c>COUNT_BIG(*)</c>. <see cref="Separator"/> is non-null only for
-/// <c>STRING_AGG</c>. The mutable <see cref="cachedResult"/> is local to
-/// one query — Expression instances aren't shared across queries, and
-/// query execution is single-threaded, so the mutation doesn't violate
-/// any global invariant.
+/// <c>STRING_AGG</c>. The bound result lives in
+/// <c>BatchContext.BoundProjectionResults</c>, never on this instance — a
+/// plan-cached <c>Selection</c> shares its expression tree across
+/// concurrently-executing commands, so instance-held results would
+/// cross-contaminate them.
 /// </para>
 /// </remarks>
 internal sealed class AggregateExpression : Expression
@@ -85,10 +86,6 @@ internal sealed class AggregateExpression : Expression
     /// once during parse; ignored by every non-JSON aggregate kind.
     /// </summary>
     public JsonNullClause JsonNulls;
-
-    private SqlValue cachedResult;
-
-    private bool resultBound;
 
     private AggregateExpression(AggregateKind kind, Expression? operand, bool distinct, Expression? separator)
     {
@@ -156,19 +153,17 @@ internal sealed class AggregateExpression : Expression
     }
 
     /// <summary>
-    /// Binds the aggregator's final result so that the next
-    /// <see cref="Run"/> call returns it. The Selection executor calls this
-    /// once per group after streaming all input rows through the matching
-    /// <see cref="Aggregator"/>.
+    /// Binds the aggregator's final result into <paramref name="batch"/> so
+    /// that the next <see cref="Run"/> call under that batch returns it. The
+    /// Selection executor calls this once per group after streaming all input
+    /// rows through the matching <see cref="Aggregator"/>.
     /// </summary>
-    internal void BindResult(SqlValue value)
-    {
-        this.cachedResult = value;
-        this.resultBound = true;
-    }
+    internal void BindResult(BatchContext batch, SqlValue value) => batch.BindProjectionResult(this, value);
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        this.resultBound ? this.cachedResult : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
+        runtime.Batch.BoundProjectionResults is { } bound && bound.TryGetValue(this, out var result)
+            ? result
+            : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {

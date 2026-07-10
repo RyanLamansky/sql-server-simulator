@@ -141,9 +141,6 @@ internal sealed class WindowExpression : Expression
     /// </summary>
     public readonly FrameSpec? Frame;
 
-    private SqlValue cachedResult;
-
-    private bool resultBound;
 
     private WindowExpression(
         WindowKind kind,
@@ -178,21 +175,19 @@ internal sealed class WindowExpression : Expression
     }
 
     /// <summary>
-    /// Sets this instance's value for the row currently being projected.
-    /// The Selection executor calls this once per buffered tuple, just
-    /// before running the projection expressions, with either the
-    /// precomputed row number (ROW_NUMBER) or the per-partition aggregate
-    /// result (aggregate windows).
+    /// Binds this expression's value for the row currently being projected
+    /// into <paramref name="batch"/> (not onto this instance — a plan-cached
+    /// <c>Selection</c> shares its tree across concurrent commands). The
+    /// Selection executor calls this once per buffered tuple, just before
+    /// running the projection expressions, with either the precomputed row
+    /// number (ROW_NUMBER) or the per-partition aggregate result (aggregate
+    /// windows).
     /// </summary>
-    internal void BindResult(SqlValue value)
-    {
-        this.cachedResult = value;
-        this.resultBound = true;
-    }
+    internal void BindResult(BatchContext batch, SqlValue value) => batch.BindProjectionResult(this, value);
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        this.resultBound
-            ? this.cachedResult
+        runtime.Batch.BoundProjectionResults is { } bound && bound.TryGetValue(this, out var result)
+            ? result
             : throw new InvalidOperationException("WindowExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as a window function.");
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch

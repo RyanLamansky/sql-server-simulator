@@ -12,21 +12,21 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// (one per parsed call site) each replicated across rows.
 /// </summary>
 /// <remarks>
-/// The simulator implements this by caching the first-evaluation result on
-/// the <see cref="Rand"/> expression instance — each parsed
-/// <c>RAND(...)</c> call lives in exactly one expression tree, so a fresh
-/// parse (each batch / each statement) gets a fresh cache. With an
-/// argument, the seed value chooses the cached value via
-/// <see cref="Random"/> seeded from a hash; same-seed → same-value match
-/// is deterministic within a process lifetime but not byte-identical to
-/// SQL Server's undocumented seed algorithm. A NULL seed yields NULL.
+/// The simulator implements this by freezing the first-evaluation result in
+/// the executing statement's frame
+/// (<c>StatementContext.StatementScopedValues</c>, keyed by this instance) —
+/// per statement <em>execution</em>, not per instance, because a plan-cached
+/// <c>Selection</c> reuses one <see cref="Rand"/> across executions that must
+/// each draw a fresh value. With an argument, the seed value chooses the
+/// value via <see cref="Random"/> seeded from a hash; same-seed →
+/// same-value match is deterministic within a process lifetime but not
+/// byte-identical to SQL Server's undocumented seed algorithm. A NULL seed
+/// yields NULL.
 /// </remarks>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/rand-transact-sql</remarks>
 internal sealed class Rand : Expression
 {
     private readonly Expression? seed;
-    private bool cached;
-    private SqlValue cachedValue;
 
     public Rand(ParserContext context)
     {
@@ -38,8 +38,14 @@ internal sealed class Rand : Expression
     [SuppressMessage("Security", "CA5394:Do not use insecure randomness", Justification = "T-SQL RAND is a non-cryptographic pseudo-random source; the simulator faithfully implements the same documented contract.")]
     public override SqlValue Run(RuntimeContext runtime)
     {
-        if (this.cached)
-            return this.cachedValue;
+        // Per-STATEMENT-EXECUTION freeze, held in the statement frame rather
+        // than on this instance: a plan-cached Selection reuses one Rand
+        // instance across executions, each of which must draw a fresh value
+        // (matching real SQL Server rolling per statement execution) while
+        // every row within one execution reuses this call site's value.
+        var frame = runtime.Batch.CurrentStatement;
+        if (frame.StatementScopedValues is { } scoped && scoped.TryGetValue(this, out var frozen))
+            return frozen;
 
         SqlValue result;
         if (this.seed is null)
@@ -77,8 +83,7 @@ internal sealed class Rand : Expression
             }
         }
 
-        this.cachedValue = result;
-        this.cached = true;
+        (frame.StatementScopedValues ??= new Dictionary<Expression, SqlValue>(ReferenceEqualityComparer.Instance))[this] = result;
         return result;
     }
 

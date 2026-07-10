@@ -535,7 +535,7 @@ internal sealed partial class Selection
         for (var i = 0; i < buffered.Count; i++)
         {
             for (var w = 0; w < windows.Count; w++)
-                windows[w].BindResult(perWindowResults[w][i]);
+                windows[w].BindResult(batch, perWindowResults[w][i]);
 
             var localTuple = buffered[i];
             SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);

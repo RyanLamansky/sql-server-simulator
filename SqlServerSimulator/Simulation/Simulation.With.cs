@@ -211,6 +211,15 @@ partial class Simulation
         for (var bi = 0; bi < recursives.Count; bi++)
             ValidateRecursiveBranchTypes(recursives[bi], anchorSchema, anchorColumnNames, binding.Name);
 
+        // A recursive-CTE plan mutates its CteBinding at EXECUTION time
+        // (CurrentIterationRows rebinds between iterations), so a plan-cached
+        // copy replayed by two commands concurrently would cross-feed
+        // iteration rowsets. Disqualify the batch from plan-cache promotion —
+        // each execution re-parses and owns a fresh binding. (A FROM-less
+        // anchor already disqualified via BuildSynthesizedSqlRow; this covers
+        // the FROM-ful-anchor shape.)
+        context.Batch.HasSessionScopedReference = true;
+
         return Selection.FromRecursiveCte([.. anchors], [.. recursives], binding);
     }
 

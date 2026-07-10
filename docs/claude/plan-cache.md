@@ -29,12 +29,24 @@ So `Simulation.CreateResultSetsForCommand` stashes the cache-key components on t
 
 ## Disqualifying state: `HasSessionScopedReference`
 
-A batch's `HasSessionScopedReference` flag suppresses cache promotion. It's set in two places, both at parse time:
+A batch's `HasSessionScopedReference` flag suppresses cache promotion. It's set in three places, all at parse time:
 
 1. **`BatchContext.TryResolveTable` for `#temp` / `##gtemp` / `@t`**: those bindings hold a specific `HeapTable` instance whose identity is meaningful only to this session (or this batch, for `@t`). A cross-session plan-cache replay would project the wrong instance.
 2. **`BuildSynthesizedSqlRow` (the FROM-less SELECT path)**: that path evaluates projection expressions at parse time (the documented Run-then-GetSqlType ordering for error-message fidelity) and bakes the resulting `SqlValue`s into the row source. Caching would emit those stale values forever; `NEWID()` / `GETDATE()` / `@@TRANCOUNT` / `NEXT VALUE FOR seq` need a fresh parse per call.
+3. **The recursive-CTE builder** (`Simulation.With.cs`): a recursive-CTE plan rebinds `CteBinding.CurrentIterationRows` at execution time, so a cached copy replayed by two commands concurrently would cross-feed iteration rowsets. A FROM-less anchor (`SELECT 1 … UNION ALL …`) was already disqualified by rule 2; the builder's own flag covers FROM-ful anchors. Non-recursive CTEs stay cacheable (their bindings are read-only after parse).
 
-Both conditions disqualify identically at the promotion site. The flag name is intentionally general — what matters is "this plan can't be safely replayed", not the cause.
+All conditions disqualify identically at the promotion site. The flag name is intentionally general — what matters is "this plan can't be safely replayed", not the cause.
+
+## The shared-plan contract: per-execution state lives per execution
+
+A cached `Selection` is **one object executed by many commands, possibly concurrently**. Anything that varies per execution must therefore live in execution-scoped state (`BatchContext` / `StatementContext`), never on the plan or its expression tree. The original single-owner assumption ("Expression instances aren't shared across queries, and query execution is single-threaded") predated the cache; four latent violations shipped with it and were fixed together (2026-07-10) after the AW / WWI workload driver surfaced intermittent sim-vs-live divergences in aggregate / window templates under 8-worker concurrency:
+
+- **Aggregate / window bind results** — `AggregateExpression` / `WindowExpression` bound each group's / row's computed value into instance fields before projecting; two concurrent executions interleaved binds and projected each other's values (measured ~1% of reads wrong; zero single-threaded). The results move to `BatchContext.BoundProjectionResults` (lazily-allocated, reference-keyed by expression instance); `BindResult(batch, value)` writes it, `Run` reads it through `runtime.Batch`.
+- **`TOP (@p)` / `OFFSET @o` / `FETCH @f` counts** — parse-time-resolved ints baked the first execution's parameter values into the plan, freezing EF `Take`/`Skip` pagination deterministically (`@p = 2` then `@p = 5` both returned 2 rows). The expressions are now stored (`FromClause.OffsetExpression` / `FetchExpression`, `topExpression`) and re-resolved per execution at the top of the row-source closure (`ResolveRowCountLimit` — also applied by the set-op chain's `ApplyTopLevelOrderBy`); parse still resolves once for immediate literal validation (Msg 10742 / 10744 fidelity).
+- **`RAND()` draws** — instance-cached, so a cached plan replayed the same "random" value forever. The draw now freezes in `StatementContext.StatementScopedValues` (per statement execution — cleared by the dispatch loop's top-of-iteration alongside the `UtcNow` refresh), preserving the probe-confirmed per-call-site-per-statement semantics.
+- **The statement clock on replay** — `ReplayCachedSelection` bypasses the dispatch loop and never stamped `CurrentStatement.UtcNow`, so a replayed `GETDATE()` read `default(DateTime)`. The replay path now stamps `UtcNow` + `StartLine` itself.
+
+When adding any executor or expression feature that computes per-row / per-group / per-execution values, bind them through `BatchContext` / `StatementContext` — never through fields on parse-time objects.
 
 ## Co-fix: `VariableReference` resolves at Run time
 
@@ -63,7 +75,7 @@ No LRU. The "first 1024 unique queries" win; subsequent novel CommandTexts miss 
 
 ## Test observability
 
-`Simulation.PlanCacheHits` and `PlanCacheMisses` (`long`, `Interlocked.Increment`-mutated) plus `PlanCacheCount` (live dict count) are `internal` and consumed by `PlanCacheTests` to assert hit / miss behavior at boundary conditions: identical-query replay, distinct CommandTexts get distinct entries, DDL invalidation, temp-table disqualification, table-variable disqualification, multi-statement disqualification, distinct parameter types get distinct entries, identical parameter types with different values still hit, result correctness across hit / miss, non-SELECT batch bypass.
+`Simulation.PlanCacheHits` and `PlanCacheMisses` (`long`, `Interlocked.Increment`-mutated) plus `PlanCacheCount` (live dict count) are `internal` and consumed by `PlanCacheTests` to assert hit / miss behavior at boundary conditions: identical-query replay, distinct CommandTexts get distinct entries, DDL invalidation, temp-table disqualification, table-variable disqualification, multi-statement disqualification, distinct parameter types get distinct entries, identical parameter types with different values still hit, result correctness across hit / miss, non-SELECT batch bypass. The shared-plan contract has its own section of tests there: parameterized TOP / OFFSET-FETCH replay resolves new values, RAND re-draws per execution, GETDATE reads the current clock on replay, recursive CTEs decline caching under either anchor shape, and two 8-worker concurrency tests hammer one cached aggregate / window plan asserting zero cross-execution contamination.
 
 ## Performance impact
 

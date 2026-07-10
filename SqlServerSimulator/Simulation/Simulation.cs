@@ -547,6 +547,14 @@ public sealed partial class Simulation
         var batch = new BatchContext(command);
         try
         {
+            // Replay bypasses the dispatch loop, so stamp the per-statement
+            // frame the way the loop's top-of-iteration would: without this a
+            // replayed GETDATE() reads default(DateTime) rather than now.
+            // (StatementScopedValues starts null on a fresh frame — no clear
+            // needed.) StartLine mirrors the single-statement dispatch value
+            // for ERROR_LINE parity.
+            batch.CurrentStatement.UtcNow = DateTime.UtcNow;
+            batch.CurrentStatement.StartLine = 1;
             var connection = batch.Connection;
             var rows = selection.Execute(batch).RowBytes.ToList();
             connection.LastStatementRowCount = rows.Count;
@@ -837,6 +845,7 @@ public sealed partial class Simulation
         // every iteration; a WITH prefix below repopulates.
         context.CteBindings = null;
         batch.CurrentStatement.UtcNow = DateTime.UtcNow;
+        batch.CurrentStatement.StatementScopedValues = null;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings

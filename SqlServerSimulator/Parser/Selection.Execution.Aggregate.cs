@@ -186,7 +186,7 @@ internal sealed partial class Selection
             foreach (var (_, state) in groups)
             {
                 for (var i = 0; i < aggregates.Count; i++)
-                    aggregates[i].BindResult(state.Aggregators[i].Result());
+                    aggregates[i].BindResult(batch, state.Aggregators[i].Result());
 
                 // Publish current grouping-set context so GROUPING() /
                 // GROUPING_ID() in projection / HAVING expressions can read

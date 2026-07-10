@@ -264,7 +264,7 @@ internal sealed partial class Selection
             ParseOrderByItems(context, orderBy);
             var topLevelTail = new FromClause();
             ConsumeOffsetFetch(context, topLevelTail);
-            combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetCount, topLevelTail.FetchCount);
+            combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
         }
 
         // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
@@ -405,25 +405,64 @@ internal sealed partial class Selection
         public readonly List<OrderBySpec> OrderBy = [];
 
         /// <summary>
-        /// Resolved <c>OFFSET</c> count. Null when no OFFSET clause was
-        /// present. The value is parse-time-resolved (constants, parameters,
-        /// arithmetic) and pre-validated for non-negativity (Msg 10742).
+        /// The <c>OFFSET</c> count expression. Null when no OFFSET clause was
+        /// present. Validated at parse time (type + non-negativity, Msg
+        /// 10742) but resolved again per execution — the expression may carry
+        /// parameters whose values differ between executions of one
+        /// plan-cached SELECT.
         /// </summary>
-        public int? OffsetCount;
+        public Expression? OffsetExpression;
 
         /// <summary>
-        /// Resolved <c>FETCH NEXT</c> / <c>FETCH FIRST</c> count. Null when
-        /// no FETCH clause was present (OFFSET-only is valid; FETCH-only is
-        /// rejected at parse time via Msg 153). Pre-validated for &gt; 0
-        /// (Msg 10744).
+        /// The <c>FETCH NEXT</c> / <c>FETCH FIRST</c> count expression. Null
+        /// when no FETCH clause was present (OFFSET-only is valid; FETCH-only
+        /// is rejected at parse time via Msg 153). Validated at parse time
+        /// (type + &gt; 0, Msg 10744) but resolved per execution, like
+        /// <see cref="OffsetExpression"/>.
         /// </summary>
-        public int? FetchCount;
+        public Expression? FetchExpression;
+    }
+
+    /// <summary>
+    /// Which row-count-limit clause a count expression came from — each has
+    /// its own range validation.
+    /// </summary>
+    private enum RowLimitKind
+    {
+        Top,
+        Offset,
+        Fetch,
+    }
+
+    /// <summary>
+    /// Resolves a <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> count expression
+    /// against the executing batch. Called once at parse time for immediate
+    /// validation (mirroring real SQL Server's compile-time rejection of a
+    /// bad literal) and again per execution inside the plan's row-source
+    /// closure — the expression may carry parameters or variables, so a
+    /// plan-cached SELECT must re-resolve rather than replay the parse-time
+    /// value (EF's <c>Skip</c>/<c>Take</c> emit exactly this shape).
+    /// </summary>
+    private static int? ResolveRowCountLimit(Expression? expression, RowLimitKind kind, BatchContext batch)
+    {
+        if (expression is null)
+            return null;
+        var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+        var count = !resolved.IsNull && resolved.Type == SqlType.Int32
+            ? resolved.AsInt32
+            : throw SimulatedSqlException.TopFetchRequiresInteger();
+        return kind switch
+        {
+            RowLimitKind.Offset when count < 0 => throw SimulatedSqlException.OffsetMustNotBeNegative(),
+            RowLimitKind.Fetch when count < 1 => throw SimulatedSqlException.FetchMustBeGreaterThanZero(),
+            _ => count,
+        };
     }
 
     private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, List<WindowExpression> windows, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         var distinct = false;
-        int? topCount = null;
+        Expression? topExpression = null;
 
         var firstToken = context.GetNextRequired();
 
@@ -445,12 +484,8 @@ internal sealed partial class Selection
 
         if (firstToken is ReservedKeyword { Keyword: Keyword.Top })
         {
-            var resolved = Expression
-                .Parse(context.MoveNextRequiredReturnSelf())
-                .Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), context.Batch));
-            topCount = !resolved.IsNull && resolved.Type == SqlType.Int32
-                ? resolved.AsInt32
-                : throw SimulatedSqlException.TopFetchRequiresInteger();
+            topExpression = Expression.Parse(context.MoveNextRequiredReturnSelf());
+            _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
         }
 
         List<Expression> expressions = [];
@@ -618,10 +653,10 @@ internal sealed partial class Selection
                     var sources = new List<FromSource>();
                     var joins = new List<JoinSpec>();
                     ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
-                    if (topCount is not null && fromClause.OffsetCount is not null)
+                    if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
-                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topCount, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
+                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
 
                 // SELECT projection INTO target [FROM ...] — captures the
                 // destination table name. Real SQL Server requires every
@@ -680,9 +715,16 @@ internal sealed partial class Selection
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
 
-        if (topCount is not null && fromClause.OffsetCount is not null)
+        if (topExpression is not null && fromClause.OffsetExpression is not null)
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-        return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy, topCount, fromClause.OffsetCount, fromClause.FetchCount, ResolveAssignmentMode(expressions), intoTarget);
+        // The FROM-less path bakes its projection values at parse time and
+        // never plan-caches (BuildSynthesizedSqlRow disqualifies the batch),
+        // so its counts resolve here once, exactly as its projection does.
+        return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy,
+            ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
+            ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
+            ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
+            ResolveAssignmentMode(expressions), intoTarget);
     }
 
     /// <summary>
@@ -1783,9 +1825,9 @@ internal sealed partial class Selection
     /// OFFSET keyword is just an unexpected identifier and falls through to a
     /// generic Msg 102 syntax error). FETCH alone (without preceding OFFSET) is
     /// rejected with Msg 153 here. <c>ROW</c> and <c>ROWS</c> are interchangeable;
-    /// <c>NEXT</c> and <c>FIRST</c> are interchangeable. Both counts resolve at
-    /// parse time and are validated for non-negativity (Msg 10742) and &gt; 0
-    /// (Msg 10744).
+    /// <c>NEXT</c> and <c>FIRST</c> are interchangeable. Both counts validate at
+    /// parse time — non-negativity (Msg 10742) and &gt; 0 (Msg 10744) — and
+    /// resolve again per execution (see <see cref="ResolveRowCountLimit"/>).
     /// </summary>
     private static void ConsumeOffsetFetch(ParserContext context, FromClause fromClause)
     {
@@ -1797,15 +1839,9 @@ internal sealed partial class Selection
             return;
 
         context.MoveNextRequired();
-        var offsetValue = Expression
-            .Parse(context)
-            .Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), context.Batch));
-        var offsetCount = !offsetValue.IsNull && offsetValue.Type == SqlType.Int32
-            ? offsetValue.AsInt32
-            : throw SimulatedSqlException.TopFetchRequiresInteger();
-        if (offsetCount < 0)
-            throw SimulatedSqlException.OffsetMustNotBeNegative();
-        fromClause.OffsetCount = offsetCount;
+        var offsetExpression = Expression.Parse(context);
+        _ = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, context.Batch);
+        fromClause.OffsetExpression = offsetExpression;
 
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1819,15 +1855,9 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        var fetchValue = Expression
-            .Parse(context)
-            .Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), context.Batch));
-        var fetchCount = !fetchValue.IsNull && fetchValue.Type == SqlType.Int32
-            ? fetchValue.AsInt32
-            : throw SimulatedSqlException.TopFetchRequiresInteger();
-        if (fetchCount < 1)
-            throw SimulatedSqlException.FetchMustBeGreaterThanZero();
-        fromClause.FetchCount = fetchCount;
+        var fetchExpression = Expression.Parse(context);
+        _ = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, context.Batch);
+        fromClause.FetchExpression = fetchExpression;
 
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
             throw SimulatedSqlException.SyntaxErrorNear(context);

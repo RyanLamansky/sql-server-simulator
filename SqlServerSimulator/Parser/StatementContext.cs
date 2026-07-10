@@ -12,13 +12,25 @@ namespace SqlServerSimulator.Parser;
 /// statement's frame rather than a long-frozen capture.
 /// </summary>
 /// <remarks>
-/// Today it's a one-field frame. Future statement-scoped concerns (a
-/// <c>TRY ... CATCH</c> error slot, an EXEC return-value slot, nested
-/// statement frames for stored-proc calls) land here without needing to
-/// invent a new scope.
+/// Statement-scoped concerns (a <c>TRY ... CATCH</c> error slot, an EXEC
+/// return-value slot, nested statement frames for stored-proc calls) land
+/// here without needing to invent a new scope.
 /// </remarks>
 internal sealed class StatementContext
 {
+    /// <summary>
+    /// Per-statement-execution values for expressions that freeze once per
+    /// statement execution — the <c>RAND()</c> call-site family — keyed by
+    /// expression instance (reference identity). Cleared by the dispatch loop
+    /// at the top of each statement iteration alongside the
+    /// <see cref="UtcNow"/> refresh, so a re-executed statement (WHILE-loop
+    /// body, plan-cache replay under a fresh batch) draws fresh values while
+    /// every call within one execution reuses its call site's value. Lives
+    /// here — not on the expression — because a plan-cached <c>Selection</c>
+    /// shares its tree across command executions.
+    /// </summary>
+    public Dictionary<Expression, Storage.SqlValue>? StatementScopedValues;
+
     /// <summary>
     /// UTC timestamp captured at the top of each top-level statement and
     /// consumed by the current-time scalar functions (<c>GETDATE</c>,

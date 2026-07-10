@@ -95,6 +95,30 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
+    /// Per-execution results for the aggregate / window expressions of the
+    /// SELECT currently projecting under this batch, keyed by expression
+    /// instance (reference identity). The executor binds each group's / row's
+    /// result here just before running the projection expressions, and
+    /// <c>AggregateExpression.Run</c> / <c>WindowExpression.Run</c> read it
+    /// back. Lives on the batch — NOT on the expression instance — because a
+    /// plan-cached <c>Selection</c> is shared across concurrently-executing
+    /// commands, and instance-bound results cross-contaminate them (measured
+    /// as transiently wrong SUM/COUNT values under concurrent identical
+    /// queries). Batch execution is single-threaded, so no lock; lazily
+    /// allocated on the first bind so aggregate-free batches pay nothing.
+    /// </summary>
+    public Dictionary<Expression, SqlValue>? BoundProjectionResults;
+
+    /// <summary>
+    /// Binds one aggregate / window expression's result for the group / row
+    /// about to be projected. Overwrites any earlier group's binding for the
+    /// same instance — within one batch, groups project strictly after their
+    /// bind, so only the latest binding is ever live.
+    /// </summary>
+    public void BindProjectionResult(Expression expression, SqlValue value) =>
+        (this.BoundProjectionResults ??= new Dictionary<Expression, SqlValue>(ReferenceEqualityComparer.Instance))[expression] = value;
+
+    /// <summary>
     /// Buffer of message texts collected across this batch from <c>PRINT</c>
     /// and severity-0-10 <c>RAISERROR</c> statements. Probe-confirmed
     /// coalescing semantic: multiple contributing statements in one command

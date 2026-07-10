@@ -103,7 +103,7 @@ internal sealed partial class Selection
         List<Expression> expressions,
         FromClause fromClause,
         bool distinct,
-        int? topCount,
+        Expression? topExpression,
         List<AggregateExpression> aggregates,
         List<WindowExpression> windows,
         Func<MultiPartName, SqlType>? outerTypeResolver,
@@ -173,8 +173,8 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
 
-        var offsetCount = fromClause.OffsetCount;
-        var fetchCount = fromClause.FetchCount;
+        var offsetExpression = fromClause.OffsetExpression;
+        var fetchExpression = fromClause.FetchExpression;
 
         // Pre-resolve operand and result types for any aggregate windows so
         // the runtime path doesn't need a column-type resolver. ROW_NUMBER
@@ -211,13 +211,22 @@ internal sealed partial class Selection
 
         var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
-            hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
+            hasTopOrOffsetOrFetch: topExpression is not null || offsetExpression is not null || fetchExpression is not null,
             (batch, outerResolver) =>
-            aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
-                : windows.Count > 0
-                    ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
-                    : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver),
+            {
+                // Per-execution count resolution: the expressions may carry
+                // parameters, and this closure replays across executions of a
+                // plan-cached SELECT (EF's Skip/Take shape), so the values
+                // must come from the EXECUTING batch, not the parse.
+                var topCount = ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch);
+                var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
+                var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
+                return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
+                    ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
+                    : windows.Count > 0
+                        ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                        : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
+            },
             isAssignmentOnly,
             intoTarget,
             destColumnSchema,
