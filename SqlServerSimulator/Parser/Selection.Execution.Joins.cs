@@ -30,9 +30,10 @@ internal sealed partial class Selection
         MultiPartName name,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        Func<MultiPartName, SqlValue> selfRecursive)
+        Func<MultiPartName, SqlValue> selfRecursive,
+        SourceColumnMemo memo)
     {
-        var (s, c) = FindSourceColumn(sources, name);
+        var (s, c) = memo.Find(sources, name);
         if (s == -1)
         {
             return outerResolver is not null
@@ -74,9 +75,10 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver)
     {
         var tuple = new byte[]?[sources.Length];
+        var memo = new SourceColumnMemo();
 
         SqlValue Resolve(MultiPartName name) =>
-            ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, Resolve);
+            ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, Resolve, memo);
 
         var rowset = EnumerateLeftmost(sources[0], tuple, batch, outerResolver);
         for (var level = 1; level < sources.Length; level++)
@@ -674,18 +676,33 @@ internal sealed partial class Selection
     {
         var runtime = new RuntimeContext(resolve, batch);
 
+        // Bucket membership is a forward-linked chain over row ordinals —
+        // buckets[key] holds the chain's (head, tail) and next[ordinal] links
+        // to the same key's following row — rather than a List<int> per key:
+        // one shared next list replaces the per-key list allocations and their
+        // growth churn, which profiling showed as the hash build's dominant
+        // cost on a 228k-row build side. Forward links keep probe emission in
+        // build order, matching the per-key List's insertion order exactly.
         var rightRows = new List<byte[]>();
-        var index = new Dictionary<SqlValueKey, List<int>>();
+        var next = new List<int>();
+        var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
         foreach (var row in right.Rows)
         {
             tuple[level] = row;
             var ordinal = rightRows.Count;
             rightRows.Add(row);
+            next.Add(-1);
             if (TryComputeKey(plan.Keys, runtime, rightSide: true, out var buildKey))
             {
-                if (!index.TryGetValue(buildKey, out var bucket))
-                    index[buildKey] = bucket = [];
-                bucket.Add(ordinal);
+                if (buckets.TryGetValue(buildKey, out var chain))
+                {
+                    next[chain.Tail] = ordinal;
+                    buckets[buildKey] = (chain.Head, ordinal);
+                }
+                else
+                {
+                    buckets[buildKey] = (ordinal, ordinal);
+                }
             }
         }
         tuple[level] = null;
@@ -696,9 +713,9 @@ internal sealed partial class Selection
         {
             var matchedLeft = false;
             if (TryComputeKey(plan.Keys, runtime, rightSide: false, out var probeKey)
-                && index.TryGetValue(probeKey, out var bucket))
+                && buckets.TryGetValue(probeKey, out var probeChain))
             {
-                foreach (var ordinal in bucket)
+                for (var ordinal = probeChain.Head; ordinal != -1; ordinal = next[ordinal])
                 {
                     tuple[level] = rightRows[ordinal];
                     if (ResidualMatches(plan.Residual, runtime))

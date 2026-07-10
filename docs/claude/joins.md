@@ -29,6 +29,7 @@ A bare `JoinKind.Cross` (from either a comma or an explicit `CROSS JOIN`) carrie
 The original equi-join win still stands — with ≥1 equi-key the inner is indexed by the promoted keys and probed once per left row, O(L + R) vs the nested loop's O(L × R) (an AdventureWorks 9-table view drops from a multi-minute hang to sub-second).
 
 - Bucket keys reuse GROUP BY's collation-consistent `SqlValueKey`, coercing both sides to the `SqlType.Promote` common type so equality matches the `=` operator exactly.
+- Bucket membership is a forward-linked chain over row ordinals (`buckets[key] = (head, tail)` + one shared `next` list) rather than a `List<int>` per key — the per-key list allocations and growth churn were the hash build's dominant profiled cost on a 228k-row build side. Forward links keep probe emission in build order, byte-identical to the per-key-list behavior.
 - NULL keys are excluded (NULL = NULL is UNKNOWN) but retained for the unmatched-right tail of RIGHT / FULL.
 - Residual non-equi conjuncts are re-checked per probed candidate (a conjunct passes only when it evaluates to `true`, matching the streaming path's `== true` gate).
 - Falls back to the nested-loop operators below for non-equi ON predicates, lateral / derived-table right sides, CROSS / APPLY, and key-type pairs `SqlType.Promote` rejects (LOB, collation conflict, cross-category) — preserving their exact per-row error behavior.

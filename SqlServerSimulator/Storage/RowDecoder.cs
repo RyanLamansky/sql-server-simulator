@@ -116,6 +116,57 @@ internal static class RowDecoder
     }
 
     /// <summary>
+    /// Array-schema fast path of
+    /// <see cref="DecodeColumn(ReadOnlySpan{HeapColumn}, ReadOnlySpan{byte}, int, Heap?)"/>:
+    /// navigates through the schema's cached <see cref="RowLayout"/>, so the
+    /// read is O(1) instead of two O(columns) walks (header validation +
+    /// navigate-to-ordinal). Overload resolution binds every caller holding
+    /// the schema as an array here — the per-row query-execution resolvers,
+    /// whose repeated walks dominated scan-bound query CPU — while span-based
+    /// callers keep the fully-validating walk. One header word is still
+    /// checked (the fixed-section end at byte 2) so a schema/row mismatch
+    /// raises the same <see cref="InvalidDataException"/> instead of
+    /// misreading; the remaining per-read validation is entrusted to span
+    /// bounds, as encoder and decoder share one format authority.
+    /// </summary>
+    public static SqlValue DecodeColumn(HeapColumn[] schema, ReadOnlySpan<byte> bytes, int ordinal, Heap? lobStore = null)
+    {
+        if ((uint)ordinal >= (uint)schema.Length)
+            throw new ArgumentOutOfRangeException(nameof(ordinal), $"Ordinal {ordinal} is out of range for schema of {schema.Length} columns.");
+
+        var layout = RowLayout.For(schema);
+        var fixedEnd = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(2, 2));
+        if (fixedEnd != layout.ExpectedFixedEnd)
+            throw new InvalidDataException($"Fixed-length end offset {fixedEnd} does not match schema's expected {layout.ExpectedFixedEnd}.");
+
+        if (IsNullColumn(bytes, layout.BitmapStart, ordinal))
+            return SqlValue.Null(schema[ordinal].Type);
+
+        switch (layout.Kinds[ordinal])
+        {
+            case RowLayout.ColumnKind.Fixed:
+                return schema[ordinal].Type.Decode(bytes.Slice(layout.Offsets[ordinal], schema[ordinal].Type.FixedLength));
+            case RowLayout.ColumnKind.Bit:
+                return SqlValue.FromBoolean((bytes[layout.Offsets[ordinal]] & (1 << layout.BitIndexes[ordinal])) != 0);
+            default:
+                var entrySize = (bytes[0] & TagA_WideVarOffsets) != 0 ? 4 : 2;
+                var directoryStart = layout.VarCountPosition + 2;
+                var varDataStart = directoryStart + (entrySize * layout.VarColumnCount);
+                var varIndex = layout.Offsets[ordinal];
+                var start = varIndex == 0 ? varDataStart : ReadDirectoryOffset(bytes, directoryStart, entrySize, varIndex - 1);
+                var end = ReadDirectoryOffset(bytes, directoryStart, entrySize, varIndex);
+                return DecodeVarValue(schema[ordinal], bytes[start..end], lobStore);
+        }
+    }
+
+    // Reads one var-offset directory entry for the fast path (the span-based
+    // walk reads through ReadVarOffset's RowHeader instead).
+    private static int ReadDirectoryOffset(ReadOnlySpan<byte> bytes, int directoryStart, int entrySize, int varIndex) =>
+        entrySize == 2
+            ? BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(directoryStart + (2 * varIndex), 2))
+            : (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(directoryStart + (4 * varIndex), 4));
+
+    /// <summary>
     /// Column-aware single-column decode. <paramref name="lobStore"/> resolves
     /// any off-row LOB pointers.
     /// </summary>

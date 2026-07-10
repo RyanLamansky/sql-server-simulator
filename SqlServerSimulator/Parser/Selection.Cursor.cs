@@ -82,11 +82,12 @@ internal sealed partial class Selection
         var sources = new[] { source };
         var orderBy = this.CursorOrderBy ?? [];
 
+        var memo = new SourceColumnMemo();
         var rows = new List<CursorRow>();
         foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
         {
             var tuple = new byte[]?[] { bytes };
-            SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, tuple, name, batch, null, Resolve);
+            SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, tuple, name, batch, null, Resolve, memo);
 
             var keep = true;
             foreach (var excluder in profile.Excluders)

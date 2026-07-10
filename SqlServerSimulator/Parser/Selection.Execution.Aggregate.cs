@@ -41,6 +41,7 @@ internal sealed partial class Selection
     {
         if (topCount == 0)
             return [];
+        var memo = new SourceColumnMemo();
 
         var aggregateOperandTypes = new SqlType[aggregates.Count];
         var aggregateResultTypes = new SqlType[aggregates.Count];
@@ -76,7 +77,7 @@ internal sealed partial class Selection
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn);
+            SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn, memo);
 
             var include = true;
             foreach (var excluder in fromClause.Excluders)
@@ -112,7 +113,7 @@ internal sealed partial class Selection
             foreach (var tuple in buffered)
             {
                 var localTuple = tuple;
-                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn);
+                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn, memo);
 
                 GroupState state;
                 if (groupingSet.Length == 0)
@@ -226,7 +227,7 @@ internal sealed partial class Selection
                     // to the outer resolver / Msg 207 when the name isn't a
                     // source column, so this subsumes the outer-or-throw tail.
                     return capturedSet.Length > 0 && state.Representative is { } rep
-                        ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, ResolveByGroupKey)
+                        ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, ResolveByGroupKey, memo)
                         : outerResolver is not null
                             ? outerResolver(name)
                             : throw SimulatedSqlException.InvalidColumnName(name);

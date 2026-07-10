@@ -241,10 +241,11 @@ internal sealed partial class Selection
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         FromSource[] sources = [source];
+        var memo = new SourceColumnMemo();
         foreach (var tuple in EnumerateJoinedRows(sources, [], batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, Resolve);
+            SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, Resolve, memo);
 
             foreach (var col in unpivotColumns)
             {

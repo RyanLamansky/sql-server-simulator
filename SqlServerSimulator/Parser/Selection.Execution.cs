@@ -334,10 +334,11 @@ internal sealed partial class Selection
 
         IEnumerable<SqlValue[]> InnerStream()
         {
+            var memo = new SourceColumnMemo();
             foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
                 var localTuple = tuple;
-                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn);
+                SqlValue ResolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveColumn, memo);
 
                 var include = true;
                 foreach (var excluder in excluders)
@@ -380,10 +381,11 @@ internal sealed partial class Selection
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
 
+        var memo = new SourceColumnMemo();
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
 
             var include = true;
             foreach (var excluder in excluders)

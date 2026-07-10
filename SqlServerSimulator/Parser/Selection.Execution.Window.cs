@@ -55,12 +55,13 @@ internal sealed partial class Selection
         // cloned. For each buffered tuple, also pre-compute every window's
         // partition + order keys so the per-row resolver doesn't have to
         // be re-bound during window evaluation.
+        var memo = new SourceColumnMemo();
         var buffered = new List<byte[]?[]>();
         var perWindowKeys = new List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]>();
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
 
             var include = true;
             foreach (var excluder in excluders)
@@ -357,14 +358,14 @@ internal sealed partial class Selection
                                     else
                                     {
                                         var localTuple = buffered[indices[i]];
-                                        SqlValue ResolveSelf(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSelf);
+                                        SqlValue ResolveSelf(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSelf, memo);
                                         results[indices[i]] = win.DefaultArg.Run(new RuntimeContext(ResolveSelf, batch));
                                     }
                                 }
                                 else
                                 {
                                     var targetTuple = buffered[indices[targetIdx]];
-                                    SqlValue ResolveTarget(MultiPartName name) => ResolveAcrossTuple(sources, targetTuple, name, batch, outerResolver, ResolveTarget);
+                                    SqlValue ResolveTarget(MultiPartName name) => ResolveAcrossTuple(sources, targetTuple, name, batch, outerResolver, ResolveTarget, memo);
                                     results[indices[i]] = win.Operand.Run(new RuntimeContext(ResolveTarget, batch));
                                 }
                             }
@@ -396,7 +397,7 @@ internal sealed partial class Selection
                                 }
                                 var refIdx = isLast ? frameEnd : frameStart;
                                 var refTuple = buffered[indices[refIdx]];
-                                SqlValue ResolveRef(MultiPartName name) => ResolveAcrossTuple(sources, refTuple, name, batch, outerResolver, ResolveRef);
+                                SqlValue ResolveRef(MultiPartName name) => ResolveAcrossTuple(sources, refTuple, name, batch, outerResolver, ResolveRef, memo);
                                 results[indices[i]] = win.Operand.Run(new RuntimeContext(ResolveRef, batch));
                             }
                         }
@@ -443,7 +444,7 @@ internal sealed partial class Selection
                                 foreach (var i in indices)
                                 {
                                     var localTuple = buffered[i];
-                                    SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                                    SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
                                     var operandValue = aggregate.Operand is null
                                         ? SqlValue.Null(SqlType.Int32)
                                         : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
@@ -468,7 +469,7 @@ internal sealed partial class Selection
                             for (var p = 0; p < count; p++)
                             {
                                 var localTuple = buffered[indices[p]];
-                                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
                                 operandByPos[p] = aggregate.Operand is null
                                     ? SqlValue.Null(SqlType.Int32)
                                     : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
@@ -538,7 +539,7 @@ internal sealed partial class Selection
                 windows[w].BindResult(batch, perWindowResults[w][i]);
 
             var localTuple = buffered[i];
-            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+            SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
 
             var projected = new SqlValue[expressions.Count];
             for (var j = 0; j < expressions.Count; j++)
@@ -595,6 +596,7 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver)
     {
         var aggregate = win.AggregateInfo!;
+        var memo = new SourceColumnMemo();
         foreach (var (_, indices) in partitions)
         {
             if (orderByList.Count > 0)
@@ -609,7 +611,7 @@ internal sealed partial class Selection
             for (var p = 0; p < count; p++)
             {
                 var localTuple = buffered[indices[p]];
-                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource);
+                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
                 var runtime = new RuntimeContext(ResolveSource, batch);
                 keys[p] = aggregate.KeyExpression!.Run(runtime);
                 values[p] = aggregate.Operand!.Run(runtime);
@@ -771,7 +773,8 @@ internal sealed partial class Selection
         if (buffered.Count == 0)
             return SqlValue.Null(SqlType.Int32);
         var firstTuple = buffered[0];
-        SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, firstTuple, name, batch, outerResolver, Resolve);
+        var memo = new SourceColumnMemo();
+        SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, firstTuple, name, batch, outerResolver, Resolve, memo);
         return arg.Run(new RuntimeContext(Resolve, batch));
     }
 }
