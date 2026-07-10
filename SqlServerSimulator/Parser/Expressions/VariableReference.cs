@@ -40,4 +40,6 @@ internal sealed class VariableReference : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.declaredType;
 
     internal override string DebugDisplay() => $"@{this.variableName}";
+
+    internal override bool ContainsVariableReference => true;
 }

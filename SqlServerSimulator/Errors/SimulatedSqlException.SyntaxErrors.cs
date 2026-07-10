@@ -275,6 +275,20 @@ partial class SimulatedSqlException
         new("Too many substitution parameters for RAISERROR. Cannot exceed 20 substitution parameters.", 2747, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 2748: a <c>FORMATMESSAGE</c> (or RAISERROR)
+    /// substitution argument has a data type that can never be a substitution
+    /// parameter (<c>bit</c> / <c>decimal</c> / <c>money</c> / <c>float</c> /
+    /// <c>datetime</c> / <c>uniqueidentifier</c> / etc. — only the integer
+    /// family excluding <c>bit</c>, the string family, and the binary family
+    /// are permitted). Real SQL Server echoes the type name and the 1-based
+    /// parameter position (probe-confirmed verbatim: <c>"Cannot specify float
+    /// data type (parameter 1) as a substitution parameter."</c>). Class 16
+    /// State 1.
+    /// </summary>
+    internal static SimulatedSqlException SubstitutionParameterTypeNotAllowed(string typeName, int paramIndex) =>
+        new($"Cannot specify {typeName} data type (parameter {paramIndex}) as a substitution parameter.", 2748, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2732: a <c>RAISERROR</c> call passed a numeric
     /// <c>msg_id</c> outside the valid user-defined range (must be 13000
     /// through 2147483647) or used the reserved value <c>50000</c> as a

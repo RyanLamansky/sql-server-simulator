@@ -506,6 +506,23 @@ internal abstract class Expression
     internal virtual void VisitColumnReferences(Action<MultiPartName> visit) { }
 
     /// <summary>
+    /// True when this expression's parse tree contains a
+    /// <see cref="Expressions.VariableReference"/> anywhere. Used by
+    /// <c>STRING_SPLIT</c>'s <c>enable_ordinal</c> gate, which must reject
+    /// every variable-bearing shape (real SQL Server: Msg 8748 —
+    /// probe-confirmed the wrapped forms <c>CAST(@v AS int)</c>, <c>@v + 0</c>,
+    /// and <c>(@v)</c> all reject, not just a bare <c>@v</c>) while still
+    /// accepting constant expressions like <c>CAST(1 AS int)</c> / <c>(1)</c> /
+    /// <c>1 + 0</c>. A runtime-eval probe can't see the variable (its slot is
+    /// declared in the batch), so the detection is a static parse-tree walk.
+    /// Default is <see langword="false"/>; the same common-container subclasses
+    /// that override <see cref="VisitColumnReferences"/> (plus
+    /// <see cref="Expressions.VariableReference"/> itself) recurse here, so a
+    /// variable buried in a less-common container is a residual coverage gap.
+    /// </summary>
+    internal virtual bool ContainsVariableReference => false;
+
+    /// <summary>
     /// When this expression is a deterministic, side-effect-free pass-through of
     /// a single operand — a <c>CAST</c> / <c>CONVERT</c> (their value operand) or
     /// a parenthesization — returns that operand; <see langword="null"/>
@@ -708,6 +725,8 @@ internal abstract class Expression
                 "JSON_VALUE" => new JsonValue(context),
                 "LAST_VALUE" => WindowExpression.ParseLastValue(context),
                 "LEFT_SHIFT" => new BitShift(context, isLeftShift: true),
+                "PWDCOMPARE" => new PwdCompare(context),
+                "PWDENCRYPT" => new PwdEncrypt(context),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "STATS_DATE" => new StatsDate(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
@@ -751,10 +770,12 @@ internal abstract class Expression
                 "CURSOR_STATUS" => new CursorStatusFunction(context),
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),
+                "FORMATMESSAGE" => new FormatMessage(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),
                 "INDEXPROPERTY" => new IndexProperty(context),
                 "IS_ROLEMEMBER" => new RoleMemberCheck(context),
                 "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
+                "LOGINPROPERTY" => new LoginProperty(context),
                 "STRING_ESCAPE" => new StringEscape(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null

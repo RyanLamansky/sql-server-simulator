@@ -236,17 +236,95 @@ public sealed class GroupingSetTests
         AreEqual("8161", ex.Data["HelpLink.EvtID"]);
     }
 
-    [TestMethod]
-    public void GroupingOfNonReferenceExpression_RaisesMsg8161()
+    private static DbConnection SeededExpr()
     {
-        // Real SQL Server returns 0 for GROUPING(a+1) when GROUP BY a+1
-        // matches exactly. The simulator doesn't do structural equality on
-        // GROUP BY expressions yet, so non-Reference args always raise
-        // Msg 8161 — the right Msg, the wrong row count. Documented as a
-        // known divergence.
-        using var conn = SeededSales();
+        var conn = new Simulation().CreateOpenConnection();
+        _ = conn.CreateCommand("""
+            create table t (a int, b int, v int);
+            insert t values (1, 10, 100), (1, 20, 200), (2, 10, 50)
+            """).ExecuteNonQuery();
+        return conn;
+    }
+
+    [TestMethod]
+    public void GroupingOfExpression_MatchesGroupByExpression()
+    {
+        // Probe-confirmed 2026-07-10: GROUPING(a+1) with GROUP BY ROLLUP(a+1)
+        // returns 0 for the detail rows and 1 for the rolled-up grand total.
+        using var conn = SeededExpr();
+        using var reader = conn.CreateCommand(
+            "select sum(v) s, grouping(a + 1) g from t group by rollup(a + 1) order by g, s").ExecuteReader();
+        var rows = new List<(int Total, int Grouping)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetByte(1)));
+        // Two detail rows (a+1 = 2 → 300, a+1 = 3 → 50), each grouping 0;
+        // plus the grand total (350) at grouping 1.
+        Assert.HasCount(3, rows);
+        AreEqual((50, 0), rows[0]);
+        AreEqual((300, 0), rows[1]);
+        AreEqual((350, 1), rows[2]);
+    }
+
+    [TestMethod]
+    public void GroupingOfExpression_RedundantParensStillMatch()
+    {
+        // Probe-confirmed 2026-07-10: GROUPING((a+1)) — extra parentheses —
+        // still matches GROUP BY a+1 (parens are normalized away).
+        using var conn = SeededExpr();
+        using var reader = conn.CreateCommand(
+            "select grouping((a + 1)) g from t group by rollup(a + 1) order by g").ExecuteReader();
+        var groupings = new List<byte>();
+        while (reader.Read())
+            groupings.Add(reader.GetByte(0));
+        // Two detail rows at 0, one grand total at 1.
+        Assert.HasCount(3, groupings);
+        AreEqual((byte)0, groupings[0]);
+        AreEqual((byte)0, groupings[1]);
+        AreEqual((byte)1, groupings[2]);
+    }
+
+    [TestMethod]
+    public void GroupingIdOfExpression_MatchesGroupingSets()
+    {
+        // Probe-confirmed 2026-07-10: GROUPING_ID(a+1, b) with GROUPING SETS
+        // ((a+1,b),(a+1),()) yields 0 (both present), 1 (b grouped away), and
+        // 3 (both grouped away).
+        using var conn = SeededExpr();
+        using var reader = conn.CreateCommand("""
+            select grouping_id(a + 1, b) gid, sum(v) s from t
+            group by grouping sets ((a + 1, b), (a + 1), ())
+            order by gid
+            """).ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+            ids.Add(reader.GetInt32(0));
+        // Three detail (gid 0), two subtotal (gid 1), one grand total (gid 3).
+        CollectionAssert.Contains(ids, 0);
+        CollectionAssert.Contains(ids, 1);
+        CollectionAssert.Contains(ids, 3);
+    }
+
+    [TestMethod]
+    public void GroupingOfMismatchedExpression_RaisesMsg8161()
+    {
+        // Probe-confirmed 2026-07-10: GROUPING(1+a) is structurally distinct
+        // from GROUP BY a+1 (operand order differs, no commutative
+        // normalization), so it raises Msg 8161.
+        using var conn = SeededExpr();
         using var cmd = conn.CreateCommand(
-            "select grouping(amount + 1) from sales group by amount + 1");
+            "select grouping(1 + a) g from t group by rollup(a + 1)");
+        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
+        AreEqual("8161", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void GroupingOfDifferentConstantExpression_RaisesMsg8161()
+    {
+        // Probe-confirmed 2026-07-10: GROUPING(a+2) against GROUP BY a+1 is a
+        // value mismatch → Msg 8161.
+        using var conn = SeededExpr();
+        using var cmd = conn.CreateCommand(
+            "select grouping(a + 2) g from t group by rollup(a + 1)");
         var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
         AreEqual("8161", ex.Data["HelpLink.EvtID"]);
     }

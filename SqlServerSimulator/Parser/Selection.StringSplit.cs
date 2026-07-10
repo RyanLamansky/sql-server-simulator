@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -17,7 +16,7 @@ namespace SqlServerSimulator.Parser;
 /// <item><description>2-arg form: <c>(value <i>input_string_type</i>)</c>.</description></item>
 /// <item><description>3-arg form with <c>enable_ordinal = 1</c>: <c>(value <i>input_string_type</i>, ordinal bigint)</c>.</description></item>
 /// <item><description>3-arg form with <c>enable_ordinal IN (0, NULL)</c>: schema collapses to the 2-arg form.</description></item>
-/// <item><description>The third argument must be a parse-time constant on real SQL Server (the schema is shape-fixed at compile time); the simulator enforces this by evaluating the third arg against an empty resolver and surfacing <see cref="NotSupportedException"/> on column / parameter references.</description></item>
+/// <item><description>The third argument must be a parse-time constant on real SQL Server (the schema is shape-fixed at compile time); the simulator enforces this by walking the third arg for any variable reference (<strong>Msg 8748</strong> — covers <c>@v</c> and its <c>CAST</c> / paren / arithmetic wrappers) and evaluating it against an empty resolver to catch column references.</description></item>
 /// </list>
 /// Runtime errors:
 /// <list type="bullet">
@@ -128,16 +127,15 @@ internal sealed partial class Selection
 
             // SQL Server requires the third arg to be a parse-time constant
             // (the schema is fixed at compile time) and raises Msg 8748 for
-            // variable / column references. The simulator gates first on a
-            // bare-VariableReference check (the empty-resolver Run trick
-            // alone misses variables — VariableReference reads its slot
-            // directly without going through the column resolver), then
-            // evaluates the expression with an empty resolver to catch
-            // column references. Cast / parenthesized wrappers around a
-            // variable slip past this gate (a divergence from real SQL
-            // Server's broader rejection), but the common bare-`@v` shape
-            // surfaces correctly.
-            if (enableOrdinalExpr is VariableReference)
+            // any variable-bearing shape — probe-confirmed 2026-07-10 that
+            // `@v`, `CAST(@v AS int)`, `@v + 0`, and `(@v)` all reject, while
+            // the constant forms `CAST(1 AS int)`, `(1)`, and `1 + 0` are
+            // accepted. The gate walks the parse tree for any
+            // VariableReference (the empty-resolver Run trick below can't see
+            // one — VariableReference reads its declared slot directly, not
+            // the column resolver), then evaluates with an empty resolver to
+            // catch column references.
+            if (enableOrdinalExpr.ContainsVariableReference)
                 throw SimulatedSqlException.StringSplitEnableOrdinalMustBeConstant();
             SqlValue enableOrdinalValue;
             try

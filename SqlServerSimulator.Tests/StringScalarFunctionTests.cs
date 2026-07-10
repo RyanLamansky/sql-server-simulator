@@ -147,6 +147,57 @@ public sealed class StringScalarFunctionTests
     public void Replicate_NvarcharMax_NoTruncation_DoubleBytes()
         => AreEqual(20000, ExecuteScalar<int>("select datalength(REPLICATE(cast('a' as nvarchar(max)), 10000))"));
 
+    /// <summary>
+    /// Probe-confirmed 2026-07-10 against a live FROM-source column: a
+    /// <c>varchar(MAX)</c> column input carries MAX-ness into REPLICATE, so
+    /// the result isn't capped at 8000 bytes (real server: 20000).
+    /// </summary>
+    [TestMethod]
+    public void Replicate_VarcharMaxColumn_NoTruncation()
+        => AreEqual(20000, ExecuteScalar<int>("""
+            create table t (v varchar(max));
+            insert t values (replicate('a', 100));
+            select datalength(REPLICATE(v, 200)) from t
+            """));
+
+    /// <summary>
+    /// Probe-confirmed 2026-07-10: an <c>nvarchar(MAX)</c> column input bypasses
+    /// the cap and produces double-byte length (real server: 40000).
+    /// </summary>
+    [TestMethod]
+    public void Replicate_NvarcharMaxColumn_NoTruncation_DoubleBytes()
+        => AreEqual(40000, ExecuteScalar<int>("""
+            create table t (v nvarchar(max));
+            insert t values (replicate(N'a', 100));
+            select datalength(REPLICATE(v, 200)) from t
+            """));
+
+    /// <summary>
+    /// Probe-confirmed 2026-07-10: a bounded <c>varchar(20)</c> column input is
+    /// NOT MAX-typed, so REPLICATE still truncates the result to 8000 bytes —
+    /// matching Microsoft's documented rule that only a MAX-typed input yields
+    /// a MAX-typed result (real server: 8000).
+    /// </summary>
+    [TestMethod]
+    public void Replicate_BoundedVarcharColumn_TruncatesAt8000()
+        => AreEqual(8000, ExecuteScalar<int>("""
+            create table t (v varchar(20));
+            insert t values ('short');
+            select datalength(REPLICATE(v, 2000)) from t
+            """));
+
+    /// <summary>
+    /// Probe-confirmed 2026-07-10: a bounded <c>nvarchar(20)</c> column input
+    /// truncates to 8000 bytes (4000 chars), not MAX (real server: 8000).
+    /// </summary>
+    [TestMethod]
+    public void Replicate_BoundedNvarcharColumn_TruncatesAt8000()
+        => AreEqual(8000, ExecuteScalar<int>("""
+            create table t (v nvarchar(20));
+            insert t values (N'short');
+            select datalength(REPLICATE(v, 2000)) from t
+            """));
+
     // ===== SPACE =====
     [TestMethod]
     public void Space_Basic_ReturnsRequestedSpaces()

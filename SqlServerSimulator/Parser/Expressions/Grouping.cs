@@ -13,12 +13,15 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <para>
 /// The argument must match an expression in the surrounding query's GROUP
 /// BY clause; SQL Server raises Msg 8161 otherwise (and also when GROUPING
-/// is used outside a GROUP BY context entirely). Matching here is by leaf-
-/// name equality for <see cref="Reference"/> arguments — the common case.
-/// Non-Reference arguments (e.g. <c>GROUPING(a+1)</c>) currently always
-/// raise Msg 8161 because the simulator doesn't yet do structural-equality
-/// matching against the GROUP BY expression list; real SQL Server returns
-/// 0 when the exact same expression appears in <c>GROUP BY</c>.
+/// is used outside a GROUP BY context entirely). <see cref="Reference"/>
+/// arguments match a GROUP BY <see cref="Reference"/> by leaf-name equality
+/// (qualifier-tolerant, case-insensitive) — the common case. A non-Reference
+/// argument (e.g. <c>GROUPING(a+1)</c> paired with <c>GROUP BY a+1</c>)
+/// matches by structural equality of the parse tree: redundant parentheses
+/// are stripped from both sides, then the rendered parse trees are compared.
+/// Probe-confirmed 2026-07-10: the match is order-sensitive and value-exact —
+/// <c>GROUPING(1+a)</c> and <c>GROUPING(a+2)</c> against <c>GROUP BY a+1</c>
+/// both raise Msg 8161, while <c>GROUPING((a+1))</c> (extra parens) matches.
 /// </para>
 /// </remarks>
 internal sealed class Grouping(ParserContext context) : Expression
@@ -38,22 +41,40 @@ internal sealed class Grouping(ParserContext context) : Expression
 
     /// <summary>
     /// Looks for <paramref name="argument"/> in <paramref name="haystack"/>.
-    /// Reference arguments match by leaf-name equality (case-insensitive via
-    /// <see cref="Collation"/>); non-Reference arguments aren't modeled here
-    /// — real SQL Server resolves them by exact-match parser comparison, but
-    /// the simulator's GROUPING surface is column-reference-only.
+    /// Two <see cref="Reference"/> operands match by leaf-name equality
+    /// (case-insensitive via <see cref="BuiltInToken"/>, so a qualified GROUP
+    /// BY column matches an unqualified GROUPING argument); any other pair
+    /// matches by structural equality of the parenthesis-stripped parse tree
+    /// (rendered via <see cref="Expression.DebugDisplay"/>, which deterministically
+    /// serializes the tree). Real SQL Server resolves the non-Reference case by
+    /// exact-match parser comparison; the render-and-compare proxy reproduces
+    /// the probed order-sensitive / value-exact boundary while normalizing
+    /// redundant parentheses.
     /// </summary>
     internal static bool FindArg(IReadOnlyList<Expression> haystack, Expression argument)
     {
-        if (argument is not Reference reference)
-            return false;
-        var leaf = reference.ReferencedName.Leaf;
+        var arg = StripParens(argument);
         foreach (var entry in haystack)
         {
-            if (entry is Reference r && BuiltInToken.Equals(r.ReferencedName.Leaf, leaf))
+            var candidate = StripParens(entry);
+            if (arg is Reference ra && candidate is Reference rb)
+            {
+                if (BuiltInToken.Equals(ra.ReferencedName.Leaf, rb.ReferencedName.Leaf))
+                    return true;
+            }
+            else if (string.Equals(arg.DebugDisplay(), candidate.DebugDisplay(), StringComparison.OrdinalIgnoreCase))
+            {
                 return true;
+            }
         }
         return false;
+    }
+
+    private static Expression StripParens(Expression expression)
+    {
+        while (expression is Parenthesized parenthesized)
+            expression = parenthesized.Wrapped;
+        return expression;
     }
 
     internal override string DebugDisplay() => $"GROUPING({this.argument.DebugDisplay()})";

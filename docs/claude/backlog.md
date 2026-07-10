@@ -22,12 +22,6 @@ This file is the home for net-new non-function feature proposals too. CLAUDE.md'
 
 Captured from a Microsoft Learn category-by-category audit (cross-checked against `Parser/Expression.cs::ResolveBuiltIn`, `Parser/AtAtKeyword.cs` + `Value.cs`, `Parser/Expressions/AggregateExpression.cs`, `Parser/Expressions/WindowExpression.cs`, and the FROM-source rowset dispatch in `Parser/Selection.{OpenJson,StringSplit,ListExtendedProperty}.cs`). Re-fetch <https://learn.microsoft.com/en-us/sql/t-sql/functions/functions> before declaring the function surface complete. 🎯 marks an item whose completion closes a Microsoft category.
 
-Buildable now (infrastructure exists):
-
-- **FORMATMESSAGE(msg_id_or_string, args...)** — printf-style with `sys.messages` fallback (sys.messages not modeled).
-- **PWDCOMPARE(clear, hash) / PWDENCRYPT(clear)** — password hashing helpers.
-- **LOGINPROPERTY(login, prop)** — login-property switch.
-
 Blocked on a larger unmodeled parent feature (shipping a function here implies the parent ships too):
 
 - **Graph** (node/edge tables) — EDGE_ID_FROM_PARTS / GRAPH_ID_FROM_EDGE_ID / GRAPH_ID_FROM_NODE_ID / NODE_ID_FROM_PARTS / OBJECT_ID_FROM_EDGE_ID / OBJECT_ID_FROM_NODE_ID.
@@ -50,9 +44,6 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **REPLICATE** of a MAX-typed *column* reference truncates to 8000 bytes (the parse-time type resolver doesn't reach FROM-source columns; literal / CAST-target inputs work).
-- **GROUPING / GROUPING_ID** only accept `Reference` arguments — `GROUPING(a+1)` paired with `GROUP BY a+1` raises Msg 8161 instead of matching structurally.
-- **STRING_SPLIT(…, …, CAST(@v AS INT))** wrapped-variable accepted; real SQL Server rejects all variable-bearing `enable_ordinal` shapes regardless of wrapping.
 - **Trailing-space MIN/MAX representative** — for a group of values differing only in trailing spaces (sort-equal under SQL Server), MIN/MAX returns a different byte-variant than the live server's scan-order representative. Surfaced by the AdventureWorks crosscheck on synthetic XML data (`vJobCandidateEducation._max_Edu_Loc_CountryRegion`). Needs trailing-space-insensitive compare + SQL Server's unspecified MAX-tie scan-order. See [`collations.md`](collations.md) "byte-exact sort" trailing-space note. **Deferred** — synthetic data, and the representative is unspecified scan-order on the live side.
 - **Leaked-connection session cleanup** — a `SimulatedDbConnection` that's never `Dispose`d is pinned indefinitely by the strong `Simulation.Connections` registry, so its session state never reclaims: an open transaction holds its locks and pins the MVCC version store forever, `##temp` tables linger, and the SPID accumulates. Real SqlClient's GC-finalization eventually closes a leaked connection and the server resets the session, so this is a genuine fidelity divergence. Faithful fix is **weak detection + deferred teardown**: weaken the registry (or add a parallel weak set) so a collected connection is noticed, and tear the session down lazily on a normal worker thread (next lock-manager pass / version-store GC / `CreateDbConnection`) — keeping transaction rollback off the finalizer thread and under the engine's existing synchronization. A bare finalizer can't work because the strong registry pins the object so the finalizer never runs, and rolling back from the finalizer thread is the one genuinely unsafe part. Interacts with deadlock detection / `sys.dm_*` waiter enumeration, which the registry currently backs. Low traffic (EF Core disposes scrupulously; only buggy consumer code hits it), but on-mission under authenticity. Eventual home: [`locking.md`](locking.md).
 - **Workload-harness divergence reporting quirks** (`.vs/workload/Program.cs`, local-only) — the parity report's example line rebuilds parameters from the op seed and can mismatch the actual divergent instance, and divergent instances aren't re-run single-threaded to classify transient-vs-stable. Both made the 2026-07-10 shared-plan-state hunt slower than it needed to be (the fixed bug class itself — instance-bound aggregate/window results, baked TOP/OFFSET counts, frozen RAND, unstamped replay clock — is documented in [`plan-cache.md`](plan-cache.md)'s shared-plan contract section).

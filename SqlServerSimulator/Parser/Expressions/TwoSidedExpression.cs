@@ -445,4 +445,6 @@ internal abstract class TwoSidedExpression : Expression
         this.left.VisitColumnReferences(visit);
         this.right.VisitColumnReferences(visit);
     }
+
+    internal sealed override bool ContainsVariableReference => this.left.ContainsVariableReference || this.right.ContainsVariableReference;
 }

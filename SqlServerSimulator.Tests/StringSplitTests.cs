@@ -203,4 +203,35 @@ public sealed class StringSplitTests
             "declare @e int = 1; select * from STRING_SPLIT('a,b', ',', @e)",
             8748,
             "The enable_ordinal argument for string_split only supports constant values (not variables or columns).");
+
+    /// <summary>
+    /// Probe-confirmed 2026-07-10: real SQL Server rejects every variable-bearing
+    /// enable_ordinal shape with Msg 8748, not only a bare <c>@v</c> — a
+    /// <c>CAST</c> / arithmetic / paren wrapper around the variable rejects too.
+    /// </summary>
+    [DataRow("cast(@e as int)")]
+    [DataRow("@e + 0")]
+    [DataRow("(@e)")]
+    [TestMethod]
+    public void EnableOrdinal_WrappedVariable_RaisesMsg8748(string enableOrdinal)
+        => new Simulation().AssertSqlError(
+            $"declare @e int = 1; select * from STRING_SPLIT('a,b', ',', {enableOrdinal})",
+            8748,
+            "The enable_ordinal argument for string_split only supports constant values (not variables or columns).");
+
+    /// <summary>
+    /// Probe-confirmed 2026-07-10: constant enable_ordinal shapes with no
+    /// variable — <c>CAST(1 AS int)</c>, <c>(1)</c>, <c>1 + 0</c> — are accepted
+    /// and produce the ordinal column (2-column schema).
+    /// </summary>
+    [DataRow("cast(1 as int)")]
+    [DataRow("(1)")]
+    [DataRow("1 + 0")]
+    [TestMethod]
+    public void EnableOrdinal_ConstantExpression_AddsOrdinalColumn(string enableOrdinal)
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        using var reader = conn.CreateCommand($"select * from STRING_SPLIT('a,b', ',', {enableOrdinal})").ExecuteReader();
+        AreEqual(2, reader.FieldCount);
+    }
 }

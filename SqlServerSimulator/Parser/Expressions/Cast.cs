@@ -67,6 +67,8 @@ internal sealed class Cast : Expression
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.source.VisitColumnReferences(visit);
 
+    internal override bool ContainsVariableReference => this.source.ContainsVariableReference;
+
     internal override Expression? PureConversionOperand => this.source;
 
     /// <summary>

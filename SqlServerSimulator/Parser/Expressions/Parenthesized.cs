@@ -20,5 +20,7 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Wrapped.VisitColumnReferences(visit);
 
+    internal override bool ContainsVariableReference => this.Wrapped.ContainsVariableReference;
+
     internal override Expression? PureConversionOperand => this.Wrapped;
 }
