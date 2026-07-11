@@ -888,6 +888,18 @@ internal sealed partial class Selection
         // Server, guarded by ApplyTests).
         var checkpoint = context.SaveCheckpoint();
         var next = context.GetNextRequired();
+
+        // OPENQUERY is a reserved keyword (not a Name), so it can't ride the
+        // name-string dispatch below. It never correlates to the left APPLY
+        // sources — its arguments are a server identifier and a constant
+        // pass-through string — so route it straight back through
+        // ParseSingleFromSource.
+        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return ParseSingleFromSource(context, depth, surroundingOuter);
+        }
+
         if (next is Name nextName)
         {
             // The right-side source's column references can correlate to the
@@ -1387,6 +1399,40 @@ internal sealed partial class Selection
                     lobStore: null,
                     rows: [],
                     lateralPlan: derivedSelection);
+
+            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
+                // OPENQUERY dispatch: an ad-hoc pass-through rowset over a
+                // linked server — a sibling of the four-part-name read that
+                // rides the same remote-execution seam. OPENQUERY is a
+                // reserved keyword, so it arrives here rather than in the
+                // Name case. ParseOpenQuery enforces the
+                // `( server , 'query' )` grammar, resolves the linked server
+                // (Msg 7202 on miss), and discovers the result-set schema by
+                // running the query once on the remote.
+                {
+                    var openQueryPlan = ParseOpenQuery(context);
+                    var openQueryAlias = ConsumeOptionalAliasInPlace(context);
+                    // A column-alias list — `OPENQUERY(...) q(c1, c2)` — is not
+                    // allowed on OPENQUERY (real SQL Server: Msg 102 near the
+                    // first alias identifier). The general FROM parser tolerates
+                    // a trailing column-alias list by ignoring it; reject it
+                    // here so the columns keep coming from the remote result set
+                    // rather than being silently renamed away.
+                    if (context.Token is Operator { Character: '(' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    var openQueryColumns = new HeapColumn[openQueryPlan.Schema.Length];
+                    for (var ci = 0; ci < openQueryColumns.Length; ci++)
+                        openQueryColumns[ci] = new HeapColumn(openQueryPlan.ColumnNames[ci], openQueryPlan.Schema[ci], maxLength: null, nullable: true);
+                    return new FromSource(
+                        qualifier: openQueryAlias,
+                        columnNames: openQueryPlan.ColumnNames,
+                        columns: openQueryColumns,
+                        storedSchema: openQueryColumns,
+                        storageOrdinals: null,
+                        lobStore: null,
+                        rows: [],
+                        lateralPlan: openQueryPlan);
+                }
 
             case ReservedKeyword
             {

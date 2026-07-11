@@ -28,6 +28,15 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 
     /// <summary>
+    /// Mimics SQL Server error 7202: an <c>OPENQUERY</c> (or four-part name)
+    /// references a linked-server name that isn't registered in
+    /// <c>sys.servers</c>. Wording probe-confirmed against SQL Server 2025;
+    /// Class 11 State 2.
+    /// </summary>
+    internal static SimulatedSqlException LinkedServerNotFound(string serverName) =>
+        new($"Could not find server '{serverName}' in sys.servers. Verify that the correct server name was specified. If necessary, execute the stored procedure sp_addlinkedserver to add the server to sys.servers.", 7202, 11, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 911: <c>USE &lt;db&gt;</c> targets a database
     /// that doesn't exist in this <see cref="Simulation"/>. Wording
     /// probe-confirmed against SQL Server 2025: literal database name in

@@ -17,6 +17,27 @@ Execution opens a fresh `SimulatedDbConnection` on the remote and issues `SELECT
 
 [`Selection.LinkedServer.cs::StreamRemoteRows`](../../SqlServerSimulator/Parser/Selection.LinkedServer.cs) buffers the remote rows into a list before returning so the remote connection / command / reader chain disposes before the local plan consumes them. Drops remote locks promptly; matches the "fresh remote session per remote query" semantic of real SQL Server.
 
+## OPENQUERY
+
+`OPENQUERY(server, 'query')` is the inline ad-hoc pass-through form over the same remote-execution seam as four-part-name reads. It's a FROM / JOIN / derived-table source that runs a verbatim query string on a linked server and returns its **first result set** as a rowset.
+
+Grammar (probed against SQL Server 2025): exactly two arguments — a bare **identifier** (plain or bracketed) naming the linked server, and a bare **string literal** (`'...'` / `N'...'`, doubled-quote `''` escaping handled by the tokenizer) carrying the pass-through query. Parsed in [`Selection.LinkedServer.cs::ParseOpenQuery`](../../SqlServerSimulator/Parser/Selection.LinkedServer.cs); dispatched from a `ReservedKeyword { Keyword: OpenQuery }` arm in `Selection.cs::ParseSingleFromSourceCore` (OPENQUERY is a reserved keyword, so it never rides the Name-token rowset dispatch used by OPENJSON / STRING_SPLIT) and from a keyword check in `ParseLateralFromSource` so it works in the JOIN / APPLY position too. Syntax errors fire **before** server resolution:
+
+- Server slot a literal / number / dotted `a.b` → **Msg 102** (the token after the identifier isn't `,`).
+- Query slot a variable (`@q`), a concatenation (`'a'+'b'`), or a 3rd argument → **Msg 102** (the token after the string literal isn't `)`).
+- Too few args (`OPENQUERY(Srv)`) → **Msg 102**.
+- Column-alias list (`OPENQUERY(...) q(c1, c2)`) → **Msg 102** near the opening `(`. Real SQL Server raises Msg 102 near the first alias identifier; the simulator's general FROM parser otherwise *tolerates and ignores* a trailing column-alias list on any source, so OPENQUERY carries an explicit guard to reject it (same Msg number, slightly different "near" token).
+
+An unregistered server name raises **Msg 7202** (Class 11, State 2, verbatim `Could not find server '<name>' in sys.servers. …`) via [`SimulatedSqlException.LinkedServerNotFound`](../../SqlServerSimulator/Errors/SimulatedSqlException.SchemaErrors.cs) — note this is the *only* linked-server surface that ports Msg 7202; four-part-name misses still fall through to Msg 208.
+
+**Compile-time schema discovery + per-execution row fetch.** OPENQUERY's columns aren't known until the remote query runs, so `ParseOpenQuery` executes the query **once at parse time** to capture the first `SimulatedSqlResultSet`'s `Schema` + `ColumnNames` (the discovery pass buffers no rows). `Selection.ForOpenQuery` then builds a `Selection` whose `rowSource` **re-runs** the query on each `Execute`, streaming the first result set's rows (via `StreamOpenQueryRows`, mirroring `StreamRemoteRows`). The batch is disqualified from plan-cache promotion (`HasSessionScopedReference = true`) because it reads external remote state.
+
+Divergences:
+- **Side-effecting payload double-run**: the query runs once for schema discovery plus once per outer execution. Fine for the SELECT payloads OPENQUERY targets; a payload with side effects would execute more than a real single pass-through would.
+- **No result set** (empty / all-whitespace string, a non-SELECT statement like `DECLARE @x int` or a bare `PRINT`) → `NotSupportedException` naming the condition. The exact real-server Msg for this case isn't probed, so the simulator declines to fabricate a number. Empty/whitespace is short-circuited in `DiscoverOpenQuerySchema` (it would otherwise reach the remote command as an uninitialized `CommandText` and leak an `InvalidOperationException`) so every no-rowset payload surfaces the same message.
+- **Scalar / select-list position** (`SELECT OPENQUERY(...)`) isn't handled by the FROM-source path; it falls through the generic unknown-scalar path rather than real SQL Server's Msg 156. Not special-cased.
+- **Writes** (`INSERT`/`UPDATE`/`DELETE OPENQUERY(...)`) aren't modeled — consistent with the four-part-name cross-server-write deferral below.
+
 ## What's shipped
 
 - **Read paths**: SELECT, JOIN (INNER / LEFT / RIGHT / FULL / CROSS / APPLY) across a four-part reference. Correlated subqueries re-execute the remote query per outer row via the existing lateral-plan re-execution pattern.

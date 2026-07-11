@@ -177,7 +177,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Per-column / per-expression collation, coercibility precedence, Msg 468 / 457 cross-collation enforcement, recognized catalog, `#temp` collation inheritance** → [`collations.md`](docs/claude/collations.md).
 - **New top-level statement parser or dispatch-loop separator rules** → [`grammar.md`](docs/claude/grammar.md) + [`control-flow.md`](docs/claude/control-flow.md).
 - **BACPAC import** (`Simulation.ImportBacpac` instance method — multi-database via repeated calls, `BacpacImportOptions`, `ModelXmlReader` dispatcher, BCP wire format, `BacpacBuilder` test harness) → [`bacpac-loader.md`](docs/claude/bacpac-loader.md).
-- **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part-name FROM routing through the remote's ADO.NET pipeline, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).
+- **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part-name FROM routing through the remote's ADO.NET pipeline, `OPENQUERY(server, 'query')` ad-hoc pass-through with compile-time schema discovery, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).
 
 ## Not modeled
 
