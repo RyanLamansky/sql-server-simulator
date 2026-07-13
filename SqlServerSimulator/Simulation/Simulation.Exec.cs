@@ -1,3 +1,4 @@
+using System.Text;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -6,6 +7,78 @@ namespace SqlServerSimulator;
 
 partial class Simulation
 {
+    /// <summary>
+    /// Matches <paramref name="leaf"/> against the system procedure names
+    /// under the database collation's equality, returning the canonical
+    /// as-declared name (so the dispatch switch in <see cref="ParseExec"/>
+    /// can match ordinal string constants) or null when the name is not a
+    /// system procedure. Matching is collation-aware — probe-confirmed
+    /// (2026-05-21): system proc names follow the database collation, so
+    /// <c>SP_EXECUTESQL</c> on a case-sensitive database misses here and
+    /// falls through to "procedure not found".
+    /// </summary>
+    private static string? ResolveSystemProcedureName(Collation collation, string leaf)
+    {
+        // Lazily built once per interned collation instance (stable across
+        // ALTER DATABASE COLLATE, which swaps the database's field to a
+        // different interned instance). A concurrent first-touch race is
+        // benign: both threads build identical sets and the reference
+        // assignment is atomic.
+        var lookup = collation.SystemProcedureLookup ??= new HashSet<string>(
+            [
+                // sp_executesql is a built-in proc with a special argument
+                // shape (param-defs and OUTPUT writeback to @-variables in
+                // the caller's scope) parsed by ParseSpExecuteSql rather
+                // than the generic EXEC-argument grammar.
+                "sp_executesql",
+                // Extended-property sprocs — all 3 share argument parsing +
+                // target resolution via InvokeSpExtendedProperty. The
+                // bacpac loader emits `EXEC sp_addextendedproperty …` for
+                // every `<SqlExtendedProperty>` element in model.xml; the
+                // update/drop variants round out the API.
+                "sp_addextendedproperty",
+                "sp_updateextendedproperty",
+                "sp_dropextendedproperty",
+                // Linked-server sprocs — sp_addlinkedserver / sp_dropserver
+                // carry semantic effect (activating / deactivating an entry
+                // in Simulation.ActiveLinkedServers); sp_addlinkedsrvlogin /
+                // sp_droplinkedsrvlogin / sp_serveroption parse-and-discard
+                // since the simulator has no principal-mapping or
+                // per-server-option model but BACPAC / migration scripts
+                // often emit them.
+                "sp_addlinkedserver",
+                "sp_dropserver",
+                "sp_addlinkedsrvlogin",
+                "sp_droplinkedsrvlogin",
+                "sp_serveroption",
+                "sp_set_session_context",
+                "sp_getapplock",
+                "sp_releaseapplock",
+            ],
+            collation);
+        if (lookup.TryGetValue(leaf, out var canonical))
+            return canonical;
+
+        // A set miss is definitive only when the probe hashes consistently
+        // with the stored names. SqlLatin1Cp1CiAsCollation.GetHashCode
+        // hashes in-repertoire strings by SQL sort weights but
+        // out-of-repertoire strings via its inner Windows collation, so an
+        // out-of-repertoire spelling that IS Equals-equal to a stored name
+        // (fullwidth ｓp_executesql — regime-1 fullwidth folding) hashes
+        // differently and misses the set. Every stored name is ASCII and
+        // therefore in-repertoire, so a pure-ASCII probe shares their
+        // hashing scheme and its miss is exact; anything else re-checks by
+        // direct equality.
+        if (Ascii.IsValid(leaf))
+            return null;
+        foreach (var name in lookup)
+        {
+            if (collation.Equals(leaf, name))
+                return name;
+        }
+        return null;
+    }
+
     /// <summary>
     /// Parses an <c>[@rc =] EXEC[UTE] target [args]</c> statement where
     /// <c>target</c> is either a procedure name (regular EXEC), a
@@ -74,85 +147,31 @@ partial class Simulation
         var procName = BatchContext.ParseObjectName(context);
         context.MoveNextOptional();
 
-        // sp_executesql is a built-in proc with a special argument shape
-        // (param-defs and OUTPUT writeback to @-variables in the caller's
-        // scope). Route to its own parser before falling through to the
-        // generic-procedure path. Probe-confirmed (2026-05-21): system proc
-        // names follow the database collation, so `SP_EXECUTESQL` on a CS
-        // database raises "procedure not found" — that's what falls through
-        // here when the case mismatch causes a dispatch miss.
-        var dbCollation = batch.CurrentDatabase.Collation;
-        if (dbCollation.Equals(procName.Leaf, "sp_executesql"))
+        // System procedures route to built-in handlers before generic
+        // resolution. ResolveSystemProcedureName does the collation-aware
+        // match and hands back the canonical as-declared name, so the
+        // switch arms below match ordinary string constants regardless of
+        // the SQL text's casing. A null falls through to user-procedure
+        // resolution.
+        var systemProcName = ResolveSystemProcedureName(batch.CurrentDatabase.Collation, procName.Leaf);
+        var systemProc = systemProcName switch
         {
-            foreach (var outcome in ParseSpExecuteSql(batch, returnCodeVar))
-                yield return outcome;
-            yield break;
-        }
-
-        // Extended-property sprocs — all 3 share argument parsing + target
-        // resolution via InvokeSpExtendedProperty. The bacpac loader emits
-        // `EXEC sp_addextendedproperty …` for every `<SqlExtendedProperty>`
-        // element in model.xml; the update/drop variants round out the API.
-        if (dbCollation.Equals(procName.Leaf, "sp_addextendedproperty"))
+            null => null,
+            "sp_addextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add),
+            "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
+            "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" or "sp_serveroption" => InvokeSpLinkedServerNoOp(batch),
+            "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
+            "sp_dropserver" => InvokeSpDropServer(batch),
+            "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar),
+            "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
+            "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
+            "sp_set_session_context" => InvokeSpSetSessionContext(batch),
+            "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
+            _ => throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
+        };
+        if (systemProc is not null)
         {
-            foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_updateextendedproperty"))
-        {
-            foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_dropextendedproperty"))
-        {
-            foreach (var outcome in InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop))
-                yield return outcome;
-            yield break;
-        }
-
-        // Linked-server sprocs — sp_addlinkedserver / sp_dropserver carry
-        // semantic effect (activating / deactivating an entry in
-        // Simulation.ActiveLinkedServers); sp_addlinkedsrvlogin /
-        // sp_droplinkedsrvlogin / sp_serveroption parse-and-discard since
-        // the simulator has no principal-mapping or per-server-option model
-        // but BACPAC / migration scripts often emit them.
-        if (dbCollation.Equals(procName.Leaf, "sp_addlinkedserver"))
-        {
-            foreach (var outcome in InvokeSpAddLinkedServer(batch))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_dropserver"))
-        {
-            foreach (var outcome in InvokeSpDropServer(batch))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_set_session_context"))
-        {
-            foreach (var outcome in InvokeSpSetSessionContext(batch))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_getapplock"))
-        {
-            foreach (var outcome in InvokeSpGetAppLock(batch, returnCodeVar))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_releaseapplock"))
-        {
-            foreach (var outcome in InvokeSpReleaseAppLock(batch, returnCodeVar))
-                yield return outcome;
-            yield break;
-        }
-        if (dbCollation.Equals(procName.Leaf, "sp_addlinkedsrvlogin")
-            || dbCollation.Equals(procName.Leaf, "sp_droplinkedsrvlogin")
-            || dbCollation.Equals(procName.Leaf, "sp_serveroption"))
-        {
-            foreach (var outcome in InvokeSpLinkedServerNoOp(batch))
+            foreach (var outcome in systemProc)
                 yield return outcome;
             yield break;
         }

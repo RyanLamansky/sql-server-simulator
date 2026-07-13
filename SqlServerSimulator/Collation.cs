@@ -45,6 +45,17 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     {
     }
 
+    /// <summary>
+    /// Lazily-built set of the system procedure names EXEC routes to
+    /// built-in handlers, using this collation as the comparer. Owned and
+    /// populated by <see cref="Simulation"/>'s EXEC parser (see
+    /// <c>Simulation.Exec.cs::ResolveSystemProcedureName</c>, including its
+    /// note on the benign first-touch race); held here so the cache follows
+    /// the interned collation instance's lifetime. Contents are fixed
+    /// literals, so sharing across simulations is safe.
+    /// </summary>
+    internal HashSet<string>? SystemProcedureLookup;
+
     public abstract string Name { get; }
 
     /// <summary>
