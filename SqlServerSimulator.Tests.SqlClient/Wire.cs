@@ -1,3 +1,4 @@
+using System.Data;
 using System.Data.Common;
 using Microsoft.Data.SqlClient;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
@@ -85,5 +86,87 @@ internal static class Wire
             CollectionAssert.AreEqual(expectedBytes, actualBytes);
         else
             AreEqual(expected, actual);
+    }
+
+    /// <summary>
+    /// Dual-reads a parameterized <c>select @p</c>: the configured parameter runs
+    /// once through the in-process ADO surface (the oracle) and once over the wire
+    /// against the same simulation, asserting the scalar results match. SqlClient
+    /// infers the wire parameter type from <paramref name="configure"/>; the oracle
+    /// mirrors the resulting <see cref="DbType"/>/value/size so any coercion (money
+    /// scale, datetime rounding) happens identically on both sides. Returns the wire
+    /// value for callers that want a further assertion (e.g. NULL checks).
+    /// </summary>
+    public static async Task<object?> AssertScalarParamRoundTrips(
+        Simulation simulation,
+        SqlConnection wireConnection,
+        CancellationToken cancellationToken,
+        Action<SqlParameter> configure)
+    {
+        var probe = new SqlParameter { ParameterName = "@p" };
+        configure(probe);
+
+        object? oracle;
+        using (var connection = simulation.CreateDbConnection())
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "select @p";
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@p";
+            parameter.DbType = probe.DbType;
+            parameter.Value = probe.Value;
+            if (probe.Size != 0)
+                parameter.Size = probe.Size;
+            _ = command.Parameters.Add(parameter);
+            oracle = command.ExecuteScalar();
+        }
+
+        await using var wire = new SqlCommand("select @p", wireConnection);
+        var wireParameter = new SqlParameter { ParameterName = "@p" };
+        configure(wireParameter);
+        _ = wire.Parameters.Add(wireParameter);
+        var actual = await wire.ExecuteScalarAsync(cancellationToken);
+
+        AssertValueEqual(oracle ?? DBNull.Value, actual ?? DBNull.Value);
+        return actual;
+    }
+
+    /// <summary>
+    /// Runs a statement through the in-process ADO surface with one output (or
+    /// InputOutput) parameter plus optional typed inputs, returning the
+    /// parameter's post-execution value — the oracle for output-parameter
+    /// writeback observed over the wire.
+    /// </summary>
+    public static object? OutputInProc(
+        Simulation simulation,
+        string sql,
+        string outputName,
+        DbType outputType,
+        ParameterDirection direction,
+        object? outputSeed,
+        params (string Name, DbType Type, object Value)[] inputs)
+    {
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, type, value) in inputs)
+        {
+            var input = command.CreateParameter();
+            input.ParameterName = name;
+            input.DbType = type;
+            input.Value = value;
+            _ = command.Parameters.Add(input);
+        }
+
+        var output = command.CreateParameter();
+        output.ParameterName = outputName;
+        output.DbType = outputType;
+        output.Direction = direction;
+        output.Value = outputSeed ?? DBNull.Value;
+        _ = command.Parameters.Add(output);
+        _ = command.ExecuteNonQuery();
+        return output.Value;
     }
 }

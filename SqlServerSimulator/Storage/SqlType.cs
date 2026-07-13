@@ -603,6 +603,7 @@ internal abstract partial class SqlType
         DbType.Decimal or DbType.VarNumeric => GetDecimal(18, 0),
         DbType.Double => Float,
         DbType.Single => Real,
+        DbType.Xml => Xml,
         DbType.Currency => Money,
         _ => throw new NotSupportedException($"No SqlType mapping for DbType {dbType}."),
     };

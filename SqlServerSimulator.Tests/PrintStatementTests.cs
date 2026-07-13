@@ -3,14 +3,13 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Tests for the <c>PRINT</c> statement. The simulator parses + evaluates
-/// the operand (so type / coercion errors surface naturally) and discards
-/// the result — <see cref="SimulatedDbConnection"/> doesn't expose an
-/// <c>InfoMessage</c> event because <c>DbConnection</c> doesn't define one
-/// and there's no demonstrated need for the public surface yet. The tests
-/// verify side-effect-free behavior (<c>@@ROWCOUNT</c> reset, skip-mode
-/// suppression, runtime errors from the operand path) rather than message
-/// capture. Behavior probed against SQL Server 2025 (2026-05-11).
+/// Tests for the <c>PRINT</c> statement's evaluation semantics: the operand
+/// parses + evaluates (so type / coercion errors surface naturally), with
+/// side-effect-free behavior (<c>@@ROWCOUNT</c> reset, skip-mode
+/// suppression, runtime errors from the operand path). Message delivery
+/// through <see cref="SimulatedDbConnection.InfoMessage"/> is covered by
+/// <c>InfoMessageEventTests</c>. Behavior probed against SQL Server 2025
+/// (2026-05-11).
 /// </summary>
 [TestClass]
 public sealed class PrintStatementTests

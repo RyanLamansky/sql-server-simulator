@@ -124,6 +124,23 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         this.WriteBVarchar(oldValue);
     }
 
+    /// <summary>
+    /// ENVCHANGE type 7: the server's default SQL collation as the 5-byte
+    /// wire structure. SqlClient stores it as the default collation it stamps
+    /// onto outbound RPC parameter TYPE_INFO — without it, parameterized
+    /// commands fail client-side.
+    /// </summary>
+    public void WriteEnvChangeSqlCollation(uint info, byte sortId)
+    {
+        this.WriteByte(Tds.TokenEnvChange);
+        this.WriteUInt16(1 + 1 + 5 + 1);
+        this.WriteByte(Tds.EnvSqlCollation);
+        this.WriteByte(5);
+        this.WriteUInt32(info);
+        this.WriteByte(sortId);
+        this.WriteByte(0);
+    }
+
     /// <summary>The empty ENVCHANGE acknowledging a connection reset.</summary>
     public void WriteResetConnectionAck()
     {
@@ -168,12 +185,45 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         this.WriteByte(0);
     }
 
-    public void WriteDone(ushort status, long rowCount)
+    public void WriteDone(ushort status, long rowCount) => this.WriteDoneToken(Tds.TokenDone, status, rowCount);
+
+    /// <summary>DONE, DONEPROC, and DONEINPROC share one 13-byte layout.</summary>
+    public void WriteDoneToken(byte token, ushort status, long rowCount)
     {
-        this.WriteByte(Tds.TokenDone);
+        this.WriteByte(token);
         this.WriteUInt16(status);
         this.WriteUInt16(0);
         this.WriteInt64(rowCount);
+    }
+
+    public void WriteReturnStatus(int value)
+    {
+        this.WriteByte(Tds.TokenReturnStatus);
+        this.WriteInt32(value);
+    }
+
+    /// <summary>
+    /// ENVCHANGE for transaction lifecycle: begin carries the new 8-byte
+    /// transaction descriptor; commit and rollback carry empty values.
+    /// </summary>
+    public void WriteEnvChangeTransaction(byte type, ulong newDescriptor)
+    {
+        this.WriteByte(Tds.TokenEnvChange);
+        if (type == Tds.EnvBeginTransaction)
+        {
+            this.WriteUInt16(1 + 1 + 8 + 1);
+            this.WriteByte(type);
+            this.WriteByte(8);
+            this.WriteUInt64(newDescriptor);
+            this.WriteByte(0);
+        }
+        else
+        {
+            this.WriteUInt16(3);
+            this.WriteByte(type);
+            this.WriteByte(0);
+            this.WriteByte(0);
+        }
     }
 
     private void Ensure(int more)

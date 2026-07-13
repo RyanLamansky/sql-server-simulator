@@ -1,3 +1,4 @@
+using System.Data;
 using System.Numerics;
 using SqlServerSimulator.Storage;
 
@@ -51,6 +52,28 @@ internal static class TdsTypeCodec
         writer.WriteByte(Tds.TokenRow);
         for (var i = 0; i < schema.Length; i++)
             WriteValue(writer, schema[i], cursor[i]);
+    }
+
+    /// <summary>
+    /// RETURNVALUE token carrying an output parameter (or a prepared-statement
+    /// handle) back to the client, which matches it by name, falling back to
+    /// ordinal when the name is empty.
+    /// </summary>
+    public static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, DbType dbType, object? value)
+    {
+        writer.WriteByte(Tds.TokenReturnValue);
+        writer.WriteUInt16(ordinal);
+        writer.WriteBVarchar(name);
+        writer.WriteByte(1);
+        writer.WriteUInt32(0);
+        writer.WriteByte(0x09);
+        writer.WriteByte(0);
+
+        var declared = SqlType.GetByDbType(dbType);
+        var sqlValue = value is null or DBNull ? SqlValue.Null(declared) : declared.ConvertParameter(value);
+        var wireType = sqlValue.IsNull ? declared : sqlValue.Type;
+        WriteTypeInfo(writer, wireType);
+        WriteValue(writer, wireType, sqlValue);
     }
 
     private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type)

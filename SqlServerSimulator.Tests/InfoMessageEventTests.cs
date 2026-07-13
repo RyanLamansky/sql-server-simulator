@@ -41,6 +41,16 @@ public sealed class InfoMessageEventTests
     }
 
     [TestMethod]
+    public void Print_InsideProcedureBody_FiresMessage()
+    {
+        var (conn, captured) = NewWithCapture();
+        _ = RunNonQuery(conn, "create procedure noisy as print 'from proc'");
+        _ = RunNonQuery(conn, "exec noisy");
+        HasCount(1, captured);
+        AreEqual("from proc", captured[0].Message);
+    }
+
+    [TestMethod]
     public void Print_StringLiteral_FiresOneMessage()
     {
         var (conn, captured) = NewWithCapture();

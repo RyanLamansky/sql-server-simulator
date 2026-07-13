@@ -133,7 +133,7 @@ Three entry points share one per-connection undo log: implicit (statement atomic
 Comparison (Msg 402), ORDER BY/DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) all enforced.
 
 ### `SimulatedDbDataReader`
-Full `DbDataReader` contract. Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no boxing); NULL → `SqlNullValueException` (SqlClient parity). `GetDateTime` covers Date/DateTime/SmallDateTime/DateTime2 (Date at midnight, `Kind=Unspecified`). A **`datetime` rounds to whole milliseconds at the ADO.NET boundary** (`DateTimeSqlType.RoundToClientMilliseconds`, in `GetDateTime` + `SqlValue.ToObject`, covering `GetValue`/`GetFieldValue`/output-param writeback) matching SqlClient's `.000`/`.003`/`.007`; the engine keeps full 1/300-second resolution internally, so only the client surface rounds. `GetDecimal` covers Decimal/Numeric/Money/SmallMoney; `GetFieldValue<T>` short-circuits EF's `DateOnly`-over-`Date` / `TimeOnly`-over-`Time`. `GetOrdinal` two-pass linear (case-sensitive then -insensitive, SqlClient precedence). `HasRows` sticky. `GetChar(int)` always raises `InvalidCastException`.
+Full `DbDataReader` contract. Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no boxing); NULL → `SqlNullValueException` (SqlClient parity). `GetDateTime` covers Date/DateTime/SmallDateTime/DateTime2 (Date at midnight, `Kind=Unspecified`). A **`datetime` rounds to whole milliseconds at the ADO.NET boundary** (`DateTimeSqlType.RoundToClientMilliseconds`, in `GetDateTime` + `SqlValue.ToObject`, covering `GetValue`/`GetFieldValue`/output-param writeback) matching SqlClient's `.000`/`.003`/`.007`; the engine keeps full 1/300-second resolution internally, so only the client surface rounds. `GetDecimal` covers Decimal/Numeric/Money/SmallMoney; `GetFieldValue<T>` short-circuits EF's `DateOnly`-over-`Date` / `TimeOnly`-over-`Time`. `GetOrdinal` two-pass (case-sensitive then -insensitive, SqlClient precedence). `HasRows` sticky. `GetChar(int)` raises `InvalidCastException`.
 
 ### Feature reference
 
@@ -178,7 +178,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **New top-level statement parser or dispatch-loop separator rules** → [`grammar.md`](docs/claude/grammar.md) + [`control-flow.md`](docs/claude/control-flow.md).
 - **BACPAC import** (`Simulation.ImportBacpac` — multi-database via repeated calls, `BacpacImportOptions`, `ModelXmlReader` dispatcher, BCP wire format, `BacpacBuilder` test harness) → [`bacpac-loader.md`](docs/claude/bacpac-loader.md).
 - **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part FROM routing through the remote's ADO.NET pipeline, `OPENQUERY(server,'query')` ad-hoc pass-through + compile-time schema discovery, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).
-- **TDS network endpoint** (`Simulation.ListenAsync` → `SimulatedNetworkListener`; real SqlClient over loopback TCP+TLS, SQLBatch-only v1 — no RPC/TM/bulk; oracle = `*.Tests.SqlClient`) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
+- **TDS network endpoint** (`Simulation.ListenAsync` → `SimulatedNetworkListener`; real SqlClient over loopback TCP+TLS; SQLBatch/RPC/TM, no bulk; EF via plain `UseSqlServer`; oracle = `*.Tests.SqlClient`) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
 ## Not modeled
 

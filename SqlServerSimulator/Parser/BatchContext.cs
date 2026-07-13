@@ -1089,6 +1089,14 @@ internal sealed class BatchContext
             if (name.StartsWith('@'))
                 name = name[1..];
             var dbType = SqlType.GetByDbType(parameter.DbType);
+            // SqlClient's Size = -1 convention declares a MAX-typed
+            // parameter (varchar(max) / nvarchar(max) / varbinary(max)).
+            // Honoring it matters beyond fidelity: the TDS listener projects
+            // `select @p` with this declared type, and a MAX value over
+            // 65535 bytes cannot be represented by the bounded wire form.
+            var maxDeclared = parameter.Size == SqlType.MaxLengthSentinel ? AsMaxVariant(dbType) : null;
+            if (maxDeclared is not null)
+                dbType = maxDeclared;
             var seed = parameter.Value is null or DBNull
                 ? SqlValue.Null(dbType)
                 : dbType.ConvertParameter(parameter.Value);
@@ -1097,11 +1105,23 @@ internal sealed class BatchContext
             // 123.45m without an explicit scale → widens to decimal(28, 2)).
             // Track the post-widen type so VariableReference.GetSqlType returns
             // the right schema and downstream readers don't truncate.
-            var declaredType = seed.IsNull ? dbType : seed.Type;
+            var declaredType = maxDeclared ?? (seed.IsNull ? dbType : seed.Type);
             dict[name] = new VariableSlot(declaredType, declaredMaxLength: null, seed, parameter);
         }
         return dict;
     }
+
+    /// <summary>
+    /// The MAX-typed variant of a variable-length parameter type, or null
+    /// when the type has no MAX form.
+    /// </summary>
+    private static SqlType? AsMaxVariant(SqlType dbType) => dbType switch
+    {
+        VarcharSqlType varchar => VarcharSqlType.Get(SqlType.MaxLengthSentinel, varchar.Collation ?? Collation.Baseline, varchar.Coercibility),
+        NVarcharSqlType nvarchar => NVarcharSqlType.Get(SqlType.MaxLengthSentinel, nvarchar.Collation ?? Collation.Baseline, nvarchar.Coercibility),
+        VarbinarySqlType => VarbinarySqlType.Get(SqlType.MaxLengthSentinel),
+        _ => null,
+    };
 
     /// <summary>
     /// True when <paramref name="parameter"/> looks like a table-valued

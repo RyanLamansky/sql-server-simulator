@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Network;
 /// <see cref="SimulatedDbConnection"/>. Runs as a single task; teardown is
 /// triggered by client disconnect, listener disposal, or a protocol error.
 /// </summary>
-internal sealed class TdsSession(Simulation simulation, Socket socket, X509Certificate2 certificate)
+internal sealed partial class TdsSession(Simulation simulation, Socket socket, X509Certificate2 certificate)
 {
     private readonly Queue<SimulatedError> pendingInfoMessages = new();
     private SimulatedDbConnection? connection;
@@ -90,13 +90,19 @@ internal sealed class TdsSession(Simulation simulation, Socket socket, X509Certi
                     case Tds.PacketSqlBatch:
                         await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
                         break;
+                    case Tds.PacketRpc:
+                        await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                        break;
                     case Tds.PacketAttention:
                         writer.WriteDone(Tds.DoneAttention, 0);
+                        break;
+                    case Tds.PacketTransactionManager:
+                        this.ExecuteTransactionManagerRequest(message, writer);
                         break;
                     default:
                         writer.WriteErrorOrInfo(
                             Tds.TokenError, 50000, 1, 16,
-                            $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType} (RPC, transaction-manager, and bulk-load requests are planned follow-ups).",
+                            $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType} (bulk-load requests are a planned follow-up).",
                             "SIMULATED", "", 1);
                         writer.WriteDone(Tds.DoneError, 0);
                         break;
@@ -154,6 +160,8 @@ internal sealed class TdsSession(Simulation simulation, Socket socket, X509Certi
         writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{database}'.", "SIMULATED", "", 1);
         writer.WriteEnvChange(Tds.EnvLanguage, "us_english", "");
         writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, "Changed language setting to us_english.", "SIMULATED", "", 1);
+        var serverCollation = TdsCollationCodec.For(Collation.Get(simulation.ServerCollationName));
+        writer.WriteEnvChangeSqlCollation(serverCollation.Info, serverCollation.SortId);
         writer.WriteLoginAck(Tds.Version74, "Microsoft SQL Server", 17, 0);
         writer.WriteEnvChange(Tds.EnvPacketSize, packetSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Tds.DefaultPacketSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
         writer.WriteDone(Tds.DoneFinal, 0);
@@ -174,48 +182,7 @@ internal sealed class TdsSession(Simulation simulation, Socket socket, X509Certi
 #pragma warning disable CA2100 // This IS a SQL endpoint: the batch text is the client's query by design.
             command.CommandText = ExtractBatchText(message.Payload);
 #pragma warning restore CA2100
-            using var outcomes = simulation.CreateResultSetsForCommand(command).GetEnumerator();
-
-            var hasOutcome = outcomes.MoveNext();
-            if (!hasOutcome)
-            {
-                this.FlushInfoMessages(writer);
-                writer.WriteDone(Tds.DoneFinal, 0);
-            }
-
-            while (hasOutcome)
-            {
-                var outcome = outcomes.Current;
-                this.FlushInfoMessages(writer);
-                if (outcome is SimulatedQueryResult query)
-                {
-                    TdsTypeCodec.ValidateSchema(query.Schema);
-                    TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames);
-                    long rows = 0;
-                    using (var cursor = query.CreateCursor())
-                    {
-                        while (cursor.MoveNext())
-                        {
-                            TdsTypeCodec.WriteRow(writer, query.Schema, cursor);
-                            rows++;
-                            await writer.FlushAsync(final: false, cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-
-                    hasOutcome = outcomes.MoveNext();
-                    writer.WriteDone((ushort)(Tds.DoneCount | (hasOutcome ? Tds.DoneMore : Tds.DoneFinal)), rows);
-                }
-                else
-                {
-                    var affected = outcome.RecordsAffected;
-                    hasOutcome = outcomes.MoveNext();
-                    var status = hasOutcome ? Tds.DoneMore : Tds.DoneFinal;
-                    if (affected >= 0)
-                        status |= Tds.DoneCount;
-
-                    writer.WriteDone(status, Math.Max(affected, 0));
-                }
-            }
+            await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
         }
         catch (SimulatedSqlException ex)
         {
@@ -236,10 +203,68 @@ internal sealed class TdsSession(Simulation simulation, Socket socket, X509Certi
             writer.WriteEnvChange(Tds.EnvDatabase, databaseAfter, databaseBefore);
     }
 
+    /// <summary>
+    /// Executes a command and streams its outcomes as result-set and DONE
+    /// tokens. Batches use the DONE token; RPC responses use DONEINPROC with
+    /// <paramref name="trailingTokensFollow"/> set, because RETURNVALUE /
+    /// RETURNSTATUS / DONEPROC still follow and every DONEINPROC must carry
+    /// the more bit. Fully drains the outcome enumerator, which is what
+    /// triggers the engine's output-parameter writeback.
+    /// </summary>
+    private async ValueTask StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
+    {
+        using var outcomes = simulation.CreateResultSetsForCommand(command).GetEnumerator();
+
+        var hasOutcome = outcomes.MoveNext();
+        if (!hasOutcome && !trailingTokensFollow)
+        {
+            this.FlushInfoMessages(writer);
+            writer.WriteDone(Tds.DoneFinal, 0);
+        }
+
+        while (hasOutcome)
+        {
+            var outcome = outcomes.Current;
+            this.FlushInfoMessages(writer);
+            if (outcome is SimulatedQueryResult query)
+            {
+                TdsTypeCodec.ValidateSchema(query.Schema);
+                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames);
+                long rows = 0;
+                using (var cursor = query.CreateCursor())
+                {
+                    while (cursor.MoveNext())
+                    {
+                        TdsTypeCodec.WriteRow(writer, query.Schema, cursor);
+                        rows++;
+                        await writer.FlushAsync(final: false, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                hasOutcome = outcomes.MoveNext();
+                var status = hasOutcome || trailingTokensFollow ? Tds.DoneMore : Tds.DoneFinal;
+                writer.WriteDoneToken(doneToken, (ushort)(status | Tds.DoneCount), rows);
+            }
+            else
+            {
+                var affected = outcome.RecordsAffected;
+                hasOutcome = outcomes.MoveNext();
+                var status = hasOutcome || trailingTokensFollow ? Tds.DoneMore : Tds.DoneFinal;
+                if (affected >= 0)
+                    status |= Tds.DoneCount;
+
+                writer.WriteDoneToken(doneToken, status, Math.Max(affected, 0));
+            }
+        }
+
+        this.FlushInfoMessages(writer);
+    }
+
     private void ResetConnection()
     {
         var previous = this.connection!;
         var database = previous.Database;
+        this.transaction = null;
         previous.Dispose();
 
         var fresh = simulation.CreateDbConnection();
@@ -265,17 +290,23 @@ internal sealed class TdsSession(Simulation simulation, Socket socket, X509Certi
     }
 
     /// <summary>Skips the ALL_HEADERS section and decodes the UCS-2 batch text.</summary>
-    private static string ExtractBatchText(byte[] payload)
+    private static string ExtractBatchText(byte[] payload) =>
+        Encoding.Unicode.GetString(payload.AsSpan(SkipAllHeaders(payload)));
+
+    /// <summary>
+    /// Returns the offset just past the ALL_HEADERS section, whose leading
+    /// little-endian length includes itself.
+    /// </summary>
+    internal static int SkipAllHeaders(byte[] payload)
     {
-        var offset = 0;
         if (payload.Length >= 4)
         {
             var headersLength = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(payload);
             if (headersLength >= 4 && headersLength <= payload.Length)
-                offset = headersLength;
+                return headersLength;
         }
 
-        return Encoding.Unicode.GetString(payload.AsSpan(offset));
+        return 0;
     }
 
     private static byte ParsePreloginEncryption(ReadOnlySpan<byte> payload)

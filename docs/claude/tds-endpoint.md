@@ -25,7 +25,23 @@ Everything lives in `Network/` (internal) except the public `SimulatedNetworkLis
 - **`USE`**: database change detected by before/after comparison and emitted as ENVCHANGE type 1 (after the DONEs, before flush — SqlClient processes it anywhere pre-EOM).
 - **Reset-connection status bit** (pooled-connection recycle): backing connection disposed and recreated on the same database, acked with the empty ENVCHANGE type 18 before the batch's tokens.
 - **Attention** (type 6): acked with DONE `DONE_ATTN`. Execution is synchronous per message, so attention is only observed between messages — a cancel never interrupts a running statement server-side, it just gets acked when the stream drains. In-process execution is fast enough that this matches observable SqlClient behavior.
-- **RPC (3) / transaction-manager (14) / bulk-load (7)**: ERROR 50000 naming the unsupported request type + DONE error. Consequences: parameterized `SqlCommand`s (RPC) and `SqlConnection.BeginTransaction()` (TM) don't work yet — SQL-text transactions (`BEGIN TRAN` in a batch) work fine. These are the next planned phases.
+- **Bulk-load (7)**: ERROR 50000 naming the unsupported request type + DONE error (`SqlBulkCopy` is a planned follow-up).
+
+## RPC requests
+
+Parameterized `SqlCommand`s arrive as RPC (packet type 3), never as batches. `TdsRpc.cs` parses the request (proc name or well-known ProcID, option flags, parameter list with per-parameter TYPE_INFO — the read-side mirror of the type codec, including PLP in both known-length and unknown-length chunked forms; multiple requests in one message split on the 0xFF batch-flag). Parameter TYPE_INFO rejected with a clear error: TVP (0xF3), CLR UDT (0xF0), `sql_variant` (0x62), legacy `text`/`ntext`/`image`.
+
+Dispatch (`TdsSession.Rpc.cs`):
+
+- **sp_executesql** (ProcID 10 or by name): first param is the statement, second the declaration string (redundant for binding and dropped), the rest become `SimulatedDbParameter`s on a Text command — the engine's `SeedVariables` path binds them by name, with typed NULLs via `DbType`. Decimal scale rides the CLR decimal value (the engine ignores `DbParameter.Precision/Scale` by design).
+- **Prepared statements**: `sp_prepexec` (13) stores statement + declaration-parsed parameter names in a per-session handle map, executes, and returns the handle via RETURNVALUE; `sp_execute` (12) looks up the handle (miss → Msg 8179) and names any unnamed wire params from the stored declaration order; `sp_prepare` (11) stores without executing; `sp_unprepare` (15) removes. Handles are per-session state, dropped on pooled-connection reset — SqlClient re-prepares transparently.
+- **Direct proc invocation** (nonzero name): `CommandType.StoredProcedure` with a synthesized `ReturnValue`-direction parameter, so the proc's `RETURN n` lands in the RETURNSTATUS token.
+- **Response shape**: per statement outcome DONEINPROC (0xFF, always `DONE_MORE` since trailing tokens follow), then RETURNSTATUS, RETURNVALUE per output parameter (name-matched by the client; values re-encoded via `DbType` → `SqlType.GetByDbType` + `ConvertParameter`), then DONEPROC final. Errors: ERROR token(s) + DONEPROC with `DONE_ERROR`.
+- Output-parameter writeback happens when the engine's outcome enumerator is fully drained — the streaming loop always drains, which is what makes RETURNVALUE correct.
+
+## Transaction Manager requests
+
+`SqlTransaction` uses TM requests (packet type 14), not SQL text. Begin (5) maps the wire isolation byte onto `BeginTransaction(IsolationLevel)` and answers ENVCHANGE type 8 carrying an opaque 8-byte transaction descriptor (a per-session counter; the client echoes it in ALL_HEADERS, which the listener ignores — the session connection *is* the transaction scope). Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 / 10 with empty values. `SqlTransaction.Save(name)` (9) and `Rollback(name)` route through SQL text (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION [name]`, bracket-escaped); rollback-to-savepoint keeps the transaction alive so no transaction ENVCHANGE is emitted. **Names in TM requests are B_VARBYTE** — the length prefix counts UTF-16 *bytes*, unlike the char-counted B_VARCHAR elsewhere (SqlClient writes `name.Length * 2`); misreading it as B_VARCHAR overruns the payload on every savepoint call.
 
 ## Type wire codec
 
@@ -52,13 +68,13 @@ COLMETADATA's 5 bytes = packed uint (LCID bits 0–19, flags 20–27, version ni
 
 ## Login response shape
 
-ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_english`) → INFO 5703 → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, version 17.0) → ENVCHANGE(packet size) → DONE. Server name in every token is `SIMULATED` (matches `SERVERPROPERTY`).
+ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_english`) → INFO 5703 → ENVCHANGE(SQL collation, type 7: the server collation's 5-byte structure) → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, version 17.0) → ENVCHANGE(packet size) → DONE. Server name in every token is `SIMULATED` (matches `SERVERPROPERTY`). **The collation ENVCHANGE is load-bearing for RPC**: SqlClient stores it as the default collation it stamps onto outbound parameter TYPE_INFO, and without it every parameterized command dies client-side in a `NullReferenceException` before any bytes hit the wire.
 
 ## Divergences / deferred
 
 - Login to a missing database: Msg 911 (from `ChangeDatabase`) instead of real's Msg 4060 wrapping; login INFO states are approximations.
-- No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth.
-- RPC / TM / bulk-load as above — parameterized commands, `SqlConnection.BeginTransaction()`, and `SqlBulkCopy` are the planned next phases (see backlog).
+- No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth, no `SqlBulkCopy`.
+- RPC parameter gaps: TVP / UDT / `sql_variant` / legacy-LOB parameters rejected with ERROR 50000; `sp_cursor*` and other well-known ProcIDs likewise.
 - Attention is acked only between messages (no mid-stream cancel).
 - SPID in packet headers truncates to 16 bits.
 

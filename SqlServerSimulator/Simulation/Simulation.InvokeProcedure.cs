@@ -180,6 +180,11 @@ partial class Simulation
             finally
             {
                 connection.NestingLevel--;
+                // The proc body's PRINT buffer belongs to the inner batch, so
+                // the top-level flush in CreateResultSetsForCommand never sees
+                // it; deliver it here (also on error, matching the real
+                // server's flush-as-they-happen info tokens).
+                innerBatch.FlushPrintMessages();
             }
         }
 

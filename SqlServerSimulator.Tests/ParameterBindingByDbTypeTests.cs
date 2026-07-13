@@ -38,6 +38,43 @@ public sealed class ParameterBindingByDbTypeTests
         conn.CreateCommand("select v from t").ExecuteScalar();
 
     [TestMethod]
+    public void Xml_BindsViaDbTypeXml()
+    {
+        var (conn, cmd) = Open("xml");
+        _ = Param(cmd, DbType.Xml, "<r><a>1</a></r>");
+        AreEqual(1, cmd.ExecuteNonQuery());
+        AreEqual("<r><a>1</a></r>", ReadBack(conn));
+    }
+
+    [TestMethod]
+    public void SizeMinusOne_DeclaresMaxTypedParameter()
+    {
+        // SqlClient's Size = -1 convention means varchar(max) /
+        // nvarchar(max) / varbinary(max); SELECT INTO materializes the
+        // parameter's declared type, observable via sys.columns.
+        var conn = new Simulation().CreateOpenConnection();
+        var cases = new (DbType DbType, object Value, string Table)[]
+        {
+            (DbType.String, new string('x', 80_000), "t_nvarchar"),
+            (DbType.AnsiString, new string('y', 80_000), "t_varchar"),
+            (DbType.Binary, new byte[70_000], "t_varbinary"),
+        };
+        foreach (var (dbType, value, table) in cases)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"select @v as c into {table}";
+            var p = cmd.CreateParameter();
+            p.ParameterName = "@v";
+            p.DbType = dbType;
+            p.Size = -1;
+            p.Value = value;
+            _ = cmd.Parameters.Add(p);
+            _ = cmd.ExecuteNonQuery();
+            AreEqual((short)-1, conn.CreateCommand($"select max_length from sys.columns where object_id = object_id('{table}')").ExecuteScalar(), table);
+        }
+    }
+
+    [TestMethod]
     public void Int64_BindsViaBigIntConvertParameter()
     {
         var (conn, cmd) = Open("bigint");
