@@ -54,30 +54,28 @@ internal static class AppLock
     /// </summary>
     public static bool TryParseMode(string text, out LockMode mode)
     {
-        if (text.Equals("Shared", StringComparison.OrdinalIgnoreCase))
+        if (text.Length <= "IntentExclusive".Length)
         {
-            mode = LockMode.Shared;
-            return true;
-        }
-        if (text.Equals("Update", StringComparison.OrdinalIgnoreCase))
-        {
-            mode = LockMode.Update;
-            return true;
-        }
-        if (text.Equals("IntentShared", StringComparison.OrdinalIgnoreCase))
-        {
-            mode = LockMode.IntentShared;
-            return true;
-        }
-        if (text.Equals("IntentExclusive", StringComparison.OrdinalIgnoreCase))
-        {
-            mode = LockMode.IntentExclusive;
-            return true;
-        }
-        if (text.Equals("Exclusive", StringComparison.OrdinalIgnoreCase))
-        {
-            mode = LockMode.Exclusive;
-            return true;
+            Span<char> upper = stackalloc char[text.Length];
+            _ = text.ToUpperInvariant(upper);
+            switch (upper)
+            {
+                case "EXCLUSIVE":
+                    mode = LockMode.Exclusive;
+                    return true;
+                case "INTENTEXCLUSIVE":
+                    mode = LockMode.IntentExclusive;
+                    return true;
+                case "INTENTSHARED":
+                    mode = LockMode.IntentShared;
+                    return true;
+                case "SHARED":
+                    mode = LockMode.Shared;
+                    return true;
+                case "UPDATE":
+                    mode = LockMode.Update;
+                    return true;
+            }
         }
 
         mode = default;
@@ -92,15 +90,19 @@ internal static class AppLock
     /// </summary>
     public static bool TryParseOwner(string text, out bool isTransaction)
     {
-        if (text.Equals("Transaction", StringComparison.OrdinalIgnoreCase))
+        if (text.Length <= "Transaction".Length)
         {
-            isTransaction = true;
-            return true;
-        }
-        if (text.Equals("Session", StringComparison.OrdinalIgnoreCase))
-        {
-            isTransaction = false;
-            return true;
+            Span<char> upper = stackalloc char[text.Length];
+            _ = text.ToUpperInvariant(upper);
+            switch (upper)
+            {
+                case "SESSION":
+                    isTransaction = false;
+                    return true;
+                case "TRANSACTION":
+                    isTransaction = true;
+                    return true;
+            }
         }
 
         isTransaction = default;
