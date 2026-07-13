@@ -1,0 +1,67 @@
+# TDS network endpoint
+
+`Simulation.ListenAsync(int port = 1433, CancellationToken cancellationToken = default)` opens a loopback TCP endpoint speaking TDS 7.4, so unmodified SQL Server clients (SqlClient, JDBC, sqlcmd, SSMS) reach the simulator with only a connection-string change. Returns `Task<SimulatedNetworkListener>`; `port: 0` binds an OS-assigned ephemeral port (read `Port`), the right shape for parallel tests. Port-in-use surfaces as the raw `SocketException`. The listener binds IPv4 loopback plus best-effort IPv6 loopback on the same port.
+
+Connection-string requirements: `TrustServerCertificate=true` (the endpoint presents an ephemeral in-memory self-signed cert generated per listener) and any credentials (parsed, not validated — enforcement is backlogged with the Msg 18456 failure path reserved). `Encrypt=Strict` (TDS 8.0) is not supported; default/`Mandatory`/`Optional` all negotiate to full encryption via `ENCRYPT_REQ`. A client that cannot do TLS at all (`ENCRYPT_NOT_SUP`) is disconnected after the prelogin response — there is no plaintext mode.
+
+`SimulatedNetworkListener` is `IDisposable`/`IAsyncDisposable`: disposal is aggressive and waits for nothing — listening sockets close, each session's backing `SimulatedDbConnection` is disposed with normal session teardown semantics (transactions roll back, temp tables drop), and mid-query clients see an abrupt connection reset. `DisposeAsync` is the same teardown returning a completed task.
+
+## Architecture
+
+Everything lives in `Network/` (internal) except the public `SimulatedNetworkListener` (root) and `Simulation.Listen.cs` (the `ListenAsync` partial). One task per accepted socket runs `TdsSession.RunAsync`: prelogin → TLS handshake → LOGIN7 → batch loop. The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Simulation.CreateResultSetsForCommand`, which yields both result sets and per-statement `RecordsAffected` — the TDS layer is a pure translator and touches no engine code.
+
+- `TdsPacketTransport` — packet framing both directions: reassembles inbound packet sequences into `TdsMessage` (EOM-terminated), stamps outbound headers (type 0x04, SPID truncated to 16 bits, incrementing packet id). The stream it rides is swapped from the raw `NetworkStream` to the `SslStream` after the handshake.
+- `TlsHandshakeFramingStream` — the TDS 7.x TLS seam: handshake records travel wrapped in PRELOGIN-type packets, so this shim strips/adds packet headers under `SslStream` during `AuthenticateAsServerAsync`, then flips to transparent passthrough. **TLS is pinned to 1.2**: a TLS 1.3 server emits NewSessionTicket records at handshake completion, which would still be prelogin-wrapped after the client switched to reading raw records ("cannot determine frame size" on the client). Matches SqlClient/real-server behavior for pre-TDS-8 encryption.
+- `Login7Request` — parses TDS version, packet size (accepted when 512–32767 and acked via ENVCHANGE type 4), hostname/username/appname/database. Requested database `master` or empty maps to the default database; anything else goes through `ChangeDatabase`, and its failure (Msg 911) is written as the login error (real server raises Msg 4060 here — known divergence).
+- `TdsTokenWriter` — growable token buffer with packetizing flush; the session flushes after every row so memory stays bounded by max(row, packet).
+- `TdsTypeCodec` — COLMETADATA TYPE_INFO + ROW value encoding (details below). Schema validated up front so unsupported column types fail as an ERROR token, never a mid-stream desync.
+- `TdsCollationCodec` + `TdsCollationRegistry` — the COLMETADATA 5-byte collation structure, derived generatively (details below).
+
+## Batch loop semantics
+
+- **SQLBatch** (type 1): ALL_HEADERS skipped via its leading length DWORD; UCS-2 text executed on the session connection. Per result set: COLMETADATA + ROW stream + DONE (`DONE_COUNT` + `DONE_MORE` when more outcomes follow); per non-query statement: DONE with `DONE_COUNT` only when `RecordsAffected >= 0`. Zero outcomes → single final DONE. All tokens are `0xFD DONE` (DONEPROC/DONEINPROC are proc-scoped and RPC isn't shipped).
+- **Errors**: `SimulatedSqlException.Errors` map field-for-field onto ERROR tokens (number/state/class/message/server/procedure/line) + DONE with `DONE_ERROR`; the session survives and keeps serving. `NotSupportedException` becomes a synthetic ERROR number 50000 class 16 prefixed `SqlServerSimulator:`.
+- **PRINT / low-severity RAISERROR**: the session subscribes to `SimulatedDbConnection.InfoMessage` and drains the queue as INFO tokens between statements and at batch end.
+- **`USE`**: database change detected by before/after comparison and emitted as ENVCHANGE type 1 (after the DONEs, before flush — SqlClient processes it anywhere pre-EOM).
+- **Reset-connection status bit** (pooled-connection recycle): backing connection disposed and recreated on the same database, acked with the empty ENVCHANGE type 18 before the batch's tokens.
+- **Attention** (type 6): acked with DONE `DONE_ATTN`. Execution is synchronous per message, so attention is only observed between messages — a cancel never interrupts a running statement server-side, it just gets acked when the stream drains. In-process execution is fast enough that this matches observable SqlClient behavior.
+- **RPC (3) / transaction-manager (14) / bulk-load (7)**: ERROR 50000 naming the unsupported request type + DONE error. Consequences: parameterized `SqlCommand`s (RPC) and `SqlConnection.BeginTransaction()` (TM) don't work yet — SQL-text transactions (`BEGIN TRAN` in a batch) work fine. These are the next planned phases.
+
+## Type wire codec
+
+Nullable wire variants throughout (INTN 0x26, BITN 0x68, FLTN 0x6D, MONEYN 0x6E, DATETIMN 0x6F, DECIMALN 0x6A, GUIDN 0x24) — legal for non-nullable data, and COLMETADATA always claims nullable (result-set schema carries no nullability). Fixed usertype 0 except rowversion's 0x50. Specifics:
+
+- **decimal**: TYPE_INFO length by precision (5/9/13/17); value = sign byte + little-endian magnitude rescaled to the declared scale via `BigInteger` (round-half-up when the stored .NET decimal scale exceeds the declared).
+- **money/smallmoney**: `SqlValue.AsMoneyScaledUnits` (scale-4 int64); money wire order is high-int32 then low-uint32.
+- **datetime**: days since 1900-01-01 + 1/300-second units, computed from full-resolution ticks with round-half-up and day-carry at 25 920 000. The engine's internal 1/300 resolution transfers exactly; client-visible millisecond rounding then happens in SqlClient itself, same as against a real server.
+- **date/time/datetime2/datetimeoffset**: scaled encodings per declared precision (3/4/5 value bytes by scale); datetimeoffset sends UTC time+date plus offset minutes.
+- **Strings**: `varchar/char` value bytes use the code page implied by the advertised collation (`TdsCollationCodec.WireEncoding`) so the client's decode round-trips; `nvarchar/nchar/sysname` are UCS-2. MAX types and `xml` use known-length PLP (total length + single chunk + terminator); PLP NULL is the 8×0xFF sentinel, non-PLP NULL is length 0xFFFF.
+- **rowversion**: BIGBINARY(8), big-endian counter bytes from `SqlValue.AsBytes`.
+- **Not encodable** (schema validation rejects with ERROR before COLMETADATA): `text`, `ntext`, `image` (legacy textptr wire form), `hierarchyid`, `geography`, `geometry` (UDT wire form). `sql_variant` has no simulator type at all.
+
+## Collation wire structure
+
+COLMETADATA's 5 bytes = packed uint (LCID bits 0–19, flags 20–27, version nibble 28–31, little-endian) + sortId byte. Derived generatively per collation (cached by interned reference), validated against a full 5540-name probe of the live reference (2026-07-13):
+
+- Flags from name tokens: CI→bit20, AI→bit21, absent WS→bit22 (ignore-width), absent KS→bit23 (ignore-kana), BIN→bit24, BIN2→bit25. **Width=22/Kana=23 is load-bearing** for KS/WS-only names and contradicts MS-TDS's field-declaration order — the spec's own assembly line and SqlClient's constants agree with 22/23, probe-confirmed via `_CI_AS_KS` (0x05) / `_CI_AS_WS` (0x09).
+- `_UTF8` → bit26, and it **displaces** the binary bits (`_BIN2_UTF8` reports 0x40, not 0x60); sensitivity bits are retained. Code page becomes 65001.
+- `_SC` / `_VSS` set no wire bit — the structure is lossy (5540 names → 3987 distinct tuples).
+- Version nibble from the name's number token: none/SQL_*→0, 90→1, 100→2, 140→3, **160→4**.
+- LCID + ANSI code page per name-prefix from `TdsCollationRegistry` (probe-derived, one entry per `KnownPrefixes` key); SQL_* code page comes from the CPnnn token (CP1→1252). Anomaly: `SQL_Latin1_General_CP1254_*` reports the Turkish LCID 0x041F (special-cased).
+- Baseline `SQL_Latin1_General_CP1_CI_AS` derives to the canonical `09 04 D0 00 34` (sortId 52).
+
+## Login response shape
+
+ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_english`) → INFO 5703 → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, version 17.0) → ENVCHANGE(packet size) → DONE. Server name in every token is `SIMULATED` (matches `SERVERPROPERTY`).
+
+## Divergences / deferred
+
+- Login to a missing database: Msg 911 (from `ChangeDatabase`) instead of real's Msg 4060 wrapping; login INFO states are approximations.
+- No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth.
+- RPC / TM / bulk-load as above — parameterized commands, `SqlConnection.BeginTransaction()`, and `SqlBulkCopy` are the planned next phases (see backlog).
+- Attention is acked only between messages (no mid-stream cancel).
+- SPID in packet headers truncates to 16 bits.
+
+## Testing
+
+`SqlServerSimulator.Tests.SqlClient` is the loopback oracle: real `Microsoft.Data.SqlClient` (direct package reference) against `ListenAsync(0)` endpoints. Where expected values are nontrivial (datetime tick rounding, money scale, collation-dependent varchar bytes), tests use the dual-read pattern — the same query through the in-process ADO surface and through the wire against the same `Simulation`, asserting equality — so the in-process behavior contract stays the single source of truth.

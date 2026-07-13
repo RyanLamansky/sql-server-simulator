@@ -18,6 +18,17 @@ This file is the home for net-new non-function feature proposals too. CLAUDE.md'
 
 ## Missing features
 
+### TDS network endpoint — follow-up phases
+
+The endpoint itself ships (see [`tds-endpoint.md`](tds-endpoint.md): prelogin, TLS-1.2-in-prelogin, LOGIN7, SQLBatch, type wire codec, collation structure, reset-connection, attention ack, aggressive dispose, `*.Tests.SqlClient` loopback oracle). Remaining phases, roughly in value order:
+
+- **RPC requests** (packet type 3) — `sp_executesql`, direct proc invocation, `sp_prepexec`/`sp_execute` prepared handles, parameter TYPE_INFO *readers* (the codec currently only writes), output params via RETURNVALUE tokens, `RETURN` status via RETURNSTATUS. Unblocks parameterized `SqlCommand`s — the biggest gap for real apps and for running `*.Tests.EFCore` over the wire.
+- **Transaction Manager requests** (packet type 14) — begin/commit/rollback/savepoint mapped onto the session connection's transaction API, ENVCHANGE 8/9/10 with the 8-byte transaction descriptor. Unblocks `SqlConnection.BeginTransaction()`.
+- **Credential enforcement** — v1 accepts anything; LOGIN7 password de-obfuscation (XOR/nibble-swap) is trivial, failure path is Msg 18456 severity 14 then close. Open design question: the public configuration knob (likely mapping onto the existing principal model — see [`permissions.md`](permissions.md)).
+- **Tool shakedown** — point sqlcmd/SSMS/DBeaver at the endpoint and harvest their exotic catalog queries / SET shapes into this backlog. SSMS is the boss fight (and needs RPC first).
+- **Wire forms deferred by the codec**: `text`/`ntext`/`image` (textptr ROW form + table-name-bearing COLMETADATA), `hierarchyid`/`geography`/`geometry` (UDT 0xF0).
+- **Smaller fidelity items**: Msg 4060 (not 911) for login to a missing database; ENVCHANGE type 7 (SQL collation) in the login response; mid-stream attention (cancel during a large result requires a concurrent reader); `SqlBulkCopy` (BulkLoadBCP); MARS; TDS 8.0 / `Encrypt=Strict` (ALPN via `SslApplicationProtocol`); user-supplied `X509Certificate2`; off-loopback binding — the last two are add-on-demand public-surface expansions.
+
 ### Built-in functions
 
 Captured from a Microsoft Learn category-by-category audit (cross-checked against `Parser/Expression.cs::ResolveBuiltIn`, `Parser/AtAtKeyword.cs` + `Value.cs`, `Parser/Expressions/AggregateExpression.cs`, `Parser/Expressions/WindowExpression.cs`, and the FROM-source rowset dispatch in `Parser/Selection.{OpenJson,StringSplit,ListExtendedProperty}.cs`). Re-fetch <https://learn.microsoft.com/en-us/sql/t-sql/functions/functions> before declaring the function surface complete. 🎯 marks an item whose completion closes a Microsoft category.

@@ -29,6 +29,12 @@ public class QualityTests
                 nameof(Simulation.ImportBacpac),
                 nameof(Simulation.AddRemoteSimulation),
                 nameof(Simulation.ServerCollationName),
+                nameof(Simulation.ListenAsync),
+            ],
+            [typeof(SimulatedNetworkListener)] = [
+                nameof(SimulatedNetworkListener.Port),
+                nameof(SimulatedNetworkListener.Dispose),
+                nameof(SimulatedNetworkListener.DisposeAsync),
             ],
             [typeof(SimulatedDbConnection)] = [
                 nameof(SimulatedDbConnection.InfoMessage),

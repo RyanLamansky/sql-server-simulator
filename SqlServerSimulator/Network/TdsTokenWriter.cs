@@ -1,0 +1,191 @@
+using System.Buffers.Binary;
+using System.Text;
+
+namespace SqlServerSimulator.Network;
+
+/// <summary>
+/// Accumulates a server-to-client token stream in a growable buffer and
+/// flushes it through the transport as tabular-result packets. Token writes
+/// are synchronous; the session flushes between rows so memory stays bounded
+/// by the larger of one row and one packet.
+/// </summary>
+internal sealed class TdsTokenWriter(TdsPacketTransport transport)
+{
+    private readonly TdsPacketTransport transport = transport;
+    private byte[] buffer = new byte[8192];
+    private int length;
+
+    /// <summary>
+    /// Sends every full packet's worth of buffered bytes; when
+    /// <paramref name="final"/>, sends the remainder with the end-of-message
+    /// bit, completing the response.
+    /// </summary>
+    public async ValueTask FlushAsync(bool final, CancellationToken cancellationToken)
+    {
+        var capacity = this.transport.PacketSize - Tds.HeaderSize;
+        var offset = 0;
+        while (this.length - offset > capacity)
+        {
+            await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, capacity), endOfMessage: false, cancellationToken).ConfigureAwait(false);
+            offset += capacity;
+        }
+
+        if (final)
+        {
+            await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, this.length - offset), endOfMessage: true, cancellationToken).ConfigureAwait(false);
+            offset = this.length;
+        }
+
+        if (offset > 0)
+        {
+            Buffer.BlockCopy(this.buffer, offset, this.buffer, 0, this.length - offset);
+            this.length -= offset;
+        }
+    }
+
+    public void WriteByte(byte value)
+    {
+        this.Ensure(1);
+        this.buffer[this.length++] = value;
+    }
+
+    public void WriteBytes(ReadOnlySpan<byte> value)
+    {
+        this.Ensure(value.Length);
+        value.CopyTo(this.buffer.AsSpan(this.length));
+        this.length += value.Length;
+    }
+
+    public void WriteUInt16(ushort value)
+    {
+        this.Ensure(2);
+        BinaryPrimitives.WriteUInt16LittleEndian(this.buffer.AsSpan(this.length), value);
+        this.length += 2;
+    }
+
+    public void WriteInt32(int value)
+    {
+        this.Ensure(4);
+        BinaryPrimitives.WriteInt32LittleEndian(this.buffer.AsSpan(this.length), value);
+        this.length += 4;
+    }
+
+    public void WriteUInt32(uint value)
+    {
+        this.Ensure(4);
+        BinaryPrimitives.WriteUInt32LittleEndian(this.buffer.AsSpan(this.length), value);
+        this.length += 4;
+    }
+
+    public void WriteInt64(long value)
+    {
+        this.Ensure(8);
+        BinaryPrimitives.WriteInt64LittleEndian(this.buffer.AsSpan(this.length), value);
+        this.length += 8;
+    }
+
+    public void WriteUInt64(ulong value)
+    {
+        this.Ensure(8);
+        BinaryPrimitives.WriteUInt64LittleEndian(this.buffer.AsSpan(this.length), value);
+        this.length += 8;
+    }
+
+    /// <summary>Writes UCS-2 characters with no length prefix.</summary>
+    public void WriteUcs2(string value)
+    {
+        var byteCount = value.Length * 2;
+        this.Ensure(byteCount);
+        _ = Encoding.Unicode.GetBytes(value, this.buffer.AsSpan(this.length));
+        this.length += byteCount;
+    }
+
+    /// <summary>B_VARCHAR: a one-byte character count followed by UCS-2 text.</summary>
+    public void WriteBVarchar(string value)
+    {
+        this.WriteByte(checked((byte)value.Length));
+        this.WriteUcs2(value);
+    }
+
+    /// <summary>US_VARCHAR: a two-byte character count followed by UCS-2 text.</summary>
+    public void WriteUsVarchar(string value)
+    {
+        this.WriteUInt16(checked((ushort)value.Length));
+        this.WriteUcs2(value);
+    }
+
+    /// <summary>ENVCHANGE with old and new values in B_VARCHAR form.</summary>
+    public void WriteEnvChange(byte type, string newValue, string oldValue)
+    {
+        this.WriteByte(Tds.TokenEnvChange);
+        this.WriteUInt16(checked((ushort)(1 + 1 + (newValue.Length * 2) + 1 + (oldValue.Length * 2))));
+        this.WriteByte(type);
+        this.WriteBVarchar(newValue);
+        this.WriteBVarchar(oldValue);
+    }
+
+    /// <summary>The empty ENVCHANGE acknowledging a connection reset.</summary>
+    public void WriteResetConnectionAck()
+    {
+        this.WriteByte(Tds.TokenEnvChange);
+        this.WriteUInt16(3);
+        this.WriteByte(Tds.EnvResetConnectionAck);
+        this.WriteByte(0);
+        this.WriteByte(0);
+    }
+
+    /// <summary>
+    /// ERROR and INFO share one layout; the token byte is the only
+    /// difference (severity below 11 is informational).
+    /// </summary>
+    public void WriteErrorOrInfo(byte token, int number, byte state, byte severity, string message, string server, string procedure, int line)
+    {
+        this.WriteByte(token);
+        var lengthPosition = this.length;
+        this.WriteUInt16(0);
+        this.WriteInt32(number);
+        this.WriteByte(state);
+        this.WriteByte(severity);
+        this.WriteUsVarchar(message);
+        this.WriteBVarchar(server);
+        this.WriteBVarchar(procedure);
+        this.WriteInt32(line);
+        BinaryPrimitives.WriteUInt16LittleEndian(this.buffer.AsSpan(lengthPosition), checked((ushort)(this.length - lengthPosition - 2)));
+    }
+
+    public void WriteLoginAck(uint tdsVersion, string programName, byte versionMajor, byte versionMinor)
+    {
+        this.WriteByte(Tds.TokenLoginAck);
+        this.WriteUInt16(checked((ushort)(1 + 4 + 1 + (programName.Length * 2) + 4)));
+        this.WriteByte(1);
+        this.Ensure(4);
+        BinaryPrimitives.WriteUInt32BigEndian(this.buffer.AsSpan(this.length), tdsVersion);
+        this.length += 4;
+        this.WriteBVarchar(programName);
+        this.WriteByte(versionMajor);
+        this.WriteByte(versionMinor);
+        this.WriteByte(0);
+        this.WriteByte(0);
+    }
+
+    public void WriteDone(ushort status, long rowCount)
+    {
+        this.WriteByte(Tds.TokenDone);
+        this.WriteUInt16(status);
+        this.WriteUInt16(0);
+        this.WriteInt64(rowCount);
+    }
+
+    private void Ensure(int more)
+    {
+        var needed = this.length + more;
+        if (needed <= this.buffer.Length)
+            return;
+
+        var newSize = this.buffer.Length * 2;
+        while (newSize < needed)
+            newSize *= 2;
+
+        Array.Resize(ref this.buffer, newSize);
+    }
+}
