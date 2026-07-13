@@ -106,34 +106,13 @@ Six scopes, one home each. **Add new state to whichever class matches its true s
 
 ## What's modeled
 
-The `*.Tests` and `*.Tests.EFCore` suites are the authoritative behavior contract. Two maps: the inline subsections below cover cross-cutting behaviors with **no dedicated deep-dive** (their canonical home); the [Feature reference](#feature-reference) index lists everything that **has** one — **presence there means it's modeled**; read on demand. Inline notes cover only probe-confirmed quirks, deviations, non-obvious rules.
-
-### Subqueries
-`EXISTS`/`NOT EXISTS` (multi-column inner OK); `expr [NOT] IN (SELECT …)` (single inner column, Msg 116); scalar `(SELECT col FROM …)` (single column, single-row Msg 512 per outer row, empty → typed NULL); `expr <op> {ANY|SOME|ALL} (SELECT col …)` quantified comparison, all six operators + T-SQL synonyms (`!=` `!<` `!>`), predicate-only (SELECT-list use → Msg 102); SOME aliases ANY. Three-valued: empty inner → ALL vacuously true / ANY vacuously false (independent of LHS NULL); a NULL either side taints to UNKNOWN. All forms correlate at arbitrary depth. Set ops (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`) are legal in every subquery context (via `Selection.Parse` → `ParseQueryExpression`), so EF Core 7+'s TPC shape (UNION ALL in a derived table) ships end-to-end.
-
-### Constraints
-- `CHECK`: inline single-column + table-level; Msg 547 per row on definitely-false predicate. Inline column-level CHECK may only reference its owning column — peer refs raise **Msg 8141** at CREATE TABLE (probe-confirmed). The walker is structural (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`); coverage spans the common containers (`Reference`, `Parenthesized`, `TwoSidedExpression`, `Cast`, `Length`) — peer refs in rarer ones (`DATEPART`, `SUBSTRING`, nested `CASE`) escape the CREATE check and surface at INSERT. Table-level CHECK has no peer restriction.
-- `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: linear scan (O(N) per insert), no B-tree; reads and `UPDATE`/`DELETE`/`MERGE` target scans get **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset). Seek shapes, mutation/MERGE seeking, journal mechanics, decline rules, residual-WHERE invariant in [`indexes.md`](docs/claude/indexes.md).
-- `FOREIGN KEY`: inline / table-level / named forms; all four referential actions on `ON DELETE`/`ON UPDATE`; enforced at INSERT/UPDATE/DELETE/MERGE; full `sys.foreign_keys` / `sys.foreign_key_columns`. Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE). Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](docs/claude/foreign-keys.md).
-
-### Transactions
-Three entry points share one per-connection undo log: implicit (statement atomicity), SqlClient API (`BeginTransaction()`/`Commit()`/`Rollback()`), SQL-text (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVE TRANSACTION`).
-
-- **Statement-level atomicity**: a mutation throwing mid-execution rolls back its partial writes. Multi-row INSERT failing on row 3 leaves zero rows.
-- **Explicit txs**: `BEGIN TRAN` increments `TranCount`; only outermost `COMMIT` commits; `ROLLBACK` zeroes `TranCount` and walks the whole log. `SAVE TRAN <name>` + `ROLLBACK TRAN <name>` is the EF SaveChanges path inside an explicit tx. Parallel `BeginTransaction` → `InvalidOperationException`. `COMMIT`/`ROLLBACK` with no active tx → Msg 3902/3903.
-- `@@TRANCOUNT` reads connection depth as int.
-- **Identity counters and the database-scoped rowversion counter bypass the log** — both advance through rollback. (A rolled-back INSERT's off-row LOB chain + heap bytes are reclaimed — rollback is terminal, so an uncommitted insert is invisible to every snapshot.)
-- **Temp-table CREATE/DROP participates in the log** via `TempTableCreation` / `TempTableRemoval` `UndoEntry` subtypes. Regular CREATE/DROP TABLE is NOT logged — asymmetry in [`temp-tables.md`](docs/claude/temp-tables.md).
-- Locking + MVCC: full 8-mode matrix, row-X writers + row-mode readers per hints/iso, RR/SER/UPDLOCK/XLOCK/TABLOCK/HOLDLOCK/REPEATABLEREAD/NOLOCK/READPAST hints, escalation at 5000 row-locks, Msg 1205 deadlock / Msg 1222 timeout, SNAPSHOT + RCSI (version chains + GC + DMVs). See [`locking.md`](docs/claude/locking.md).
+The `*.Tests` and `*.Tests.EFCore` suites are the authoritative behavior contract. The [Feature reference](#feature-reference) index maps every modeled area to its deep-dive — **presence there means it's modeled**; read the linked doc on demand when working in that area. The two small subsections below are inline-only notes with no deep-dive.
 
 ### EF Core adapter coverage
 `UseSqlServerSimulator(...)` covers seven SqlParameter-downcast pairs: `DateOnly→date`, `DateTime→date`, `DateTime→smalldatetime`, `TimeOnly→time(N)`, `TimeSpan→time(N)`, `decimal→money`, `decimal→smallmoney`. Without the adapter these throw at SaveChanges. MAX-string family flows through plain `UseSqlServer`.
 
 ### `text` / `ntext` / `image` restrictions
 Comparison (Msg 402), ORDER BY/DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) all enforced.
-
-### `SimulatedDbDataReader`
-Full `DbDataReader` contract. Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no boxing); NULL → `SqlNullValueException` (SqlClient parity). `GetDateTime` covers Date/DateTime/SmallDateTime/DateTime2 (Date at midnight, `Kind=Unspecified`). A **`datetime` rounds to whole milliseconds at the ADO.NET boundary** (`DateTimeSqlType.RoundToClientMilliseconds`, in `GetDateTime` + `SqlValue.ToObject`, covering `GetValue`/`GetFieldValue`/output-param writeback) matching SqlClient's `.000`/`.003`/`.007`; the engine keeps full 1/300-second resolution internally, so only the client surface rounds. `GetDecimal` covers Decimal/Numeric/Money/SmallMoney; `GetFieldValue<T>` short-circuits EF's `DateOnly`-over-`Date` / `TimeOnly`-over-`Time`. `GetOrdinal` two-pass (case-sensitive then -insensitive, SqlClient precedence). `HasRows` sticky. `GetChar(int)` raises `InvalidCastException`.
 
 ### Feature reference
 
@@ -142,7 +121,9 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Built-in scalars** — math; date (DATETRUNC / DATE_BUCKET / SWITCHOFFSET / TODATETIMEOFFSET / `*FROMPARTS` / AT TIME ZONE / current-time); string (CONCAT / SOUNDEX / TRANSLATE / STRING_ESCAPE / DIFFERENCE); CHOOSE / IIF; bit (BIT_COUNT / GET_BIT / SET_BIT / shifts); CHECKSUM / BINARY_CHECKSUM; FORMAT / FORMATMESSAGE; RAND; STRING_SPLIT / GENERATE_SERIES; COMPRESS / DECOMPRESS; PWDENCRYPT / PWDCOMPARE / LOGINPROPERTY; `@@`-constants + HOST_NAME / APP_NAME / GETANSINULL / ORIGINAL_DB_NAME; session-state (SESSION_CONTEXT / sp_set_session_context / CONTEXT_INFO / CONNECTIONPROPERTY) → [`scalars.md`](docs/claude/scalars.md).
 - **`SqlType.Promote` / `PromoteForArithmetic` / decimal precision-scale / int↔string promotion** → [`arithmetic.md`](docs/claude/arithmetic.md).
 - **`Cast` / coercion error paths** (CAST/CONVERT narrow targets, TRY_CAST/TRY_CONVERT swallow set, PARSE/TRY_PARSE culture-aware parsing) → [`casting.md`](docs/claude/casting.md).
+- **`SimulatedDbDataReader` client surface** (typed accessors, `datetime` client-millisecond rounding, `GetOrdinal` precedence, GetBytes/GetChars materialization divergence) → [`data-reader.md`](docs/claude/data-reader.md).
 - **`Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH** → [`query.md`](docs/claude/query.md).
+- **Subqueries** (EXISTS / IN(SELECT) / scalar / quantified ANY-SOME-ALL, three-valued rules, arbitrary-depth correlation, set ops in subquery contexts) → [`subqueries.md`](docs/claude/subqueries.md).
 - **JOIN / APPLY** — INNER/LEFT/RIGHT/FULL/CROSS + CROSS/OUTER APPLY, ANSI-89 comma-FROM, EF `LeftJoin`/`RightJoin` routing (no LINQ `FullJoin`, so FULL is raw-SQL-only); `JoinDriver` equi-join hash fast path + `SqlValueKey` keying, nested-loop fallback, comma/`CROSS JOIN`+WHERE → equi-`INNER` rewrite, RIGHT/FULL materialization + derived-table-right, `JoinDiagnostics` guard → [`joins.md`](docs/claude/joins.md).
 - **`PIVOT` / `UNPIVOT`** — PIVOT desugars to grouped conditional aggregation (implicit grouping = inner columns minus FOR + aggregate-arg), UNPIVOT is a NULL-skipping unfold; both attach as a postfix FROM-source wrapper on the derived-table `LateralPlan` seam → [`pivot.md`](docs/claude/pivot.md).
 - **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / rowversion** (`@@DBTS` / `MIN_ACTIVE_ROWVERSION`) **/ identity helpers** (`@@IDENTITY` / `SCOPE_IDENTITY` / `IDENT_CURRENT`/`_INCR`/`_SEED`) **/ `@@ROWCOUNT` / `ROWCOUNT_BIG` / OUTPUT / MERGE** → [`dml.md`](docs/claude/dml.md).
@@ -160,12 +141,15 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **`sp_addextendedproperty` / `fn_listextendedproperty` / `sys.extended_properties`** → [`extended-properties.md`](docs/claude/extended-properties.md).
 - **`CREATE/ALTER/DROP SEQUENCE`, `NEXT VALUE FOR`, `sys.sequences`** → [`sequences.md`](docs/claude/sequences.md).
 - **DML + DDL triggers** (`CREATE TRIGGER` incl. `ON DATABASE`, `INSERTED`/`DELETED`, `TRIGGER_NESTLEVEL`, `sys.triggers`) → [`triggers.md`](docs/claude/triggers.md).
+- **CHECK / PRIMARY KEY / UNIQUE enforcement** (Msg 547 / 8141 peer-reference gate, Msg 2627 vs 2601, NULLs-equal UNIQUE) → [`constraints.md`](docs/claude/constraints.md).
 - **`FOREIGN KEY` + referential actions, `sys.foreign_keys`** → [`foreign-keys.md`](docs/claude/foreign-keys.md).
 - **`PERIOD FOR SYSTEM_TIME`, `FOR SYSTEM_TIME ALL/AS OF`, history sibling, `temporal_type`** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
 - **`ALTER TABLE` ADD/DROP/ALTER COLUMN + CONSTRAINT (incl. trust toggling)** → [`alter-table.md`](docs/claude/alter-table.md).
 - **`CREATE INDEX` (UNIQUE / CLUSTERED / INCLUDE / WHERE filter), `sys.indexes`** → [`indexes.md`](docs/claude/indexes.md).
 - **Table hints (`WITH (NOLOCK …)`) + statement `OPTION (…)` hints** → [`query-hints.md`](docs/claude/query-hints.md).
+- **Heap page lifecycle** (reclamation/reuse, tail-only shrink, `DBCC SHRINKDATABASE`/`SHRINKFILE`) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **Per-`Simulation` plan cache** (single-SELECT `Selection` reuse keyed by text + db + param-type sig, `SchemaVersion`-stamped invalidation, inline-in-SELECT-arm promotion since the iterator's post-yield code is unreachable on a non-draining `ExecuteReader`; `VariableReference` Run-time slot lookup is the co-fix) → [`plan-cache.md`](docs/claude/plan-cache.md).
+- **Transactions** (statement atomicity, undo log, BEGIN/COMMIT/ROLLBACK/SAVE, `@@TRANCOUNT`, identity/rowversion log bypass, temp-table logging asymmetry) → [`transactions.md`](docs/claude/transactions.md).
 - **Locking, MVCC, SNAPSHOT/RCSI, deadlock/timeout, lock-related DMVs** → [`locking.md`](docs/claude/locking.md).
 - **Application locks** (`sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, return-code-vs-raised-error asymmetry, EF 9/10 `Database.Migrate()`'s `__EFMigrationsLock`) → [`app-locks.md`](docs/claude/app-locks.md).
 - **`hierarchyid` type** (incl. deferred byte-identical CAST research notes) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
@@ -212,5 +196,4 @@ Cross-cutting divergences with no single feature-doc home; feature-specific quir
 - `decimal` / `numeric`: backed by .NET `decimal`. Values needing more than 28 significant digits aren't modeled (declarations up through `decimal(38, *)` accepted so storage byte-width matches).
 - `float` text formatting: .NET `G15`/`G7`, not SQL Server's `1e+015`-style scientific.
 - Auto-generated constraint names: PK/UNIQUE shape `PK__<table8>__<16hex>` / `UQ__<table8>__<16hex>` (16-hex 64-bit FNV-1a); CK/FK/DF shape `CK__<table8>__[<col8>__]<8hex>` (8-hex 32-bit FNV-1a). Deterministic across runs, distinct from SQL Server's object-id-derived hex (won't byte-match).
-- **`GetBytes` / `GetChars` materialize, don't stream**: each call decodes the full column value via `RowDecoder` and slices into the caller's buffer. Per-call observation matches; the streaming-memory guarantee doesn't.
-- **Reclaimed heap space is reused; page lists shrink only from the tail**: superseded rows + off-row LOB chains are freed and reused (`HeapPage.Compact` / `Heap.FreeLobChain`) — memory tracks the *peak concurrent* working set. Dead interior pages are reused in place, never removed from `Heap.Pages` (a reclaimed slot keeps a 2-byte zero-extent entry) — mid-list removal would break the stable `(page, slot)` addresses cursors, version Rids, and forward pointers depend on. `DBCC SHRINKDATABASE`/`SHRINKFILE` trim only the *trailing* run of dead/freed-LOB pages (`Heap.TrimTrailing*`, post version-store GC); interior dead + pinned tail pages stay. SHRINKDATABASE emits no result set; SHRINKFILE returns the per-file row from heap page totals (no physical file model). A versioning-on **autocommit** UPDATE/DELETE reclaims superseded chains via a statement-end GC pass when no snapshot is open.
+- Client-surface streaming and heap-page divergences live in [`data-reader.md`](docs/claude/data-reader.md) and [`heap-storage.md`](docs/claude/heap-storage.md).
