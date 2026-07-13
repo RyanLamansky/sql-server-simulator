@@ -209,6 +209,75 @@ internal abstract partial class Collation
             { 'æ', "ae" }, { 'Æ', "ae" }, { 'ß', "ss" },
         }.ToFrozenDictionary();
 
+        // In-repertoire characters whose GetHashCode must fold onto another
+        // spelling. Each entry's target is inner-collation-equal to its key
+        // (validated by test against an exhaustive ICU scan), and equality
+        // can therefore relate an out-of-repertoire spelling to in-repertoire
+        // strings using EITHER form — e.g. fullwidth `２` equals both `2`
+        // and `²` through the inner fallback, so `2` and `²` must share a
+        // hash even though the weight tables keep them unequal (a legal
+        // collision). Covers: the ICU-completely-ignorable controls + soft
+        // hyphen (fold to empty), NBSP → space, feminine/masculine
+        // ordinals → base letter, superscript digits → digits, Thai digits →
+        // ASCII digits, vulgar fractions → their FRACTION SLASH compat
+        // decompositions (out-of-repertoire targets, deliberately — both
+        // spellings then take the inner-hash path together), the CP1252
+        // case pairs whose legacy varchar weights are asymmetric
+        // (Œ Š Ÿ Ž → lowercase), and Thai SARA AM → its NIKHAHIT + SARA AA
+        // compat decomposition (ICU equates the spellings; the weight
+        // tables don't). CollationHashConsistencyTests sweeps the
+        // repertoire and Unicode blocks to keep this list complete.
+        private static readonly FrozenDictionary<char, string> hashFolds = BuildHashFolds();
+
+        // Per-body fast-path set: repertoire minus hashFolds keys. A string
+        // whose every character is in this set hashes straight off its
+        // weight runs with no canonicalization.
+        private static readonly FrozenSet<char> varcharHashClean =
+            varcharWeights.Keys.Where(c => !hashFolds.ContainsKey(c)).ToFrozenSet();
+
+        private static readonly FrozenSet<char> nvarcharHashClean =
+            nvarcharWeights.Keys.Where(c => !hashFolds.ContainsKey(c)).ToFrozenSet();
+
+        // Lazily-resolved hash folds for runes outside the repertoire,
+        // computed by ComputeRuneFold on first sight and cached process-wide
+        // (null = no fold; the rune keeps its own identity). Shared by the
+        // varchar and nvarchar bodies — both delegate to the same inner
+        // CultureCollation, whose equality defines the fold relation.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, string?> runeFoldCache = new();
+
+        private static FrozenDictionary<char, string> BuildHashFolds()
+        {
+            var map = new Dictionary<char, string>
+            {
+                ['\u00A0'] = " ",
+                ['\u00AA'] = "a",
+                ['\u00BA'] = "o",
+                ['\u00B9'] = "1",
+                ['\u00B2'] = "2",
+                ['\u00B3'] = "3",
+                ['\u00BC'] = "1\u20444",
+                ['\u00BD'] = "1\u20442",
+                ['\u00BE'] = "3\u20444",
+                ['\u0152'] = "\u0153",
+                ['\u0160'] = "\u0161",
+                ['\u0178'] = "\u00FF",
+                ['\u017D'] = "\u017E",
+                ['\u0E33'] = "\u0E4D\u0E32",
+            };
+            for (var d = 0; d <= 9; d++)
+                map[(char)(0x0E50 + d)] = ((char)('0' + d)).ToString();
+            foreach (var ignorable in (int[])[
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+                0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xAD])
+            {
+                map[(char)ignorable] = string.Empty;
+            }
+
+            return map.ToFrozenDictionary();
+        }
+
         // The parser-built CultureCollation for this name, supplying the
         // metadata (description, storage encoding) and the CompareInfo fallback
         // for non-CP1252 input. Typed as the sealed concrete body so the JIT
@@ -309,27 +378,196 @@ internal abstract partial class Collation
             : !this.InRepertoire(x) || !this.InRepertoire(y) ? this.inner.Compare(x, y)
             : CompareInRepertoire(x, y);
 
+        // Equality intentionally diverges from Compare == 0 on the
+        // cross-boundary path: Compare routes through the inner
+        // CultureCollation's two-pass minimal-punctuation ORDERING, whose
+        // tie-break checks only minimal-vs-real at each position and so
+        // would equate an apostrophe with a hyphen. Equality uses the
+        // inner's plain equality instead — the same equality/ordering
+        // split CultureCollation itself has — keeping hyphen and
+        // apostrophe distinct marks and staying consistent with the inner
+        // GetHashCode the canonicalized hash path delegates to.
         public override bool Equals(string? x, string? y) =>
-            x is null ? y is null : y is not null && this.Compare(x, y) == 0;
+            x is null
+                ? y is null
+                : y is not null
+                    && (!this.InRepertoire(x) || !this.InRepertoire(y)
+                        ? this.inner.Equals(x, y)
+                        : this.CompareInRepertoire(x, y) == 0);
 
         public override int GetHashCode(string obj)
         {
-            if (!this.InRepertoire(obj))
-                return this.inner.GetHashCode(obj);
+            // Strings made only of weight-table characters with no
+            // hash-fold entry (the overwhelmingly common case — identifiers
+            // and CP1252 data) hash directly off their weight runs; the
+            // clean set is the repertoire minus HashFolds' keys, so this
+            // walk costs the same as InRepertoire.
+            var clean = this.varcharStorage ? varcharHashClean : nvarcharHashClean;
+            var isClean = true;
+            foreach (var ch in obj)
+            {
+                if (!clean.Contains(ch))
+                {
+                    isClean = false;
+                    break;
+                }
+            }
 
-            // Hash the primary weight run, a separator, then the secondary run —
-            // mirrors the order Compare consults them, so Compare-equal strings
-            // (equal at both levels) always hash equal. Streamed through the
-            // cursor so no weight lists are materialized.
+            if (isClean)
+                return this.WeightRunHash(obj);
+
+            // Everything else canonicalizes first so that any string the
+            // equality relation can deem equal to an in-repertoire string
+            // (fullwidth spellings, decomposed accents, ICU-ignorable
+            // characters, cross-script homoglyphs) hashes exactly like that
+            // string. Equals routes such cross-boundary pairs through the
+            // inner CultureCollation, whose relation the canonicalizer
+            // provably preserves: every substitution it makes is validated
+            // inner-equal to what it replaces. A canonical form still
+            // outside the repertoire has no in-repertoire equal partner, so
+            // the inner hash (consistent with inner equality) covers it.
+            var canonical = this.HashCanonicalize(obj);
+            return this.InRepertoire(canonical)
+                ? this.WeightRunHash(canonical)
+                : this.inner.GetHashCode(canonical);
+        }
+
+        // Hash the primary weight run, a separator, then the secondary run —
+        // mirrors the order Compare consults them, so Compare-equal strings
+        // (equal at both levels) always hash equal. Streamed through the
+        // cursor so no weight lists are materialized.
+        private int WeightRunHash(string s)
+        {
             var hash = new HashCode();
-            var primary = this.NewCursor(obj);
+            var primary = this.NewCursor(s);
             while (primary.MoveNext())
                 hash.Add(primary.Primary);
             hash.Add(-1);
-            var secondary = this.NewCursor(obj);
+            var secondary = this.NewCursor(s);
             while (secondary.MoveNext())
                 hash.Add(secondary.Secondary);
             return hash.ToHashCode();
+        }
+
+        // Rewrites a string onto hash-canonical spellings: NFC composes
+        // decomposed sequences (e + combining acute → é) into their CP1252
+        // characters, then each rune folds through hashFolds (in-repertoire
+        // entries) or the lazily-computed rune fold (everything else).
+        // Every substitution is inner-collation-equal to what it replaces,
+        // so canonicalization preserves the inner equality that governs
+        // cross-repertoire-boundary Equals. Lone surrogates skip
+        // normalization (it rejects invalid Unicode) and pass through
+        // verbatim — the inner collation equates them with nothing.
+        private string HashCanonicalize(string s)
+        {
+            string normalized;
+            try
+            {
+                normalized = s.Normalize(NormalizationForm.FormC);
+            }
+            catch (ArgumentException)
+            {
+                normalized = s;
+            }
+
+            var builder = new StringBuilder(normalized.Length);
+            for (var i = 0; i < normalized.Length; i++)
+            {
+                var ch = normalized[i];
+                if (char.IsHighSurrogate(ch) && i + 1 < normalized.Length && char.IsLowSurrogate(normalized[i + 1]))
+                {
+                    var fold = runeFoldCache.GetOrAdd(char.ConvertToUtf32(ch, normalized[i + 1]), ComputeRuneFold, this);
+                    _ = fold is null
+                        ? builder.Append(ch).Append(normalized[i + 1])
+                        : builder.Append(fold);
+                    i++;
+                }
+                else if (hashFolds.TryGetValue(ch, out var inRepFold))
+                {
+                    _ = builder.Append(inRepFold);
+                }
+                else if (!nvarcharWeights.ContainsKey(ch))
+                {
+                    var runeFold = runeFoldCache.GetOrAdd(ch, ComputeRuneFold, this);
+                    _ = runeFold is null ? builder.Append(ch) : builder.Append(runeFold);
+                }
+                else
+                {
+                    _ = builder.Append(ch);
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        // Resolves the hash fold of a rune outside the repertoire, cached
+        // process-wide by the caller. Candidate generation is NFKC + lower
+        // (covers fullwidth forms, superscripts, compat ligatures, singleton
+        // canonical mappings like the Kelvin sign); a candidate is accepted
+        // only when the inner collation confirms it equal, so an NFKC fold
+        // ICU disagrees with (long s → "s") never lands. Runes whose compat
+        // decomposition points the wrong way (Greek μ vs CP1252 µ, other
+        // scripts' decimal digits) fall to a one-time scan of the repertoire
+        // for a single-character inner-equal partner. Targets are routed
+        // back through hashFolds so a fold can never re-introduce a
+        // non-canonical in-repertoire spelling. Returns null (keep the rune
+        // verbatim) when the inner collation equates it with nothing we can
+        // reach — such runes have no in-repertoire equal partner, and the
+        // inner hash covers string pairs built from them.
+        private static string? ComputeRuneFold(int rune, SqlLatin1Cp1CiAsCollation self)
+        {
+            var s = char.ConvertFromUtf32(rune);
+            if (self.inner.Equals(s, string.Empty))
+                return string.Empty;
+
+            string? candidate = null;
+            try
+            {
+                // Lowercase (not the CA1308-preferred uppercase) is the
+                // fold's target case: the repertoire's expansion-bearing
+                // letters exist only in lowercase (ß) and every hashFolds
+                // target is lowercase; the inner-equality validation below
+                // gates any lossy lowering (İ) out.
+#pragma warning disable CA1308
+                candidate = s.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+#pragma warning restore CA1308
+            }
+            catch (ArgumentException)
+            {
+            }
+
+            if (candidate is not null && candidate != s && candidate.Length > 0
+                && AllInNvarcharRepertoire(candidate) && self.inner.Equals(s, candidate))
+            {
+                return ApplyHashFolds(candidate);
+            }
+
+            foreach (var repertoireChar in nvarcharWeights.Keys)
+            {
+                if (self.inner.Equals(s, repertoireChar.ToString()))
+                    return ApplyHashFolds(char.ToLowerInvariant(repertoireChar).ToString());
+            }
+
+            return null;
+        }
+
+        private static bool AllInNvarcharRepertoire(string s)
+        {
+            foreach (var ch in s)
+            {
+                if (!nvarcharWeights.ContainsKey(ch))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static string ApplyHashFolds(string s)
+        {
+            var builder = new StringBuilder(s.Length);
+            foreach (var ch in s)
+                _ = builder.Append(hashFolds.TryGetValue(ch, out var fold) ? fold : ch.ToString());
+            return builder.ToString();
         }
 
         private int CompareInRepertoire(string x, string y)

@@ -9,11 +9,15 @@ namespace SqlServerSimulator;
 ///   <item>
 ///     Regime 1 — identifier resolution under the database collation
 ///     (CI + width-insensitive, accent-sensitive). Fullwidth Latin
-///     characters fold to halfwidth. Applies to catalog views, schema
-///     names, type-prefixes in static calls, system-proc names, proc
-///     parameter names, the INSERTED/DELETED pseudo-tables, OBJECT_ID's
-///     typeFilter argument, extended-property level-type / level-name
-///     arguments.
+///     characters fold to halfwidth; decomposed combining-mark spellings
+///     fold to the composed form. Applies to catalog views, schema
+///     names, user table / procedure names, type-prefixes in static
+///     calls, system-proc names, proc parameter names (including EXEC
+///     duplicate-named-argument detection), the INSERTED/DELETED
+///     pseudo-tables, OBJECT_ID's typeFilter argument, extended-property
+///     level-type / level-name arguments. Variable names are a special
+///     case: they fold case/width/kana regardless of the database
+///     collation (probed on a real CS_AS database, 2026-07-13).
 ///   </item>
 ///   <item>
 ///     Regime 2 — T-SQL grammar tokens (parser-level, ASCII-only
@@ -121,6 +125,75 @@ public sealed class NameComparisonRegimeTests
             "insert dbo.regime1_o output ｉnserted.v values (1, 42)"));
     }
 
+    [TestMethod]
+    public void Regime1_UserTable_FullwidthReference_Resolves()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table dbo.regime1_fw (id int);
+            insert dbo.regime1_fw values (7);
+            select count(*) from dbo.ｒegime1_fw
+            """));
+
+    [TestMethod]
+    public void Regime1_UserTable_FullwidthSchemaQualifier_Resolves()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table dbo.regime1_fws (id int);
+            insert dbo.regime1_fws values (7);
+            select count(*) from ｄbo.regime1_fws
+            """));
+
+    [TestMethod]
+    public void Regime1_UserProcedure_FullwidthExecName_Invokes()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure dbo.regime1_fwp @a int as select @a");
+        AreEqual(1, sim.ExecuteScalar("exec dbo.ｒegime1_fwp @a=1"));
+    }
+
+    [TestMethod]
+    public void Regime1_Variable_FullwidthDeclaration_AsciiReference_Resolves()
+        => AreEqual(5, new Simulation().ExecuteScalar(
+            "declare @ｖx int; set @vx = 5; select @vx"));
+
+    /// <summary>
+    /// A fullwidth respelling of an already-supplied named argument is a
+    /// duplicate under the collation's width folding, and the message
+    /// echoes the first-seen spelling — probe-confirmed verbatim.
+    /// </summary>
+    [TestMethod]
+    public void Regime1_ExecNamedArgs_FullwidthDuplicate_Msg8143EchoesFirstSpelling()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure dbo.regime1_fwd @a int as select @a");
+        sim.AssertSqlError(
+            "exec dbo.regime1_fwd @a=1, @ａ=2",
+            8143,
+            "Parameter '@a' was supplied multiple times.");
+    }
+
+    /// <summary>
+    /// A decomposed identifier spelling (combining acute accent after the
+    /// base letter) both tokenizes and resolves against the composed
+    /// created name — probe-confirmed (2026-07-13).
+    /// </summary>
+    [TestMethod]
+    public void Regime1_Identifier_DecomposedCombiningMark_Resolves()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            "create table dbo.café (id int); insert dbo.café values (1); " +
+            "select count(*) from dbo.cafe\u0301"));
+
+    /// <summary>
+    /// Data-level folding: fullwidth and case variants of the same letter
+    /// land in one GROUP BY bucket — probe-confirmed (2026-07-13): real
+    /// SQL Server groups N's', N'ｓ', N'S' as a single group.
+    /// </summary>
+    [TestMethod]
+    public void Regime1_GroupBy_FullwidthAndCaseVariants_FoldIntoOneGroup()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table dbo.regime1_gb (v nvarchar(10));
+            insert dbo.regime1_gb values (N's'), (N'ｓ'), (N'S');
+            select count(*) from (select v from dbo.regime1_gb group by v) g
+            """));
+
     // ===== Regime 2: parser grammar tokens — fullwidth REJECTED =====
 
     [TestMethod]
@@ -222,6 +295,16 @@ public sealed class NameComparisonRegimeTests
         // folds to sys and matches the reserved set.
         _ = CsCollation().AssertSqlError("CREATE SCHEMA ｓys", 2760);
     }
+
+    /// <summary>
+    /// Variable names do NOT follow the database collation: on a real
+    /// CS_AS database, <c>declare @vx</c> referenced as <c>@VX</c> still
+    /// resolves — probe-confirmed (2026-07-13). They fold case, width,
+    /// and kana type unconditionally (BatchContext.VariableNameComparer).
+    /// </summary>
+    [TestMethod]
+    public void CsDatabase_Variable_CaseFlippedReference_Resolves()
+        => AreEqual(5, CsCollation().ExecuteScalar("declare @vx int; set @VX = 5; select @vx"));
 
     /// <summary>
     ///`SP_EXECUTESQL` doesn't case-equal `sp_executesql` under CS, so

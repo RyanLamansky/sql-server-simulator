@@ -903,6 +903,23 @@ internal sealed class BatchContext
     public Database CurrentDatabase => this.Parser.CurrentDatabase;
 
     /// <summary>
+    /// Comparer for <c>@</c>-variable and table-variable names. Unlike
+    /// object identifiers (which follow the database collation — see the
+    /// name-comparison regimes in <c>docs/claude/collations.md</c>),
+    /// variable names fold case, width, and kana type regardless of the
+    /// database collation — probe-confirmed (2026-07-13) on a real
+    /// <c>SQL_Latin1_General_CP1_CS_AS</c> database: <c>declare @vx int;
+    /// set @VX = 5</c> succeeds, as does a fullwidth <c>@ｖx</c>
+    /// declaration referenced as <c>@vx</c>.
+    /// </summary>
+    internal static readonly StringComparer VariableNameComparer =
+        StringComparer.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.CompareOptions.IgnoreCase
+            | System.Globalization.CompareOptions.IgnoreKanaType
+            | System.Globalization.CompareOptions.IgnoreWidth);
+
+    /// <summary>
     /// Per-batch variable store. Seeded with SqlClient parameters at
     /// construction; <c>DECLARE</c> adds entries; <c>SET</c> /
     /// <c>SELECT @v = expr</c> mutate them. Parameters and declared variables
@@ -1049,14 +1066,14 @@ internal sealed class BatchContext
     /// </summary>
     public BatchContext(SimulatedDbCommand triggerBodyCommand, TriggerFrame triggerFrame)
     {
-        this.Variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        this.Variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         this.TriggerFrame = triggerFrame;
         this.Parser = new ParserContext(triggerBodyCommand, this);
     }
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
     {
-        var dict = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        var dict = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         foreach (SimulatedDbParameter parameter in command.Parameters)
         {
             // Skip structured / table-valued parameters here — they land in

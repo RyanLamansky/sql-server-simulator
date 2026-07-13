@@ -119,8 +119,8 @@ partial class Simulation
         // coerced to each parameter's declared type. TVP parameters land in
         // a parallel table-variables seed (registered on the child batch
         // post-construction).
-        var variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
-        var tableVariables = new Dictionary<string, HeapTable>(StringComparer.InvariantCultureIgnoreCase);
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        var tableVariables = new Dictionary<string, HeapTable>(BatchContext.VariableNameComparer);
         for (var i = 0; i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];

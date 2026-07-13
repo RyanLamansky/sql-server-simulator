@@ -213,6 +213,28 @@ public sealed class CollationBehaviorTests
         CollectionAssert.AreEqual(new[] { "ad", "æx", "af" }, rows);
     }
 
+    /// <summary>
+    /// Apostrophe and hyphen are both minimal-weight marks but remain
+    /// distinct from each other, including when a fullwidth character
+    /// pushes the comparison onto the non-CP1252 fallback path —
+    /// probe-confirmed (2026-07-13): real SQL Server returns 'neq' for
+    /// both forms and keeps the values in separate GROUP BY buckets.
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'ab''c' = N'ab-c'", 0)]
+    [DataRow("N'ab''cＸ' = N'ab-cＸ'", 0)]
+    [DataRow("N'coopＸ' = N'co-opＸ'", 0)]
+    public void DefaultCollation_MinimalMarks_StayDistinct(string condition, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
+
+    [TestMethod]
+    public void DefaultCollation_MinimalMarks_GroupSeparately()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create table dbo.marks (v nvarchar(10));
+            insert dbo.marks values (N'ab''cＸ'), (N'ab-cＸ');
+            select count(*) from (select v from dbo.marks group by v) g
+            """));
+
     [TestMethod]
     public void CollationName_LookupIsCaseInsensitive()
     {

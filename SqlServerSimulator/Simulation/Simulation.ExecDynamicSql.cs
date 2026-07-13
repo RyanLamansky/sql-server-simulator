@@ -142,7 +142,7 @@ partial class Simulation
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
         // Bind declared params: positional fill first, then named lookup.
-        var preDeclared = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        var preDeclared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var outputBindings = new List<(SpExecuteSqlParam Param, VariableSlot CallerSlot)>();
         if (declaredParams is not null)
         {
@@ -360,8 +360,8 @@ partial class Simulation
         // without raising Msg 178 — dynamic-SQL batches inherit the proc-
         // body's RETURN semantics (RETURN value is captured but unused).
         var variables = preDeclaredVariables is null
-            ? new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase)
-            : new Dictionary<string, VariableSlot>(preDeclaredVariables, StringComparer.InvariantCultureIgnoreCase);
+            ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
+            : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
         var procFrame = new ProcFrame("<dynamic-sql>");
         var innerBatch = new BatchContext(dynCommand, variables, procFrame);
 

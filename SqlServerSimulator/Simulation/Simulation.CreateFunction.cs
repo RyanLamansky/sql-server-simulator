@@ -530,7 +530,7 @@ partial class Simulation
         bodyCommand.CommandText = bodyText;
 #pragma warning restore CA2100
 
-        var variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         for (var i = 0; i < parameters.Length; i++)
         {
             var p = parameters[i];

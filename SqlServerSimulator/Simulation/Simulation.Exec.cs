@@ -1,4 +1,3 @@
-using System.Text;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -56,27 +55,7 @@ partial class Simulation
                 "sp_releaseapplock",
             ],
             collation);
-        if (lookup.TryGetValue(leaf, out var canonical))
-            return canonical;
-
-        // A set miss is definitive only when the probe hashes consistently
-        // with the stored names. SqlLatin1Cp1CiAsCollation.GetHashCode
-        // hashes in-repertoire strings by SQL sort weights but
-        // out-of-repertoire strings via its inner Windows collation, so an
-        // out-of-repertoire spelling that IS Equals-equal to a stored name
-        // (fullwidth ｓp_executesql — regime-1 fullwidth folding) hashes
-        // differently and misses the set. Every stored name is ASCII and
-        // therefore in-repertoire, so a pure-ASCII probe shares their
-        // hashing scheme and its miss is exact; anything else re-checks by
-        // direct equality.
-        if (Ascii.IsValid(leaf))
-            return null;
-        foreach (var name in lookup)
-        {
-            if (collation.Equals(leaf, name))
-                return name;
-        }
-        return null;
+        return lookup.TryGetValue(leaf, out var canonical) ? canonical : null;
     }
 
     /// <summary>
@@ -224,8 +203,13 @@ partial class Simulation
                 if (context.Token is Operator { Character: '=' })
                 {
                     argName = nameToken.Value;
-                    if (!seenNames.Add(argName))
-                        throw SimulatedSqlException.ParameterSuppliedMultipleTimes(argName);
+                    // Msg 8143 echoes the first-seen spelling of the name —
+                    // probe-confirmed (2026-07-13): `@a=1, @ａ=2` (fullwidth
+                    // duplicate under the collation's width folding) reports
+                    // "Parameter '@a' was supplied multiple times."
+                    if (seenNames.TryGetValue(argName, out var firstSpelling))
+                        throw SimulatedSqlException.ParameterSuppliedMultipleTimes(firstSpelling);
+                    _ = seenNames.Add(argName);
                     sawNamed = true;
                     context.MoveNextRequired();
                 }

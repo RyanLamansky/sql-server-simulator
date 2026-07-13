@@ -36,7 +36,7 @@ partial class Simulation
         // TVF invocation — the body's RETURN <value> form is parse-time-
         // rejected here because UdfFrame is set, but that's harmless since
         // a view body is a plain SELECT with no RETURN.
-        var variables = new Dictionary<string, VariableSlot>(StringComparer.InvariantCultureIgnoreCase);
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
         connection.NestingLevel++;

@@ -74,13 +74,26 @@ static class Tokenizer
         return new(command, start, index - start);
     }
 
+    /// <summary>
+    /// True when <paramref name="c"/> can continue an unquoted identifier
+    /// (including <c>@</c>-name and <c>#</c>-name) body: letters, digits,
+    /// underscore, plus non-spacing combining marks — probe-confirmed
+    /// (2026-07-13) against SQL Server 2025: a decomposed identifier
+    /// spelling (<c>zzcafe</c> + U+0301 COMBINING ACUTE ACCENT) both
+    /// tokenizes and resolves to a table created as composed
+    /// <c>zzcafé</c>.
+    /// </summary>
+    private static bool IsIdentifierBodyChar(char c) =>
+        char.IsLetterOrDigit(c)
+        || c == '_'
+        || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.NonSpacingMark;
+
     private static Token ParseUnquotedStringOrReservedKeyword(string command, ref int index)
     {
         var start = index;
         while (++index < command.Length)
         {
-            var c = command[index];
-            if (!char.IsLetterOrDigit(c) && c != '_')
+            if (!IsIdentifierBodyChar(command[index]))
                 break;
         }
 
@@ -103,8 +116,7 @@ static class Tokenizer
             index++; // optional second '#' for ## globals
         while (index < command.Length)
         {
-            var c = command[index];
-            if (!char.IsLetterOrDigit(c) && c != '_')
+            if (!IsIdentifierBodyChar(command[index]))
                 break;
             index++;
         }
@@ -175,8 +187,7 @@ static class Tokenizer
 
         while (index < command.Length)
         {
-            var c = command[index];
-            if (!char.IsLetterOrDigit(c) && c != '_')
+            if (!IsIdentifierBodyChar(command[index]))
                 break;
             index++;
         }
