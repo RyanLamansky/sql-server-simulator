@@ -56,13 +56,13 @@ internal sealed partial class TdsSession
             }
             catch (SimulatedSqlException ex)
             {
-                this.FlushInfoMessages(writer);
+                _ = this.FlushInfoMessages(writer);
                 WriteErrors(writer, ex);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
             catch (NotSupportedException ex)
             {
-                this.FlushInfoMessages(writer);
+                _ = this.FlushInfoMessages(writer);
                 writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }

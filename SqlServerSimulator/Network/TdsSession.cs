@@ -211,18 +211,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
         catch (SimulatedSqlException ex)
         {
-            this.FlushInfoMessages(writer);
+            _ = this.FlushInfoMessages(writer);
             WriteErrors(writer, ex);
             writer.WriteDone(Tds.DoneError, 0);
         }
         catch (NotSupportedException ex)
         {
-            this.FlushInfoMessages(writer);
+            _ = this.FlushInfoMessages(writer);
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
             writer.WriteDone(Tds.DoneError, 0);
         }
 
-        this.FlushInfoMessages(writer);
+        _ = this.FlushInfoMessages(writer);
         var databaseAfter = this.connection.Database;
         if (!string.Equals(databaseAfter, databaseBefore, StringComparison.Ordinal))
             writer.WriteEnvChange(Tds.EnvDatabase, databaseAfter, databaseBefore);
@@ -241,16 +241,19 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         using var outcomes = simulation.CreateResultSetsForCommand(command).GetEnumerator();
 
         var hasOutcome = outcomes.MoveNext();
-        if (!hasOutcome && !trailingTokensFollow)
-        {
-            this.FlushInfoMessages(writer);
-            writer.WriteDone(Tds.DoneFinal, 0);
-        }
-
+        var anyOutcome = hasOutcome;
         while (hasOutcome)
         {
             var outcome = outcomes.Current;
-            this.FlushInfoMessages(writer);
+            // Messages from a preceding no-outcome statement (PRINT,
+            // severity<=10 RAISERROR): real SQL Server gives that statement
+            // its own DONE after the INFO tokens. Without it SqlClient's
+            // token reader stalls on the INFO/COLMETADATA adjacency until
+            // command timeout (go-sqlcmd shakedown, 2026-07-14). RPC
+            // responses skip the extra DONEINPROC — their per-statement
+            // DONEINPROC stream is already well-formed for proc-body PRINT.
+            if (this.FlushInfoMessages(writer) && !trailingTokensFollow)
+                writer.WriteDoneToken(doneToken, Tds.DoneMore, 0);
             if (outcome is SimulatedQueryResult query)
             {
                 TdsTypeCodec.ValidateSchema(query.Schema);
@@ -267,14 +270,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 }
 
                 hasOutcome = outcomes.MoveNext();
-                var status = hasOutcome || trailingTokensFollow ? Tds.DoneMore : Tds.DoneFinal;
-                writer.WriteDoneToken(doneToken, (ushort)(status | Tds.DoneCount), rows);
+                writer.WriteDoneToken(doneToken, (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneCount), rows);
             }
             else
             {
                 var affected = outcome.RecordsAffected;
                 hasOutcome = outcomes.MoveNext();
-                var status = hasOutcome || trailingTokensFollow ? Tds.DoneMore : Tds.DoneFinal;
+                var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 if (affected >= 0)
                     status |= Tds.DoneCount;
 
@@ -282,8 +284,22 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             }
         }
 
-        this.FlushInfoMessages(writer);
+        // Trailing messages (batch ends in PRINT): INFO may never follow the
+        // final DONE, so the last outcome's DONE stayed DONE_MORE (see
+        // OutcomeDoneStatus) and the batch closes with its own final DONE.
+        var flushedTrailing = this.FlushInfoMessages(writer);
+        if (!trailingTokensFollow && (flushedTrailing || !anyOutcome))
+            writer.WriteDoneToken(doneToken, Tds.DoneFinal, 0);
     }
+
+    /// <summary>
+    /// DONE status for a completed outcome: more tokens follow when another
+    /// outcome exists, the response is an RPC (RETURNSTATUS / DONEPROC still
+    /// come), or queued info messages remain to be written — the trailing-
+    /// PRINT case, whose INFO must precede the batch's final DONE.
+    /// </summary>
+    private ushort OutcomeDoneStatus(bool hasOutcome, bool trailingTokensFollow) =>
+        hasOutcome || trailingTokensFollow || this.pendingInfoMessages.Count > 0 ? Tds.DoneMore : Tds.DoneFinal;
 
     private void ResetConnection()
     {
@@ -302,10 +318,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         this.connection = fresh;
     }
 
-    private void FlushInfoMessages(TdsTokenWriter writer)
+    /// <summary>Writes all queued info messages as INFO tokens; true when any were written.</summary>
+    private bool FlushInfoMessages(TdsTokenWriter writer)
     {
+        var any = false;
         while (this.pendingInfoMessages.TryDequeue(out var error))
+        {
             writer.WriteErrorOrInfo(Tds.TokenInfo, error.Number, error.State, error.Class, error.Message, error.Server, error.Procedure, error.LineNumber);
+            any = true;
+        }
+
+        return any;
     }
 
     private static void WriteErrors(TdsTokenWriter writer, SimulatedSqlException exception)
