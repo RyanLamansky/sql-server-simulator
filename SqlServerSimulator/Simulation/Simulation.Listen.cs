@@ -11,9 +11,13 @@ public sealed partial class Simulation
     /// so unmodified SQL Server clients can connect to this simulation with
     /// only a connection-string change. The endpoint presents an ephemeral
     /// self-signed TLS certificate, so connection strings must include
-    /// <c>TrustServerCertificate=true</c>. Credentials are accepted without
-    /// validation, and any requested database that does not exist raises the
-    /// same error a direct connection would.
+    /// <c>TrustServerCertificate=true</c>. While no logins have been created,
+    /// any credentials are accepted; once <c>CREATE LOGIN</c> has registered
+    /// one or more logins (through any connection to this simulation), the
+    /// endpoint requires a matching username and password and rejects
+    /// mismatches with SQL Server's login-failed error 18456. A requested
+    /// database that does not exist raises the same error a direct
+    /// connection would.
     /// </summary>
     /// <param name="port">
     /// The TCP port to bind, 1433 by default. Pass 0 to let the operating

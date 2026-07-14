@@ -4,9 +4,10 @@ using System.Text;
 namespace SqlServerSimulator.Network;
 
 /// <summary>
-/// The fields of a client LOGIN7 message the listener acts on. Credentials
-/// are parsed but not enforced; enforcement is a planned follow-up and the
-/// failure surface is reserved (Msg 18456).
+/// The fields of a client LOGIN7 message the listener acts on. The session
+/// validates <see cref="UserName"/> / <see cref="Password"/> against
+/// <see cref="Simulation.Logins"/> when that registry is non-empty (Msg 18456
+/// on mismatch); an empty registry accepts any credentials.
 /// </summary>
 internal sealed class Login7Request
 {
@@ -14,15 +15,17 @@ internal sealed class Login7Request
     public readonly int PacketSize;
     public readonly string HostName;
     public readonly string UserName;
+    public readonly string Password;
     public readonly string AppName;
     public readonly string Database;
 
-    private Login7Request(uint tdsVersion, int packetSize, string hostName, string userName, string appName, string database)
+    private Login7Request(uint tdsVersion, int packetSize, string hostName, string userName, string password, string appName, string database)
     {
         this.TdsVersion = tdsVersion;
         this.PacketSize = packetSize;
         this.HostName = hostName;
         this.UserName = userName;
+        this.Password = password;
         this.AppName = appName;
         this.Database = database;
     }
@@ -45,10 +48,36 @@ internal sealed class Login7Request
 
         var hostName = ReadField(payload, 36);
         var userName = ReadField(payload, 40);
+        var password = ReadPasswordField(payload, 44);
         var appName = ReadField(payload, 48);
         var database = ReadField(payload, 68);
 
-        return new Login7Request(tdsVersion, packetSize, hostName, userName, appName, database);
+        return new Login7Request(tdsVersion, packetSize, hostName, userName, password, appName, database);
+    }
+
+    /// <summary>
+    /// Reads the password field, undoing the client-side obfuscation MS-TDS
+    /// mandates: each byte was nibble-swapped and then XORed with 0xA5, so
+    /// decoding XORs first and swaps back before the UCS-2 decode.
+    /// </summary>
+    private static string ReadPasswordField(ReadOnlySpan<byte> payload, int pairOffset)
+    {
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(payload[pairOffset..]);
+        var chars = BinaryPrimitives.ReadUInt16LittleEndian(payload[(pairOffset + 2)..]);
+        if (chars == 0)
+            return "";
+
+        var byteCount = chars * 2;
+        if (offset + byteCount > payload.Length)
+            throw new InvalidDataException("LOGIN7 variable-section field extends past the end of the payload.");
+        var clear = byteCount <= 512 ? stackalloc byte[byteCount] : new byte[byteCount];
+        payload.Slice(offset, byteCount).CopyTo(clear);
+        for (var i = 0; i < clear.Length; i++)
+        {
+            var b = (byte)(clear[i] ^ 0xA5);
+            clear[i] = (byte)((b >> 4) | (b << 4));
+        }
+        return Encoding.Unicode.GetString(clear);
     }
 
     private static string ReadField(ReadOnlySpan<byte> payload, int pairOffset)

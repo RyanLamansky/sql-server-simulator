@@ -1069,6 +1069,25 @@ partial class SimulatedSqlException
         new($"User, group, or role '{name}' already exists in the current database.", 15023, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15025: <c>CREATE LOGIN name</c> when a server
+    /// principal of that name already exists. Wording is docs-derived (the
+    /// reference instance's login lacks the server permission to reach this
+    /// check, reporting Msg 15247 instead).
+    /// </summary>
+    internal static SimulatedSqlException ServerPrincipalAlreadyExists(string name) =>
+        new($"The server principal '{name}' already exists.", 15025, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for <c>ALTER LOGIN</c> / <c>DROP LOGIN</c>
+    /// on a nonexistent login. Same number as <see cref="CannotFindPrincipal"/>
+    /// but a distinct verb-bearing login wording — probe-confirmed against SQL
+    /// Server 2025: <c>Cannot alter the login 'x', because it does not exist
+    /// or you do not have permission.</c> (and the same with "drop").
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterOrDropLogin(string verb, string name) =>
+        new($"Cannot {verb} the login '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2749: an <c>ALTER COLUMN</c> on an IDENTITY
     /// column tried to change the underlying type to something outside the
     /// integer / decimal-scale-0 family. Probe-confirmed wording against SQL

@@ -70,9 +70,12 @@ internal sealed class LoginProperty : Expression
             return SqlValue.Null(SqlType.NVarchar);
 
         var login = loginValue.CoerceTo(SqlType.NVarchar).AsString;
-        // Only the fixed simulated login resolves; every other name behaves
-        // like a nonexistent login (all properties NULL).
-        if (!BuiltInToken.Comparer.Equals(login, PrincipalPlaceholders.CurrentLogin))
+        // The fixed simulated login resolves with seeded constants; a
+        // CREATE LOGIN-registered login resolves with its actual create /
+        // password-set stamps; every other name behaves like a nonexistent
+        // login (all properties NULL).
+        var registered = runtime.Batch.Connection.Simulation.Logins.TryGetValue(login, out var serverLogin);
+        if (!registered && !BuiltInToken.Comparer.Equals(login, PrincipalPlaceholders.CurrentLogin))
             return SqlValue.Null(SqlType.NVarchar);
 
         var property = propertyValue.CoerceTo(SqlType.NVarchar).AsString;
@@ -92,7 +95,9 @@ internal sealed class LoginProperty : Expression
             "LOCKOUTTIME" => SqlValue.FromNVarchar(NeverSentinel),
             "PASSWORDHASH" => SqlValue.Null(SqlType.NVarchar),
             "PASSWORDHASHALGORITHM" => SqlValue.Null(SqlType.NVarchar),
-            "PASSWORDLASTSETTIME" => SqlValue.FromNVarchar(PasswordLastSetSeed),
+            "PASSWORDLASTSETTIME" => registered
+                ? SqlValue.FromNVarchar(serverLogin!.PasswordLastSetTime.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                : SqlValue.FromNVarchar(PasswordLastSetSeed),
             _ => SqlValue.Null(SqlType.NVarchar),
         };
     }

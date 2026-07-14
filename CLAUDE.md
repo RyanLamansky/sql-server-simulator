@@ -153,7 +153,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **Locking, MVCC, SNAPSHOT/RCSI, deadlock/timeout, lock-related DMVs** → [`locking.md`](docs/claude/locking.md).
 - **Application locks** (`sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, return-code-vs-raised-error asymmetry, EF 9/10 `Database.Migrate()`'s `__EFMigrationsLock`) → [`app-locks.md`](docs/claude/app-locks.md).
 - **`hierarchyid` type** (incl. deferred byte-identical CAST research notes) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
-- **`GRANT` / `REVOKE` / `DENY`, principal DDL, fixed-principal seed, principal scalars** (`USER_NAME` / `SUSER_SNAME` / `DATABASE_PRINCIPAL_ID` / `CURRENT_USER` / `SESSION_USER` / `ORIGINAL_LOGIN` / `HAS_PERMS_BY_NAME` / `IS_MEMBER`) → [`permissions.md`](docs/claude/permissions.md).
+- **`GRANT` / `REVOKE` / `DENY`, principal DDL (incl. server logins: `CREATE/ALTER/DROP LOGIN`), fixed-principal seed, principal scalars** (`USER_NAME` / `SUSER_SNAME` / `DATABASE_PRINCIPAL_ID` / `CURRENT_USER` / `SESSION_USER` / `ORIGINAL_LOGIN` / `HAS_PERMS_BY_NAME` / `IS_MEMBER`) → [`permissions.md`](docs/claude/permissions.md).
 - **`CREATE FULLTEXT CATALOG`/`INDEX`, `CONTAINS`/`FREETEXT` rejection** → [`full-text.md`](docs/claude/full-text.md).
 - **`xml` type, XML schema collections, XML methods (`.value()` / `.nodes()` / `.query()` / `.exist()` via an XQuery-subset evaluator; `.modify()` XML-DML skip-with-diagnostic), XML indexes** → [`xml.md`](docs/claude/xml.md).
 - **`geography` / `geometry` types, spatial methods, spatial indexes** → [`spatial.md`](docs/claude/spatial.md).
@@ -162,7 +162,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **New top-level statement parser or dispatch-loop separator rules** → [`grammar.md`](docs/claude/grammar.md) + [`control-flow.md`](docs/claude/control-flow.md).
 - **BACPAC import** (`Simulation.ImportBacpac` — multi-database via repeated calls, `BacpacImportOptions`, `ModelXmlReader` dispatcher, BCP wire format, `BacpacBuilder` test harness) → [`bacpac-loader.md`](docs/claude/bacpac-loader.md).
 - **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part FROM routing through the remote's ADO.NET pipeline, `OPENQUERY(server,'query')` ad-hoc pass-through + compile-time schema discovery, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).
-- **TDS network endpoint** (`Simulation.ListenAsync` → `SimulatedNetworkListener`; real SqlClient over loopback TCP+TLS; SQLBatch/RPC/TM, no bulk; EF via plain `UseSqlServer`; oracle = `*.Tests.SqlClient`) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
+- **TDS network endpoint** (`Simulation.ListenAsync` → `SimulatedNetworkListener`; real SqlClient over loopback TCP+TLS; SQLBatch/RPC/TM, no bulk; credential enforcement via the `CREATE LOGIN` registry, Msg 18456 on mismatch; EF via plain `UseSqlServer`; oracle = `*.Tests.SqlClient`) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
 ## Not modeled
 

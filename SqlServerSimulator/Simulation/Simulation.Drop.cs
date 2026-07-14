@@ -48,6 +48,8 @@ partial class Simulation
                 return TryParseDropUser(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseDropRole(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
+                return TryParseDropLogin(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseDropFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:

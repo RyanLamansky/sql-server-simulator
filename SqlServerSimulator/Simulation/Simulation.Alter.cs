@@ -38,6 +38,8 @@ partial class Simulation
                 return TryParseAlterTable(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseAlterRole(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
+                return TryParseAlterLogin(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:

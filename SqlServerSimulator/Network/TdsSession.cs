@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using SqlServerSimulator.Parser.Expressions;
 
 namespace SqlServerSimulator.Network;
 
@@ -69,6 +70,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 transport.PacketSize = login.PacketSize;
 
             var writer = new TdsTokenWriter(transport);
+            if (!ValidateCredentials(simulation, login))
+            {
+                // Probe-confirmed shape: Msg 18456 severity 14 state 1 with
+                // identical wording for wrong-password / unknown-login /
+                // empty-password (the real server masks the detailed state
+                // from clients), then the connection closes.
+                writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{login.UserName}'.", "SIMULATED", "", 1);
+                writer.WriteDone(Tds.DoneError, 0);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (!this.TryOpenConnection(login.Database, writer))
             {
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
@@ -122,6 +135,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             await transportStream.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Enforces SQL-authentication credentials against
+    /// <see cref="Simulation.Logins"/>. An empty registry accepts anything
+    /// (the zero-configuration default); once <c>CREATE LOGIN</c> has
+    /// populated it, the LOGIN7 username must resolve and the de-obfuscated
+    /// password must verify against the stored PWDENCRYPT-format hash.
+    /// </summary>
+    private static bool ValidateCredentials(Simulation simulation, Login7Request login) =>
+        simulation.Logins.IsEmpty
+        || (simulation.Logins.TryGetValue(login.UserName, out var serverLogin)
+            && PasswordHash.Verify(login.Password, serverLogin.PasswordHash));
 
     private bool TryOpenConnection(string requestedDatabase, TdsTokenWriter writer)
     {

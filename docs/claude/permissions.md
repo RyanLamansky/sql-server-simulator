@@ -1,6 +1,6 @@
 # Permission statements + principal DDL
 
-`GRANT` / `REVOKE` / `DENY` parsing plus the principal DDL surface (`CREATE USER` / `CREATE ROLE` / `ALTER ROLE` / `DROP USER` / `DROP ROLE`) + three new catalog views. Parse-and-store fidelity tier — no enforcement of the actual permissions on subsequent operations.
+`GRANT` / `REVOKE` / `DENY` parsing plus the principal DDL surface (`CREATE USER` / `CREATE ROLE` / `ALTER ROLE` / `DROP USER` / `DROP ROLE`, and the server-scope `CREATE LOGIN` / `ALTER LOGIN` / `DROP LOGIN`) + three new catalog views. Parse-and-store fidelity tier — no enforcement of the actual permissions on subsequent operations. The exception is logins: the TDS network endpoint enforces them as connection credentials (see [`tds-endpoint.md`](tds-endpoint.md)).
 
 ## Storage
 
@@ -56,6 +56,19 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`. AUTHORIZATION clause parse-and-discards.
 - `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`. `WITH NAME` parses-and-discards.
 - `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals` and cascade-remove `Database.RoleMembers` entries that reference the removed id. Dispatched ahead of the generic DROP-target switch in `Simulation.Drop.cs` because principals don't live in a per-schema dict.
+
+### Server logins (`Simulation/Simulation.LoginDdl.cs`)
+
+Server-scope, stored in `Simulation.Logins` (`ConcurrentDictionary<string, ServerLogin>`, `BuiltInToken.Comparer` — the same case-insensitive keying as the sibling server-scope dicts, a slight divergence from real keying by server collation). Each `ServerLogin` is immutable (name, password hash, create date, password-last-set date); mutations replace the entry wholesale so the TDS endpoint's concurrent reads see a consistent hash. The hash uses the legacy `0x0200` single-pass-SHA-512 format (`PasswordHash.EncryptLegacy`) rather than PWDENCRYPT's `0x0300` PBKDF2: never-persisted hashes gain nothing from 100k-iteration hardening, which would otherwise bill every TDS connection open ~50ms. `PasswordHash.Verify` dispatches on the version tag, so both forms verify; the T-SQL `PWDENCRYPT` keeps emitting `0x0300`. In-process connections never authenticate — login DDL through one is how the registry is seeded.
+
+- `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE / SID / CREDENTIAL) parses-and-discards. `FROM WINDOWS` / certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`. A password over SQL Server's documented **128-character cap** raises Msg 6607 (CREATE and ALTER alike) — **approximate**: 6607 is the password-machinery error probe-confirmed on the `PWDENCRYPT` cap, but real's CREATE LOGIN rejection shape is unverifiable from the reference instance (its login hits the Msg 15247 permission wall before password validation).
+- `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`). Every other ALTER form (ENABLE / DISABLE / other WITH options) parses-and-discards after the existence check — DISABLE does **not** block endpoint logins.
+- `DROP LOGIN name` — **no `IF EXISTS` clause**: real SQL Server's DROP LOGIN grammar rejects it (probe-confirmed Msg 156 near 'IF'), reproduced verbatim — a reserved keyword in any of the three login-name positions raises the keyword-flavored Msg 156, not the generic Msg 102.
+
+| Msg | When | Provenance |
+|---|---|---|
+| 15025 | Duplicate `CREATE LOGIN` name: `The server principal 'x' already exists.` | Docs-derived — the reference login lacks the server permission to reach the duplicate check (Msg 15247 fires first). |
+| 15151 | `ALTER LOGIN` / `DROP LOGIN` on a missing login: `Cannot {alter\|drop} the login 'x', because it does not exist or you do not have permission.` | Probe-confirmed (2026-07-13) — distinct wording from the database-principal 15151 (`CannotFindPrincipal`). |
 
 ## Permission type-code derivation
 
@@ -113,6 +126,6 @@ The simulator doesn't enforce permissions, so these return values that let permi
 - **Server-scope grants** (`GRANT … ON SERVER`), schema-scope grants, column-scope grants — not modeled.
 - **`WITH GRANT OPTION` cascading** — records the W state but doesn't propagate to descendants.
 - **Canonical 4-char permission type codes** — simulator uses a first-letter heuristic; real SQL Server has a per-permission table.
-- **`CREATE LOGIN` / `ALTER LOGIN` / `DROP LOGIN`** — server-scope, not modeled.
+- **Login-model edges** — no `sys.server_principals` / `sys.sql_logins` catalog views; login DDL itself is permission-unchecked (anyone can CREATE LOGIN); DISABLE / password policy / lockout not enforced; logins aren't linked to database users (`CREATE USER … FOR LOGIN` still parse-and-discards).
 - **`CREATE USER … FROM EXTERNAL PROVIDER` / `WITH PASSWORD` semantics** — parse-and-discard.
 - **Permission enforcement** — the simulator never checks granted/denied permissions when dispatching subsequent operations.

@@ -20,10 +20,9 @@ This file is the home for net-new non-function feature proposals too. CLAUDE.md'
 
 ### TDS network endpoint — follow-up phases
 
-The endpoint ships with SQLBatch + RPC + Transaction Manager support (see [`tds-endpoint.md`](tds-endpoint.md)); EF Core runs over the wire through vanilla `UseSqlServer`. Remaining phases, roughly in value order:
+The endpoint ships with SQLBatch + RPC + Transaction Manager support and credential enforcement via the `CREATE LOGIN` registry (see [`tds-endpoint.md`](tds-endpoint.md)); EF Core runs over the wire through vanilla `UseSqlServer`. Remaining phases, roughly in value order:
 
-- **Credential enforcement** — accepts anything today; LOGIN7 password de-obfuscation (XOR/nibble-swap) is trivial, failure path is Msg 18456 severity 14 then close. Open design question: the public configuration knob (likely mapping onto the existing principal model — see [`permissions.md`](permissions.md)).
-- **Tool shakedown** — point sqlcmd/SSMS/DBeaver at the endpoint and harvest their exotic catalog queries / SET shapes into this backlog. SSMS is the boss fight.
+- **Tool shakedown** — point sqlcmd/SSMS/DBeaver at the endpoint and harvest their exotic catalog queries / SET shapes into this backlog. SSMS is the boss fight. Likely to want `sys.server_principals` / `sys.sql_logins` projected over the login registry.
 - **TVP parameters over the wire** (TYPE_INFO 0xF3) — the in-process TVP surface ships; the RPC reader rejects the wire form. Needed for `SqlDbType.Structured` and EF bulk patterns.
 - **Wire forms deferred by the codec**: `text`/`ntext`/`image` (textptr ROW form + table-name-bearing COLMETADATA), `hierarchyid`/`geography`/`geometry` (UDT 0xF0), `sql_variant` (no simulator type at all).
 - **Smaller fidelity items**: Msg 4060 (not 911) for login to a missing database; mid-stream attention (cancel during a large result requires a concurrent reader); `SqlBulkCopy` (BulkLoadBCP); MARS; TDS 8.0 / `Encrypt=Strict` (ALPN via `SslApplicationProtocol`); user-supplied `X509Certificate2`; off-loopback binding — the last two are add-on-demand public-surface expansions.

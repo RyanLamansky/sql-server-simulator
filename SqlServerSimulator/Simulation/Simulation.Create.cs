@@ -38,6 +38,8 @@ partial class Simulation
                 return TryParseCreateUser(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseCreateRole(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
+                return TryParseCreateLogin(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:

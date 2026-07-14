@@ -125,6 +125,20 @@ partial class SimulatedSqlException
         new($"The {functionLowerName} function requires {argumentCount} argument(s).", 174, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 6607: the password-encryption machinery
+    /// rejected an input — fired by <c>PWDENCRYPT</c> for a clear text over
+    /// 128 characters (probe-confirmed at exactly the 128/129 boundary, same
+    /// shape for varchar and nvarchar input). Also raised for a
+    /// <c>CREATE/ALTER LOGIN</c> password over the same documented 128-char
+    /// cap, where real's rejection shape is unverifiable from the reference
+    /// instance (its login hits the Msg 15247 permission wall before password
+    /// validation) — an approximation flagged in
+    /// <c>docs/claude/permissions.md</c>.
+    /// </summary>
+    internal static SimulatedSqlException PasswordEncryptionInvalidValue() =>
+        new("Password Encryption: The value supplied for parameter number 1 is invalid.", 6607, 16, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 155: the first argument to <c>DATEPART</c> /
     /// <c>DATEADD</c> / <c>DATEDIFF</c> / etc. wasn't a recognized datepart
     /// keyword (year / month / day / hour / minute / second / etc.). The

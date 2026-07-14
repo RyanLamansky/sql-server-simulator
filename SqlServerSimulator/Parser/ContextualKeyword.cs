@@ -52,6 +52,7 @@ enum ContextualKeyword
     Input,
     Instead,
     Log,
+    Login,
     Matched,
     Max,
     Native_Compilation,
