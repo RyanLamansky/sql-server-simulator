@@ -1162,6 +1162,33 @@ internal static class BuiltInResources
             new("host_architecture", SqlType.NVarchar, 256, false),
         ], (batch, database) => DmOsHostInfoRows);
 
+        // sys.configurations: server-scoped static server-configuration
+        // catalog. Real SQL Server types value / minimum / maximum /
+        // value_in_use as sql_variant; the simulator surfaces them as bigint
+        // (config values like 'max server memory (MB)' exceed int range),
+        // following the same sql_variant-to-concrete-base substitution
+        // sys.sequences uses for its sql_variant-typed value columns. The 106
+        // rows are a stock instance's defaults (probe-confirmed against SQL
+        // Server 2025) — configuration_id and name are stable across
+        // instances, and value mirrors value_in_use on a fresh server. This is
+        // static catalog data, not a live settings model: SET / sp_configure
+        // changes are not reflected. SMO reads value_in_use for
+        // configuration_id 16384 (Agent XPs) during SSMS's Object-Explorer
+        // database-node preamble, so the row set must resolve for that folder
+        // to populate. Row set is independent of the database argument.
+        Sys("configurations",
+        [
+            new("configuration_id", SqlType.Int32, null, false),
+            new("name", SqlType.NVarchar, 35, false),
+            new("value", SqlType.BigInt, null, true),
+            new("minimum", SqlType.BigInt, null, true),
+            new("maximum", SqlType.BigInt, null, true),
+            new("value_in_use", SqlType.BigInt, null, true),
+            new("description", SqlType.NVarchar, 255, false),
+            new("is_dynamic", SqlType.Bit, null, false),
+            new("is_advanced", SqlType.Bit, null, false),
+        ], (batch, database) => ConfigurationsRows);
+
         return views;
     }
 
@@ -1245,6 +1272,155 @@ internal static class BuiltInResources
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Raw stock-instance rows for <c>sys.configurations</c> (probe-confirmed
+    /// against SQL Server 2025). <c>configuration_id</c> and <c>name</c> are
+    /// stable across instances; <c>value</c> mirrors <c>value_in_use</c> on a
+    /// fresh server. The four sql_variant columns hold integers for every
+    /// option, surfaced as bigint.
+    /// </summary>
+    private static readonly (int Id, string Name, long Value, long Minimum, long Maximum, long ValueInUse, string Description, bool IsDynamic, bool IsAdvanced)[] ConfigurationData =
+    [
+        (101, "recovery interval (min)", 0, 0, 32767, 0, "Maximum recovery interval in minutes", true, true),
+        (102, "allow updates", 0, 0, 1, 0, "Allow updates to system tables", true, false),
+        (103, "user connections", 0, 0, 32767, 0, "Number of user connections allowed", false, true),
+        (106, "locks", 0, 5000, 2147483647, 0, "Number of locks for all users", false, true),
+        (107, "open objects", 0, 0, 2147483647, 0, "Number of open database objects", false, true),
+        (109, "fill factor (%)", 0, 0, 100, 0, "Default fill factor percentage", false, true),
+        (114, "disallow results from triggers", 0, 0, 1, 0, "Disallow returning results from triggers", true, true),
+        (115, "nested triggers", 1, 0, 1, 1, "Allow triggers to be invoked within triggers", true, false),
+        (116, "server trigger recursion", 1, 0, 1, 1, "Allow recursion for server level triggers", true, false),
+        (117, "remote access", 1, 0, 1, 1, "Allow remote access", false, false),
+        (124, "default language", 0, 0, 9999, 0, "default language", true, false),
+        (400, "cross db ownership chaining", 0, 0, 1, 0, "Allow cross db ownership chaining", true, false),
+        (503, "max worker threads", 0, 128, 65535, 0, "Maximum worker threads", true, true),
+        (505, "network packet size (B)", 4096, 512, 32767, 4096, "Network packet size", true, true),
+        (518, "show advanced options", 0, 0, 1, 0, "show advanced options", true, false),
+        (542, "remote proc trans", 0, 0, 1, 0, "Create DTC transaction for remote procedures", true, false),
+        (544, "c2 audit mode", 0, 0, 1, 0, "c2 audit mode", false, true),
+        (1126, "default full-text language", 1033, 0, 2147483647, 1033, "default full-text language", true, true),
+        (1127, "two digit year cutoff", 2049, 1753, 9999, 2049, "two digit year cutoff", true, true),
+        (1505, "index create memory (KB)", 0, 704, 2147483647, 0, "Memory for index create sorts (kBytes)", true, true),
+        (1517, "priority boost", 0, 0, 1, 0, "Priority boost", false, true),
+        (1519, "remote login timeout (s)", 10, 0, 2147483647, 10, "remote login timeout", true, false),
+        (1520, "remote query timeout (s)", 600, 0, 2147483647, 600, "remote query timeout", true, false),
+        (1531, "cursor threshold", -1, -1, 2147483647, -1, "cursor threshold", true, true),
+        (1532, "set working set size", 0, 0, 1, 0, "set working set size", false, true),
+        (1534, "user options", 0, 0, 32767, 0, "user options", true, false),
+        (1535, "affinity mask", 0, -2147483648, 2147483647, 0, "affinity mask", true, true),
+        (1536, "max text repl size (B)", 65536, -1, 2147483647, 65536, "Maximum size of a text field in replication.", true, false),
+        (1537, "media retention", 0, 0, 365, 0, "Tape retention period in days", true, true),
+        (1538, "cost threshold for parallelism", 5, 0, 32767, 5, "cost threshold for parallelism", true, true),
+        (1539, "max degree of parallelism", 8, 0, 32767, 8, "maximum degree of parallelism", true, true),
+        (1540, "min memory per query (KB)", 1024, 512, 2147483647, 1024, "minimum memory per query (kBytes)", true, true),
+        (1541, "query wait (s)", -1, -1, 2147483647, -1, "maximum time to wait for query memory (s)", true, true),
+        (1543, "min server memory (MB)", 0, 0, 2147483647, 16, "Minimum size of server memory (MB)", true, true),
+        (1544, "max server memory (MB)", 4096, 128, 2147483647, 4096, "Maximum size of server memory (MB)", true, true),
+        (1545, "query governor cost limit", 0, 0, 2147483647, 0, "Maximum estimated cost allowed by query governor", true, true),
+        (1546, "lightweight pooling", 0, 0, 1, 0, "User mode scheduler uses lightweight pooling", false, true),
+        (1547, "scan for startup procs", 0, 0, 1, 0, "scan for startup stored procedures", false, true),
+        (1549, "affinity64 mask", 0, -2147483648, 2147483647, 0, "affinity64 mask", true, true),
+        (1550, "affinity I/O mask", 0, -2147483648, 2147483647, 0, "affinity I/O mask", false, true),
+        (1551, "affinity64 I/O mask", 0, -2147483648, 2147483647, 0, "affinity64 I/O mask", false, true),
+        (1555, "transform noise words", 0, 0, 1, 0, "Transform noise words for full-text query", true, true),
+        (1556, "precompute rank", 0, 0, 1, 0, "Use precomputed rank for full-text query", true, true),
+        (1557, "PH timeout (s)", 60, 1, 3600, 60, "DB connection timeout for full-text protocol handler (s)", true, true),
+        (1562, "clr enabled", 0, 0, 1, 0, "CLR user code execution enabled in the server", true, false),
+        (1563, "max full-text crawl range", 4, 0, 256, 4, "Maximum  crawl ranges allowed in full-text indexing", true, true),
+        (1564, "ft notify bandwidth (min)", 0, 0, 32767, 0, "Number of reserved full-text notifications buffers", true, true),
+        (1565, "ft notify bandwidth (max)", 100, 0, 32767, 100, "Max number of full-text notifications buffers", true, true),
+        (1566, "ft crawl bandwidth (min)", 0, 0, 32767, 0, "Number of reserved full-text crawl buffers", true, true),
+        (1567, "ft crawl bandwidth (max)", 100, 0, 32767, 100, "Max number of full-text crawl buffers", true, true),
+        (1568, "default trace enabled", 1, 0, 1, 1, "Enable or disable the default trace", true, true),
+        (1569, "blocked process threshold (s)", 0, 0, 86400, 0, "Blocked process reporting threshold", true, true),
+        (1570, "in-doubt xact resolution", 0, 0, 2, 0, "Recovery policy for DTC transactions with unknown outcome", true, true),
+        (1576, "remote admin connections", 0, 0, 1, 0, "Dedicated Admin Connections are allowed from remote clients", true, false),
+        (1577, "common criteria compliance enabled", 0, 0, 1, 0, "Common Criteria compliance mode enabled", false, true),
+        (1578, "EKM provider enabled", 0, 0, 1, 0, "Enable or disable EKM provider", true, true),
+        (1579, "backup compression default", 0, 0, 1, 0, "Enable compression of backups by default", true, false),
+        (1580, "filestream access level", 0, 0, 2, 0, "Sets the FILESTREAM access level", true, false),
+        (1581, "optimize for ad hoc workloads", 0, 0, 1, 0, "When this option is set, plan cache size is further reduced for single-use adhoc OLTP workload.", true, true),
+        (1582, "access check cache bucket count", 0, 0, 65536, 0, "Default hash bucket count for the access check result security cache", true, true),
+        (1583, "access check cache quota", 0, 0, 2147483647, 0, "Default quota for the access check result security cache", true, true),
+        (1584, "backup checksum default", 0, 0, 1, 0, "Enable checksum of backups by default", true, false),
+        (1585, "automatic soft-NUMA disabled", 0, 0, 1, 0, "Automatic soft-NUMA is enabled by default", false, true),
+        (1586, "external scripts enabled", 0, 0, 1, 0, "Allows execution of external scripts", true, false),
+        (1587, "clr strict security", 1, 0, 1, 1, "CLR strict security enabled in the server", true, true),
+        (1588, "column encryption enclave type", 0, 0, 2, 0, "Type of enclave used for computations on encrypted columns", false, false),
+        (1589, "tempdb metadata memory-optimized", 0, 0, 1, 0, "Tempdb metadata memory-optimized is disabled by default.", false, true),
+        (1591, "ADR cleaner retry timeout (min)", 15, 0, 32767, 15, "ADR cleaner retry timeout.", true, true),
+        (1592, "ADR Preallocation Factor", 4, 0, 32767, 4, "ADR Preallocation Factor.", true, true),
+        (1593, "version high part of SQL Server", 1114112, -2147483648, 2147483647, 1114112, "version high part of SQL Server that model database copied for", true, true),
+        (1594, "version low part of SQL Server", 73072641, -2147483648, 2147483647, 73072641, "version low part of SQL Server that model database copied for", true, true),
+        (1595, "Data processed daily limit in TB", 2147483647, 0, 2147483647, 2147483647, "SQL On-demand data processed daily limit in TB", true, false),
+        (1596, "Data processed weekly limit in TB", 2147483647, 0, 2147483647, 2147483647, "SQL On-demand data processed weekly limit in TB", true, false),
+        (1597, "Data processed monthly limit in TB", 2147483647, 0, 2147483647, 2147483647, "SQL On-demand data processed monthly limit in TB", true, false),
+        (1598, "ADR Cleaner Thread Count", 1, 1, 32767, 1, "Max number of threads ADR cleaner can assign.", true, true),
+        (1599, "hardware offload enabled", 0, 0, 1, 0, "Enable hardware offloading on the server", false, true),
+        (1600, "hardware offload config", 0, 0, 255, 0, "Configure hardware offload accelerator", false, true),
+        (1601, "hardware offload mode", 0, 0, 255, 0, "Configure hardware offload accelerator mode", false, true),
+        (1602, "backup compression algorithm", 0, 0, 3, 0, "Configure default backup compression algorithm", true, false),
+        (1603, "ADR cleaner lock timeout (s)", 5, 1, 32767, 5, "ADR cleaner lock timeout", true, true),
+        (1606, "SLOG memory quota (%)", 75, 1, 100, 75, "SLOG memory quota percentage", true, true),
+        (1609, "max RPC request params (KB)", 0, 0, 2147483647, 0, "Maximum memory for RPC request parameters (kBytes)", true, true),
+        (1610, "max UCS send boxcars", 256, 256, 2048, 256, "Maximum number of UCS boxcars for sending messages.", false, true),
+        (1611, "availability group commit time (ms)", 0, 0, 10, 0, "Configure availability group commit time in milliseconds for SQL Server only.", true, true),
+        (1612, "tiered memory enabled", 0, 0, 1, 0, "tiered memory memory-optimized is disabled by default.", false, true),
+        (1613, "max server tiered memory (MB)", 2147483647, 0, 2147483647, 2147483647, "Maximum size of server tiered memory (MB)", false, true),
+        (16384, "Agent XPs", 0, 0, 1, 0, "Enable or disable Agent XPs", true, true),
+        (16386, "Database Mail XPs", 0, 0, 1, 0, "Enable or disable Database Mail XPs", true, true),
+        (16387, "SMO and DMO XPs", 1, 0, 1, 1, "Enable or disable SMO and DMO XPs", true, true),
+        (16388, "Ole Automation Procedures", 0, 0, 1, 0, "Enable or disable Ole Automation Procedures", true, true),
+        (16390, "xp_cmdshell", 0, 0, 1, 0, "Enable or disable command shell", true, true),
+        (16391, "Ad Hoc Distributed Queries", 0, 0, 1, 0, "Enable or disable Ad Hoc Distributed Queries", true, true),
+        (16392, "Replication XPs", 0, 0, 1, 0, "Enable or disable Replication XPs", true, true),
+        (16393, "contained database authentication", 0, 0, 1, 0, "Enables contained databases and contained authentication", true, false),
+        (16394, "hadoop connectivity", 0, 0, 8, 0, "Configure SQL Server to connect to external Hadoop or Microsoft Azure storage blob data sources through PolyBase", true, false),
+        (16395, "polybase network encryption", 1, 0, 1, 1, "Configure SQL Server to encrypt control and data channels when using PolyBase", true, false),
+        (16396, "remote data archive", 0, 0, 1, 0, "Allow the use of the REMOTE_DATA_ARCHIVE data access for databases", true, false),
+        (16397, "allow polybase export", 0, 0, 1, 0, "Allows writing into an external table using PolyBase", true, false),
+        (16398, "allow filesystem enumeration", 1, 0, 1, 1, "Allow enumeration of filesystem", true, true),
+        (16399, "polybase enabled", 0, 0, 1, 0, "Configure SQL Server to connect to external data sources through PolyBase", true, false),
+        (16400, "suppress recovery model errors", 0, 0, 1, 0, "Return warning instead of error for unsupported ALTER DATABASE SET RECOVERY command", true, true),
+        (16401, "openrowset auto_create_statistics", 1, 0, 1, 1, "Enable or disable auto create statistics for openrowset sources.", true, true),
+        (16402, "external rest endpoint enabled", 0, 0, 1, 0, "Enable or disable invocations of external REST endpoints", true, false),
+        (16403, "external xtp dll gen util enabled", 0, 0, 1, 0, "Enable or disable using external xtp dll generation via HkDllGen.exe", true, false),
+        (16404, "external AI runtimes enabled", 0, 0, 1, 0, "Enable or disable using external AI runtimes", true, false),
+        (16405, "allow server scoped db credentials", 0, 0, 1, 0, "Enable or disable use of server managed identity in database scoped credentials", true, false),
+    ];
+
+    /// <summary>
+    /// The 106 rows projected by <c>sys.configurations</c>, materialized once
+    /// from <see cref="ConfigurationData"/> since server-configuration
+    /// metadata is fixed static catalog data (matching how the other
+    /// constant-row catalog views reuse a shared array). Independent of the
+    /// database argument — <c>sys.configurations</c> is server-scoped.
+    /// </summary>
+    private static readonly SqlValue[][] ConfigurationsRows = BuildConfigurationsRows();
+
+    private static SqlValue[][] BuildConfigurationsRows()
+    {
+        var rows = new SqlValue[ConfigurationData.Length][];
+        for (var i = 0; i < ConfigurationData.Length; i++)
+        {
+            var (id, name, value, minimum, maximum, valueInUse, description, isDynamic, isAdvanced) = ConfigurationData[i];
+            rows[i] =
+            [
+                SqlValue.FromInt32(id),
+                SqlValue.FromNVarchar(name),
+                SqlValue.FromInt64(value),
+                SqlValue.FromInt64(minimum),
+                SqlValue.FromInt64(maximum),
+                SqlValue.FromInt64(valueInUse),
+                SqlValue.FromNVarchar(description),
+                SqlValue.FromBoolean(isDynamic),
+                SqlValue.FromBoolean(isAdvanced),
+            ];
+        }
+
+        return rows;
     }
 
     /// <summary>

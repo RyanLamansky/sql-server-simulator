@@ -358,4 +358,83 @@ public sealed class CatalogViewTests
         else
             IsTrue(reader.IsDBNull(0));
     }
+
+    [TestMethod]
+    public void SysConfigurations_AgentXps_ValueInUseIsBigintZero()
+    {
+        // The exact query SSMS's SMO issues during its Object-Explorer
+        // database-node preamble. Msg 208 here aborts the request before the
+        // database enumeration, so the row must resolve and surface bigint.
+        using var reader = new Simulation().ExecuteReader(
+            "select value_in_use from sys.configurations where configuration_id = 16384");
+        IsTrue(reader.Read());
+        AreEqual(typeof(long), reader.GetFieldType(0));
+        AreEqual(0L, reader.GetInt64(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void SysConfigurations_HasHundredSixRows()
+        => AreEqual(106, new Simulation().ExecuteScalar("select count(*) from sys.configurations"));
+
+    [TestMethod]
+    public void SysConfigurations_ColumnShape()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select configuration_id, name, value, minimum, maximum,
+                   value_in_use, description, is_dynamic, is_advanced
+            from sys.configurations where configuration_id = 16384
+            """);
+        AreEqual(9, reader.FieldCount);
+        IsTrue(reader.Read());
+        AreEqual(typeof(int), reader.GetFieldType(0));
+        AreEqual(typeof(string), reader.GetFieldType(1));
+        AreEqual(typeof(long), reader.GetFieldType(2));
+        AreEqual(typeof(long), reader.GetFieldType(3));
+        AreEqual(typeof(long), reader.GetFieldType(4));
+        AreEqual(typeof(long), reader.GetFieldType(5));
+        AreEqual(typeof(string), reader.GetFieldType(6));
+        AreEqual(typeof(bool), reader.GetFieldType(7));
+        AreEqual(typeof(bool), reader.GetFieldType(8));
+    }
+
+    [TestMethod]
+    public void SysConfigurations_AgentXpsRow_MatchesReference()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select configuration_id, name, value, minimum, maximum,
+                   value_in_use, description, is_dynamic, is_advanced
+            from sys.configurations where configuration_id = 16384
+            """);
+        IsTrue(reader.Read());
+        AreEqual(16384, reader.GetInt32(0));
+        AreEqual("Agent XPs", reader.GetString(1));
+        AreEqual(0L, reader.GetInt64(2));
+        AreEqual(0L, reader.GetInt64(3));
+        AreEqual(1L, reader.GetInt64(4));
+        AreEqual(0L, reader.GetInt64(5));
+        AreEqual("Enable or disable Agent XPs", reader.GetString(6));
+        IsTrue(reader.GetBoolean(7));
+        IsTrue(reader.GetBoolean(8));
+    }
+
+    [TestMethod]
+    public void SysConfigurations_ClrEnabled_ByName()
+        => AreEqual(1562, new Simulation().ExecuteScalar(
+            "select configuration_id from sys.configurations where name = 'clr enabled'"));
+
+    [TestMethod]
+    public void SysConfigurations_XpCmdshell_ByName()
+        => AreEqual(16390, new Simulation().ExecuteScalar(
+            "select configuration_id from sys.configurations where name = 'xp_cmdshell'"));
+
+    [TestMethod]
+    public void SysConfigurations_AgentXps_CountByNameIsOne()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            "select count(*) from sys.configurations where name = 'Agent XPs'"));
+
+    [TestMethod]
+    public void SysConfigurations_ReadableViaThreePartMasterName()
+        => AreEqual(106, new Simulation().ExecuteScalar(
+            "select count(*) from master.sys.configurations"));
 }
