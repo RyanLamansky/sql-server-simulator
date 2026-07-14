@@ -83,15 +83,18 @@ public sealed class SelectListStringAliasTests
     }
 
     /// <summary>
-    /// Double-quoted delimited identifiers (QUOTED_IDENTIFIER) aren't
-    /// tokenized at all in this simulator — `"` is an unrecognized
-    /// character everywhere, not just as an alias. That's a language-wide
-    /// gap orthogonal to select-list aliases; string-literal (' / N') and
-    /// bracket ([]) delimited aliases are the supported forms.
+    /// Double-quoted delimited identifiers — under the default
+    /// <c>QUOTED_IDENTIFIER ON</c>, <c>"X"</c> is an identifier alias
+    /// exactly like <c>[X]</c>. The full QUOTED_IDENTIFIER surface
+    /// (including the OFF string-literal reading) is covered in
+    /// <c>QuotedIdentifierTests</c>.
     /// </summary>
     [TestMethod]
-    public void As_DoubleQuotedIdentifier_RaisesMsg102()
-        => _ = new Simulation().AssertSqlError("select 1 as \"X\"", 102);
+    public void As_DoubleQuotedIdentifier_IsIdentifierAlias()
+    {
+        var (name, _) = FirstColumn("select 1 as \"X Y\"");
+        AreEqual("X Y", name);
+    }
 
     [TestMethod]
     public void As_EmptyLiteral_RaisesMsg1038()

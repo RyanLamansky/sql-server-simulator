@@ -67,13 +67,21 @@ internal sealed class Value : Expression
             case AtAtKeyword.TextSize:
                 this.Constant = SqlValue.FromInt32(-1);
                 return;
-            case AtAtKeyword.Options:
-                this.Constant = SqlValue.FromInt32(5432);
-                return;
         }
 
         throw new NotSupportedException($"Simulator doesn't recognize {doubleAtPrefixedString}.");
     }
+
+    /// <summary>
+    /// Builds the <c>@@OPTIONS</c> constant: SQL Server 2025's fresh-session
+    /// default 5432 (probe-confirmed 2026-05-22), with the QUOTED_IDENTIFIER
+    /// bit (256) tracking the parse-position setting — the one component the
+    /// simulator's <c>SET</c> surface actually models. Baking the value at
+    /// parse is correct because QUOTED_IDENTIFIER is itself a parse-time
+    /// option and the plan cache keys on it.
+    /// </summary>
+    public static Value FromAtAtOptions(ParserContext context) =>
+        new(SqlValue.FromInt32(context.QuotedIdentifiers ? 5432 : 5432 & ~256));
 
     public override SqlValue Run(RuntimeContext runtime) => this.Constant;
 

@@ -17,8 +17,17 @@ namespace SqlServerSimulator.Parser;
 /// a typed value), and result sets propagate up. The frame also carries the
 /// procedure name for <c>ERROR_PROCEDURE()</c> attribution.
 /// </remarks>
-internal sealed class ProcFrame(string procedureName)
+internal sealed class ProcFrame(string procedureName, bool isDynamicSql = false)
 {
+    /// <summary>
+    /// True when this frame wraps a dynamic-SQL batch (<c>EXEC('…')</c> /
+    /// <c>sp_executesql</c>) rather than a real stored-procedure body. The
+    /// two differ in <c>SET QUOTED_IDENTIFIER</c> handling (probe-confirmed):
+    /// dynamic SQL honors the SET within its own batch (reverting at exit),
+    /// while a procedure body ignores it entirely.
+    /// </summary>
+    public readonly bool IsDynamicSql = isDynamicSql;
+
     /// <summary>
     /// Procedure being executed — surfaces in <c>ERROR_PROCEDURE()</c> when
     /// an exception is caught inside the body's dispatch. Not currently

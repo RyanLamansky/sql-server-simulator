@@ -86,6 +86,20 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int LockTimeoutMillis = -1;
 
     /// <summary>
+    /// Session-scoped <c>QUOTED_IDENTIFIER</c> setting: <see langword="true"/>
+    /// (the default, matching SqlClient connections — probe-confirmed
+    /// <c>@@OPTIONS &amp; 256</c> is set on a fresh session) tokenizes
+    /// <c>"…"</c> as a delimited identifier; <see langword="false"/> as a
+    /// varchar string literal. Mutated by top-level
+    /// <c>SET QUOTED_IDENTIFIER</c> / <c>SET ANSI_DEFAULTS</c> — even from a
+    /// never-taken conditional branch, because SQL Server applies the option
+    /// at parse time (probe-confirmed). SETs inside dynamic SQL or a
+    /// procedure body do NOT write here (dynamic SQL scopes the change to
+    /// its own batch; procedure bodies ignore it entirely).
+    /// </summary>
+    internal bool QuotedIdentifiers = true;
+
+    /// <summary>
     /// Session-scoped transaction-isolation level. Default is
     /// <see cref="IsolationLevel.ReadCommitted"/> (matches SQL Server's
     /// connection-default). Mutated by

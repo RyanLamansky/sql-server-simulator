@@ -138,7 +138,7 @@ internal abstract partial class Collation
                 + (flags.HasFlag(CollationFlags.WidthSensitive) ? 0 : 0x20000);
         var versionOrdinal = version switch { 90 => 1, 100 => 2, 140 => 3, 160 => 4, _ => 0 };
 
-        var hasRegistered = Network.TdsCollationRegistry.ByPrefix.TryGetValue(prefix, out var registered);
+        var hasRegistered = LcidAndCodePageByPrefix.TryGetValue(prefix, out var registered);
         var lcid = hasRegistered ? registered.Lcid : 0x0409;
         var ansiCodePage = flags.HasFlag(CollationFlags.Utf8)
             ? 65001

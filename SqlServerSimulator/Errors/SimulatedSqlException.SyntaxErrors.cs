@@ -8,11 +8,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MissingEndCommentMark() => new("Missing end comment mark '*/'.", 113, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 105: a string literal opened with <c>'</c> was
-    /// never closed before end of input.
+    /// Mimics SQL Server error 105: a string literal or quote-delimited
+    /// identifier opened with <c>'</c> or <c>"</c> was never closed before
+    /// end of input. Real SQL Server echoes the scanned body in the message
+    /// (probe-confirmed for the <c>"</c> form against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException UnclosedStringLiteral() =>
-        new("Unclosed quotation mark after the character string.", 105, 15, 1);
+    internal static SimulatedSqlException UnclosedStringLiteral(string body) =>
+        new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1);
 
     internal static SimulatedSqlException SyntaxErrorNearKeyword(ReservedKeyword token) => new($"Incorrect syntax near the keyword '{token}'.", 156, 15, 1);
 

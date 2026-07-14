@@ -53,6 +53,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     private int index;
 
     /// <summary>
+    /// The effective <c>QUOTED_IDENTIFIER</c> setting at the current parse
+    /// position: <see langword="true"/> tokenizes <c>"…"</c> as a delimited
+    /// identifier, <see langword="false"/> as a varchar string literal.
+    /// Seeded from the session (<c>SET QUOTED_IDENTIFIER</c> persists across
+    /// batches); flipped mid-batch by the SET parser at the statement's
+    /// textual position regardless of control flow — SQL Server applies this
+    /// option at parse time, so a SET inside a never-taken IF branch still
+    /// affects everything after it in the batch (probe-confirmed).
+    /// </summary>
+    public bool QuotedIdentifiers = command.Connection!.QuotedIdentifiers;
+
+    /// <summary>
     /// The most recently identified token in the command string.
     /// </summary>
     public Token? Token;
@@ -292,7 +304,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     [MemberNotNullWhen(true, nameof(Token))]
     public bool MoveNext()
     {
-        while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation) is Token token)
+        while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers) is Token token)
         {
             if (token is Whitespace or Comment)
                 continue;

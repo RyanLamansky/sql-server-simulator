@@ -14,3 +14,31 @@ The dispatch loop drains optional `;`s at the top of each iteration and trusts e
 - `ConsumeToStatementBoundary` — the principal-DDL parse-and-discard tail (`FROM LOGIN` / `WITH PASSWORD` / `DEFAULT_SCHEMA`).
 
 This is why semicolon-less statement sequences work for the full set, e.g. `select 1\nexec xp_msver`, `declare @x int\nuse master`, `if 1=1 select 1\nfetch c`. Before unification these predicates had drifted (EXEC/EXECUTE missing from several), so SSMS's semicolon-less AlwaysOn probe died with Msg 102.
+
+# Double-quoted identifiers / `SET QUOTED_IDENTIFIER`
+
+`"…"` is dual-natured, switched by the session `QUOTED_IDENTIFIER` option (**default ON**). The tokenizer's `NextToken(…, bool quotedIdentifiers)` reads the parser flag threaded from `ParserContext.QuotedIdentifiers` (seeded from `SimulatedDbConnection.QuotedIdentifiers`):
+
+- **ON** — `"foo"` tokenizes as a `DelimitedIdentifier` (`Parser/Tokens/DelimitedIdentifier.cs`, the renamed `BracketDelimitedString`), identical to `[foo]`. `""` is the embedded-quote escape; `[`, `]`, `'` are ordinary characters inside. So `"a""b"` → identifier `a"b`, and `"a]b'c [d"` is that exact name. Reserved words (`"select"`) and spaces-only (`"   "`) are legal identifiers. An unresolvable quoted column raises Msg 207 (`Invalid column name '…'`).
+- **OFF** — `"foo"` tokenizes as a varchar `Literal`, typed exactly like `'foo'` (same collation/coercibility). `""` is the escape, so `"a""b"` → string `a"b`, `"it's"` → `it's`. Empty `""` is a valid **empty string**, not an error. Concatenation and string-literal aliasing work (`"a" + 'b' + "c"` → `abc`; `SELECT 1 AS "X Y"` names the column via string-literal-alias). Brackets `[…]` stay identifiers regardless.
+
+`N` is **not** a Unicode prefix for double quotes (unlike `N'…'`): `N"foo"` tokenizes as identifier `N` followed by `"foo"`, so in a select list it reads as column `N` aliased `foo` → Msg 207 for `N`.
+
+Empty `""` (ON) and properly-closed empty `[]` raise **Msg 1038** (class 15, **state 4**, `EmptyColumnAlias()`) at the *tokenizer* level — so at every identifier position (`SELECT 1 AS ""`, `SELECT [] FROM t`, `CREATE TABLE ""(c int)`), not only select-list aliases. An unclosed `"` (either mode) raises **Msg 105** via `UnclosedStringLiteral(body)`, whose message echoes the scanned body: `Unclosed quotation mark after the character string '<body>'.` (the `'…'` / `N'…'` / `"…"` scanners share `ParseQuotedBody`, hence one Msg-105 shape).
+
+`@@OPTIONS` (`Parser/Expressions/Value.cs` `FromAtAtOptions`) returns 5432 with **bit 256** tracking the parse-position QI setting — `@@OPTIONS & 256` is 256 under ON, 0 under OFF. The **plan cache** key (`PlanCacheKey`, `Simulation/Simulation.cs`) includes the `QuotedIdentifiers` bool, so the identical text `SELECT "abc"` caches separately under ON vs OFF and never replays the wrong reading.
+
+## Scoping — parse-time, textual order
+
+`SET QUOTED_IDENTIFIER ON|OFF` and `SET ANSI_DEFAULTS ON|OFF` (whose bundle includes QI) apply through `ApplyQuotedIdentifierOption` (`Simulation/Simulation.Set.cs`), including the comma multi-option form (`SET QUOTED_IDENTIFIER, ANSI_NULLS OFF`). The application is **parse-time and NOT gated on skip-mode**, matching SQL Server:
+
+- **Textual order, not control flow** — a `SET` inside a never-taken branch still applies to everything textually after it: `IF 1 = 0 SET QUOTED_IDENTIFIER OFF; SELECT "deadlit"` returns the string `deadlit`. And at the top level the change also **persists to the session**, so a subsequent separate command reads `"…"` the same way.
+- **Forward-only** — a statement *before* the `SET` parses under the prior setting: with the session ON, `SELECT "a1"; SET QUOTED_IDENTIFIER OFF; SELECT "a2"` raises Msg 207 for `a1` (parsed as identifier before the flip).
+- **Top level → flips both** the in-flight tokenizer flag and the session setting (`SimulatedDbConnection.QuotedIdentifiers`), so it crosses command boundaries on the same connection.
+- **Dynamic SQL** (`EXEC('…')` / `sp_executesql`, marked by `ProcFrame.IsDynamicSql`) flips **only its own batch** — the session is unaffected (`@@OPTIONS & 256` unchanged afterward).
+- **Procedure / function / trigger bodies ignore the `SET` entirely** (SQL Server's "ignored in a stored procedure" rule) — neither the body's own reading nor the session changes.
+
+## Divergences
+
+- **Per-object creation-time QI capture is NOT modeled.** Real SQL Server stamps procedures / views / triggers / tables with the `QUOTED_IDENTIFIER` in effect at CREATE time (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes their bodies under that captured setting regardless of the caller's session. The simulator re-parses bodies under the **executing session's** current setting instead. Rare legacy pattern (creating an object under a non-default QI and relying on the stamp); most code runs everything under the default ON.
+- **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).

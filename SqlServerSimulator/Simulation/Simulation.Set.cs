@@ -68,19 +68,28 @@ partial class Simulation
         // Multi-option comma form is OnOff-only: SET opt1, opt2, ... ON|OFF.
         if (firstKind == SetOptionKind.OnOff && context.Token is Operator { Character: ',' })
         {
+            var affectsQuotedIdentifier = IsQuotedIdentifierOption(firstName);
             while (context.Token is Operator { Character: ',' })
             {
                 if (context.GetNextRequired() is not UnquotedString next)
                     return false;
                 if (!RecognizedOptions.TryGetValue(next.Value, out var nextKind) || nextKind != SetOptionKind.OnOff)
                     throw SimulatedSqlException.UnrecognizedSetOption(next.Value);
+                affectsQuotedIdentifier |= IsQuotedIdentifierOption(next.Value);
                 context.MoveNextRequired();
             }
-            return context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } commaOnOff)
+                return false;
+            if (affectsQuotedIdentifier)
+                ApplyQuotedIdentifierOption(context, commaOnOff.Keyword == Keyword.On);
+            return true;
         }
 
         if (!ConsumeValueForKind(context, firstKind))
             return false;
+
+        if (IsQuotedIdentifierOption(firstName) && context.Token is ReservedKeyword { Keyword: var qiOnOff })
+            ApplyQuotedIdentifierOption(context, qiOnOff == Keyword.On);
 
         // LOCK_TIMEOUT is the one Integer-shape option that has semantic
         // effect — it drives lock-acquisition wait via
@@ -113,6 +122,45 @@ partial class Simulation
     }
 
     /// <summary>
+    /// True when <paramref name="optionName"/> is a SET option that carries
+    /// the <c>QUOTED_IDENTIFIER</c> semantic — the option itself, or
+    /// <c>ANSI_DEFAULTS</c>, whose bundle includes it (probe-confirmed:
+    /// <c>SET ANSI_DEFAULTS OFF</c> flips <c>"…"</c> to string-literal
+    /// tokenization).
+    /// </summary>
+    private static bool IsQuotedIdentifierOption(string optionName) =>
+        optionName.Equals("QUOTED_IDENTIFIER", StringComparison.OrdinalIgnoreCase)
+        || optionName.Equals("ANSI_DEFAULTS", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Applies a parsed <c>SET QUOTED_IDENTIFIER</c> (or <c>ANSI_DEFAULTS</c>)
+    /// with SQL Server's parse-time scoping, probe-confirmed against SQL
+    /// Server 2025:
+    /// <list type="bullet">
+    /// <item>Runs at parse regardless of control flow — deliberately NOT
+    /// gated on <c>IsSkipping</c>, because a SET inside a never-taken IF
+    /// branch still applies to everything after it in the batch AND persists
+    /// to the session.</item>
+    /// <item>Top-level batches flip both the in-flight tokenizer flag and the
+    /// session setting.</item>
+    /// <item>Dynamic SQL (<c>EXEC('…')</c> / <c>sp_executesql</c>) flips only
+    /// its own batch's flag — the change reverts when the dynamic batch
+    /// ends.</item>
+    /// <item>Procedure / function / trigger bodies ignore the statement
+    /// entirely (the documented "ignored in a stored procedure" rule).</item>
+    /// </list>
+    /// </summary>
+    private static void ApplyQuotedIdentifierOption(ParserContext context, bool on)
+    {
+        var batch = context.Batch;
+        if (batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false })
+            return;
+        context.QuotedIdentifiers = on;
+        if (batch.ProcFrame is null)
+            context.Connection.QuotedIdentifiers = on;
+    }
+
+    /// <summary>
     /// Distinguishes Msg 195 (clearly meant as a SET option — unknown name
     /// followed by a recognizable ON/OFF/value) from Msg 102 (unknown name
     /// followed by nothing recognizable — propagates through the caller's
@@ -130,7 +178,7 @@ partial class Simulation
         var peeked = context.GetNextOptional();
         context.RestoreCheckpoint(checkpoint);
         if (peeked is ReservedKeyword { Keyword: Keyword.On or Keyword.Off }
-            or Numeric or Literal or UnquotedString or BracketDelimitedString)
+            or Numeric or Literal or UnquotedString or DelimitedIdentifier)
         {
             throw SimulatedSqlException.UnrecognizedSetOption(nameValue);
         }

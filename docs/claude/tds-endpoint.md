@@ -21,7 +21,7 @@ Everything lives in `Network/` (internal) except the public `SimulatedNetworkLis
 - `Login7Request` — parses TDS version, packet size (accepted when 512–32767 and acked via ENVCHANGE type 4), hostname/username/password (de-obfuscated)/appname/database. An **empty** requested database maps to the default (user) database; **any non-empty name — including `master` — resolves genuinely through `ChangeDatabase`** (master is a real seeded database now, so `Database=master` lands in master rather than being aliased to the default). A `ChangeDatabase` failure becomes the probe-confirmed login pair — Msg 4060 severity 11 (`Cannot open database "x" requested by the login. The login failed.`, double-quoted name) then Msg 18456 severity 14 — before the connection closes. Mid-session `USE` keeps the engine's Msg 911.
 - `TdsTokenWriter` — growable token buffer with packetizing flush; the session flushes after every row so memory stays bounded by max(row, packet).
 - `TdsTypeCodec` — COLMETADATA TYPE_INFO + ROW value encoding (details below). Schema validated up front so unsupported column types fail as an ERROR token, never a mid-stream desync.
-- `TdsCollationCodec` + `TdsCollationRegistry` — the COLMETADATA 5-byte collation structure, derived generatively (details below).
+- `TdsCollationCodec` — the COLMETADATA 5-byte collation structure, derived generatively from the collation name plus the core-layer `Collation.LcidAndCodePageByPrefix` probe table (details below).
 
 ## Batch loop semantics
 
@@ -70,7 +70,7 @@ COLMETADATA's 5 bytes = packed uint (LCID bits 0–19, flags 20–27, version ni
 - `_UTF8` → bit26, and it **displaces** the binary bits (`_BIN2_UTF8` reports 0x40, not 0x60); sensitivity bits are retained. Code page becomes 65001.
 - `_SC` / `_VSS` set no wire bit — the structure is lossy (5540 names → 3987 distinct tuples).
 - Version nibble from the name's number token: none/SQL_*→0, 90→1, 100→2, 140→3, **160→4**.
-- LCID + ANSI code page per name-prefix from `TdsCollationRegistry` (probe-derived, one entry per `KnownPrefixes` key); SQL_* code page comes from the CPnnn token (CP1→1252). Anomaly: `SQL_Latin1_General_CP1254_*` reports the Turkish LCID 0x041F (special-cased).
+- LCID + ANSI code page per name-prefix from the core-layer `Collation.LcidAndCodePageByPrefix` (probe-derived, one entry per `KnownPrefixes` key); SQL_* code page comes from the CPnnn token (CP1→1252). Anomaly: `SQL_Latin1_General_CP1254_*` reports the Turkish LCID 0x041F (special-cased).
 - Baseline `SQL_Latin1_General_CP1_CI_AS` derives to the canonical `09 04 D0 00 34` (sortId 52).
 
 ## Login response shape

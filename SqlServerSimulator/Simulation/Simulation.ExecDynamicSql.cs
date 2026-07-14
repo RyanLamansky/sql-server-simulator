@@ -362,7 +362,7 @@ partial class Simulation
         var variables = preDeclaredVariables is null
             ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
             : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
-        var procFrame = new ProcFrame("<dynamic-sql>");
+        var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
         var innerBatch = new BatchContext(dynCommand, variables, procFrame);
 
         connection.NestingLevel++;

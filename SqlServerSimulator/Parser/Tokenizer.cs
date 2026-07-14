@@ -40,9 +40,10 @@ static class Tokenizer
     /// <param name="command">The command from which a token is produced.</param>
     /// <param name="index">The position of the next un-read character (0 to begin); updated to the next un-read position past the returned token.</param>
     /// <param name="activeCollation">Collation tagged onto string-literal <see cref="SqlValue"/>s; supplied by the caller's active <see cref="Database"/>.</param>
+    /// <param name="quotedIdentifiers">The effective <c>QUOTED_IDENTIFIER</c> setting at this parse position: <see langword="true"/> (the default) tokenizes <c>"…"</c> as a delimited identifier, <see langword="false"/> as a varchar string literal. Threaded from <see cref="ParserContext.QuotedIdentifiers"/>.</param>
     /// <returns>The next token, or null if the end of <paramref name="command"/> has been reached.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect or unsupported syntax.</exception>
-    public static Token? NextToken(string command, ref int index, Collation activeCollation) =>
+    public static Token? NextToken(string command, ref int index, Collation activeCollation, bool quotedIdentifiers = true) =>
         index >= command.Length ? null : command[index] switch
         {
             ' ' or '\r' or '\n' or '\t' => ParseWhitespace(command, ref index),
@@ -51,11 +52,13 @@ static class Tokenizer
             '0' when index + 1 < command.Length && (command[index + 1] == 'x' || command[index + 1] == 'X') => ParseHexLiteral(command, ref index),
             >= '0' and <= '9' => ParseNumeric(command, ref index),
             '\'' => ParseStringLiteral(command, ref index, activeCollation),
+            '"' when quotedIdentifiers => ParseQuoteDelimitedIdentifier(command, ref index),
+            '"' => ParseDoubleQuotedStringLiteral(command, ref index, activeCollation),
             '@' => ParseAtOrDoubleAtPrefixedString(command, ref index),
             '#' => ParseHashPrefixedName(command, ref index),
             '-' => ParseMinusOrComment(command, ref index),
             '/' => ParseForwardSlashOrComment(command, ref index),
-            '[' => ParseBracketDelimitedString(command, ref index),
+            '[' => ParseBracketDelimitedIdentifier(command, ref index),
             '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or ':' or '=' or '&' or '|' or '^' or '>' or '<' or '!' => new Operator(command, index++),
             '$' when IsDollarAction(command, index) => ParseDollarAction(command, ref index),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
@@ -223,28 +226,27 @@ static class Tokenizer
     private static Literal ParseStringLiteral(string command, ref int index, Collation activeCollation)
     {
         var start = index;
-        var builder = new StringBuilder();
-        while (++index < command.Length)
-        {
-            var c = command[index];
-            if (c != '\'')
-            {
-                _ = builder.Append(c);
-                continue;
-            }
+        var body = ParseQuotedBody(command, ref index, '\'');
+        var literalType = VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+        return new Literal(SqlValue.FromVarchar(literalType, body), command, start, index - start);
+    }
 
-            if (index + 1 < command.Length && command[index + 1] == '\'')
-            {
-                _ = builder.Append('\'');
-                index++;
-                continue;
-            }
-
-            var literalType = VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
-            return new Literal(SqlValue.FromVarchar(literalType, builder.ToString()), command, start, ++index - start);
-        }
-
-        throw SimulatedSqlException.UnclosedStringLiteral();
+    /// <summary>
+    /// Parses a double-quoted string literal — the <c>SET QUOTED_IDENTIFIER
+    /// OFF</c> reading of <c>"foo"</c>, with <c>""</c> as the embedded-quote
+    /// escape (an apostrophe needs no escape inside it). Typed exactly like a
+    /// single-quoted literal: <see cref="SqlType.Varchar"/> tagged with
+    /// <paramref name="activeCollation"/> at
+    /// <see cref="Coercibility.CoercibleDefault"/>. There is no N-prefixed
+    /// double-quoted form — <c>N"foo"</c> tokenizes as the identifier
+    /// <c>N</c> followed by this literal (probe-confirmed).
+    /// </summary>
+    private static Literal ParseDoubleQuotedStringLiteral(string command, ref int index, Collation activeCollation)
+    {
+        var start = index;
+        var body = ParseQuotedBody(command, ref index, '"');
+        var literalType = VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+        return new Literal(SqlValue.FromVarchar(literalType, body), command, start, index - start);
     }
 
     /// <summary>
@@ -259,28 +261,63 @@ static class Tokenizer
     {
         var start = index;
         index++; // skip the N
+        var body = ParseQuotedBody(command, ref index, '\'');
+        var literalType = NVarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+        return new Literal(SqlValue.FromNVarchar(literalType, body), command, start, index - start);
+    }
+
+    /// <summary>
+    /// Scans a quote-delimited body whose opening <paramref name="quote"/> is
+    /// at <paramref name="index"/>, unescaping the doubled-quote form, and
+    /// leaves <paramref name="index"/> one past the closing quote. Shared by
+    /// the <c>'…'</c> / <c>N'…'</c> / <c>"…"</c> literal parsers and the
+    /// quote-delimited-identifier parser — all four use the same
+    /// doubled-delimiter escape and the same Msg 105 on end-of-input
+    /// (probe-confirmed for <c>"</c> against SQL Server 2025, echoing the
+    /// scanned body in the message).
+    /// </summary>
+    private static string ParseQuotedBody(string command, ref int index, char quote)
+    {
         var builder = new StringBuilder();
         while (++index < command.Length)
         {
             var c = command[index];
-            if (c != '\'')
+            if (c != quote)
             {
                 _ = builder.Append(c);
                 continue;
             }
 
-            if (index + 1 < command.Length && command[index + 1] == '\'')
+            if (index + 1 < command.Length && command[index + 1] == quote)
             {
-                _ = builder.Append('\'');
+                _ = builder.Append(quote);
                 index++;
                 continue;
             }
 
-            var literalType = NVarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
-            return new Literal(SqlValue.FromNVarchar(literalType, builder.ToString()), command, start, ++index - start);
+            index++;
+            return builder.ToString();
         }
 
-        throw SimulatedSqlException.UnclosedStringLiteral();
+        throw SimulatedSqlException.UnclosedStringLiteral(builder.ToString());
+    }
+
+    /// <summary>
+    /// Parses a double-quote-delimited identifier — the default
+    /// <c>SET QUOTED_IDENTIFIER ON</c> reading of <c>"foo"</c>, with
+    /// <c>""</c> as the embedded-quote escape (<c>[</c> / <c>]</c> /
+    /// <c>'</c> are ordinary characters inside). An empty body raises
+    /// Msg 1038 — probe-confirmed at every identifier position, not just
+    /// aliases. Unclosed raises Msg 105, unlike the historically lenient
+    /// bracket form.
+    /// </summary>
+    private static DelimitedIdentifier ParseQuoteDelimitedIdentifier(string command, ref int index)
+    {
+        var start = index;
+        var value = ParseQuotedBody(command, ref index, '"');
+        return value.Length == 0
+            ? throw SimulatedSqlException.EmptyColumnAlias()
+            : new(value, command, start, index - start);
     }
 
     /// <summary>
@@ -408,7 +445,14 @@ static class Tokenizer
                     : 0m;
     }
 
-    private static BracketDelimitedString ParseBracketDelimitedString(string command, ref int index)
+    /// <summary>
+    /// Parses a bracket-delimited identifier: <c>[foo]</c>, with <c>]]</c>
+    /// as the embedded-bracket escape. A properly-closed empty <c>[]</c>
+    /// raises Msg 1038 (probe-confirmed at every identifier position, same
+    /// as the empty <c>""</c> form); an unclosed <c>[</c> at end-of-input
+    /// keeps its historically lenient empty-token behavior.
+    /// </summary>
+    private static DelimitedIdentifier ParseBracketDelimitedIdentifier(string command, ref int index)
     {
         var start = index;
         var builder = new StringBuilder();
@@ -433,7 +477,12 @@ static class Tokenizer
 
         var length = index - start;
         if (index < command.Length)
+        {
             index++;
+            if (builder.Length == 0)
+                throw SimulatedSqlException.EmptyColumnAlias();
+        }
+
         return new(builder.ToString(), command, start, length);
     }
 }

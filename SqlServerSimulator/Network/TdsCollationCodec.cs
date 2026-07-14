@@ -9,7 +9,7 @@ namespace SqlServerSimulator.Network;
 /// The COLMETADATA 5-byte collation structure and the code page a client
 /// will use to decode <c>varchar</c> values described by it. Flags, version,
 /// and sort id derive from the collation name; LCID and code page come from
-/// <see cref="TdsCollationRegistry"/> (probed per prefix). Instances cache by
+/// <see cref="Collation.LcidAndCodePageByPrefix"/> (probed per prefix). Instances cache by
 /// collation reference, which is stable because collation lookups intern.
 /// </summary>
 internal sealed class TdsCollationCodec
@@ -160,7 +160,7 @@ internal sealed class TdsCollationCodec
         var candidate = name;
         while (true)
         {
-            if (TdsCollationRegistry.ByPrefix.TryGetValue(candidate, out var entry))
+            if (Collation.LcidAndCodePageByPrefix.TryGetValue(candidate, out var entry))
                 return entry;
 
             var cut = candidate.LastIndexOf('_');

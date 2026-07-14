@@ -559,8 +559,12 @@ public sealed partial class Simulation
 
     /// <summary>Cache key for <see cref="planCache"/>. The schema-version
     /// is intentionally NOT part of the key — it sits on the entry so a stale
-    /// lookup overwrites in place rather than orphaning entries on every DDL.</summary>
-    private readonly record struct PlanCacheKey(string CommandText, string DatabaseName, string ParameterSignature);
+    /// lookup overwrites in place rather than orphaning entries on every DDL.
+    /// The session's QUOTED_IDENTIFIER setting IS part of the key: it changes
+    /// how <c>"…"</c> tokenizes, so the same text parses to different plans
+    /// under each setting (mirroring real SQL Server, whose plan-cache keys
+    /// fold in the parse-time SET options).</summary>
+    private readonly record struct PlanCacheKey(string CommandText, string DatabaseName, string ParameterSignature, bool QuotedIdentifiers);
 
     /// <summary>Cache entry: the parsed <see cref="Selection"/> plus the
     /// <see cref="SchemaVersion"/> active when it was parsed.</summary>
@@ -745,7 +749,9 @@ public sealed partial class Simulation
         if (batch.PlanCacheDatabaseName is not { } dbName) return;
         if (batch.PlanCacheParameterSignature is not { } paramSig) return;
         if (Volatile.Read(ref this.SchemaVersion) != batch.PlanCacheSchemaVersion) return;
-        var key = new PlanCacheKey(text, dbName, paramSig);
+        // A cacheable batch is a single SELECT (no SET can precede it), so the
+        // connection's live setting still equals the value at parse.
+        var key = new PlanCacheKey(text, dbName, paramSig, batch.Connection.QuotedIdentifiers);
         // Refresh-in-place semantics: when a DDL has invalidated the prior
         // entry under this key, the indexer overwrites without growing the
         // dictionary. The capacity cap therefore only gates fresh keys, not
@@ -768,9 +774,9 @@ public sealed partial class Simulation
     private static PlanCacheKey? TryBuildPlanCacheKey(SimulatedDbCommand command)
         => string.IsNullOrEmpty(command.CommandText)
             ? null
-            : command.Connection?.CurrentDatabase is { } currentDb
+            : command.Connection is { CurrentDatabase: { } currentDb } connection
                 && BuildPlanCacheParameterSignature(command) is { } sig
-                    ? new PlanCacheKey(command.CommandText, currentDb.Name, sig)
+                    ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers)
                     : null;
 
     private static string? BuildPlanCacheParameterSignature(SimulatedDbCommand command)

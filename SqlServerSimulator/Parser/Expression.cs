@@ -77,6 +77,7 @@ internal abstract class Expression
                 AtAtKeyword.ProcId => new ProcIdExpression(),
                 AtAtKeyword.FetchStatus => new FetchStatusExpression(),
                 AtAtKeyword.CursorRows => new CursorRowsExpression(),
+                AtAtKeyword.Options => Value.FromAtAtOptions(context),
                 _ => new Value(doubleAtPrefixedString),
             },
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),

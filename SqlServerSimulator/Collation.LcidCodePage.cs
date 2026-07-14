@@ -1,27 +1,27 @@
 using System.Collections.Frozen;
 
-namespace SqlServerSimulator.Network;
+namespace SqlServerSimulator;
 
-/// <summary>
-/// LCID and ANSI code page per collation-name prefix, for the 5-byte
-/// COLMETADATA collation structure. Probed from SQL Server 2025
-/// COLLATIONPROPERTY over the complete fn_helpcollations() catalog; every
-/// other component of the structure (flags, version, sort id) derives from
-/// the collation name itself.
-/// </summary>
-/// <remarks>
-/// The code page for a SQL_* prefix is 0 here: SQL_* names carry their ANSI
-/// code page in the CPnnn name token (CP1 = 1252), so it is read from the
-/// name rather than this table. A _UTF8 name likewise overrides the code
-/// page to 65001. SQL_Latin1_General is stored as LCID 0x0409, but its two
-/// CP1254 members (SQL_Latin1_General_CP1254_CI_AS / _CS_AS) actually report
-/// LCID 0x041F on the reference server — a per-name anomaly the prefix key
-/// cannot capture.
-/// </remarks>
-internal static class TdsCollationRegistry
+internal abstract partial class Collation
 {
-    /// <summary>Maps a collation name prefix to (LCID, ANSI code page).</summary>
-    public static readonly FrozenDictionary<string, (int Lcid, int CodePage)> ByPrefix = new Dictionary<string, (int Lcid, int CodePage)>(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// LCID and ANSI code page per collation-name prefix, for the 5-byte
+    /// COLMETADATA collation structure and the <c>COLLATIONPROPERTY</c> metrics.
+    /// Probed from SQL Server 2025 <c>COLLATIONPROPERTY</c> over the complete
+    /// <c>fn_helpcollations()</c> catalog; every other component of the
+    /// structure (flags, version, sort id) derives from the collation name
+    /// itself.
+    /// </summary>
+    /// <remarks>
+    /// The code page for a SQL_* prefix is 0 here: SQL_* names carry their ANSI
+    /// code page in the CPnnn name token (CP1 = 1252), so it is read from the
+    /// name rather than this table. A _UTF8 name likewise overrides the code
+    /// page to 65001. SQL_Latin1_General is stored as LCID 0x0409, but its two
+    /// CP1254 members (SQL_Latin1_General_CP1254_CI_AS / _CS_AS) actually report
+    /// LCID 0x041F on the reference server — a per-name anomaly the prefix key
+    /// cannot capture.
+    /// </remarks>
+    internal static readonly FrozenDictionary<string, (int Lcid, int CodePage)> LcidAndCodePageByPrefix = new Dictionary<string, (int Lcid, int CodePage)>(StringComparer.OrdinalIgnoreCase)
     {
         ["Albanian"] = (0x041C, 1250),
         ["Arabic"] = (0x0401, 1256),
