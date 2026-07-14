@@ -46,7 +46,7 @@ internal sealed partial class TdsSession
             return;
         }
 
-        var databaseBefore = this.connection!.Database;
+        this.databaseAtMessageStart = this.connection!.Database;
         for (var i = 0; i < requests.Count; i++)
         {
             var moreRequests = i < requests.Count - 1;
@@ -58,19 +58,19 @@ internal sealed partial class TdsSession
             {
                 _ = this.FlushInfoMessages(writer);
                 WriteErrors(writer, ex);
+                if (!moreRequests)
+                    this.WriteDatabaseChangeIfAny(writer);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
             catch (NotSupportedException ex)
             {
                 _ = this.FlushInfoMessages(writer);
                 writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
+                if (!moreRequests)
+                    this.WriteDatabaseChangeIfAny(writer);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
         }
-
-        var databaseAfter = this.connection.Database;
-        if (!string.Equals(databaseAfter, databaseBefore, StringComparison.Ordinal))
-            writer.WriteEnvChange(Tds.EnvDatabase, databaseAfter, databaseBefore);
     }
 
     private async ValueTask DispatchRpcAsync(TdsRpcRequest request, TdsTokenWriter writer, bool moreRequests, CancellationToken cancellationToken)
@@ -180,6 +180,8 @@ internal sealed partial class TdsSession
         foreach (var (ordinal, wire, bound) in outputs)
             TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, wire.DbType, bound.Value);
 
+        if (!moreRequests)
+            this.WriteDatabaseChangeIfAny(writer);
         writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
     }
 
@@ -212,6 +214,8 @@ internal sealed partial class TdsSession
         foreach (var (ordinal, wire, bound) in outputs)
             TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, wire.DbType, bound.Value);
 
+        if (!moreRequests)
+            this.WriteDatabaseChangeIfAny(writer);
         writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
     }
 

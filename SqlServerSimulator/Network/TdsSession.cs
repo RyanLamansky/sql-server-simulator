@@ -206,7 +206,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             writer.WriteResetConnectionAck();
         }
 
-        var databaseBefore = this.connection!.Database;
+        this.databaseAtMessageStart = this.connection!.Database;
         try
         {
             using var command = this.connection.CreateCommand();
@@ -219,19 +219,46 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             _ = this.FlushInfoMessages(writer);
             WriteErrors(writer, ex);
+            this.WriteDatabaseChangeIfAny(writer);
             writer.WriteDone(Tds.DoneError, 0);
         }
         catch (NotSupportedException ex)
         {
             _ = this.FlushInfoMessages(writer);
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
+            this.WriteDatabaseChangeIfAny(writer);
             writer.WriteDone(Tds.DoneError, 0);
         }
+    }
 
-        _ = this.FlushInfoMessages(writer);
-        var databaseAfter = this.connection.Database;
-        if (!string.Equals(databaseAfter, databaseBefore, StringComparison.Ordinal))
-            writer.WriteEnvChange(Tds.EnvDatabase, databaseAfter, databaseBefore);
+    /// <summary>
+    /// The session database when the current batch / RPC message began, for
+    /// detecting a mid-message <c>USE</c>. Emitted as ENVCHANGE type 1 +
+    /// INFO 5701 via <see cref="WriteDatabaseChangeIfAny"/>, which must run
+    /// BEFORE the response's final DONE: SqlClient's token reader stalls
+    /// until command timeout on an ENVCHANGE that arrives after the last
+    /// DONE (probe-confirmed 2026-07-15 — the SSMS freeze on
+    /// <c>use [master]</c>; go-mssqldb tolerates the late position, which is
+    /// how the ordering shipped unnoticed).
+    /// </summary>
+    private string? databaseAtMessageStart;
+
+    /// <summary>
+    /// Writes the database-change ENVCHANGE + INFO 5701 when the session
+    /// database differs from <see cref="databaseAtMessageStart"/>, matching
+    /// real SQL Server's token order for <c>USE</c> (ENVCHANGE, then INFO,
+    /// then the statement's DONE). Idempotent — the first call records the
+    /// new baseline, so the multiple call sites (per-final-DONE seams and
+    /// error paths) emit at most once per change.
+    /// </summary>
+    private void WriteDatabaseChangeIfAny(TdsTokenWriter writer)
+    {
+        var current = this.connection!.Database;
+        if (this.databaseAtMessageStart is null || string.Equals(current, this.databaseAtMessageStart, StringComparison.Ordinal))
+            return;
+        writer.WriteEnvChange(Tds.EnvDatabase, current, this.databaseAtMessageStart);
+        writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{current}'.", "SIMULATED", "", 1);
+        this.databaseAtMessageStart = current;
     }
 
     /// <summary>
@@ -276,7 +303,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 }
 
                 hasOutcome = outcomes.MoveNext();
-                writer.WriteDoneToken(doneToken, (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneCount), rows);
+                var queryStatus = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneCount);
+                if ((queryStatus & Tds.DoneMore) == 0)
+                    this.WriteDatabaseChangeIfAny(writer);
+                writer.WriteDoneToken(doneToken, queryStatus, rows);
             }
             else
             {
@@ -286,6 +316,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 if (affected >= 0)
                     status |= Tds.DoneCount;
 
+                if ((status & Tds.DoneMore) == 0)
+                    this.WriteDatabaseChangeIfAny(writer);
                 writer.WriteDoneToken(doneToken, status, Math.Max(affected, 0));
             }
         }
@@ -293,9 +325,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // Trailing messages (batch ends in PRINT): INFO may never follow the
         // final DONE, so the last outcome's DONE stayed DONE_MORE (see
         // OutcomeDoneStatus) and the batch closes with its own final DONE.
+        // A mid-batch USE's ENVCHANGE must likewise precede the final DONE.
         var flushedTrailing = this.FlushInfoMessages(writer);
         if (!trailingTokensFollow && (flushedTrailing || !anyOutcome))
+        {
+            this.WriteDatabaseChangeIfAny(writer);
             writer.WriteDoneToken(doneToken, Tds.DoneFinal, 0);
+        }
     }
 
     /// <summary>
