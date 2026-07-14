@@ -165,20 +165,7 @@ partial class Simulation
     /// </summary>
     private static void ConsumeToStatementBoundary(ParserContext context)
     {
-        while (context.Token is not (null
-            or Operator { Character: ';' }
-            or ReservedKeyword
-            {
-                Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete
-                    or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback
-                    or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc
-                    or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else
-                    or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue
-                    or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
-                    or Keyword.Truncate or Keyword.Grant or Keyword.Revoke or Keyword.Deny
-            }))
-        {
+        while (!IsStatementBoundary(context.Token))
             context.MoveNextOptional();
-        }
     }
 }

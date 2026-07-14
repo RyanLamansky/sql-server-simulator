@@ -58,6 +58,12 @@ partial class Simulation
                 // here from any current database (real SQL Server resolves
                 // sp_/xp_ system procs through master).
                 "xp_msver",
+                // xp_qv is SSMS's AlwaysOn-availability probe. It yields no
+                // result set and returns status 0; the simulator reports
+                // AlwaysOn as not-available (consistent with
+                // SERVERPROPERTY('IsHadrEnabled') = 0), so the @rc capture
+                // lands 0 and Object Explorer's Databases node populates.
+                "xp_qv",
             ],
             collation);
         return lookup.TryGetValue(leaf, out var canonical) ? canonical : null;
@@ -152,6 +158,7 @@ partial class Simulation
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
             "xp_msver" => InvokeXpMsver(batch),
+            "xp_qv" => InvokeXpQv(batch, returnCodeVar),
             _ => throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
         };
         if (systemProc is not null)
@@ -188,7 +195,7 @@ partial class Simulation
         var arguments = new List<ProcArgument>();
         // No args at all — return empty list. The terminator is either `;`,
         // end-of-batch, or a statement-starting keyword.
-        if (IsExecArgumentBoundary(context.Token))
+        if (IsStatementBoundary(context.Token))
             return arguments;
 
         var sawNamed = false;
@@ -262,6 +269,18 @@ partial class Simulation
             return new ProcArgument(name, isDefault: true, value: SqlValue.Null(SqlType.Int32), outputSlot: null);
         }
 
+        // @@-prefixed niladic function (e.g. @@SERVICENAME, which SSMS's
+        // AlwaysOn probe passes to xp_qv). Evaluate the single atom in a
+        // column-less runtime context; session-state forms (@@SPID /
+        // @@ROWCOUNT / …) read their live value through the batch.
+        if (context.Token is DoubleAtPrefixedString)
+        {
+            var expression = Expression.Parse(context);
+            var value = expression.Run(new RuntimeContext(
+                columnName => throw SimulatedSqlException.ColumnReferenceNotAllowed(columnName), batch));
+            return new ProcArgument(name, isDefault: false, value: value, outputSlot: null);
+        }
+
         // @variable reference — capture the slot (live, so OUTPUT writeback
         // sees the proc's final value), read its value now, and check for a
         // trailing OUTPUT / OUT keyword. When the name resolves to a table
@@ -328,12 +347,6 @@ partial class Simulation
         : v.Type == SqlType.BigInt ? SqlValue.FromInt64(-v.AsInt64)
         : v.Type == SqlType.SmallInt ? SqlValue.FromInt16((short)-v.AsInt32)
         : v;
-
-    private static bool IsExecArgumentBoundary(Token? token) =>
-        token is null
-        or Operator { Character: ';' }
-        or ReservedKeyword { Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge or Keyword.Begin or Keyword.Commit or Keyword.Rollback or Keyword.Save or Keyword.Create or Keyword.Drop or Keyword.Alter or Keyword.Dbcc or Keyword.Set or Keyword.Declare or Keyword.With or Keyword.If or Keyword.Else or Keyword.End or Keyword.While or Keyword.Break or Keyword.Continue or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor or Keyword.Truncate or Keyword.Exec or Keyword.Execute }
-        or UnquotedString { ContextualKeyword: ContextualKeyword.Throw };
 }
 
 /// <summary>

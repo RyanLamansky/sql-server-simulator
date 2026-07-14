@@ -1380,8 +1380,16 @@ public sealed partial class Simulation
     /// batch, a recognized statement-starting keyword, or the <c>END</c>
     /// terminator of a BEGIN…END block. Used to decide whether to re-normalize
     /// a parser's leftover cursor position.
+    ///
+    /// This is the single source of truth for "does this token begin a new
+    /// top-level statement (or a hard boundary)?" — the dispatch loop, the
+    /// EXEC-argument scanner, the principal-DDL parse-and-discard tail, and the
+    /// SELECT projection-list terminator all route through it, so a new
+    /// statement keyword is added in exactly one place. SQL Server accepts
+    /// back-to-back statements without a separating <c>;</c>; every consumer
+    /// mirrors that by treating the full keyword set uniformly as a boundary.
     /// </summary>
-    private static bool IsStatementBoundary(Token? token) =>
+    internal static bool IsStatementBoundary(Token? token) =>
         token is null
         or Operator { Character: ';' }
         or ReservedKeyword
@@ -1394,6 +1402,7 @@ public sealed partial class Simulation
                 or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
                 or Keyword.Truncate or Keyword.Use or Keyword.Grant or Keyword.Revoke or Keyword.Deny
                 or Keyword.Open or Keyword.Fetch or Keyword.Close or Keyword.Deallocate
+                or Keyword.Exec or Keyword.Execute
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.

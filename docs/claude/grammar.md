@@ -5,3 +5,12 @@ Statements are separated by an optional `;`. Real SQL Server's relaxed grammar l
 - A `MERGE` not terminated by `;` raises **Msg 10713 St 1** (`A MERGE statement must be terminated by a semi-colon (;).`) regardless of whether another statement follows or the batch ends. The check sits at the dispatch site immediately after `ParseMerge` returns, before any cursor normalization.
 
 The dispatch loop drains optional `;`s at the top of each iteration and trusts each parser to leave `Token` at its first un-consumed token (the `ParserContext` lookahead-position contract). Parsers that historically ended on the last token they consumed (DBCC's closing `)`, SET-session-state's `ON`/`OFF`) get a one-token advance via `IsStatementBoundary` after dispatch — Token already at `;`, end-of-batch, or a recognized statement-starting keyword is left alone.
+
+`Simulation.IsStatementBoundary(Token?)` is the **single source of truth** for "does this token begin a new top-level statement (or a hard boundary — `null` / `;` / the contextual `THROW`)?" It answers `true` for the full statement-keyword set: SELECT / INSERT / UPDATE / DELETE / MERGE / BEGIN / COMMIT / ROLLBACK / SAVE / CREATE / DROP / ALTER / DBCC / SET / DECLARE / WITH / IF / ELSE / END / WHILE / BREAK / CONTINUE / RETURN / PRINT / RAISERROR / WAITFOR / TRUNCATE / USE / GRANT / REVOKE / DENY / OPEN / FETCH / CLOSE / DEALLOCATE / EXEC / EXECUTE. Four consumers route through it so a new statement keyword is added in exactly one place:
+
+- the dispatch loop's post-statement cursor normalization + error-recovery scans;
+- `Selection.Parse`'s two projection-list terminator switches (the `WITH` case is checked *before* the shared predicate so its more-specific Msg 319 wins; the switch matches only `ReservedKeyword`, so a following statement's keyword ends the projection while column-name-like contextual keywords are unaffected);
+- `ParseExecArguments` — an EXEC argument list stops at any statement start (reserved statement keywords can't be bare argument values, so this never truncates a legitimate literal / `@var` / DEFAULT / OUTPUT / NULL / `@@`-niladic arg);
+- `ConsumeToStatementBoundary` — the principal-DDL parse-and-discard tail (`FROM LOGIN` / `WITH PASSWORD` / `DEFAULT_SCHEMA`).
+
+This is why semicolon-less statement sequences work for the full set, e.g. `select 1\nexec xp_msver`, `declare @x int\nuse master`, `if 1=1 select 1\nfetch c`. Before unification these predicates had drifted (EXEC/EXECUTE missing from several), so SSMS's semicolon-less AlwaysOn probe died with Msg 102.
