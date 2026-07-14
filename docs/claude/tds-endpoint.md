@@ -18,7 +18,7 @@ Everything lives in `Network/` (internal) except the public `SimulatedNetworkLis
 
 - `TdsPacketTransport` — packet framing both directions: reassembles inbound packet sequences into `TdsMessage` (EOM-terminated), stamps outbound headers (type 0x04, SPID truncated to 16 bits, incrementing packet id). The stream it rides is swapped from the raw `NetworkStream` to the `SslStream` after the handshake.
 - `TlsHandshakeFramingStream` — the TDS 7.x TLS seam: handshake records travel wrapped in PRELOGIN-type packets, so this shim strips/adds packet headers under `SslStream` during `AuthenticateAsServerAsync`, then flips to transparent passthrough. **TLS is pinned to 1.2**: a TLS 1.3 server emits NewSessionTicket records at handshake completion, which would still be prelogin-wrapped after the client switched to reading raw records ("cannot determine frame size" on the client). Matches SqlClient/real-server behavior for pre-TDS-8 encryption.
-- `Login7Request` — parses TDS version, packet size (accepted when 512–32767 and acked via ENVCHANGE type 4), hostname/username/password (de-obfuscated)/appname/database. Requested database `master` or empty maps to the default database; anything else goes through `ChangeDatabase`, and its failure (Msg 911) is written as the login error (real server raises Msg 4060 here — known divergence).
+- `Login7Request` — parses TDS version, packet size (accepted when 512–32767 and acked via ENVCHANGE type 4), hostname/username/password (de-obfuscated)/appname/database. Requested database `master` or empty maps to the default database; anything else goes through `ChangeDatabase`, whose failure becomes the probe-confirmed login pair — Msg 4060 severity 11 (`Cannot open database "x" requested by the login. The login failed.`, double-quoted name) then Msg 18456 severity 14 — before the connection closes. Mid-session `USE` keeps the engine's Msg 911.
 - `TdsTokenWriter` — growable token buffer with packetizing flush; the session flushes after every row so memory stays bounded by max(row, packet).
 - `TdsTypeCodec` — COLMETADATA TYPE_INFO + ROW value encoding (details below). Schema validated up front so unsupported column types fail as an ERROR token, never a mid-stream desync.
 - `TdsCollationCodec` + `TdsCollationRegistry` — the COLMETADATA 5-byte collation structure, derived generatively (details below).
@@ -78,7 +78,7 @@ ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_engli
 
 ## Divergences / deferred
 
-- Login to a missing database: Msg 911 (from `ChangeDatabase`) instead of real's Msg 4060 wrapping; login INFO states are approximations.
+- Login INFO states are approximations.
 - No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating), no `SqlBulkCopy`.
 - Credential-enforcement edges not modeled: `ALTER LOGIN … DISABLE` parses but doesn't block login; password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
 - RPC parameter gaps: TVP / UDT / `sql_variant` / legacy-LOB parameters rejected with ERROR 50000; `sp_cursor*` and other well-known ProcIDs likewise.

@@ -166,6 +166,31 @@ public sealed partial class Simulation
     internal readonly ConcurrentDictionary<string, ServerLogin> Logins = new(BuiltInToken.Comparer);
 
     /// <summary>
+    /// Per-Simulation monotonic counter for server-principal ids. Each
+    /// <c>CREATE LOGIN</c> claims a fresh id via
+    /// <see cref="AllocatePrincipalId"/>; the counter is seeded at 2 so the
+    /// first allocation returns 3 — ids 1 and 2 are reserved for the synthetic
+    /// <c>sa</c> / <c>public</c> rows <c>sys.server_principals</c> projects.
+    /// </summary>
+    private int nextPrincipalId = 2;
+
+    /// <summary>
+    /// Allocates the next server-principal id for a freshly-created
+    /// <see cref="ServerLogin"/>. <c>ALTER LOGIN</c> preserves the existing id
+    /// rather than allocating a new one.
+    /// </summary>
+    internal int AllocatePrincipalId() => Interlocked.Increment(ref this.nextPrincipalId);
+
+    /// <summary>
+    /// Stable install-time timestamp used as the <c>create_date</c> /
+    /// <c>modify_date</c> of the synthetic fixed <c>sys.server_principals</c>
+    /// rows (<c>sa</c> / <c>public</c>). Captured once at construction, exactly
+    /// as each <see cref="Database"/> seeds its fixed database principals' dates
+    /// from a single <c>DateTime.UtcNow</c>.
+    /// </summary>
+    internal readonly DateTime SeedDate = DateTime.UtcNow;
+
+    /// <summary>
     /// System tables (e.g. <c>systypes</c>). Materialized once per process and
     /// shared across all <see cref="Simulation"/> instances; the bytes are
     /// immutable.

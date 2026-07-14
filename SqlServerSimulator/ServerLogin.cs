@@ -7,8 +7,17 @@ namespace SqlServerSimulator;
 /// verified by the TDS endpoint at LOGIN7 time. Instances are immutable;
 /// <c>ALTER LOGIN … WITH PASSWORD</c> swaps in a replacement entry.
 /// </summary>
-internal sealed class ServerLogin(string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime)
+internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime)
 {
+    /// <summary>
+    /// Server-level principal id, allocated once at <c>CREATE LOGIN</c> and
+    /// preserved across the wholesale replacement <c>ALTER LOGIN</c> performs.
+    /// Surfaces as <c>sys.server_principals.principal_id</c> /
+    /// <c>sys.sql_logins.principal_id</c>. Ids 1 and 2 are reserved for the
+    /// synthetic <c>sa</c> / <c>public</c> rows, so allocation starts at 3.
+    /// </summary>
+    public readonly int PrincipalId = principalId;
+
     public readonly string Name = name;
 
     /// <summary>

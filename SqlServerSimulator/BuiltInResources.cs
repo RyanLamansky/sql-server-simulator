@@ -888,6 +888,54 @@ internal static class BuiltInResources
             new("member_principal_id", SqlType.Int32, null, false),
         ], EnumerateSysDatabaseRoleMembers);
 
+        // sys.server_principals: probe-confirmed 14-col shape against SQL
+        // Server 2025 (2026-07-15), projected over the per-Simulation login
+        // registry (Simulation.Logins) plus two synthetic fixed rows: sa
+        // (principal_id 1) and public (principal_id 2). Columns the simulator
+        // doesn't track (credential_id, disabled flag) surface as their real
+        // low-privilege defaults.
+        Sys("server_principals",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, false),
+            new("sid", SqlType.Varbinary, 85, true),
+            new("type", charOne, 1, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("default_database_name", SqlType.SystemName, 128, true),
+            new("default_language_name", SqlType.SystemName, 128, true),
+            new("credential_id", SqlType.Int32, null, true),
+            new("owning_principal_id", SqlType.Int32, null, true),
+            new("is_fixed_role", SqlType.Bit, null, false),
+            new("tenant_id", SqlType.UniqueIdentifier, null, true),
+        ], EnumerateSysServerPrincipals);
+
+        // sys.sql_logins: probe-confirmed 14-col shape against SQL Server 2025
+        // (2026-07-15). Same leading 10 columns as sys.server_principals,
+        // filtered to type='S' (SQL logins) — sa plus the registry logins,
+        // never the public server role. password_hash surfaces NULL: the
+        // simulator deliberately doesn't expose its stored PWDCOMPARE hash,
+        // matching what a low-privilege reader sees on the reference instance.
+        Sys("sql_logins",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, false),
+            new("sid", SqlType.Varbinary, 85, true),
+            new("type", charOne, 1, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("default_database_name", SqlType.SystemName, 128, true),
+            new("default_language_name", SqlType.SystemName, 128, true),
+            new("credential_id", SqlType.Int32, null, true),
+            new("is_policy_checked", SqlType.Bit, null, true),
+            new("is_expiration_checked", SqlType.Bit, null, true),
+            new("password_hash", SqlType.Varbinary, 256, true),
+        ], EnumerateSysSqlLogins);
+
         // sys.fulltext_catalogs: per-database full-text catalog metadata.
         // Column subset matches Microsoft Learn's documented surface for
         // SQL Server 2022+ (the reference instance doesn't have full-text
@@ -1893,6 +1941,166 @@ internal static class BuiltInResources
             yield return [
                 SqlValue.FromInt32(roleId),
                 SqlValue.FromInt32(memberId),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Derives a deterministic 16-byte synthetic <c>sid</c> from a login name.
+    /// Real SQL logins carry a 16-byte random GUID sid; the simulator fills the
+    /// four 32-bit quadrants with a per-quadrant-salted FNV-1a hash so the same
+    /// name always maps to the same bytes without persisting a GUID.
+    /// </summary>
+    private static byte[] DeriveLoginSid(string name)
+    {
+        var sid = new byte[16];
+        for (var quadrant = 0; quadrant < 4; quadrant++)
+        {
+            var hash = Simulation.Fnv1a32.Initial;
+            hash.Mix(name);
+            hash.Mix((byte)quadrant);
+            var value = hash.Value;
+            var offset = quadrant * 4;
+            sid[offset] = (byte)value;
+            sid[offset + 1] = (byte)(value >> 8);
+            sid[offset + 2] = (byte)(value >> 16);
+            sid[offset + 3] = (byte)(value >> 24);
+        }
+        return sid;
+    }
+
+    /// <summary>
+    /// Projects <c>sys.server_principals</c> over the per-Simulation login
+    /// registry plus the two synthetic fixed rows (<c>sa</c> = principal_id 1,
+    /// <c>public</c> = principal_id 2). Rows emit in principal_id order.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerPrincipals(Parser.BatchContext batch, Database database)
+    {
+        var simulation = batch.Connection.Simulation;
+        var charOne = SqlType.GetChar(1);
+        var falseBit = SqlValue.FromBoolean(false);
+        var sqlLogin = SqlValue.FromNVarchar("SQL_LOGIN");
+        var loginType = SqlValue.FromChar(charOne, "S");
+        var nullCredentialId = SqlValue.Null(SqlType.Int32);
+        var nullOwningId = SqlValue.Null(SqlType.Int32);
+        var master = SqlValue.FromSystemName("master");
+        var usEnglish = SqlValue.FromSystemName("us_english");
+        var nullTenant = SqlValue.Null(SqlType.UniqueIdentifier);
+        var zeroTenant = SqlValue.FromGuid(Guid.Empty);
+        var seedDate = SqlValue.FromDateTime(simulation.SeedDate);
+
+        // sa: the fixed SQL-authentication login, principal_id 1.
+        yield return [
+            SqlValue.FromSystemName("sa"),
+            SqlValue.FromInt32(1),
+            SqlValue.FromVarbinary([0x01]),
+            loginType,
+            sqlLogin,
+            falseBit,
+            seedDate,
+            seedDate,
+            master,
+            usEnglish,
+            nullCredentialId,
+            nullOwningId,
+            falseBit,
+            nullTenant,
+        ];
+
+        // public: the fixed server role, principal_id 2. owning_principal_id
+        // points at sa (1); is_fixed_role is 0 (probe-confirmed).
+        yield return [
+            SqlValue.FromSystemName("public"),
+            SqlValue.FromInt32(2),
+            SqlValue.FromVarbinary([0x02]),
+            SqlValue.FromChar(charOne, "R"),
+            SqlValue.FromNVarchar("SERVER_ROLE"),
+            falseBit,
+            seedDate,
+            seedDate,
+            SqlValue.Null(SqlType.SystemName),
+            SqlValue.Null(SqlType.SystemName),
+            nullCredentialId,
+            SqlValue.FromInt32(1),
+            falseBit,
+            nullTenant,
+        ];
+
+        foreach (var login in simulation.Logins.Values.OrderBy(l => l.PrincipalId))
+        {
+            yield return [
+                SqlValue.FromSystemName(login.Name),
+                SqlValue.FromInt32(login.PrincipalId),
+                SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
+                loginType,
+                sqlLogin,
+                falseBit,
+                SqlValue.FromDateTime(login.CreateDate),
+                SqlValue.FromDateTime(login.PasswordLastSetTime),
+                master,
+                usEnglish,
+                nullCredentialId,
+                nullOwningId,
+                falseBit,
+                zeroTenant,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Projects <c>sys.sql_logins</c>: the type='S' subset of
+    /// <c>sys.server_principals</c> (<c>sa</c> plus the registry logins, never
+    /// the <c>public</c> server role), with the policy / expiration / hash
+    /// tail. Rows emit in principal_id order.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysSqlLogins(Parser.BatchContext batch, Database database)
+    {
+        var simulation = batch.Connection.Simulation;
+        var charOne = SqlType.GetChar(1);
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var sqlLogin = SqlValue.FromNVarchar("SQL_LOGIN");
+        var loginType = SqlValue.FromChar(charOne, "S");
+        var nullCredentialId = SqlValue.Null(SqlType.Int32);
+        var master = SqlValue.FromSystemName("master");
+        var usEnglish = SqlValue.FromSystemName("us_english");
+        var nullPasswordHash = SqlValue.Null(SqlType.Varbinary);
+        var seedDate = SqlValue.FromDateTime(simulation.SeedDate);
+
+        yield return [
+            SqlValue.FromSystemName("sa"),
+            SqlValue.FromInt32(1),
+            SqlValue.FromVarbinary([0x01]),
+            loginType,
+            sqlLogin,
+            falseBit,
+            seedDate,
+            seedDate,
+            master,
+            usEnglish,
+            nullCredentialId,
+            trueBit,
+            falseBit,
+            nullPasswordHash,
+        ];
+
+        foreach (var login in simulation.Logins.Values.OrderBy(l => l.PrincipalId))
+        {
+            yield return [
+                SqlValue.FromSystemName(login.Name),
+                SqlValue.FromInt32(login.PrincipalId),
+                SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
+                loginType,
+                sqlLogin,
+                falseBit,
+                SqlValue.FromDateTime(login.CreateDate),
+                SqlValue.FromDateTime(login.PasswordLastSetTime),
+                master,
+                usEnglish,
+                nullCredentialId,
+                trueBit,
+                falseBit,
+                nullPasswordHash,
             ];
         }
     }

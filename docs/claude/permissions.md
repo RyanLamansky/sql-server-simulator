@@ -88,6 +88,10 @@ In `BuiltInResources.cs`:
 
 **`sys.database_role_members`** (2-col full row): `role_principal_id` / `member_principal_id`.
 
+**`sys.server_principals`** (14-col full probe-confirmed shape, 2026-07-15): `name` / `principal_id` / `sid` / `type` / `type_desc` / `is_disabled` / `create_date` / `modify_date` / `default_database_name` / `default_language_name` / `credential_id` / `owning_principal_id` / `is_fixed_role` / `tenant_id`. Projects two synthetic fixed rows — `sa` (id 1, sid `0x01`, `SQL_LOGIN`, default db `master`) and `public` (id 2, sid `0x02`, `SERVER_ROLE`, `owning_principal_id` 1, `is_fixed_role` **0** — probe-confirmed quirk) — plus one row per `Simulation.Logins` entry (ids from 3 via `Simulation.AllocatePrincipalId`; `modify_date` = password-last-set; `tenant_id` all-zero GUID matching real's SQL-login rows). Created-login `sid`s are deterministic synthetic 16-byte values (FNV-derived from the name) — unique and stable, but won't byte-match real.
+
+**`sys.sql_logins`** (14-col full probe-confirmed shape): the first 10 `server_principals` columns plus `credential_id` / `is_policy_checked` / `is_expiration_checked` / `password_hash`. Rows are the type-`S` subset (`sa` + created logins, not `public`). `password_hash` is always NULL — matches what a low-privilege reader sees on real, and deliberately keeps the registry's stored hash unexposed. `is_policy_checked` is always 1 (real's default when `CHECK_POLICY` is unspecified; the simulator parse-and-discards the option, so a login created with `CHECK_POLICY = OFF` diverges).
+
 ## Errors enforced verbatim
 
 | Msg | When |
@@ -126,6 +130,6 @@ The simulator doesn't enforce permissions, so these return values that let permi
 - **Server-scope grants** (`GRANT … ON SERVER`), schema-scope grants, column-scope grants — not modeled.
 - **`WITH GRANT OPTION` cascading** — records the W state but doesn't propagate to descendants.
 - **Canonical 4-char permission type codes** — simulator uses a first-letter heuristic; real SQL Server has a per-permission table.
-- **Login-model edges** — no `sys.server_principals` / `sys.sql_logins` catalog views; login DDL itself is permission-unchecked (anyone can CREATE LOGIN); DISABLE / password policy / lockout not enforced; logins aren't linked to database users (`CREATE USER … FOR LOGIN` still parse-and-discards).
+- **Login-model edges** — login DDL itself is permission-unchecked (anyone can CREATE LOGIN); DISABLE / password policy / lockout not enforced; logins aren't linked to database users (`CREATE USER … FOR LOGIN` still parse-and-discards); no server-role model beyond the fixed `public` row (`ALTER SERVER ROLE` not modeled).
 - **`CREATE USER … FROM EXTERNAL PROVIDER` / `WITH PASSWORD` semantics** — parse-and-discard.
 - **Permission enforcement** — the simulator never checks granted/denied permissions when dispatching subsequent operations.

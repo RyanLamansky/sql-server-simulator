@@ -37,7 +37,7 @@ partial class Simulation
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         var simulation = context.Batch.Connection.Simulation;
         var utcNow = context.Batch.CurrentStatement.UtcNow;
-        return simulation.Logins.TryAdd(name, new ServerLogin(name, PasswordHash.EncryptLegacy(password), utcNow, utcNow))
+        return simulation.Logins.TryAdd(name, new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow))
             ? true
             : throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
     }
@@ -68,7 +68,7 @@ partial class Simulation
             if (password.Length > PasswordHash.MaxClearTextChars)
                 throw SimulatedSqlException.PasswordEncryptionInvalidValue();
             simulation.Logins[name] = new ServerLogin(
-                existing.Name, PasswordHash.EncryptLegacy(password), existing.CreateDate,
+                existing.PrincipalId, existing.Name, PasswordHash.EncryptLegacy(password), existing.CreateDate,
                 context.Batch.CurrentStatement.UtcNow);
         }
         return true;

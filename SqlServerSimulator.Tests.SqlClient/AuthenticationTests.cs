@@ -132,6 +132,33 @@ public sealed class AuthenticationTests
         await AssertLoginSucceeds(listener, "other", "whatever", TestContext.CancellationToken);
     }
 
+    // Probe-confirmed (2026-07-15): login naming a database that can't be
+    // opened fails with a two-error sequence — Msg 4060 severity 11 (database
+    // name in double quotes) then Msg 18456 severity 14 — and the connection
+    // closes. Distinct from mid-session USE, which stays Msg 911.
+    [TestMethod]
+    public async Task LoginToMissingDatabase_Fails4060Then18456()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var connection = new SqlConnection(
+                $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;Database=no_such_db;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+            await connection.OpenAsync(TestContext.CancellationToken);
+        });
+
+        AreEqual(4060, ex.Number);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual("Cannot open database \"no_such_db\" requested by the login. The login failed.", ex.Errors[0].Message);
+        AreEqual((byte)11, ex.Errors[0].Class);
+        AreEqual((byte)1, ex.Errors[0].State);
+        AreEqual(18456, ex.Errors[1].Number);
+        AreEqual("Login failed for user 'sa'.", ex.Errors[1].Message);
+        AreEqual((byte)14, ex.Errors[1].Class);
+    }
+
     [TestMethod]
     public async Task SecondLogin_BothEnforced()
     {

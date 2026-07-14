@@ -82,7 +82,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 return;
             }
 
-            if (!this.TryOpenConnection(login.Database, writer))
+            if (!this.TryOpenConnection(login.Database, login.UserName, writer))
             {
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                 return;
@@ -148,7 +148,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         || (simulation.Logins.TryGetValue(login.UserName, out var serverLogin)
             && PasswordHash.Verify(login.Password, serverLogin.PasswordHash));
 
-    private bool TryOpenConnection(string requestedDatabase, TdsTokenWriter writer)
+    private bool TryOpenConnection(string requestedDatabase, string userName, TdsTokenWriter writer)
     {
         var opened = simulation.CreateDbConnection();
         opened.Open();
@@ -159,9 +159,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             {
                 opened.ChangeDatabase(requestedDatabase);
             }
-            catch (SimulatedSqlException ex)
+            catch (SimulatedSqlException)
             {
-                WriteErrors(writer, ex);
+                // Probe-confirmed shape for a login whose requested database
+                // can't be opened: Msg 4060 severity 11 (database name in
+                // double quotes) followed by Msg 18456 severity 14, then the
+                // connection closes. The engine's Msg 911 stays the shape for
+                // a mid-session USE; login gets the wrapping pair.
+                writer.WriteErrorOrInfo(Tds.TokenError, 4060, 1, 11, $"Cannot open database \"{requestedDatabase}\" requested by the login. The login failed.", "SIMULATED", "", 1);
+                writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{userName}'.", "SIMULATED", "", 1);
                 writer.WriteDone(Tds.DoneError, 0);
                 opened.Dispose();
                 return false;
