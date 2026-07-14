@@ -34,17 +34,17 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <item>The conventional default (<see cref="Simulation.DefaultDatabaseName"/>)
     /// if present — preserves the all-T-SQL "fresh Simulation just works"
     /// path.</item>
-    /// <item>When <see cref="Simulation.Databases"/> is empty, lazily seed
-    /// the default — fresh <see cref="Simulation"/>'s ctor starts empty so
-    /// no-collision <c>ImportBacpac</c> shapes work; the first connection
-    /// pays the cost of materializing the default when no import
-    /// preceded it.</item>
-    /// <item>Otherwise pick the alphabetically-first database — predictable
+    /// <item>Otherwise pick the alphabetically-first user database — predictable
     /// fallback for the multi-import scenario, matching the ordering
-    /// <c>sys.databases</c> uses. Pending real <c>USE &lt;db&gt;</c>
+    /// <c>sys.databases</c> uses. The always-present <c>master</c> system
+    /// database is excluded from this pick so a fresh connection never lands on
+    /// master by default. Pending real <c>USE &lt;db&gt;</c>
     /// support, the user can still inspect any database via catalog
     /// views regardless of which one a connection's CurrentDatabase
     /// happens to be pointed at.</item>
+    /// <item>When no user database exists (only the seeded <c>master</c>),
+    /// lazily seed the default — the first connection pays the cost of
+    /// materializing the default when no import preceded it.</item>
     /// </list>
     /// </summary>
     private static Database ResolveInitialDatabase(Simulation simulation)
@@ -53,16 +53,14 @@ public sealed class SimulatedDbConnection : DbConnection
         {
             if (simulation.Databases.TryGetValue(Simulation.DefaultDatabaseName, out var existing))
                 return existing;
-            if (simulation.Databases.Count == 0)
+            foreach (var kvp in simulation.Databases.OrderBy(static kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
             {
-                var seeded = new Database(Simulation.DefaultDatabaseName, simulation.ServerCollation);
-                simulation.Databases.Add(Simulation.DefaultDatabaseName, seeded);
-                return seeded;
+                if (!BuiltInToken.Comparer.Equals(kvp.Key, Simulation.MasterDatabaseName))
+                    return kvp.Value;
             }
-            return simulation.Databases
-                .OrderBy(static kvp => kvp.Key, StringComparer.OrdinalIgnoreCase)
-                .First()
-                .Value;
+            var seeded = new Database(Simulation.DefaultDatabaseName, simulation.ServerCollation);
+            simulation.Databases.Add(Simulation.DefaultDatabaseName, seeded);
+            return seeded;
         }
     }
 
@@ -222,6 +220,15 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>Real SQL Server's combined nesting cap (probe-confirmed).</summary>
     internal const int MaxNestingLevel = 32;
+
+    /// <summary>
+    /// True while an <c>INSERT … EXEC</c> is draining its source EXEC's
+    /// result sets on this connection. An <c>INSERT … EXEC</c> encountered
+    /// while this is set (i.e. inside the executed procedure / dynamic
+    /// batch) raises <strong>Msg 8164</strong> "An INSERT EXEC statement
+    /// cannot be nested." (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal bool InsertExecActive;
 
     /// <summary>
     /// ObjectIds of triggers currently mid-fire on this connection. The

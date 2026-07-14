@@ -202,4 +202,50 @@ public sealed class FullTextDdlTests
         // dbo is principal_id=1 (probe-confirmed pre-seed).
         AreEqual(1, sim.ExecuteScalar("select principal_id from sys.fulltext_catalogs where name = 'AW2025FullTextCatalog'"));
     }
+
+    // FULLTEXTSERVICEPROPERTY returns a plain int (probe-confirmed — unlike
+    // SERVERPROPERTY's sql_variant). The simulator claims Full-Text is
+    // installed, so IsFullTextInstalled reports 1 (the reference box returns 0
+    // only because Full-Text isn't installed there); the resource-tuning
+    // properties report their installed value of 0.
+    [TestMethod]
+    public void FullTextServiceProperty_IsFullTextInstalled_ReturnsOne()
+        => AreEqual(1, new Simulation().ExecuteScalar("select fulltextserviceproperty('IsFullTextInstalled')"));
+
+    [TestMethod]
+    public void FullTextServiceProperty_SurfacesAsInt()
+    {
+        using var reader = new Simulation().ExecuteReader("select fulltextserviceproperty('IsFullTextInstalled')");
+        IsTrue(reader.Read());
+        AreEqual("int", reader.GetDataTypeName(0));
+        _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(1, reader.GetValue(0));
+    }
+
+    [TestMethod]
+    public void FullTextServiceProperty_ResourceProperties_ReturnZero()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('ResourceUsage')"));
+        AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('ConnectTimeout')"));
+        AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('LoadOSResources')"));
+        AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('VerifyResourceUsage')"));
+    }
+
+    [TestMethod]
+    public void FullTextServiceProperty_CaseInsensitive()
+        => AreEqual(1, new Simulation().ExecuteScalar("select fulltextserviceproperty('ISFULLTEXTINSTALLED')"));
+
+    [TestMethod]
+    public void FullTextServiceProperty_UnknownName_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select fulltextserviceproperty('NotAProperty')"));
+
+    [TestMethod]
+    public void FullTextServiceProperty_NullArg_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select fulltextserviceproperty(cast(null as nvarchar(128)))"));
+
+    [TestMethod]
+    public void FullTextServiceProperty_NonConstantName_StillInt()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            "declare @p nvarchar(40) = 'IsFullTextInstalled'; select fulltextserviceproperty(@p)"));
 }

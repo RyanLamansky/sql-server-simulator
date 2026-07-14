@@ -87,7 +87,7 @@ _ = context.Items.Add(new Item { ... });                  // returns EntityEntry
 ## Collation / Unicode fixtures
 
 - **Literal `N'…'`** for any character with a distinctive visible glyph (`€`, `ƒ`, `Ÿ`, `ア`, `café`) — the literal *is* the explanation, no `U+xxxx` comment needed.
-- **`nchar(N)` (decimal, never `0xNN`)** only for invisible / ambiguous characters: NBSP (U+00A0, renders like a space), Private Use Area (no glyph), surrogate pairs (`nchar(55357) + nchar(56832)` for 😀). Hex `nchar(0x…)` fails — the parser reads `0xNN` as varbinary and the varbinary→int coercion isn't implemented.
+- **`nchar(N)` (decimal, never `0xNN`)** only for invisible / ambiguous characters: NBSP (U+00A0, renders like a space), Private Use Area (no glyph), surrogate pairs (`nchar(55357) + nchar(56832)` for 😀). Prefer decimal for readability, but hex `nchar(0x…)` now resolves too (`nchar(0x41)` → `'A'`): the parser reads `0xNN` as varbinary and the varbinary→int coercion converts it big-endian to the code point.
 - **Skip the `cast(<literal> as varchar(N))` / `char(N)` on INSERT** — assignment-time coercion handles `N'…'` → `varchar(N)` and `nchar(N)` → `char(N)` automatically; the cast is noise.
 
 ## Probe code is not a style reference

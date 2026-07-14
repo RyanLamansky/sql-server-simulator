@@ -60,8 +60,8 @@ public sealed class SchemaNameTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select object_name(99999)"));
 
     [TestMethod]
-    public void ObjectName_WithDbIdArg_IgnoresArg()
-        => AreEqual("foo", new Simulation().ExecuteScalar("create table foo (id int); select object_name(object_id('foo'), 1)"));
+    public void ObjectName_WithDbIdArg_RoutesToNamedDatabase()
+        => AreEqual("foo", new Simulation().ExecuteScalar("create table foo (id int); select object_name(object_id('foo'), db_id())"));
 
     [TestMethod]
     public void ObjectName_View_Works()

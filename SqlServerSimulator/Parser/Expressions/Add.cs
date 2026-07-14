@@ -12,7 +12,34 @@ internal sealed class Add : TwoSidedExpression
     protected override SqlValue Run(SqlValue left, SqlValue right) =>
         IsStringConcatPair(left, right)
             ? StringConcatenation(left, right)
-            : AdditiveArithmetic(left, right, '+', "add", static (a, b) => a + b);
+            : left.Type is VarbinarySqlType or BinarySqlType && right.Type is VarbinarySqlType or BinarySqlType
+                ? BinaryConcatenation(left, right)
+                : AdditiveArithmetic(left, right, '+', "add", static (a, b) => a + b);
+
+    /// <summary>
+    /// Binary <c>+</c> binary concatenation: the two byte payloads are joined
+    /// left-to-right. Result type is <c>binary(N+M)</c> when both operands are
+    /// fixed-length binary, else <c>varbinary(N+M)</c> (capped at 8000) — the
+    /// same type <see cref="SqlType.PromoteForArithmetic"/> computes for the
+    /// projection schema. NULL propagates. Probe-confirmed against SQL Server
+    /// 2025 (2026-07-14): <c>0x01 + 0x01 = 0x0101</c>,
+    /// <c>cast(0x0102 as binary(2)) + cast(0x03 as binary(1)) = 0x010203</c>.
+    /// </summary>
+    private static SqlValue BinaryConcatenation(SqlValue left, SqlValue right)
+    {
+        var resultType = SqlType.PromoteForArithmetic(left.Type, right.Type, '+');
+        if (left.IsNull || right.IsNull)
+            return SqlValue.Null(resultType);
+
+        var leftBytes = left.AsBytes;
+        var rightBytes = right.AsBytes;
+        var joined = new byte[leftBytes.Length + rightBytes.Length];
+        leftBytes.CopyTo(joined, 0);
+        rightBytes.CopyTo(joined, leftBytes.Length);
+        return resultType is BinarySqlType binaryResult
+            ? SqlValue.FromBinary(binaryResult, joined)
+            : SqlValue.FromVarbinary(joined);
+    }
 
     /// <summary>
     /// Detects whether <c>+</c> should run as string concatenation rather

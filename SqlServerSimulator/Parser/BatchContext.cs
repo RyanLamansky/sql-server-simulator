@@ -384,17 +384,15 @@ internal sealed class BatchContext
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Fidelity gap vs SQL Server (un-taken IF): real SQL Server defers name
-    /// resolution for un-taken IF branches (an un-taken
-    /// <c>SELECT bad_col FROM bad_table</c> runs silently). The simulator
-    /// parses both branches the same way, so invalid table/column references
-    /// in un-taken branches still raise <c>Msg 208</c> / <c>Msg 207</c> here.
-    /// Common patterns (<c>IF NOT EXISTS (…) CREATE TABLE foo (…)</c>,
-    /// <c>IF OBJECT_ID('foo','U') IS NOT NULL DROP TABLE foo</c>) reference
-    /// names that exist at parse time when the branch is skipped, so they
-    /// work end-to-end; only synthetic patterns that name nothing-tables hit
-    /// the gap. BREAK / CONTINUE scope checks (Msg 135 / 136) explicitly
-    /// don't defer — they fire even in skip mode, matching real SQL Server's
+    /// Deferred name resolution (un-taken IF / WHILE): real SQL Server binds
+    /// names lazily, so an un-taken <c>SELECT bad_col FROM bad_table</c> runs
+    /// silently. The simulator parses both branches the same way, so its parse
+    /// throws — but <c>Simulation.DispatchOneStatement</c> swallows a
+    /// name-resolution error (<c>Msg 208</c> / <c>Msg 207</c>) caught while
+    /// <see cref="IsSkipping"/> is true, dropping the discarded statement.
+    /// BREAK / CONTINUE / RETURN / THROW scope checks (Msg 135 / 136 / 178 /
+    /// 10704) are structural, not name resolution, so they explicitly don't
+    /// defer — they fire even in skip mode, matching real SQL Server's
     /// compile-time check on those statements.
     /// </para>
     /// </remarks>

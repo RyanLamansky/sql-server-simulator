@@ -114,6 +114,22 @@ internal abstract class TwoSidedExpression : Expression
             left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
         }
 
+        // Binary ↔ integer: the binary operand converts to the integer side's
+        // specific type (big-endian, left-truncated to that width), for
+        // arithmetic AND bitwise operators alike (unlike the string path,
+        // which excludes bitwise). Probe-confirmed against SQL Server 2025:
+        // 1 + 0x01 → 2 (int), 255 & 0x01 → 1 (int), cast(5 as bigint) / 0x02
+        // → 2 (bigint), cast(5 as tinyint) + 0x01 → 6 (tinyint).
+        if (left.Type.Category == SqlTypeCategory.Integer && right.Type is VarbinarySqlType or BinarySqlType)
+            right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
+        else if (right.Type.Category == SqlTypeCategory.Integer && left.Type is VarbinarySqlType or BinarySqlType)
+            left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
+        else if (left.Type is VarbinarySqlType or BinarySqlType && right.Type is VarbinarySqlType or BinarySqlType)
+            // Binary + binary is concatenation (handled in Add.Run before it
+            // reaches here); every other operator raises Msg 402 ('- % & | ^')
+            // or Msg 8117 ('* /') with the wording PromoteForArithmetic emits.
+            _ = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
+
         return left.Type.Category switch
         {
             SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),

@@ -28,6 +28,13 @@ public sealed partial class Simulation
     public Simulation()
     {
         RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
+        // Every instance ships with a real `master` database (database_id 1),
+        // present from construction so `USE master`, `master.sys.*` three-part
+        // reads, and `master.dbo.<proc>` all resolve — SSMS leans on these on
+        // every connect. Seeded here under the ctor-time collation (baseline);
+        // the ServerCollationName object-initializer setter runs afterward and
+        // re-points master's collation to the chosen server collation.
+        this.Databases.Add(MasterDatabaseName, new Database(MasterDatabaseName, this.ServerCollation));
     }
 
     /// <summary>
@@ -95,6 +102,16 @@ public sealed partial class Simulation
     internal const string DefaultDatabaseName = "simulated";
 
     /// <summary>
+    /// The <c>master</c> system database's name. Every <see cref="Simulation"/>
+    /// seeds one at construction (<c>database_id</c> 1), so <c>USE master</c>,
+    /// three-part <c>master.sys.*</c> reads, and <c>master.dbo.&lt;proc&gt;</c>
+    /// calls resolve without an explicit import. Excluded from the
+    /// initial-database fallback so a fresh connection still lands on
+    /// <see cref="DefaultDatabaseName"/> rather than master.
+    /// </summary>
+    internal const string MasterDatabaseName = "master";
+
+    /// <summary>
     /// Server-wide default collation name. Used as the seed for every
     /// <see cref="Database"/> created on this simulation — both the lazy
     /// <c>"simulated"</c> seed picked up on first
@@ -124,6 +141,17 @@ public sealed partial class Simulation
             ArgumentNullException.ThrowIfNull(value);
             this.ServerCollation = Collation.TryGet(value)
                 ?? throw new ArgumentException($"Collation '{value}' is not recognized by the simulator.", nameof(value));
+            // The ctor seeded `master` under the baseline collation before this
+            // object-initializer setter ran; re-point it so master.collation
+            // mirrors the chosen server collation (as real SQL Server's
+            // master.collation tracks the install-time server collation). The
+            // construction-time schema dict comparers don't rebuild — matching
+            // the documented ALTER DATABASE COLLATE quirk.
+            if (this.Databases.TryGetValue(MasterDatabaseName, out var master))
+            {
+                master.Collation = this.ServerCollation;
+                master.CollationName = this.ServerCollation.Name;
+            }
         }
     }
 
@@ -139,10 +167,11 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Per-database state hosted by this server instance, keyed by name.
-    /// Starts empty; <see cref="SimulatedDbConnection"/>'s constructor
-    /// lazily seeds <see cref="DefaultDatabaseName"/> on first connection
-    /// to a Simulation that has no databases (so the all-T-SQL use case
-    /// keeps working without an explicit import / CREATE DATABASE).
+    /// Seeded at construction with the <see cref="MasterDatabaseName"/> system
+    /// database; <see cref="SimulatedDbConnection"/>'s constructor lazily seeds
+    /// <see cref="DefaultDatabaseName"/> on first connection to a Simulation
+    /// that has no user database (so the all-T-SQL use case keeps working
+    /// without an explicit import / CREATE DATABASE).
     /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>
     /// adds further entries; <c>USE &lt;db&gt;</c> switches a session's
     /// <see cref="SimulatedDbConnection.CurrentDatabase"/> across entries
@@ -804,6 +833,7 @@ public sealed partial class Simulation
         connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         List<SimulatedStatementOutcome>? outcomes = null;
         SimulatedSqlException? caught = null;
+        var deferredNameError = false;
         try
         {
             try
@@ -819,15 +849,42 @@ public sealed partial class Simulation
                 // path and the TRY-caught path observe the same rollback.
                 if (ex.Class == 13)
                     connection.CurrentTransaction?.Rollback();
-                if (batch.TryFrameDepth == 0)
+                // Deferred name resolution: real SQL Server binds object /
+                // column names lazily, so an un-taken IF / WHILE branch (or a
+                // block skipped after BREAK / CONTINUE / RETURN) that names a
+                // nonexistent table or column compiles fine and is discarded.
+                // The simulator resolves names inline with parsing, so in skip
+                // mode such a failure just means the discarded statement
+                // referenced something absent — drop the statement instead of
+                // surfacing the error. Checked ahead of the TRY-frame path: a
+                // skipped BEGIN TRY body must not activate its CATCH. Only
+                // name resolution defers — syntax / structural errors carry
+                // other numbers and still propagate.
+                if (batch.IsSkipping && IsDeferrableNameResolutionError(ex))
+                    deferredNameError = true;
+                else if (batch.TryFrameDepth == 0)
                     throw;
-                caught = ex;
+                else
+                    caught = ex;
             }
         }
         finally
         {
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = savedThreadId;
+        }
+
+        if (deferredNameError)
+        {
+            // The parser threw mid-statement; advance to the next statement
+            // boundary so the outer dispatch loop resumes cleanly (same
+            // cursor-recovery scan the TRY-caught path uses below). No
+            // @@ERROR / InFlightError mutation — the skipped statement is
+            // conceptually never compiled, not run-and-failed.
+            var parser = batch.Parser;
+            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
+                parser.MoveNextOptional();
+            yield break;
         }
 
         if (caught is not null)
@@ -873,6 +930,17 @@ public sealed partial class Simulation
         foreach (var o in outcomes!)
             yield return o;
     }
+
+    /// <summary>
+    /// True for the parse-time errors real SQL Server defers to bind time —
+    /// Msg 208 (invalid object name) and Msg 207 (invalid column name). These
+    /// are the only errors swallowed for a statement dispatched in skip mode
+    /// (un-taken IF / WHILE branch, or a block skipped after BREAK / CONTINUE
+    /// / RETURN), matching real SQL Server's deferred name resolution. Syntax
+    /// and structural errors carry other numbers and still propagate.
+    /// </summary>
+    private static bool IsDeferrableNameResolutionError(SimulatedSqlException ex)
+        => ex.Number is 207 or 208;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte)
     {

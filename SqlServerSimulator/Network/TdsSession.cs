@@ -153,7 +153,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var opened = simulation.CreateDbConnection();
         opened.Open();
         opened.InfoMessage += this.OnInfoMessage;
-        if (requestedDatabase.Length > 0 && !requestedDatabase.Equals("master", StringComparison.OrdinalIgnoreCase))
+        if (requestedDatabase.Length > 0)
         {
             try
             {

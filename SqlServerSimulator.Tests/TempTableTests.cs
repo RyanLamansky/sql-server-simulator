@@ -111,6 +111,18 @@ public sealed class TempTableTests
     }
 
     [TestMethod]
+    public void DropTable_MissingRegular_RaisesMsg3701()
+    {
+        // The regular (non-temp) missing-table path raises the same Msg 3701
+        // St 5 as the temp path above — probe-confirmed verbatim wording
+        // against SQL Server 2025.
+        using var conn = new Simulation().CreateOpenConnection();
+        var ex = Throws<DbException>(() => Exec(conn, "drop table missing_regular"));
+        AreEqual("3701", ex.Data["HelpLink.EvtID"]);
+        AreEqual("Cannot drop the table 'missing_regular', because it does not exist or you do not have permission.", ex.Message);
+    }
+
+    [TestMethod]
     public void DropTable_IfExists_Missing_IsSilent()
     {
         using var conn = new Simulation().CreateOpenConnection();

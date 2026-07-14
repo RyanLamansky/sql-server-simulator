@@ -32,14 +32,13 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             var variableName = variableToken.Value;
-            // In skip mode the duplicate-name check (Msg 134) is also gated:
-            // real SQL Server defers binding of un-taken IF branches, so a
-            // second DECLARE of the same name in an un-taken branch never
-            // sees the first DECLARE. Without this gate, the simulator would
-            // surface Msg 134 where SQL Server stays silent.
-            if (!context.Batch.IsSkipping
-                && (context.Batch.Variables.ContainsKey(variableName)
-                    || context.Batch.TableVariables.ContainsKey(variableName)))
+            // Variable declarations are compile-scoped batch-wide: a DECLARE
+            // inside an un-taken IF branch still registers its slot, and a
+            // duplicate name raises Msg 134 even when either declaration
+            // sits in a dead branch (probe-confirmed against SQL Server
+            // 2025). Only the initializer is execution-scoped.
+            if (context.Batch.Variables.ContainsKey(variableName)
+                || context.Batch.TableVariables.ContainsKey(variableName))
             {
                 throw SimulatedSqlException.VariableAlreadyDeclared(variableName);
             }
@@ -102,8 +101,7 @@ partial class Simulation
                 }
             }
 
-            if (!context.Batch.IsSkipping)
-                context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
+            context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
             sawScalar = true;
         } while (context.Token is Operator { Character: ',' });
 
@@ -217,12 +215,8 @@ partial class Simulation
         return true;
     }
 
-    private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType)
-    {
-        if (context.Batch.IsSkipping)
-            return;
+    private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType) =>
         context.Batch.TableVariables[variableName] = tableType.Clone("@" + variableName, context.Batch);
-    }
 
     /// <summary>
     /// Parses the column-list body of <c>DECLARE @t TABLE (...)</c> and
@@ -260,8 +254,12 @@ partial class Simulation
     private static void ParseDeclareTableVariable(ParserContext context, string variableName)
     {
         var fullName = "@" + variableName;
-        if (!TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints))
-            return;
+        // The false return (skip mode) is ignored here: table-variable
+        // declarations are compile-scoped batch-wide like scalar DECLAREs,
+        // so an un-taken IF branch still registers @t (probe-confirmed
+        // against SQL Server 2025). Only CREATE FUNCTION's RETURNS @r TABLE
+        // caller uses the skip signal, to avoid registering the function.
+        _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints);
 
         var heapTable = new HeapTable(
             fullName,
@@ -280,10 +278,11 @@ partial class Simulation
     /// and <c>CREATE FUNCTION ... RETURNS @r TABLE</c>. Cursor on entry: the
     /// <c>TABLE</c> reserved keyword. Cursor on exit: one token past the
     /// closing <c>)</c>. <paramref name="fullName"/> is the surface name
-    /// reported in error messages (e.g. <c>"@r"</c>). Returns <see langword="false"/>
-    /// when <see cref="BatchContext.IsSkipping"/> short-circuits the body
-    /// (an un-taken IF branch around the declaration); caller should bail
-    /// without registering anything.
+    /// reported in error messages (e.g. <c>"@r"</c>). The out-params are
+    /// populated unconditionally; the return value is <see langword="false"/>
+    /// under <see cref="BatchContext.IsSkipping"/> (an un-taken IF branch) so
+    /// the CREATE FUNCTION caller can avoid registering the function, while
+    /// DECLARE registers its compile-scoped table variable either way.
     /// </summary>
     private static bool TryParseTableVariableColumnsAndConstraints(
         ParserContext context,
@@ -370,12 +369,9 @@ partial class Simulation
                 }));
         }
 
-        if (context.Batch.IsSkipping)
-            return false;
-
         resolvedColumns = [.. heapColumns!];
         keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase);
         checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase);
-        return true;
+        return !context.Batch.IsSkipping;
     }
 }

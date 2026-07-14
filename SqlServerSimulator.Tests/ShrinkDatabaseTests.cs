@@ -29,7 +29,8 @@ public sealed class ShrinkDatabaseTests
         AreEqual(typeof(int), reader.GetFieldType(1));
 
         IsTrue(reader.Read());
-        AreEqual((short)1, reader.GetInt16(0));
+        // database_id 5: the simulated user database (master is 1).
+        AreEqual((short)5, reader.GetInt16(0));
         AreEqual(1, reader.GetInt32(1));
         IsFalse(reader.Read());
     }

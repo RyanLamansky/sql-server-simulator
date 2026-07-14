@@ -846,6 +846,7 @@ internal abstract class Expression
             23 => uppercaseName switch
             {
                 "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
+                "FULLTEXTSERVICEPROPERTY" => new FullTextServiceProperty(context),
                 _ => null
             },
             _ => (Expression?)null

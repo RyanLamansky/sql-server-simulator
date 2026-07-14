@@ -68,9 +68,9 @@ partial class Simulation
             if (renameList is not null)
             {
                 if (renameList.Length < body.Schema.Length)
-                    throw SimulatedSqlException.CteHasMoreColumnsThanList(cteName.Value);
+                    throw SimulatedSqlException.HasMoreColumnsThanColumnList(cteName.Value);
                 if (renameList.Length > body.Schema.Length)
-                    throw SimulatedSqlException.CteHasFewerColumnsThanList(cteName.Value);
+                    throw SimulatedSqlException.HasFewerColumnsThanColumnList(cteName.Value);
                 columnNames = renameList;
             }
             else

@@ -40,6 +40,8 @@ INNER / CROSS / LEFT / CROSS APPLY / OUTER APPLY stream one upstream tuple at a 
 
 **RIGHT / FULL with a derived-table right side** materialize the lateral plan once via the enclosing-scope `outerResolver` (not the joined-tuple resolver), so non-correlated and outer-correlated derived tables work; lateral correlation to the left side is rejected because the derived-table parse doesn't wire the left-source snapshot resolver — left-side references raise Msg 207 ("Invalid column name") at runtime when `Reference.Run` hits the null outer resolver. Real SQL Server raises Msg 4104 at bind time for the same shape; different code, same end state.
 
+**Table-value-constructor (`(VALUES …) alias(cols)`) sources** are one more `LateralPlan` shape: a `CROSS` / `OUTER APPLY` VALUES source correlates to the left row (its cell expressions re-evaluate per outer tuple through the joined-tuple resolver), and `JoinDriver` treats it exactly like a derived-table SELECT right side. Parsing / type-promotion / error surface live in [`query.md`](query.md) (projection section).
+
 ## EF Core mapping
 
 EF Core 10's LINQ `LeftJoin` / `RightJoin` operators translate to LEFT / RIGHT JOIN respectively and route through this pipeline. .NET 10 LINQ doesn't expose a `FullJoin` operator, so FULL OUTER JOIN is reachable only via raw SQL.

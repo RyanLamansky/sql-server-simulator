@@ -25,11 +25,18 @@ internal abstract partial class SqlType
     /// <see cref="Category"/> with each arm handing off to a helper that
     /// switches on the right operand's category. Both switches are over
     /// dense byte-typed enums, so the JIT can lower them to jump tables.
+    /// varbinary / binary vs an integer partner: the binary side implicitly
+    /// converts to the integer type (probe-confirmed against SQL Server
+    /// 2025 — <c>0x01 = 1</c> compares equal, <c>1 + 0x01</c> and
+    /// <c>255 &amp; 0x01</c> stay int, <c>cast(5 as bigint) / 0x02</c> stays
+    /// bigint). Comparison and arithmetic both route through here.
     /// </remarks>
     public static SqlType Promote(SqlType a, SqlType b) =>
         a == b ? a
         : a is RowVersionSqlType ? PromoteFromRowVersion(b)
         : b is RowVersionSqlType ? PromoteFromRowVersion(a)
+        : (a is VarbinarySqlType or BinarySqlType) && IsIntegerCategory(b) ? b
+        : (b is VarbinarySqlType or BinarySqlType) && IsIntegerCategory(a) ? a
         : a.Category switch
         {
             SqlTypeCategory.Approximate => PromoteFromApproximate(a, b),
@@ -217,6 +224,18 @@ internal abstract partial class SqlType
     /// </remarks>
     public static SqlType PromoteForArithmetic(SqlType a, SqlType b, char op)
     {
+        // Binary operands. One binary + one integer converts the binary side
+        // to the integer type (Promote handles it — applies to arithmetic AND
+        // bitwise). Binary + binary is varbinary/binary concatenation for '+',
+        // and an error for every other operator: Msg 402 for '- % & | ^',
+        // Msg 8117 for '* /' (probe-confirmed against SQL Server 2025).
+        var aBinary = a is VarbinarySqlType or BinarySqlType;
+        var bBinary = b is VarbinarySqlType or BinarySqlType;
+        if (aBinary && bBinary)
+            return BinaryPairResultType(a, b, op);
+        if ((aBinary && IsIntegerCategory(b)) || (bBinary && IsIntegerCategory(a)))
+            return Promote(a, b);
+
         // Bitwise operators (&, |, ^) don't have per-operator scale rules
         // and don't accept decimal operands anyway — fall through to the
         // joint-envelope rule for type unification (decimal × bitwise will
@@ -386,6 +405,56 @@ internal abstract partial class SqlType
         DateTimeOffsetSqlType dto => dto.precision,
         _ when type == DateTime => 3,
         _ => 0,
+    };
+
+    /// <summary>
+    /// Result type for a binary-+-binary operator pair. <c>+</c> concatenates
+    /// (<c>binary(N+M)</c> when both sides are fixed-length binary, else
+    /// <c>varbinary(N+M)</c>, capped at 8000); <c>- % &amp; | ^</c> raise Msg 402;
+    /// <c>* /</c> raise Msg 8117. Probe-confirmed against SQL Server 2025
+    /// (2026-07-14).
+    /// </summary>
+    private static SqlType BinaryPairResultType(SqlType a, SqlType b, char op) => op switch
+    {
+        '+' => BinaryConcatResultType(a, b),
+        '*' or '/' => throw SimulatedSqlException.OperandDataTypeInvalid(a, BinaryOperatorWord(op)),
+        _ => throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, BinaryOperatorWord(op)),
+    };
+
+    /// <summary>
+    /// Concatenation result type for binary <c>+</c> binary. Both fixed-length
+    /// binary operands give <c>binary(N+M)</c>; any varbinary participant gives
+    /// <c>varbinary(N+M)</c>; the summed length caps at 8000. Length-unspecified
+    /// operands (hex literals carry no static length) fall back to the
+    /// unspecified varbinary form.
+    /// </summary>
+    private static SqlType BinaryConcatResultType(SqlType a, SqlType b)
+    {
+        var summed = Math.Min(8000, BinaryLength(a) + BinaryLength(b));
+        return summed <= 0 ? Varbinary
+            : a is BinarySqlType && b is BinarySqlType ? GetBinary(summed)
+            : VarbinarySqlType.Get(summed);
+    }
+
+    private static int BinaryLength(SqlType type) => type switch
+    {
+        BinarySqlType binary => binary.length,
+        VarbinarySqlType varbinary => varbinary.length > 0 ? varbinary.length : 0,
+        _ => 0,
+    };
+
+    /// <summary>
+    /// Operator wording for the binary-pair Msg 402 / 8117 errors: the word
+    /// form for <c>-</c>/<c>*</c>/<c>/</c>/<c>%</c> and the quoted operator
+    /// character for the bitwise <c>&amp;</c>/<c>|</c>/<c>^</c> operators.
+    /// </summary>
+    private static string BinaryOperatorWord(char op) => op switch
+    {
+        '-' => "subtract",
+        '*' => "multiply",
+        '/' => "divide",
+        '%' => "modulo",
+        _ => $"'{op}'",
     };
 
     /// <summary>

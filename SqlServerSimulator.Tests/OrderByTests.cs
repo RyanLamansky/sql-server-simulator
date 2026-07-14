@@ -251,4 +251,61 @@ public class OrderByTests
             rows.Add(((int)reader[0], (int)reader[1]));
         CollectionAssert.AreEqual(new[] { (0, 2), (1, 2), (2, 1) }, rows);
     }
+
+    // === FROM-less SELECT with a trailing ORDER BY ===
+    // A SELECT with no FROM yields exactly one row, so ORDER BY is a no-op
+    // sort, but SQL Server still accepts the clause (probed 2026-07-14).
+    // The SSMS server-properties query ends `… AS [IsFullTextInstalled]
+    // ORDER BY [Server_Name] ASC` with no FROM. The clause reaches the parser
+    // through the projection-alias continuation, which previously raised
+    // Msg 156 near ORDER.
+
+    [TestMethod]
+    public void Fromless_OrderByAlias_ReturnsRow()
+    {
+        using var reader = new Simulation().ExecuteReader("select 2 as x, 1 as y order by x");
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetValue(0));
+        AreEqual(1, reader.GetValue(1));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Fromless_OrderByAliasDescending_ReturnsRow()
+    {
+        // The exact SSMS shape: a trailing bracketed-alias ORDER BY, no FROM.
+        using var reader = new Simulation().ExecuteReader("select 7 as [Server_Name] order by [Server_Name] desc");
+        IsTrue(reader.Read());
+        AreEqual("Server_Name", reader.GetName(0));
+        AreEqual(7, reader.GetValue(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Fromless_OrderByOrdinal_ReturnsRow()
+    {
+        using var reader = new Simulation().ExecuteReader("select 2 as x, 1 as y order by 2");
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetValue(0));
+        AreEqual(1, reader.GetValue(1));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Fromless_OrderByWithOffsetFetch_ReturnsRow()
+    {
+        using var reader = new Simulation().ExecuteReader("select 5 as x order by x offset 0 rows fetch next 1 rows only");
+        IsTrue(reader.Read());
+        AreEqual(5, reader.GetValue(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void Fromless_SetOpChain_TopLevelOrderBy_Sorts()
+    {
+        // The final ORDER BY of a set-op chain whose branches are all
+        // FROM-less: `SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X DESC` → 2, 1.
+        using var reader = new Simulation().ExecuteReader("select 2 as x union all select 1 order by x desc");
+        CollectionAssert.AreEqual(new object?[] { 2, 1 }, Column0(reader));
+    }
 }

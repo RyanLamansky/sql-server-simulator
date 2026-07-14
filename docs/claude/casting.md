@@ -42,6 +42,21 @@ Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):
 
 `VarcharSqlType`/`NVarcharSqlType`/`VarbinarySqlType` are per-length singletons via `Get(N)` (parallel to `CharSqlType`); `Unspecified` (length 0) is the runtime sentinel; `MaxForm` (length -1) is the LOB form. **Equality**: `value.Type == SqlType.Varchar` is true only for the unspecified form; "is any varchar" needs `is VarcharSqlType`. The encoder accepts any same-family pair regardless of length (write-time truncation enforced upstream).
 
+## Binary ↔ integer / money CAST
+
+Both directions live in `SqlValue.CoerceTo` (probe-confirmed against SQL Server 2025, 2026-07-14). This is what makes SSMS's connect queries (`CAST(0x0001 AS int)`, `(@@microsoftversion / 0x1000000) & 0xff`) and hex `nchar(0x41)` resolve.
+
+| Source → target | Rule |
+| --- | --- |
+| `binary`/`varbinary` → `bit`/`tinyint`/`smallint`/`int`/`bigint` | Big-endian; **left-truncate** to the target width (keep the rightmost bytes), zero-fill high bytes when shorter, read two's-complement. **Silent — never overflows.** `cast(0x0102 as int)`=258, `cast(0x0102030405 as int)`=33752069, `cast(0xFF01 as tinyint)`=1 (no Msg 244), `cast(0xFFFFFFFF as int)`=-1, `cast(0x as int)`=0. `bit` tests the final byte for non-zero (`cast(0x0100 as bit)`=0, `cast(0x01 as bit)`=1). |
+| `binary`/`varbinary` → `money`/`smallmoney` | Rightmost 8 (money) / 4 (smallmoney) bytes = raw **scale-4 units**, big-endian two's-complement ÷ 10000. `cast(0x01 as money)`=0.0001, `cast(0x01 as smallmoney)`=0.0001. |
+| `binary`/`varbinary` → `decimal`/`numeric` | **Msg 8114** (`"Error converting data type varbinary to numeric."`, class 16 state 5) — *not* the Msg 529 used elsewhere. `TRY_CAST` swallows it to NULL. |
+| `binary`/`varbinary` → `float`/`real` | **Msg 529** (`"Explicit conversion from data type varbinary to float is not allowed."`, class 16 state 1) — via `CoerceToApproximate`'s default arm. NOT swallowed by `TRY_CAST` (`try_cast(0x41 as float)` still raises 529). |
+| `bit`/`tinyint`/`smallint`/`int`/`bigint` → `binary(N)` | Native-width big-endian two's-complement (bit/tinyint→1, smallint→2, int→4, bigint→8), then **left-zero-pad or left-truncate to exactly N** (fixed width). `cast(258 as binary(4))`=`0x00000102`, `cast(258 as binary(1))`=`0x02`, `cast(-1 as binary(4))`=`0xFFFFFFFF`, `cast(258 as binary)`=30 zero-padded bytes (CAST default length 30). |
+| `bit`/`tinyint`/`smallint`/`int`/`bigint` → `varbinary(N)` | Native-width bytes, **left-truncated only when N < native, never left-padded** (variable width). `cast(258 as varbinary(4))`=`0x00000102`, `cast(cast(1 as tinyint) as varbinary(4))`=`0x01`, `cast(cast(258 as smallint) as varbinary(1))`=`0x02`, `cast(258 as varbinary)`=`0x00000102`. |
+
+Helpers: `VarbinaryToInteger` / `VarbinaryToMoneyUnits` / `EncodeIntegerToBinary` in `SqlValue.Coerce.cs`. `binary(N)` targets carry their length on the `BinarySqlType`; `varbinary(N)` targets carry it on the `VarbinarySqlType` (length ≤ 0 — unspecified / MAX — keeps native width). Arithmetic/bitwise/comparison with a binary operand routes through these same paths — see [`arithmetic.md`](arithmetic.md)'s *Binary operand promotion*.
+
 ## `TRY_CAST` / `TRY_CONVERT`
 Wrap regular CAST/CONVERT in try/catch that swallows documented "conversion failed" error numbers (returning typed NULL) while letting structural errors propagate.
 

@@ -269,10 +269,17 @@ partial class Simulation
 
         var output = TryParseOutputClause(context, destinationTable, sourceColumnNames: null);
 
+        // OUTPUT combined with an INSERT … EXEC source is rejected outright
+        // (Msg 483) — probe-confirmed. The check runs regardless of skip
+        // state since it's a structural incompatibility.
+        if (output is not null && context.Token is ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute })
+            throw SimulatedSqlException.OutputClauseNotAllowedInInsertExec();
+
         var sourceRows = context.Token switch
         {
             ReservedKeyword { Keyword: Keyword.Values } => EvaluateValuesTuples(context),
             ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
+            ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
 
@@ -535,6 +542,49 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         foreach (var rowBytes in resultSet.RowBytes)
             rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
+        return rows;
+    }
+
+    /// <summary>
+    /// Parses and executes the <c>EXEC</c>-source side of <c>INSERT … EXEC</c>.
+    /// The EXEC clause (a stored-procedure call or a parenthesized dynamic-SQL
+    /// batch) runs through the shared EXEC machinery; every result set it
+    /// yields is appended to the destination, so a multi-<c>SELECT</c> body
+    /// lands all of its rows (probe-confirmed) and <c>@@ROWCOUNT</c> becomes
+    /// the total across result sets. Non-tabular outcomes (a pure-DML
+    /// procedure) contribute no rows and the INSERT succeeds with zero rows.
+    /// Each result set's column count must match the INSERT target's column
+    /// list — a mismatch raises <strong>Msg 213</strong> (State 7); value
+    /// coercion into the target types happens later in the shared per-row
+    /// encode loop, so a bad value surfaces the usual conversion error.
+    /// An <c>INSERT … EXEC</c> reached while another is draining on the same
+    /// connection raises <strong>Msg 8164</strong> (nesting is disallowed).
+    /// </summary>
+    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, int expectedColumnCount)
+    {
+        var batch = context.Batch;
+        var connection = batch.Connection;
+        if (connection.InsertExecActive)
+            throw SimulatedSqlException.InsertExecCannotBeNested();
+
+        var rows = new List<SqlValue[]>();
+        connection.InsertExecActive = true;
+        try
+        {
+            foreach (var outcome in connection.Simulation.ParseExec(batch))
+            {
+                if (outcome is not SimulatedSqlResultSet resultSet)
+                    continue;
+                if (resultSet.Schema.Length != expectedColumnCount)
+                    throw SimulatedSqlException.InsertExecColumnCountMismatch();
+                foreach (var rowBytes in resultSet.RowBytes)
+                    rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
+            }
+        }
+        finally
+        {
+            connection.InsertExecActive = false;
+        }
         return rows;
     }
 

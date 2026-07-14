@@ -76,12 +76,10 @@ internal sealed class ObjectName : Expression
 
     private static Database? LookupDatabaseById(Simulation simulation, int requested)
     {
-        short id = 1;
-        foreach (var db in DbId.OrderedDatabases(simulation))
+        foreach (var (db, id) in DbId.DatabasesWithIds(simulation))
         {
             if (id == requested)
                 return db;
-            id++;
         }
         return null;
     }

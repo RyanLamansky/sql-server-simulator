@@ -210,6 +210,39 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Wraps a table value constructor's rows (<c>(VALUES (…), (…)) alias(cols)</c>)
+    /// as a <see cref="Selection"/> usable as a <see cref="FromSource.LateralPlan"/>.
+    /// Each row's cell expressions are evaluated per <see cref="Execute"/>
+    /// against the outer-row resolver — so a VALUES source under CROSS / OUTER
+    /// APPLY can correlate to the left side (the SSMS server-properties shape)
+    /// — coerced to the per-column promoted <paramref name="schema"/> type, and
+    /// encoded. Riding the deferred lateral-plan seam is what gives VALUES its
+    /// per-outer-row correlation for free, exactly like a derived-table SELECT.
+    /// </summary>
+    private static Selection ForValuesConstructor(SqlType[] schema, string[] columnNames, List<Expression[]> tuples) =>
+        new(schema, columnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            rowSource: (batch, outerResolver) => EnumerateValuesRows(schema, tuples, batch, outerResolver));
+
+    private static IEnumerable<byte[]> EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        SqlValue Resolve(MultiPartName name) =>
+            outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name);
+        var runtime = new RuntimeContext(Resolve, batch);
+        foreach (var tuple in tuples)
+        {
+            var values = new SqlValue[schema.Length];
+            for (var c = 0; c < schema.Length; c++)
+            {
+                var raw = tuple[c].Run(runtime);
+                values[c] = raw.IsNull || raw.Type == schema[c] ? raw : raw.CoerceTo(schema[c]);
+            }
+            yield return RowEncoder.EncodeRow(schema, values);
+        }
+    }
+
+    /// <summary>
     /// Materializes the SELECT against the given outer-row resolver
     /// (null for top-level / non-correlated scopes). Each call produces a
     /// fresh <see cref="SimulatedSqlResultSet"/>; the underlying row sequence
@@ -498,6 +531,15 @@ internal sealed partial class Selection
             {
                 case ReservedKeyword { Keyword: Keyword.From }:
                 case ReservedKeyword { Keyword: Keyword.Into }:
+                // A FROM-less SELECT can still carry a trailing ORDER BY
+                // (legal on real SQL Server: `SELECT 2 AS X ORDER BY X`
+                // returns the one row). When the final projection element ended
+                // in an alias, the alias-continue routes ORDER back to this
+                // pre-expression switch; fall through (like FROM / INTO) to the
+                // post-expression ORDER handler, which consumes the clause and
+                // its OFFSET / FETCH tail. Sorting is a no-op on the one
+                // synthesized row, but the clause must parse rather than raise.
+                case ReservedKeyword { Keyword: Keyword.Order }:
                     break;
 
                 case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp or Keyword.Current_Date or Keyword.Current_User or Keyword.Session_User or Keyword.System_user or Keyword.User }:
@@ -1017,12 +1059,21 @@ internal sealed partial class Selection
         }
         if (next is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var afterApplyParen = context.GetNextRequired();
 
         var leftSnapshot = leftSources.ToArray();
         SqlType ChainedResolver(MultiPartName name) =>
             ResolveColumnTypeAcrossSources(leftSnapshot, name, surroundingOuter);
+
+        // CROSS / OUTER APPLY (VALUES (…), (…)) alias(cols): the table value
+        // constructor's rows can reference the left APPLY sources — the SSMS
+        // dm_os_host_info server-properties shape. The chained resolver wires
+        // that correlation in at parse and (via ForValuesConstructor) runtime.
+        if (afterApplyParen is ReservedKeyword { Keyword: Keyword.Values })
+            return ParseValuesDerivedTable(context, ChainedResolver);
+
+        if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var lateralPlan = Selection.Parse(context, depth + 1, outerTypeResolver: ChainedResolver);
 
@@ -1407,7 +1458,16 @@ internal sealed partial class Selection
                     backingTable: tvTable);
 
             case Operator { Character: '(' }:
-                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+                var afterOpenParen = context.GetNextRequired();
+
+                // Table-value-constructor derived table: `(VALUES …) alias(cols)`.
+                // Rides the same deferred lateral-plan seam as a derived-table
+                // SELECT, so a VALUES source correlates to outer scope the same
+                // way (needed for a comma-FROM VALUES referencing an outer CTE).
+                if (afterOpenParen is ReservedKeyword { Keyword: Keyword.Values })
+                    return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? outerTypeResolver);
+
+                if (afterOpenParen is not ReservedKeyword { Keyword: Keyword.Select })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 // Derived tables can correlate to outer scope (SQL Server
@@ -1503,6 +1563,112 @@ internal sealed partial class Selection
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+    }
+
+    /// <summary>
+    /// Parses a table-value-constructor derived table:
+    /// <c>(VALUES (row), (row), …) alias(col, col, …)</c>. Entered with the
+    /// cursor on the <c>VALUES</c> keyword (the caller has consumed the opening
+    /// <c>(</c> and matched the keyword). On return the cursor sits at the
+    /// first un-consumed token after the alias's column list (WHERE / JOIN /
+    /// comma / <c>)</c> / <c>;</c> / null). The alias and its column-alias list
+    /// are both required — real SQL Server raises <strong>Msg 102</strong>
+    /// (no alias) or <strong>Msg 8155</strong> (no column list). Per-column
+    /// result types promote across rows exactly like set-op / CASE branches
+    /// (<see cref="SqlType.Promote"/>); the resulting plan defers to
+    /// <see cref="ForValuesConstructor"/> so a VALUES source under APPLY can
+    /// correlate to the outer row.
+    /// </summary>
+    private static FromSource ParseValuesDerivedTable(ParserContext context, Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
+        // ParseValuesTuples enters on VALUES and leaves the cursor on the token
+        // after the last tuple's ')', which must be the (VALUES …) wrapper's
+        // closing ')'.
+        var tuples = Simulation.ParseValuesTuples(context);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Every row must have the same column count (Msg 10709).
+        var arity = tuples[0].Length;
+        for (var i = 1; i < tuples.Count; i++)
+        {
+            if (tuples[i].Length != arity)
+                throw SimulatedSqlException.TableValueConstructorRowArityMismatch();
+        }
+
+        // ConsumeOptionalAlias expects the cursor on the closing ')'; it
+        // advances past it and consumes `AS alias` / bare `alias`. A VALUES
+        // derived table requires the alias (Msg 102 near ')' otherwise).
+        var alias = ConsumeOptionalAlias(context)
+            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // The column-alias list is mandatory (Msg 8155 when absent).
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.NoColumnNameSpecified(1, alias);
+        var columnNames = ParseColumnAliasList(context);
+
+        // Msg 8158 (rows wider than the list) / Msg 8159 (rows narrower).
+        if (arity > columnNames.Length)
+            throw SimulatedSqlException.HasMoreColumnsThanColumnList(alias);
+        if (arity < columnNames.Length)
+            throw SimulatedSqlException.HasFewerColumnsThanColumnList(alias);
+
+        // Per-column type promotion across every row's cell — mirrors the
+        // set-op / CASE joint-envelope rule. Correlated cell references
+        // (a VALUES source under APPLY) resolve through the chained outer
+        // type resolver.
+        SqlType TypeResolver(MultiPartName name) =>
+            outerTypeResolver is not null
+                ? outerTypeResolver(name)
+                : throw SimulatedSqlException.InvalidColumnName(name);
+        var schema = new SqlType[arity];
+        for (var c = 0; c < arity; c++)
+        {
+            var colType = tuples[0][c].GetSqlType(context.Batch, TypeResolver);
+            for (var i = 1; i < tuples.Count; i++)
+                colType = SqlType.Promote(colType, tuples[i][c].GetSqlType(context.Batch, TypeResolver));
+            schema[c] = colType;
+        }
+
+        var columns = new HeapColumn[arity];
+        for (var c = 0; c < arity; c++)
+            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: true);
+
+        return new FromSource(
+            qualifier: alias,
+            columnNames: columnNames,
+            columns: columns,
+            storedSchema: columns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: [],
+            lateralPlan: ForValuesConstructor(schema, columnNames, tuples));
+    }
+
+    /// <summary>
+    /// Parses a parenthesized column-alias list <c>(col, col, …)</c> — the
+    /// name list a VALUES derived table (or any aliased rowset) attaches to
+    /// rename its columns. Entered with the cursor on the opening <c>(</c>;
+    /// on return the cursor sits at the first token after the closing
+    /// <c>)</c>. Each name is an identifier (bare or bracketed); anything
+    /// else raises <strong>Msg 102</strong>.
+    /// </summary>
+    private static string[] ParseColumnAliasList(ParserContext context)
+    {
+        var names = new List<string>();
+        while (true)
+        {
+            if (context.GetNextRequired() is not Name columnName)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            names.Add(columnName.Value);
+            var separator = context.GetNextRequired();
+            if (separator is Operator { Character: ')' })
+                break;
+            if (separator is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        context.MoveNextOptional();
+        return [.. names];
     }
 
     /// <summary>

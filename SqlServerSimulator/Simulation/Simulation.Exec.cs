@@ -53,6 +53,11 @@ partial class Simulation
                 "sp_set_session_context",
                 "sp_getapplock",
                 "sp_releaseapplock",
+                // xp_msver returns a one-result-set version/host-info table.
+                // SSMS calls master.dbo.xp_msver on connect; the leaf routes
+                // here from any current database (real SQL Server resolves
+                // sp_/xp_ system procs through master).
+                "xp_msver",
             ],
             collation);
         return lookup.TryGetValue(leaf, out var canonical) ? canonical : null;
@@ -146,6 +151,7 @@ partial class Simulation
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
+            "xp_msver" => InvokeXpMsver(batch),
             _ => throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
         };
         if (systemProc is not null)

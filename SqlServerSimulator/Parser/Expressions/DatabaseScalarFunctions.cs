@@ -9,11 +9,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL Server's projected column type for this function.
 /// </summary>
 /// <remarks>
-/// The simulator allocates ids by iterating
-/// <see cref="Simulation.Databases"/> in case-insensitive name order
-/// and assigning 1-based positions on each call — the same convention
-/// used to project <c>sys.databases.database_id</c>. Unknown name
-/// returns NULL; NULL argument returns NULL.
+/// The simulator allocates ids via <see cref="DatabasesWithIds"/>: the
+/// <c>master</c> system database is always <c>database_id</c> 1, and user
+/// databases take 5, 6, … in case-insensitive name order (real SQL Server
+/// reserves 2-4 for tempdb / model / msdb, which the simulator doesn't model)
+/// — the same convention used to project <c>sys.databases.database_id</c>.
+/// Unknown name returns NULL; NULL argument returns NULL.
 /// </remarks>
 internal sealed class DbId : Expression
 {
@@ -33,12 +34,10 @@ internal sealed class DbId : Expression
         var targetName = this.nameArg is null ? runtime.Batch.CurrentDatabase.Name : ResolveNameArgument(runtime);
         if (targetName is null)
             return SqlValue.Null(SqlType.SmallInt);
-        short id = 1;
-        foreach (var db in OrderedDatabases(runtime.Batch.Connection.Simulation))
+        foreach (var (db, id) in DatabasesWithIds(runtime.Batch.Connection.Simulation))
         {
             if (BuiltInToken.Comparer.Equals(db.Name, targetName))
                 return SqlValue.FromInt16(id);
-            id++;
         }
         return SqlValue.Null(SqlType.SmallInt);
     }
@@ -51,6 +50,31 @@ internal sealed class DbId : Expression
 
     internal static IEnumerable<Database> OrderedDatabases(Simulation simulation) =>
         simulation.Databases.Values.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Pairs each hosted database with its <c>database_id</c>: <c>master</c> is
+    /// always 1, and every other (user) database takes 5, 6, … in
+    /// case-insensitive name order. Real SQL Server reserves ids 2-4 for
+    /// tempdb / model / msdb, which the simulator doesn't model, so user
+    /// databases start at 5. Single source of truth for
+    /// <see cref="DbId"/> / <see cref="DbName"/>, <c>OBJECT_NAME</c>'s
+    /// database routing, <c>sys.databases.database_id</c>, and
+    /// <c>DBCC SHRINKDATABASE</c>'s numeric-id form.
+    /// </summary>
+    internal static IEnumerable<(Database Database, short Id)> DatabasesWithIds(Simulation simulation)
+    {
+        foreach (var db in OrderedDatabases(simulation))
+        {
+            if (BuiltInToken.Comparer.Equals(db.Name, Simulation.MasterDatabaseName))
+                yield return (db, 1);
+        }
+        short id = 5;
+        foreach (var db in OrderedDatabases(simulation))
+        {
+            if (!BuiltInToken.Comparer.Equals(db.Name, Simulation.MasterDatabaseName))
+                yield return (db, id++);
+        }
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
@@ -84,12 +108,10 @@ internal sealed class DbName : Expression
         if (v.IsNull)
             return SqlValue.Null(SqlType.SystemName);
         var requested = v.CoerceTo(SqlType.Int32).AsInt32;
-        short id = 1;
-        foreach (var db in DbId.OrderedDatabases(runtime.Batch.Connection.Simulation))
+        foreach (var (db, id) in DbId.DatabasesWithIds(runtime.Batch.Connection.Simulation))
         {
             if (id == requested)
                 return SqlValue.FromString(SqlType.SystemName, db.Name);
-            id++;
         }
         return SqlValue.Null(SqlType.SystemName);
     }

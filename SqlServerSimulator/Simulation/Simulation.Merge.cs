@@ -1660,9 +1660,11 @@ partial class Simulation
     /// Parses one or more comma-separated <c>(...)</c> tuples following a
     /// <c>VALUES</c> keyword. Enters with <see cref="ParserContext.Token"/>
     /// on <c>VALUES</c>; on return the cursor sits on the first token
-    /// after the last tuple's closing paren. Shared with INSERT.
+    /// after the last tuple's closing paren. Shared with INSERT and with
+    /// the table-value-constructor derived table (<c>(VALUES …) alias(cols)</c>)
+    /// parsed in <see cref="Selection"/>.
     /// </summary>
-    private static List<Expression[]> ParseValuesTuples(ParserContext context)
+    internal static List<Expression[]> ParseValuesTuples(ParserContext context)
     {
         var tuples = new List<Expression[]>();
         do

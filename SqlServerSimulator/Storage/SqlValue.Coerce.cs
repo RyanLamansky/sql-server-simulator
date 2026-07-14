@@ -92,6 +92,19 @@ internal readonly partial struct SqlValue
         if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsStringCategory(target))
             return this.CoerceBinaryToStringWithStyle(target, 0);
 
+        // varbinary / binary → integer family (bit/tinyint/smallint/int/bigint):
+        // big-endian, left-truncate to the target width (keep the rightmost
+        // bytes), zero-fill the high bytes when the source is shorter, then
+        // read as a two's-complement integer of the target width. Silent —
+        // SQL Server never raises an overflow here. Probe-confirmed against
+        // SQL Server 2025 (2026-07-14): <c>cast(0x0102 as int) = 258</c>,
+        // <c>cast(0x0102030405 as int) = 33752069</c> (last four bytes),
+        // <c>cast(0xFF01 as tinyint) = 1</c>, <c>cast(0x0100 as bit) = 0</c>,
+        // <c>cast(0x01 as bit) = 1</c>, <c>cast(0x as int) = 0</c>,
+        // <c>cast(0xFFFFFFFF as int) = -1</c>.
+        if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsIntegerCategory(target))
+            return VarbinaryToInteger(this.AsBytes, target);
+
         // String → binary crossing: encode the string into raw bytes using
         // CP1252 for varchar/char/sysname sources and UTF-16 LE for
         // nvarchar/nchar sources. <c>varbinary(N)</c> targets get the raw
@@ -106,6 +119,22 @@ internal readonly partial struct SqlValue
             return FromVarbinary(EncodeStringForBinary(this.AsString, this.Type));
         if (SqlType.IsStringCategory(this.Type) && target is BinarySqlType targetStringToBinary)
             return FromBinary(targetStringToBinary, EncodeStringForBinary(this.AsString, this.Type));
+
+        // Integer family → binary / varbinary: big-endian native-width two's-
+        // complement bytes (bit/tinyint → 1, smallint → 2, int → 4, bigint →
+        // 8). <c>binary(N)</c> is fixed-width — left-zero-pad or left-truncate
+        // to exactly N; <c>varbinary(N)</c> keeps the native width and only
+        // left-truncates when N is narrower (never left-pads). Probe-confirmed
+        // against SQL Server 2025 (2026-07-14): <c>cast(258 as binary(4)) =
+        // 0x00000102</c>, <c>cast(258 as varbinary(4)) = 0x00000102</c>,
+        // <c>cast(258 as binary(1)) = 0x02</c>, <c>cast(-1 as binary(4)) =
+        // 0xFFFFFFFF</c>, <c>cast(cast(1 as tinyint) as varbinary(4)) =
+        // 0x01</c> (native width kept), <c>cast(258 as binary) = 30
+        // zero-padded bytes</c> (CAST default length 30).
+        if (SqlType.IsIntegerCategory(this.Type) && target is BinarySqlType intToBinary)
+            return FromBinary(intToBinary, EncodeIntegerToBinary(this, intToBinary.length, fixedWidth: true));
+        if (SqlType.IsIntegerCategory(this.Type) && target is VarbinarySqlType intToVarbinary)
+            return FromVarbinary(EncodeIntegerToBinary(this, intToVarbinary.length, fixedWidth: false));
 
         // rowversion outbound CAST: bigint reads the 8 bytes big-endian (matches
         // SQL Server: the database-scoped @@DBTS counter is exposed as a signed
@@ -649,6 +678,12 @@ internal readonly partial struct SqlValue
         _ when SqlType.IsMoneyCategory(this.Type) => FromMoney(target, this.AsMoney),
         _ when this.Type == SqlType.Float => FromMoney(target, (decimal)this.AsDouble),
         _ when this.Type == SqlType.Real => FromMoney(target, (decimal)this.AsSingle),
+        // varbinary / binary → money / smallmoney: the payload's rightmost
+        // 8 (money) / 4 (smallmoney) bytes are the raw scale-4 currency units,
+        // read big-endian as a two's-complement integer then divided by 10000.
+        // Probe-confirmed 2026-07-14: <c>cast(0x01 as money) = 0.0001</c>,
+        // <c>cast(0x01 as smallmoney) = 0.0001</c>.
+        VarbinarySqlType or BinarySqlType => FromMoney(target, VarbinaryToMoneyUnits(this.AsBytes, target)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
 
@@ -848,6 +883,11 @@ internal readonly partial struct SqlValue
         _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(AsInt64Widened(this), target)),
         DecimalSqlType => FromDecimal(target, RoundAndOverflowCheck(this.AsDecimal, target)),
         _ when SqlType.IsMoneyCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(this.AsMoney, target)),
+        // varbinary / binary → decimal / numeric is disallowed: SQL Server
+        // raises Msg 8114 ("Error converting data type varbinary to numeric.")
+        // rather than the Msg 529 explicit-conversion rejection used elsewhere.
+        // Probe-confirmed 2026-07-14; TRY_CAST swallows the 8114 to NULL.
+        VarbinarySqlType or BinarySqlType => throw SimulatedSqlException.ConvertingDataTypeError(this.Type, "numeric"),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
 
@@ -1155,4 +1195,84 @@ internal readonly partial struct SqlValue
         sourceType is NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType
             ? System.Text.Encoding.Unicode.GetBytes(source)
             : System.Text.Encoding.Latin1.GetBytes(source);
+
+    /// <summary>
+    /// Decodes a varbinary/binary payload into an integer-family value the way
+    /// SQL Server's binary→integer CAST does: big-endian, keeping the rightmost
+    /// <c>width</c> bytes (left-truncation), zero-filling the high bytes when the
+    /// payload is shorter, then reading the window as a two's-complement integer
+    /// of the target's width. Truncation is silent (no overflow). <c>bit</c>
+    /// tests only the final byte for non-zero; an empty payload is 0 / false.
+    /// </summary>
+    private static SqlValue VarbinaryToInteger(ReadOnlySpan<byte> bytes, SqlType target)
+    {
+        if (target == SqlType.Bit)
+            return FromBoolean(bytes.Length > 0 && bytes[^1] != 0);
+
+        var width = target == SqlType.TinyInt ? 1
+            : target == SqlType.SmallInt ? 2
+            : target == SqlType.Int32 ? 4
+            : 8;
+        Span<byte> buffer = stackalloc byte[8];
+        var take = Math.Min(width, bytes.Length);
+        // Right-align the rightmost `take` source bytes into the low end of the
+        // 8-byte window so a big-endian int64 read yields the target integer.
+        bytes[^take..].CopyTo(buffer[(8 - take)..]);
+        var value = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(buffer);
+        return target == SqlType.TinyInt ? FromByte((byte)value)
+            : target == SqlType.SmallInt ? FromInt16((short)value)
+            : target == SqlType.Int32 ? FromInt32((int)value)
+            : FromInt64(value);
+    }
+
+    /// <summary>
+    /// Decodes a varbinary/binary payload into a <c>money</c>/<c>smallmoney</c>
+    /// value: the rightmost 8 (money) / 4 (smallmoney) bytes are read big-endian
+    /// as a two's-complement integer of scale-4 currency units, then divided by
+    /// 10000. Shorter payloads zero-fill the high bytes.
+    /// </summary>
+    private static decimal VarbinaryToMoneyUnits(ReadOnlySpan<byte> bytes, SqlType target)
+    {
+        var width = target == SqlType.SmallMoney ? 4 : 8;
+        Span<byte> buffer = stackalloc byte[8];
+        var take = Math.Min(width, bytes.Length);
+        bytes[^take..].CopyTo(buffer[(8 - take)..]);
+        var units = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(buffer);
+        // smallmoney is a 4-byte signed unit count; sign-extend from int32.
+        if (target == SqlType.SmallMoney)
+            units = (int)units;
+        return units / 10000m;
+    }
+
+    /// <summary>
+    /// Encodes an integer-family value into big-endian bytes for a binary /
+    /// varbinary CAST target. The value is first rendered in its native width
+    /// (bit/tinyint → 1, smallint → 2, int → 4, bigint → 8) as big-endian
+    /// two's-complement, then fitted to the target width: fixed-width
+    /// <c>binary(N)</c> left-zero-pads or left-truncates to exactly N bytes;
+    /// <c>varbinary(N)</c> keeps the native width and only left-truncates when
+    /// N is narrower (never left-pads). Length ≤ 0 (unspecified / MAX
+    /// varbinary) keeps the native width.
+    /// </summary>
+    private static byte[] EncodeIntegerToBinary(SqlValue value, int declaredLength, bool fixedWidth)
+    {
+        var native = value.Type == SqlType.SmallInt ? 2
+            : value.Type == SqlType.Int32 ? 4
+            : value.Type == SqlType.BigInt ? 8
+            : 1;
+        Span<byte> wide = stackalloc byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(wide, AsInt64Widened(value));
+        var nativeBytes = wide[(8 - native)..];
+
+        var width = fixedWidth ? declaredLength
+            : declaredLength <= 0 ? native
+            : Math.Min(declaredLength, native);
+
+        var result = new byte[width];
+        if (width <= native)
+            nativeBytes[(native - width)..].CopyTo(result);
+        else
+            nativeBytes.CopyTo(result.AsSpan(width - native));
+        return result;
+    }
 }

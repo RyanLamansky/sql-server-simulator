@@ -159,6 +159,33 @@ public sealed class AuthenticationTests
         AreEqual((byte)14, ex.Errors[1].Class);
     }
 
+    // The LOGIN7 requested database maps genuinely: Database=master lands in
+    // the real master system database (every Simulation seeds one), no longer
+    // aliased to the default. An empty requested database still maps to the
+    // default user database.
+    [TestMethod]
+    public async Task LoginToMaster_LandsInMaster()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = new SqlConnection(
+            $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;Database=master;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select db_name()", connection);
+        AreEqual("master", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public async Task LoginWithNoDatabase_LandsInDefault()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = new SqlConnection(Wire.ConnectionString(listener));
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select db_name()", connection);
+        AreEqual("simulated", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
     [TestMethod]
     public async Task SecondLogin_BothEnforced()
     {

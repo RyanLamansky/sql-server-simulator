@@ -723,7 +723,7 @@ public class BacpacLoaderTests
         sim.ImportBacpac(bacpac, out var diag);
         if (diag.Skipped.Count > 0)
             Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
-        AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar("SELECT collation_name FROM sys.databases;"));
+        AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar("SELECT collation_name FROM sys.databases WHERE name = 'simulated';"));
         AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar("SELECT DATABASEPROPERTYEX('simulated', 'Collation');"));
     }
 

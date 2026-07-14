@@ -110,8 +110,9 @@ partial class Simulation
     /// <summary>
     /// Resolves the <c>DBCC SHRINKDATABASE</c> first argument to a database: a
     /// bare / bracketed name routes through <see cref="Databases"/>
-    /// (Msg 2520 on miss), a numeric database-id through the same 1-based
-    /// name-ordered id convention <see cref="DbId"/> uses.
+    /// (Msg 2520 on miss), a numeric database-id through the same
+    /// <c>master</c>-is-1 / user-databases-from-5 convention
+    /// <see cref="DbId"/> uses.
     /// </summary>
     private static Database ResolveShrinkDatabase(Simulation simulation, Token? firstArg)
     {
@@ -123,12 +124,10 @@ partial class Simulation
                     : throw SimulatedSqlException.CouldNotFindDatabase(name.Value);
             case Numeric { Value: { IsNull: false } idValue }:
                 var id = idValue.AsInt32;
-                short pos = 1;
-                foreach (var db in DbId.OrderedDatabases(simulation))
+                foreach (var (db, pos) in DbId.DatabasesWithIds(simulation))
                 {
                     if (pos == id)
                         return db;
-                    pos++;
                 }
                 throw SimulatedSqlException.CouldNotFindDatabase(id.ToString(CultureInfo.InvariantCulture));
             default:
@@ -187,15 +186,13 @@ partial class Simulation
         return total;
     }
 
-    /// <summary>The 1-based, name-ordered database id (matching <see cref="DbId"/>) as a smallint.</summary>
+    /// <summary>The database id (matching <see cref="DbId"/>: master = 1, user databases from 5) as a smallint.</summary>
     private static short SmallDatabaseId(Simulation simulation, Database target)
     {
-        short id = 1;
-        foreach (var db in DbId.OrderedDatabases(simulation))
+        foreach (var (db, id) in DbId.DatabasesWithIds(simulation))
         {
             if (ReferenceEquals(db, target))
                 return id;
-            id++;
         }
         return 1;
     }

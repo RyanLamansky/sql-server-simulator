@@ -250,17 +250,24 @@ public sealed class IfBlockTests
             "begin declare @v int = 7 end; select @v"));
 
     /// <summary>
-    /// <c>DECLARE</c> in an un-taken IF branch never executes, so the
-    /// variable isn't bound — reading it raises Msg 137. The skip-mode
-    /// gate suppresses both the dict insertion and the Msg 134 duplicate-
-    /// check, so subsequent real DECLAREs of the same name still work.
+    /// <c>DECLARE</c> is compile-scoped batch-wide (probe-confirmed against
+    /// SQL Server 2025): an un-taken IF branch still registers the slot, so
+    /// the variable reads after the branch — but the initializer is
+    /// execution-scoped and never ran, so the value is NULL, not 7.
     /// </summary>
     [TestMethod]
-    public void Variable_DeclaredInSkippedBranch_NotVisible()
-        => new Simulation().AssertSqlError("""
+    public void Variable_DeclaredInSkippedBranch_VisibleButUninitialized()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
             if 1=0 declare @v int = 7;
             select @v
-            """, 137);
+            """;
+        AreEqual(DBNull.Value, command.ExecuteScalar());
+    }
 
     // ---- Un-taken-branch skip mode ----
 

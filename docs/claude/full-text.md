@@ -65,6 +65,12 @@ Statement dispatch: `Fulltext` is added to the `ContextualKeyword` enum; CREATE 
 
 Column shapes are from Microsoft Learn (`learn.microsoft.com/sql/relational-databases/system-catalog-views/`); the reference SQL Server 2025 instance doesn't have Full-Text installed, so probe-confirmation isn't available.
 
+## `FULLTEXTSERVICEPROPERTY('property_name')`
+
+`Parser/Expressions/FullTextServiceProperty.cs`. Returns a plain `int` — probe-confirmed against SQL Server 2025 (unlike `SERVERPROPERTY`, which is `sql_variant`), so the result type is always `int` regardless of whether the argument is a compile-time constant (no constant-detection branch, unlike `ServerProperty`).
+
+The simulator reports Full-Text as installed (`SERVERPROPERTY('IsFullTextInstalled') = 1`; CREATE FULLTEXT CATALOG / INDEX are modeled), so for self-consistency `FULLTEXTSERVICEPROPERTY('IsFullTextInstalled')` returns `1`. The reference box returns `0` only because Full-Text isn't installed there — and while uninstalled it returns NULL for the resource-tuning properties too, so their installed values can't be probed. The simulator reports the installed value of `0` for each: `ConnectTimeout`, `LoadOSResources`, `ResourceUsage`, `VerifyResourceUsage`. An unrecognized property name returns NULL `int` (probe-confirmed convention); names are case-insensitive. `FULLTEXTCATALOGPROPERTY` is not modeled.
+
 ## Known gaps
 
 - **Query-time text search** — tokenizer / stemmer / inverted-index pipeline. Out of scope.

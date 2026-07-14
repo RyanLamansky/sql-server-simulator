@@ -205,12 +205,12 @@ partial class Simulation
         string[] columnNames;
         if (renameList is { } renames)
         {
-            // Msg 8158 / 8159 — same wording the existing CTE rename-list
-            // mismatch factory uses (probe-confirmed identical text).
+            // Msg 8158 / 8159 — the shared column-alias-list mismatch factory
+            // (probe-confirmed identical text across CTE / view / VALUES).
             if (renames.Count < projectionCount)
-                throw SimulatedSqlException.CteHasMoreColumnsThanList(viewName);
+                throw SimulatedSqlException.HasMoreColumnsThanColumnList(viewName);
             if (renames.Count > projectionCount)
-                throw SimulatedSqlException.CteHasFewerColumnsThanList(viewName);
+                throw SimulatedSqlException.HasFewerColumnsThanColumnList(viewName);
             columnNames = [.. renames];
         }
         else

@@ -2538,18 +2538,15 @@ internal static class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch, Database database)
     {
-        // Stable ordering: by name. Real SQL Server orders sys.databases by
-        // database_id; the simulator doesn't allocate per-database ids yet,
-        // so name-ordering is the next-best deterministic choice.
-        var databases = batch.Connection.Simulation.Databases.Values
-            .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
-        short id = 1;
-        foreach (var db in databases)
+        // Ordered by database_id via DatabasesWithIds (master = 1, user
+        // databases from 5) — matching real SQL Server's sys.databases
+        // ordering by database_id.
+        foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
             var snapshotState = (byte)(db.AllowSnapshotIsolation ? 1 : 0);
             yield return [
                 SqlValue.FromSystemName(db.Name),
-                SqlValue.FromInt16(id++),
+                SqlValue.FromInt16(id),
                 SqlValue.FromByte((byte)db.CompatibilityLevel),
                 SqlValue.FromSystemName(db.CollationName),
                 SqlValue.FromByte(snapshotState),

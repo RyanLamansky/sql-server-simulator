@@ -29,7 +29,7 @@ public sealed class CollationMetadataTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("ALTER DATABASE simulated COLLATE Latin1_General_100_CI_AS");
         AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar(
-            "SELECT collation_name FROM sys.databases"));
+            "SELECT collation_name FROM sys.databases WHERE name = 'simulated'"));
     }
 
     [TestMethod]
@@ -202,10 +202,12 @@ public sealed class CollationMetadataTests
     [TestMethod]
     public void SysDatabases_RowShape_CarriesCompatibilityAndIsolation()
     {
+        // master (database_id 1) sorts ahead of the user database, so scope
+        // the row-shape assertions to the simulated database by name.
         var sim = new Simulation();
-        AreEqual("simulated", sim.ExecuteScalar("SELECT name FROM sys.databases"));
-        AreEqual((short)1, sim.ExecuteScalar("SELECT database_id FROM sys.databases"));
-        AreEqual("ONLINE", sim.ExecuteScalar("SELECT state_desc FROM sys.databases"));
+        AreEqual("simulated", sim.ExecuteScalar("SELECT name FROM sys.databases WHERE name = 'simulated'"));
+        AreEqual((short)5, sim.ExecuteScalar("SELECT database_id FROM sys.databases WHERE name = 'simulated'"));
+        AreEqual("ONLINE", sim.ExecuteScalar("SELECT state_desc FROM sys.databases WHERE name = 'simulated'"));
     }
 
     [TestMethod]

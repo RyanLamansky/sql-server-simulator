@@ -242,18 +242,38 @@ partial class SimulatedSqlException
         new($"Duplicate common table expression name '{name}' was specified.", 239, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 8158: a CTE's column-rename list has fewer
-    /// names than the body's projection produces. Counterpart to Msg 8159.
+    /// Mimics SQL Server error 8158: a column-rename list has fewer names
+    /// than the rowset it renames produces — a CTE / view body projection or
+    /// a table-value-constructor derived table with more columns than its
+    /// alias column list. Counterpart to Msg 8159.
     /// </summary>
-    internal static SimulatedSqlException CteHasMoreColumnsThanList(string name) =>
+    internal static SimulatedSqlException HasMoreColumnsThanColumnList(string name) =>
         new($"'{name}' has more columns than were specified in the column list.", 8158, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 8159: a CTE's column-rename list has more
-    /// names than the body's projection produces. Counterpart to Msg 8158.
+    /// Mimics SQL Server error 8159: a column-rename list has more names than
+    /// the rowset it renames produces — a CTE / view body projection or a
+    /// table-value-constructor derived table with fewer columns than its
+    /// alias column list. Counterpart to Msg 8158.
     /// </summary>
-    internal static SimulatedSqlException CteHasFewerColumnsThanList(string name) =>
+    internal static SimulatedSqlException HasFewerColumnsThanColumnList(string name) =>
         new($"'{name}' has fewer columns than were specified in the column list.", 8159, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8155: a table-value-constructor derived table
+    /// (<c>(VALUES …) alias</c>) carries no column-alias list, so column
+    /// <paramref name="columnPosition"/> of <paramref name="alias"/> is
+    /// unnamed. Real SQL Server requires the list on a VALUES-in-FROM source.
+    /// </summary>
+    internal static SimulatedSqlException NoColumnNameSpecified(int columnPosition, string alias) =>
+        new($"No column name was specified for column {columnPosition} of '{alias}'.", 8155, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 10709: the rows of a table value constructor
+    /// (<c>VALUES (…), (…)</c>) don't all have the same number of columns.
+    /// </summary>
+    internal static SimulatedSqlException TableValueConstructorRowArityMismatch() =>
+        new("The number of columns for each row in a table value constructor must be the same.", 10709, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 240: anchor and recursive parts of a recursive
@@ -573,4 +593,30 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ForSystemTimeRequiresVersionedTable(string qualifiedTableName) =>
         new($"Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. '{qualifiedTableName}' is not a system-versioned table.", 13544, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 213 as raised by <c>INSERT … EXEC</c> when a
+    /// result set produced by the executed procedure / dynamic batch has a
+    /// column count that doesn't match the INSERT target's column list.
+    /// State 7 probe-confirmed against SQL Server 2025 (distinct from the
+    /// OUTPUT INTO variant's State 1).
+    /// </summary>
+    internal static SimulatedSqlException InsertExecColumnCountMismatch() =>
+        new("Column name or number of supplied values does not match table definition.", 213, 16, 7);
+
+    /// <summary>
+    /// Mimics SQL Server error 8164: an <c>INSERT … EXEC</c> executed a
+    /// procedure / dynamic batch that itself contains an <c>INSERT … EXEC</c>.
+    /// Wording and State 1 probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InsertExecCannotBeNested() =>
+        new("An INSERT EXEC statement cannot be nested.", 8164, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 483: an <c>OUTPUT</c> clause combined with an
+    /// <c>INSERT … EXEC</c> source. Wording and State 2 probe-confirmed
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException OutputClauseNotAllowedInInsertExec() =>
+        new("The OUTPUT clause cannot be used in an INSERT...EXEC statement.", 483, 16, 2);
 }

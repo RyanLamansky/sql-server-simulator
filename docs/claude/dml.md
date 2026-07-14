@@ -1,4 +1,4 @@
-# DML — UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / MERGE / rowversion
+# DML — UPDATE / DELETE / INSERT…SELECT / INSERT…EXEC / SELECT…INTO / MERGE / rowversion
 
 ## UPDATE / DELETE
 - Bare `UPDATE table SET ... [WHERE]` and `DELETE [FROM] table [WHERE]`.
@@ -31,6 +31,20 @@ Source-kind dispatch after the OUTPUT-clause parse: `Values` token → existing 
 **Full buffering**: source materializes to `List<SqlValue[]>` before any destination write — makes self-insert (`INSERT t SELECT … FROM t`) safe.
 
 Projection-count mismatch fires at parse time: too few SELECT columns → Msg 120 St 1 Cls 15; too many → Msg 121. Empty source → silent success, rows-affected 0. Mid-source constraint violations trigger statement-level rollback. EF doesn't emit `INSERT…SELECT` from SaveChanges; reachable from raw SQL and bulk-copy patterns. CTE-prefix INSERTs not modeled.
+
+## INSERT … EXEC
+`INSERT [INTO] target [(cols)] EXEC[UTE] <proc | (dynamic-sql)> [args]` appends the result sets the executed code yields into the target — the third source-kind arm alongside `VALUES` / `SELECT` (`Simulation.Insert.cs:ExecuteExecSource`). SSMS's server-properties query relies on it (`insert #SVer exec master.dbo.xp_msver`). The EXEC clause runs through the shared EXEC machinery (`ParseExec` — stored-proc call or `EXEC('…')` dynamic batch), so proc-arg binding, dynamic-SQL variable isolation, and system-proc dispatch all behave identically to a standalone EXEC. Table-variable and updatable-view targets work (both share `ProcessHeapInsert`).
+
+Every yielded result set is decoded row-by-row (`RowDecoder.DecodeRow`) and buffered into the same `List<SqlValue[]>` the VALUES / SELECT arms produce, then funnels into the shared per-row encode loop — so defaults / identity / rowversion / computed columns / constraints / triggers all behave exactly as they would for `INSERT … SELECT` of the same rows. Probe-confirmed semantics (SQL Server 2025, 2026-07-14):
+
+- **Multiple result sets append all rows** (`exec('select 5; select 6')` lands both), and `@@ROWCOUNT` is the **total** rows inserted across every result set.
+- **A procedure yielding no result set** (pure-DML body) inserts 0 rows and succeeds — non-tabular outcomes (`SimulatedNonQuery`) are skipped during the drain.
+- **Per-result-set column count** must match the target's column list — a mismatch (either direction) raises **Msg 213 St 7** (`InsertExecColumnCountMismatch`) — distinct from the SELECT arm's Msg 120/121, and distinct from OUTPUT INTO's Msg 213 St 1. Validated during the drain, before any heap write.
+- **Uncoercible values** surface the shared per-row coercion error (the simulator's Msg 245 conversion path — real SQL Server raises Msg 8114 for a dynamic value; the simulator's INSERT coercion path is Msg 245 for both INSERT…SELECT and INSERT…EXEC, a pre-existing divergence).
+- **Nested INSERT…EXEC** (the executed proc / dynamic batch itself contains an `INSERT … EXEC`) raises **Msg 8164 St 1** "An INSERT EXEC statement cannot be nested." Guarded by `SimulatedDbConnection.InsertExecActive`, set while the outer drain runs and checked at the inner INSERT…EXEC entry.
+- **OUTPUT clause combined with INSERT…EXEC** raises **Msg 483 St 2** "The OUTPUT clause cannot be used in an INSERT...EXEC statement." — a structural check that fires regardless of skip state, before the source dispatch.
+
+Skip-mode (un-taken IF branch) parses the EXEC clause for cursor advance but `ParseExec` self-suppresses the invocation, so the drain sees no result sets and no rows land.
 
 ## `SELECT … INTO target`
 Creates a destination table from the projection's inferred schema, then copies rows in. Target routes by `#`-prefix: `#foo` lands in the per-connection `TempTables` dict (same as `CREATE TABLE #foo`); regular names land in the current database's `HeapTables`. Probe-confirmed schema-inference rules (2026-05-11):
