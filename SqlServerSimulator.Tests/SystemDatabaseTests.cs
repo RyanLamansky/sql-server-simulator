@@ -180,4 +180,62 @@ public sealed class SystemDatabaseTests
     public void SyspolicyHealthState_DoesNotExistInUserDatabase()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
             "select object_id('dbo.syspolicy_system_health_state')"));
+
+    // === msdb.dbo.syspolicy_configuration (SSMS PolicyStore) ===
+
+    [TestMethod]
+    public void SyspolicyConfiguration_HasFourRows()
+        => AreEqual(4, new Simulation().ExecuteScalar(
+            "select count(*) from msdb.dbo.syspolicy_configuration"));
+
+    [TestMethod]
+    public void SyspolicyConfiguration_EnabledCurrentValue_IsOne()
+        => AreEqual("1", new Simulation().ExecuteScalar(
+            "select current_value from msdb.dbo.syspolicy_configuration where name = 'Enabled'"));
+
+    [TestMethod]
+    public void SyspolicyConfiguration_EnabledCurrentValue_CastsToBit()
+        => IsTrue((bool)new Simulation().ExecuteScalar(
+            "select cast((select current_value from msdb.dbo.syspolicy_configuration where name = 'Enabled') as bit)")!);
+
+    // The three named integer rows SSMS reads, each through the exact
+    // (SELECT current_value …) CAST expression the PolicyStore setup applies.
+    [TestMethod]
+    public void SyspolicyConfiguration_PolicyStoreCastExpressions_Resolve()
+    {
+        var sim = new Simulation();
+        AreEqual(1, sim.ExecuteScalar(
+            "select cast((select current_value from msdb.dbo.syspolicy_configuration where name = 'Enabled') as int)"));
+        AreEqual(0, sim.ExecuteScalar(
+            "select cast((select current_value from msdb.dbo.syspolicy_configuration where name = 'HistoryRetentionInDays') as int)"));
+        IsFalse((bool)sim.ExecuteScalar(
+            "select cast((select current_value from msdb.dbo.syspolicy_configuration where name = 'LogOnSuccess') as bit)")!);
+    }
+
+    [TestMethod]
+    public void SyspolicyConfiguration_PurgeHistoryJobGuidRow_Present()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            "select count(*) from msdb.dbo.syspolicy_configuration where name = 'PurgeHistoryJobGuid'"));
+
+    // === msdb.dbo.fn_syspolicy_is_automation_enabled (SSMS PolicyHealth) ===
+
+    [TestMethod]
+    public void SyspolicyAutomationEnabled_ReturnsOne()
+        => IsTrue((bool)new Simulation().ExecuteScalar(
+            "select msdb.dbo.fn_syspolicy_is_automation_enabled()")!);
+
+    // The three-part call resolves from any current database, not just msdb.
+    [TestMethod]
+    public void SyspolicyAutomationEnabled_ResolvesFromUserDatabase()
+        => IsTrue((bool)new Simulation().ExecuteScalar(
+            "use simulated; select msdb.dbo.fn_syspolicy_is_automation_enabled()")!);
+
+    // The exact SSMS PolicyHealth CASE expression: automation is enabled but
+    // syspolicy_system_health_state is empty, so the result is 0.
+    [TestMethod]
+    public void SyspolicyPolicyHealth_CaseExpression_ReturnsZero()
+        => AreEqual(0, new Simulation().ExecuteScalar(
+            "select case when 1 = msdb.dbo.fn_syspolicy_is_automation_enabled() " +
+            "and exists (select * from msdb.dbo.syspolicy_system_health_state " +
+            "where target_query_expression_with_id like 'Server%') then 1 else 0 end"));
 }

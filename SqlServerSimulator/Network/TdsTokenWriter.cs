@@ -181,6 +181,12 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         this.WriteBVarchar(programName);
         this.WriteByte(versionMajor);
         this.WriteByte(versionMinor);
+        // ProgVersion build field left 0 — the simulator deliberately reports a
+        // 0-build version (SqlConnection.ServerVersion "17.00.0000") as an
+        // honest "this is not a real SQL Server build" marker. Probed harmless
+        // to SMO's Object Explorer (2026-07-15): the user-database enumeration
+        // populates regardless — the actual gate was ntext RPC-parameter
+        // support, not the reported version.
         this.WriteByte(0);
         this.WriteByte(0);
     }

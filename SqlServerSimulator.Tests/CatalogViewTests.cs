@@ -523,4 +523,167 @@ public sealed class CatalogViewTests
         AreEqual((byte)0, reader.GetByte(8));
         IsFalse(reader.Read());
     }
+
+    // === sys.database_mirroring: one non-mirrored row per database ===
+
+    [TestMethod]
+    public void SysDatabaseMirroring_Projects21Columns()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.database_mirroring where database_id = 1");
+        AreEqual(21, reader.FieldCount);
+    }
+
+    [TestMethod]
+    public void SysDatabaseMirroring_NonMirroredRow_OnlyDatabaseIdPopulated()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select database_id, mirroring_guid, mirroring_state, mirroring_role,
+                   mirroring_role_desc, mirroring_failover_lsn
+            from sys.database_mirroring where database_id = 5
+            """);
+        AreEqual(typeof(int), reader.GetFieldType(0));
+        AreEqual(typeof(byte), reader.GetFieldType(2));
+        AreEqual(typeof(decimal), reader.GetFieldType(5));
+        IsTrue(reader.Read());
+        AreEqual(5, reader.GetInt32(0));
+        IsTrue(reader.IsDBNull(1));
+        IsTrue(reader.IsDBNull(2));
+        IsTrue(reader.IsDBNull(3));
+        IsTrue(reader.IsDBNull(4));
+        IsTrue(reader.IsDBNull(5));
+        IsFalse(reader.Read());
+    }
+
+    // One row per database, joining 1:1 to sys.databases on database_id.
+    [TestMethod]
+    public void SysDatabaseMirroring_OneRowPerDatabase_JoinsToDatabases()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            select count(*)
+            from master.sys.databases dtb
+            full join sys.database_mirroring dmi on dmi.database_id = dtb.database_id
+            where dtb.database_id is null or dmi.database_id is null
+            """));
+
+    // The core of SSMS's Object-Explorer "Databases" enumeration: sys.databases
+    // LEFT JOIN sys.database_mirroring, reading ISNULL(mirroring_role, 0) /
+    // ISNULL(mirroring_state + 1, 0), filtered to user databases. Msg 208 on the
+    // mirroring view would blank the folder.
+    [TestMethod]
+    public void SysDatabaseMirroring_SmoEnumeration_ReturnsUserDatabase()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select dtb.name, isnull(dmi.mirroring_role, 0), isnull(dmi.mirroring_state + 1, 0)
+            from master.sys.databases dtb
+            left join sys.database_mirroring dmi on dmi.database_id = dtb.database_id
+            where dtb.name not in ('master', 'model', 'msdb', 'tempdb')
+            """);
+        IsTrue(reader.Read());
+        AreEqual("simulated", reader.GetString(0));
+        // ISNULL(mirroring_role, 0) inherits mirroring_role's tinyint type;
+        // ISNULL(mirroring_state + 1, 0) is int (tinyint + int promotes).
+        AreEqual((byte)0, reader.GetByte(1));
+        AreEqual(0, reader.GetInt32(2));
+        IsFalse(reader.Read());
+    }
+
+    // === AlwaysOn Availability-Group views: empty, server-scope ===
+
+    [TestMethod]
+    public void SysAvailabilityReplicas_Projects22Columns_ZeroRows()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.availability_replicas");
+        AreEqual(22, reader.FieldCount);
+        AreEqual(typeof(Guid), reader.GetFieldType(0));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void SysAvailabilityGroups_Projects19Columns_ZeroRows()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.availability_groups");
+        AreEqual(19, reader.FieldCount);
+        AreEqual(typeof(Guid), reader.GetFieldType(0));
+        AreEqual(typeof(string), reader.GetFieldType(1));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void SysDmHadrDatabaseReplicaStates_Projects39Columns_ZeroRows()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.dm_hadr_database_replica_states");
+        AreEqual(39, reader.FieldCount);
+        IsFalse(reader.Read());
+    }
+
+    // SSMS's enumeration seeds a #temp from the empty replica DMV; the
+    // insert-from-empty-catalog-view path must resolve and add zero rows.
+    [TestMethod]
+    public void SysAvailabilityReplicas_InsertFromEmptyView_AddsNoRows()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table #r (a uniqueidentifier, b uniqueidentifier, c sysname);
+            insert #r select replica_id, group_id, replica_server_name
+            from master.sys.availability_replicas;
+            select count(*) from #r
+            """));
+
+    // === sys.master_files: data + log file per database, no type-2 files ===
+
+    [TestMethod]
+    public void SysMasterFiles_Projects32Columns()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.master_files where database_id = 1");
+        AreEqual(32, reader.FieldCount);
+    }
+
+    [TestMethod]
+    public void SysMasterFiles_DataAndLogFilePerDatabase()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select file_id, type, type_desc, name, physical_name
+            from sys.master_files where database_id = 5 order by file_id
+            """);
+        AreEqual(typeof(int), reader.GetFieldType(0));
+        AreEqual(typeof(byte), reader.GetFieldType(1));
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual((byte)0, reader.GetByte(1));
+        AreEqual("ROWS", reader.GetString(2));
+        AreEqual("simulated_Data", reader.GetString(3));
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        AreEqual((byte)1, reader.GetByte(1));
+        AreEqual("LOG", reader.GetString(2));
+        AreEqual("simulated_Log", reader.GetString(3));
+        IsFalse(reader.Read());
+    }
+
+    // Two files (data + log) for each of the five hosted databases.
+    [TestMethod]
+    public void SysMasterFiles_TwoFilesPerDatabase()
+        => AreEqual(10, new Simulation().ExecuteScalar(
+            "select count(*) from master.sys.master_files"));
+
+    // SSMS's in-memory-OLTP filegroup probe: no type-2 file exists, so the
+    // bracket-escaped [type] filter must parse and return zero.
+    [TestMethod]
+    public void SysMasterFiles_NoType2Files()
+        => AreEqual(0, new Simulation().ExecuteScalar(
+            "select count(*) from master.sys.master_files where [type] = 2"));
+
+    [TestMethod]
+    public void SysMasterFiles_TypeTwoJoinToDatabases_ReturnsNothing()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select db.name
+            from master.sys.master_files mf
+            join master.sys.databases db on mf.database_id = db.database_id
+            where mf.[type] = 2
+            """);
+        IsFalse(reader.Read());
+    }
 }

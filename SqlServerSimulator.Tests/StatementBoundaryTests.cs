@@ -114,10 +114,13 @@ public sealed class StatementBoundaryTests
 
     // The exact SSMS Object-Explorer AlwaysOn availability probe: three
     // statements, only the middle two separated by a semicolon. xp_qv returns
-    // status 0 (AlwaysOn not available), so ISNULL(@alwayson, -1) yields 0.
+    // status 2 (AlwaysOn *available* — the edition-capability answer for the
+    // simulated Enterprise EngineEdition; distinct from IsHadrEnabled = 0
+    // meaning not-configured), so ISNULL(@alwayson, -1) yields 2. SMO's
+    // Databases enumeration is HADR-aware and requires this.
     [TestMethod]
-    public void SsmsAlwaysOnProbe_ReturnsZero()
-        => AreEqual(0, new Simulation().ExecuteScalar<int>("""
+    public void SsmsAlwaysOnProbe_ReturnsTwo()
+        => AreEqual(2, new Simulation().ExecuteScalar<int>("""
             DECLARE @alwayson INT
             EXECUTE @alwayson = master.dbo.xp_qv N'3641190370', @@SERVICENAME;
             SELECT ISNULL(@alwayson,-1) AS [AlwaysOn]
@@ -134,8 +137,8 @@ public sealed class StatementBoundaryTests
     }
 
     [TestMethod]
-    public void XpQv_ReturnStatus_IsZero()
-        => AreEqual(0, new Simulation().ExecuteScalar<int>("""
+    public void XpQv_ReturnStatus_IsTwo()
+        => AreEqual(2, new Simulation().ExecuteScalar<int>("""
             declare @rc int;
             exec @rc = xp_qv N'x', N'y';
             select @rc

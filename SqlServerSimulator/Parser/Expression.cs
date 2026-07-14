@@ -814,6 +814,7 @@ internal abstract class Expression
             },
             17 => uppercaseName switch
             {
+                "COLLATIONPROPERTY" => new CollationProperty(context),
                 "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
                 "HAS_PERMS_BY_NAME" => new HasPermsByName(context),
                 "INDEXKEY_PROPERTY" => new IndexKeyProperty(context),

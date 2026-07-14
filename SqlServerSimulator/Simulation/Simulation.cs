@@ -40,7 +40,10 @@ public sealed partial class Simulation
         // collation.
         foreach (var (name, _) in SystemDatabaseIds)
             this.Databases.Add(name, new Database(name, this.ServerCollation));
-        SeedMsdbPolicyHealthView(this.Databases[MsdbDatabaseName]);
+        var msdb = this.Databases[MsdbDatabaseName];
+        SeedMsdbPolicyHealthView(msdb);
+        SeedMsdbPolicyConfigurationView(msdb);
+        SeedMsdbPolicyAutomationFunction(msdb);
     }
 
     /// <summary>
@@ -106,6 +109,93 @@ public sealed partial class Simulation
             DefinitionText = $"CREATE VIEW dbo.syspolicy_system_health_state AS {bodyText}",
         };
         schema.Views[view.Name] = view;
+    }
+
+    /// <summary>
+    /// Seeds <c>msdb.dbo.syspolicy_configuration</c> as a four-row view.
+    /// SSMS's Object-Explorer PolicyStore setup reads
+    /// <c>(SELECT current_value FROM msdb.dbo.syspolicy_configuration WHERE
+    /// name = '…')</c> for <c>Enabled</c> / <c>HistoryRetentionInDays</c> /
+    /// <c>LogOnSuccess</c> and casts each to <c>bit</c> / <c>int</c>. On the
+    /// real server this is a view whose <c>current_value</c> column is
+    /// <c>sql_variant</c> (probe-confirmed 2026-07-14: the three named rows
+    /// carry <c>int</c> bases, <c>PurgeHistoryJobGuid</c> a <c>binary</c>
+    /// GUID). The simulator doesn't model sql_variant, and a single column
+    /// can't hold both an int and a binary GUID, so <c>current_value</c> is
+    /// surfaced as <c>nvarchar</c> — the integer rows stay CAST-compatible
+    /// with the <c>bit</c> / <c>int</c> targets SSMS applies (the GUID row is
+    /// never cast). Values copied verbatim from the reference. Constructed as
+    /// a <see cref="View"/> directly (like the health-state seed) so no
+    /// connection is materialized at construction; the body re-parses through
+    /// the querying connection at read time.
+    /// </summary>
+    private static void SeedMsdbPolicyConfigurationView(Database msdb)
+    {
+        var schema = msdb.Schemas[Database.DefaultSchemaName];
+        var textType = NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit);
+        HeapColumn[] outputColumns =
+        [
+            new("name", textType, maxLength: 128, nullable: false),
+            new("current_value", textType, maxLength: 128, nullable: true),
+        ];
+        const string bodyText =
+            "select name, current_value from (values " +
+            "(cast(N'Enabled' as nvarchar(128)), cast(N'1' as nvarchar(128))), " +
+            "(cast(N'HistoryRetentionInDays' as nvarchar(128)), cast(N'0' as nvarchar(128))), " +
+            "(cast(N'LogOnSuccess' as nvarchar(128)), cast(N'0' as nvarchar(128))), " +
+            "(cast(N'PurgeHistoryJobGuid' as nvarchar(128)), cast(N'0x46762DA67B564E42A23C1376789E8D8E' as nvarchar(128)))" +
+            ") v(name, current_value)";
+        var view = new View(
+            schema,
+            "syspolicy_configuration",
+            msdb.AllocateObjectId(),
+            outputColumns,
+            bodyText,
+            withCheckOption: false,
+            createDate: DateTime.UtcNow,
+            baseTable: null,
+            baseColumnOrdinals: [],
+            rejectionReason: ViewUpdatabilityRejection.UnsupportedShape,
+            visibilityCheck: null,
+            checkOptionCheck: null)
+        {
+            DefinitionText = $"CREATE VIEW dbo.syspolicy_configuration AS {bodyText}",
+        };
+        schema.Views[view.Name] = view;
+    }
+
+    /// <summary>
+    /// Seeds <c>msdb.dbo.fn_syspolicy_is_automation_enabled()</c> as a scalar
+    /// function returning <c>bit</c> 1. SSMS's Object-Explorer PolicyHealth
+    /// query is
+    /// <c>case when 1 = msdb.dbo.fn_syspolicy_is_automation_enabled() and
+    /// exists (select * from msdb.dbo.syspolicy_system_health_state where …)
+    /// then 1 else 0 end</c>; the function must resolve without error (the
+    /// three-part call routes to msdb.dbo from any current database). The
+    /// return value mirrors the reference (probe-confirmed 2026-07-14: returns
+    /// <c>1</c>, consistent with <c>syspolicy_configuration</c>'s
+    /// <c>Enabled = 1</c> row). Constructed directly (like the health-state
+    /// and configuration seeds) rather than run through <c>CREATE FUNCTION</c>
+    /// so no connection is materialized at construction; the body re-parses
+    /// per call.
+    /// </summary>
+    private static void SeedMsdbPolicyAutomationFunction(Database msdb)
+    {
+        var schema = msdb.Schemas[Database.DefaultSchemaName];
+        const string bodyText = "return cast(1 as bit)";
+        var function = new ScalarFunction(
+            schema,
+            "fn_syspolicy_is_automation_enabled",
+            msdb.AllocateObjectId(),
+            parameters: [],
+            returnType: SqlType.Bit,
+            returnsNullOnNullInput: false,
+            bodyText,
+            createDate: DateTime.UtcNow)
+        {
+            DefinitionText = $"CREATE FUNCTION dbo.fn_syspolicy_is_automation_enabled() RETURNS bit AS BEGIN {bodyText} END",
+        };
+        schema.Functions[function.Name] = function;
     }
 
     /// <summary>

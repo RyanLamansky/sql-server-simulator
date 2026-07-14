@@ -133,6 +133,12 @@ internal static class BuiltInResources
         var nvarchar60Catalog = NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit);
         var nvarchar128Catalog = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
 
+        // numeric(25, 0) — the log-sequence-number (LSN) storage shape shared
+        // by the mirroring / replica-state / master-files views. Always surfaced
+        // NULL here (the simulator has no physical log), so precision matters
+        // only for the column schema clients read back.
+        var lsnNumeric = SqlType.GetDecimal(25, 0);
+
         // sys.schemas: (name sysname, schema_id int, principal_id int null)
         Sys("schemas",
         [
@@ -1282,8 +1288,205 @@ internal static class BuiltInResources
             new("is_advanced", SqlType.Bit, null, false),
         ], (batch, database) => ConfigurationsRows);
 
+        // sys.database_mirroring: one row per database (join key database_id),
+        // surfaced so SSMS's Object-Explorer enumeration
+        // (master.sys.databases LEFT JOIN sys.database_mirroring) populates the
+        // Databases folder. The simulator never mirrors a database, so every
+        // mirroring_* column is NULL on every row — the exact non-mirrored
+        // shape a live SQL Server 2025 returns (probe-confirmed: only
+        // database_id populated). mirroring_failover_lsn / _end_of_log_lsn /
+        // _replication_lsn are numeric(25, 0) on the server; surfaced NULL.
+        Sys("database_mirroring",
+        [
+            new("database_id", SqlType.Int32, null, false),
+            new("mirroring_guid", SqlType.UniqueIdentifier, null, true),
+            new("mirroring_state", SqlType.TinyInt, null, true),
+            new("mirroring_state_desc", nvarchar60Catalog, 60, true),
+            new("mirroring_role", SqlType.TinyInt, null, true),
+            new("mirroring_role_desc", nvarchar60Catalog, 60, true),
+            new("mirroring_role_sequence", SqlType.Int32, null, true),
+            new("mirroring_safety_level", SqlType.TinyInt, null, true),
+            new("mirroring_safety_level_desc", nvarchar60Catalog, 60, true),
+            new("mirroring_safety_sequence", SqlType.Int32, null, true),
+            new("mirroring_partner_name", SqlType.NVarchar, 128, true),
+            new("mirroring_partner_instance", SqlType.NVarchar, 128, true),
+            new("mirroring_witness_name", SqlType.NVarchar, 128, true),
+            new("mirroring_witness_state", SqlType.TinyInt, null, true),
+            new("mirroring_witness_state_desc", nvarchar60Catalog, 60, true),
+            new("mirroring_failover_lsn", lsnNumeric, null, true),
+            new("mirroring_connection_timeout", SqlType.Int32, null, true),
+            new("mirroring_redo_queue", SqlType.Int32, null, true),
+            new("mirroring_redo_queue_type", nvarchar60Catalog, 60, true),
+            new("mirroring_end_of_log_lsn", lsnNumeric, null, true),
+            new("mirroring_replication_lsn", lsnNumeric, null, true),
+        ], EnumerateSysDatabaseMirroring);
+
+        // sys.availability_replicas: server-scope AlwaysOn Availability-Group
+        // catalog. No AGs are configured in the simulator, so the view is
+        // always empty — SSMS's enumeration does
+        // `insert into #tmp select replica_id, group_id, replica_server_name
+        // from master.sys.availability_replicas`, which must resolve and
+        // return zero rows. Full column shape modeled so future tooling
+        // selecting other columns doesn't hit Msg 207.
+        Sys("availability_replicas",
+        [
+            new("replica_id", SqlType.UniqueIdentifier, null, true),
+            new("group_id", SqlType.UniqueIdentifier, null, true),
+            new("replica_metadata_id", SqlType.Int32, null, true),
+            new("replica_server_name", SqlType.NVarchar, 256, true),
+            new("owner_sid", SqlType.Varbinary, 85, true),
+            new("endpoint_url", SqlType.NVarchar, 256, true),
+            new("availability_mode", SqlType.TinyInt, null, true),
+            new("availability_mode_desc", nvarchar60Catalog, 60, true),
+            new("failover_mode", SqlType.TinyInt, null, true),
+            new("failover_mode_desc", nvarchar60Catalog, 60, true),
+            new("session_timeout", SqlType.Int32, null, true),
+            new("primary_role_allow_connections", SqlType.TinyInt, null, true),
+            new("primary_role_allow_connections_desc", nvarchar60Catalog, 60, true),
+            new("secondary_role_allow_connections", SqlType.TinyInt, null, true),
+            new("secondary_role_allow_connections_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, true),
+            new("modify_date", SqlType.DateTime, null, true),
+            new("backup_priority", SqlType.Int32, null, true),
+            new("read_only_routing_url", SqlType.NVarchar, 256, true),
+            new("seeding_mode", SqlType.TinyInt, null, true),
+            new("seeding_mode_desc", nvarchar60Catalog, 60, true),
+            new("read_write_routing_url", SqlType.NVarchar, 256, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.availability_groups: server-scope AlwaysOn catalog, always empty
+        // (no AGs configured). SSMS's enumeration does
+        // `insert into #tmp select group_id, name from
+        // master.sys.availability_groups`.
+        Sys("availability_groups",
+        [
+            new("group_id", SqlType.UniqueIdentifier, null, false),
+            new("name", SqlType.NVarchar, 128, true),
+            new("resource_id", SqlType.NVarchar, 40, true),
+            new("resource_group_id", SqlType.NVarchar, 40, true),
+            new("failure_condition_level", SqlType.Int32, null, true),
+            new("health_check_timeout", SqlType.Int32, null, true),
+            new("automated_backup_preference", SqlType.TinyInt, null, true),
+            new("automated_backup_preference_desc", nvarchar60Catalog, 60, true),
+            new("version", SqlType.SmallInt, null, true),
+            new("basic_features", SqlType.Bit, null, true),
+            new("dtc_support", SqlType.Bit, null, true),
+            new("db_failover", SqlType.Bit, null, true),
+            new("is_distributed", SqlType.Bit, null, true),
+            new("cluster_type", SqlType.TinyInt, null, true),
+            new("cluster_type_desc", nvarchar60Catalog, 60, true),
+            new("required_synchronized_secondaries_to_commit", SqlType.Int32, null, true),
+            new("sequence_number", SqlType.BigInt, null, true),
+            new("is_contained", SqlType.Bit, null, true),
+            new("cluster_connection_options", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.dm_hadr_database_replica_states: server-scope AlwaysOn DMV,
+        // always empty (no AGs). SSMS's enumeration does
+        // `insert into #tmp select group_database_id, synchronization_state,
+        // is_local, group_id, database_id from
+        // master.sys.dm_hadr_database_replica_states`. LSN columns are
+        // numeric(25, 0).
+        Sys("dm_hadr_database_replica_states",
+        [
+            new("database_id", SqlType.Int32, null, false),
+            new("group_id", SqlType.UniqueIdentifier, null, false),
+            new("replica_id", SqlType.UniqueIdentifier, null, false),
+            new("group_database_id", SqlType.UniqueIdentifier, null, false),
+            new("is_local", SqlType.Bit, null, true),
+            new("is_primary_replica", SqlType.Bit, null, true),
+            new("synchronization_state", SqlType.TinyInt, null, true),
+            new("synchronization_state_desc", nvarchar60Catalog, 60, true),
+            new("is_commit_participant", SqlType.Bit, null, true),
+            new("synchronization_health", SqlType.TinyInt, null, true),
+            new("synchronization_health_desc", nvarchar60Catalog, 60, true),
+            new("database_state", SqlType.TinyInt, null, true),
+            new("database_state_desc", nvarchar60Catalog, 60, true),
+            new("is_suspended", SqlType.Bit, null, true),
+            new("suspend_reason", SqlType.TinyInt, null, true),
+            new("suspend_reason_desc", nvarchar60Catalog, 60, true),
+            new("recovery_lsn", lsnNumeric, null, true),
+            new("truncation_lsn", lsnNumeric, null, true),
+            new("last_sent_lsn", lsnNumeric, null, true),
+            new("last_sent_time", SqlType.DateTime, null, true),
+            new("last_received_lsn", lsnNumeric, null, true),
+            new("last_received_time", SqlType.DateTime, null, true),
+            new("last_hardened_lsn", lsnNumeric, null, true),
+            new("last_hardened_time", SqlType.DateTime, null, true),
+            new("last_redone_lsn", lsnNumeric, null, true),
+            new("last_redone_time", SqlType.DateTime, null, true),
+            new("log_send_queue_size", SqlType.BigInt, null, true),
+            new("log_send_rate", SqlType.BigInt, null, true),
+            new("redo_queue_size", SqlType.BigInt, null, true),
+            new("redo_rate", SqlType.BigInt, null, true),
+            new("filestream_send_rate", SqlType.BigInt, null, true),
+            new("end_of_log_lsn", lsnNumeric, null, true),
+            new("last_commit_lsn", lsnNumeric, null, true),
+            new("last_commit_time", SqlType.DateTime, null, true),
+            new("low_water_mark_for_ghosts", SqlType.BigInt, null, true),
+            new("secondary_lag_seconds", SqlType.BigInt, null, true),
+            new("quorum_commit_lsn", lsnNumeric, null, true),
+            new("quorum_commit_time", SqlType.DateTime, null, true),
+            new("is_internal", SqlType.Bit, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.master_files: one data file (type 0, ROWS) + one log file
+        // (type 1, LOG) per database, join key database_id. SSMS probes for
+        // in-memory-OLTP filegroups via
+        // `... from master.sys.master_files mf ... where mf.[type] = 2`, which
+        // must return nothing — the simulator emits no type-2 (FILESTREAM /
+        // memory-optimized) files. File contents are synthetic: logical name
+        // `<db>_Data` / `<db>_Log`, a plausible physical path, a small page
+        // count, unlimited max_size, 64 MB growth. All LSN columns numeric(25, 0),
+        // surfaced NULL (no physical log).
+        Sys("master_files",
+        [
+            new("database_id", SqlType.Int32, null, false),
+            new("file_id", SqlType.Int32, null, false),
+            new("file_guid", SqlType.UniqueIdentifier, null, true),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("name", SqlType.NVarchar, 128, true),
+            new("physical_name", SqlType.NVarchar, 260, false),
+            new("state", SqlType.TinyInt, null, true),
+            new("state_desc", nvarchar60Catalog, 60, true),
+            new("size", SqlType.Int32, null, false),
+            new("max_size", SqlType.Int32, null, false),
+            new("growth", SqlType.Int32, null, false),
+            new("is_media_read_only", SqlType.Bit, null, false),
+            new("is_read_only", SqlType.Bit, null, false),
+            new("is_sparse", SqlType.Bit, null, false),
+            new("is_percent_growth", SqlType.Bit, null, false),
+            new("is_name_reserved", SqlType.Bit, null, false),
+            new("is_persistent_log_buffer", SqlType.Bit, null, false),
+            new("create_lsn", lsnNumeric, null, true),
+            new("drop_lsn", lsnNumeric, null, true),
+            new("read_only_lsn", lsnNumeric, null, true),
+            new("read_write_lsn", lsnNumeric, null, true),
+            new("differential_base_lsn", lsnNumeric, null, true),
+            new("differential_base_guid", SqlType.UniqueIdentifier, null, true),
+            new("differential_base_time", SqlType.DateTime, null, true),
+            new("redo_start_lsn", lsnNumeric, null, true),
+            new("redo_start_fork_guid", SqlType.UniqueIdentifier, null, true),
+            new("redo_target_lsn", lsnNumeric, null, true),
+            new("redo_target_fork_guid", SqlType.UniqueIdentifier, null, true),
+            new("backup_lsn", lsnNumeric, null, true),
+            new("credential_id", SqlType.Int32, null, true),
+        ], EnumerateSysMasterFiles);
+
         return views;
     }
+
+    /// <summary>
+    /// Shared empty row set for the AlwaysOn Availability-Group catalog views
+    /// (<c>sys.availability_replicas</c> / <c>sys.availability_groups</c> /
+    /// <c>sys.dm_hadr_database_replica_states</c>). No AGs are ever configured
+    /// in the simulator, so all three project zero rows; SSMS's enumeration
+    /// relies only on their column shape resolving for its
+    /// <c>INSERT … SELECT … FROM</c> preamble.
+    /// </summary>
+    private static readonly SqlValue[][] EmptyCatalogRows = [];
 
     /// <summary>
     /// The single row projected by <c>sys.dm_os_host_info</c>. Materialized
@@ -2958,6 +3161,121 @@ internal static class BuiltInResources
                 falseBit,
                 falseBit,
             ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.database_mirroring</c> — one per database (join key
+    /// <c>database_id</c>, ordered via <see cref="Parser.Expressions.DbId.DatabasesWithIds"/>).
+    /// The simulator never mirrors a database, so every <c>mirroring_*</c>
+    /// column is NULL on every row, matching a live SQL Server 2025's
+    /// non-mirrored shape. SSMS's Object-Explorer enumeration LEFT JOINs this
+    /// to <c>sys.databases</c> on <c>database_id</c> and reads
+    /// <c>ISNULL(mirroring_role, 0)</c> / <c>ISNULL(mirroring_state + 1, 0)</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabaseMirroring(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
+        var nullTinyInt = SqlValue.Null(SqlType.TinyInt);
+        var nullDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullName = SqlValue.Null(SqlType.NVarchar);
+        var nullLsn = SqlValue.Null(SqlType.GetDecimal(25, 0));
+
+        foreach (var (_, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
+        {
+            yield return [
+                SqlValue.FromInt32(id),
+                nullGuid,
+                nullTinyInt,
+                nullDesc,
+                nullTinyInt,
+                nullDesc,
+                nullInt,
+                nullTinyInt,
+                nullDesc,
+                nullInt,
+                nullName,
+                nullName,
+                nullName,
+                nullTinyInt,
+                nullDesc,
+                nullLsn,
+                nullInt,
+                nullInt,
+                nullDesc,
+                nullLsn,
+                nullLsn,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.master_files</c> — one data file (<c>type</c> 0, ROWS)
+    /// and one log file (<c>type</c> 1, LOG) per database, join key
+    /// <c>database_id</c>. The simulator emits no <c>type</c>-2
+    /// (FILESTREAM / memory-optimized) files, so SSMS's in-memory-OLTP probe
+    /// (<c>where mf.[type] = 2</c>) returns nothing. Contents are synthetic:
+    /// logical name <c>&lt;db&gt;_Data</c> / <c>&lt;db&gt;_Log</c>, a plausible
+    /// physical path, a small page count, unlimited <c>max_size</c>, 64 MB
+    /// growth. All LSN columns surface NULL (no physical log).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysMasterFiles(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var falseBit = SqlValue.FromBoolean(false);
+        var zeroByte = SqlValue.FromByte(0);
+        var onlineState = SqlValue.FromNVarchar("ONLINE");
+        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
+        var nullTime = SqlValue.Null(SqlType.DateTime);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullLsn = SqlValue.Null(SqlType.GetDecimal(25, 0));
+        var rowsDesc = SqlValue.FromNVarchar("ROWS");
+        var logDesc = SqlValue.FromNVarchar("LOG");
+        var unlimited = SqlValue.FromInt32(-1);
+        var growthKb = SqlValue.FromInt32(65536);
+
+        SqlValue[] BuildFile(short id, int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
+        [
+            SqlValue.FromInt32(id),
+            SqlValue.FromInt32(fileId),
+            nullGuid,
+            SqlValue.FromByte(type),
+            typeDesc,
+            SqlValue.FromInt32(dataSpaceId),
+            SqlValue.FromNVarchar(logicalName),
+            SqlValue.FromNVarchar(physicalName),
+            zeroByte,
+            onlineState,
+            SqlValue.FromInt32(sizePages),
+            unlimited,
+            growthKb,
+            falseBit,
+            falseBit,
+            falseBit,
+            falseBit,
+            falseBit,
+            falseBit,
+            nullLsn,
+            nullLsn,
+            nullLsn,
+            nullLsn,
+            nullLsn,
+            nullGuid,
+            nullTime,
+            nullLsn,
+            nullGuid,
+            nullLsn,
+            nullGuid,
+            nullLsn,
+            nullInt,
+        ];
+
+        foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
+        {
+            yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", "/var/opt/mssql/data/" + db.Name + ".mdf", 640);
+            yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", "/var/opt/mssql/data/" + db.Name + "_log.ldf", 128);
         }
     }
 

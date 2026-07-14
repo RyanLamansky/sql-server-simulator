@@ -35,4 +35,20 @@ public sealed class NetworkListenerTests
         IsGreaterThan(0, listener.Port);
         AreNotEqual(1433, listener.Port);
     }
+
+    // SqlConnection.ServerVersion is parsed from the LOGINACK token's
+    // ProgVersion (major.minor.build). The simulator deliberately reports a
+    // 0 build ("17.00.0000") as an honest "not a real SQL Server build"
+    // marker — probed harmless to SMO's Object Explorer (the Databases node
+    // populates regardless; the enumeration gate was ntext RPC-param support,
+    // not the reported version).
+    [TestMethod]
+    public async Task LoginAck_ReportsSimulatedZeroBuild()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = new SqlConnection(ConnectionString(listener));
+        await connection.OpenAsync(TestContext.CancellationToken);
+        AreEqual("17.00.0000", connection.ServerVersion);
+    }
 }

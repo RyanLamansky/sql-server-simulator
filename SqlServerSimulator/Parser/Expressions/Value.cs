@@ -36,6 +36,8 @@ internal sealed class Value : Expression
             case AtAtKeyword.MicrosoftVersion:
                 // (major << 24) | (minor << 16) | build, self-consistent with
                 // SERVERPROPERTY('ProductVersion') = "17.0.0.0" → 0x11000000.
+                // The deliberately 0-build version doubles as a "not a real
+                // SQL Server" marker.
                 this.Constant = SqlValue.FromInt32(0x11000000);
                 return;
             case AtAtKeyword.MaxPrecision:

@@ -170,7 +170,7 @@ Constants whose values don't carry real session/server identity in the simulator
 - **`@@TEXTSIZE`** — -1 (matches SQL Server's documented default).
 - **`@@OPTIONS`** — 5432 (composite of ANSI/ARITHABORT/QUOTED_IDENTIFIER/CONCAT_NULL_YIELDS_NULL flags matching the simulator's defaults).
 - **`@@VERSION`** — `"SQL Server Simulator"`.
-- **`@@MICROSOFTVERSION`** — int `0x11000000` (285212672), the `(major << 24) | (minor << 16) | build` packing of version `17.0.0`, self-consistent with `SERVERPROPERTY('ProductVersion')` = `"17.0.0.0"`.
+- **`@@MICROSOFTVERSION`** — int `0x11000000` (285212672), the `(major << 24) | (minor << 16) | build` packing of version `17.0.0`, self-consistent with `SERVERPROPERTY('ProductVersion')` = `"17.0.0.0"`. The deliberately 0-build version doubles as an honest "not a real SQL Server build" marker; probed harmless to SSMS's Object Explorer (the Databases node populates regardless — the enumeration gate was ntext RPC-parameter support, not the reported version).
 - **`@@REMSERVER`** — NULL (deprecated in SQL Server proper too).
 
 Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catalog-views.md`](catalog-views.md).
@@ -186,6 +186,18 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
 - **`CURRENT_REQUEST_ID()`** — int, returns 0 (the simulator doesn't multiplex requests per session; probe-confirmed value for a single-request session).
 
 **`SESSION_ID()` is deliberately not modeled** — it's not a box-product function (raises Msg 195 on SQL Server 2025; it's a dedicated-SQL-pool / cloud surface). `@@SPID` is the box session-id mechanism.
+
+## `COLLATIONPROPERTY(collation_name, property)`
+
+`Parser/Expressions/CollationProperty.cs`: metadata for a collation. SSMS's Object-Explorer per-database follow-up runs `COLLATIONPROPERTY((select collation_name from sys.databases where name = …), 'CodePage')`. Real SQL Server projects `sql_variant` with a per-property base type; the simulator doesn't model sql_variant, so it surfaces the **bare** base type — `CodePage` / `LCID` / `ComparisonStyle` / `Version` as `int`, `Name` as `nvarchar` (the same substitution `SERVERPROPERTY` uses). The base type flows to the projection schema only when the property-name argument is a compile-time constant; a non-constant name falls back to `nvarchar` with a runtime coerce (static/runtime parity). An **unrecognized collation name** or an **unknown property** returns NULL (matches the reference). Property names are case-insensitive.
+
+Values derive from the collation model (`Collation.TryGetMetrics`) so any recognized name resolves — the name is re-walked into its prefix / suffix-flags / version / code-page token. Probe-confirmed against SQL Server 2025 (2026-07-14): `SQL_Latin1_General_CP1_CI_AS` → CodePage 1252, LCID 1033, ComparisonStyle 196609, Version 0, Name `SQL_Latin1_General_CP1_CI_AS`.
+
+- **CodePage** — the ANSI code page. `_UTF8` names → 65001; SQL_\* names read their `CPnnn` name token (CP1 → 1252); Windows names come from the probe-built prefix registry (`Japanese*` → 932, `Latin1_General*` → 1252). *The simulator stores all non-UTF8 varchar as CP1252, so `StorageEncoding.CodePage` is not the source — the token/registry lookup is.*
+- **LCID** — from the probe-built prefix registry (`SQL_Latin1_General` / `Latin1_General` → 0x0409 = 1033, `Japanese` → 0x0411 = 1041); defaults to 0x0409 for a recognized prefix that isn't tabulated. *Known minor divergences: sort-variant prefixes with a distinct sort-order LCID and the CP1254 SQL_Latin1 members fall back to the base-prefix LCID.*
+- **ComparisonStyle** — derived from the suffix flags: binary (`_BIN` / `_BIN2`) → 0, else `ignore-case (0x1 when CI) + ignore-accent (0x2 when AI) + ignore-kana (0x10000 unless KS) + ignore-width (0x20000 unless WS)` (CI_AS → 196609, CI_AI → 196611, CS_AS → 196608, CI_AS_KS_WS → 1).
+- **Version** — the version ordinal from the numeric name token: unversioned / SQL_\* → 0, 90 → 1, 100 → 2, 140 → 3, 160 → 4.
+- **Name** — the collation's canonical name.
 
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution. Yields one row per substring split on the single-character separator.

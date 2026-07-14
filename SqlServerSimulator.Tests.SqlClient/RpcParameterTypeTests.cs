@@ -182,4 +182,41 @@ public sealed class RpcParameterTypeTests
             _ = IsInstanceOfType<DBNull>(wireValue);
         }
     }
+
+    // A statement > nvarchar(4000) forces SqlClient to send the sp_executesql
+    // @statement parameter as ntext (0x63) with the legacy 4-byte-length value
+    // form (LONGLEN max + collation + LONGLEN data + UTF-16 bytes) — NOT PLP.
+    // SMO's Object-Explorer user-database enumeration is exactly such a large
+    // parameterized query; rejecting ntext RPC params meant it never executed,
+    // so the Databases node stayed empty. Spans multiple TDS packets at the
+    // 8000-byte default. Probe-confirmed wire shape (2026-07-15).
+    [TestMethod]
+    public async Task LargeStatement_SentAsNtextRpcParam_Executes()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        // ~12 KB of statement text → over nvarchar(4000) and multi-packet.
+        var pad = "/* " + new string('x', 6000) + " */";
+        await using var command = new SqlCommand($"{pad} SELECT @p AS v", connection);
+        _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Int) { Value = 42 });
+        AreEqual(42, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    // The @statement itself carrying > 4000 chars of real SQL (not padding) —
+    // ntext value must decode to the exact query the server then runs.
+    [TestMethod]
+    public async Task LargeStatement_NtextValue_DecodesExactly()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var terms = string.Join(" + ", Enumerable.Repeat("1", 3000));
+        await using var command = new SqlCommand($"SELECT ({terms}) AS total, @p AS p", connection);
+        _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.NVarChar, 20) { Value = "ok" });
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(3000, reader.GetInt32(0));
+        AreEqual("ok", reader.GetString(1));
+    }
 }

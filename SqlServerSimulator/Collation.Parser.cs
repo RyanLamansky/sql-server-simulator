@@ -89,6 +89,66 @@ internal abstract partial class Collation
     internal static bool IsRecognized(string name) => TryGet(name) is not null;
 
     /// <summary>
+    /// The <c>COLLATIONPROPERTY(name, property)</c> value set for a recognized
+    /// collation: ANSI code page, locale id, comparison-style bitmask, and the
+    /// version ordinal. Probe-confirmed against SQL Server 2025 — e.g.
+    /// <c>SQL_Latin1_General_CP1_CI_AS</c> → (1252, 1033, 196609, 0),
+    /// <c>Latin1_General_100_CI_AS</c> → (1252, 1033, 196609, 2).
+    /// </summary>
+    internal readonly record struct CollationMetrics(int CodePage, int Lcid, int ComparisonStyle, int Version, string Name);
+
+    /// <summary>
+    /// Computes the <c>COLLATIONPROPERTY</c> metrics for <paramref name="name"/>,
+    /// or returns <see langword="false"/> when the name isn't a recognized
+    /// collation (real SQL Server's <c>COLLATIONPROPERTY</c> returns NULL for
+    /// an unrecognized name). The comparison style is derived from the suffix
+    /// flags (binary collations report 0, otherwise the ignore-case /
+    /// ignore-accent / ignore-kana / ignore-width bitmask), the version ordinal
+    /// from the numeric name token (unversioned/SQL → 0, 90 → 1, 100 → 2,
+    /// 140 → 3, 160 → 4), and the LCID plus ANSI code page from the probe-built
+    /// collation registry keyed by prefix. SQL_* names carry their code page in
+    /// the <c>CPnnn</c> name token, and a <c>_UTF8</c> name overrides it to
+    /// 65001; the LCID defaults to <c>0x0409</c> and the code page to 1252 when
+    /// a recognized prefix isn't tabulated.
+    /// </summary>
+    internal static bool TryGetMetrics(string name, out CollationMetrics metrics)
+    {
+        metrics = default;
+        if (TryGet(name) is not { } collation)
+            return false;
+
+        // The name is recognized, so the suffix walk that TryParse ran is
+        // guaranteed to succeed again; re-walk it here to recover the prefix,
+        // flags, version, and code-page token the metrics derive from.
+        var parts = name.Split('_');
+        var splitAt = parts.Length;
+        var flags = CollationFlags.None;
+        int? version = null;
+        int? codePage = null;
+        while (splitAt > 0 && TryClassifySuffix(parts[splitAt - 1], ref flags, ref version, ref codePage))
+            splitAt--;
+        var prefix = string.Join("_", parts.Take(splitAt));
+
+        var isBinary = flags.HasFlag(CollationFlags.Binary) || flags.HasFlag(CollationFlags.Binary2);
+        var comparisonStyle = isBinary
+            ? 0
+            : (flags.HasFlag(CollationFlags.CaseInsensitive) ? 0x1 : 0)
+                + (flags.HasFlag(CollationFlags.AccentInsensitive) ? 0x2 : 0)
+                + (flags.HasFlag(CollationFlags.KanaSensitive) ? 0 : 0x10000)
+                + (flags.HasFlag(CollationFlags.WidthSensitive) ? 0 : 0x20000);
+        var versionOrdinal = version switch { 90 => 1, 100 => 2, 140 => 3, 160 => 4, _ => 0 };
+
+        var hasRegistered = Network.TdsCollationRegistry.ByPrefix.TryGetValue(prefix, out var registered);
+        var lcid = hasRegistered ? registered.Lcid : 0x0409;
+        var ansiCodePage = flags.HasFlag(CollationFlags.Utf8)
+            ? 65001
+            : codePage ?? (hasRegistered && registered.CodePage != 0 ? registered.CodePage : 1252);
+
+        metrics = new CollationMetrics(ansiCodePage, lcid, comparisonStyle, versionOrdinal, collation.Name);
+        return true;
+    }
+
+    /// <summary>
     /// Enumerates every recognized collation name with its description
     /// (the form <c>sys.fn_helpcollations()</c> exposes). Crosses the
     /// SQL_* sort-order table and the per-prefix tail-set patterns. Ordering

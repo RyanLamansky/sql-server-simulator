@@ -36,7 +36,7 @@ Everything lives in `Network/` (internal) except the public `SimulatedNetworkLis
 
 ## RPC requests
 
-Parameterized `SqlCommand`s arrive as RPC (packet type 3), never as batches. `TdsRpc.cs` parses the request (proc name or well-known ProcID, option flags, parameter list with per-parameter TYPE_INFO — the read-side mirror of the type codec, including PLP in both known-length and unknown-length chunked forms; multiple requests in one message split on the 0xFF batch-flag). Parameter TYPE_INFO rejected with a clear error: TVP (0xF3), CLR UDT (0xF0), `sql_variant` (0x62), legacy `text`/`ntext`/`image`.
+Parameterized `SqlCommand`s arrive as RPC (packet type 3), never as batches. `TdsRpc.cs` parses the request (proc name or well-known ProcID, option flags, parameter list with per-parameter TYPE_INFO — the read-side mirror of the type codec, including PLP in both known-length and unknown-length chunked forms; multiple requests in one message split on the 0xFF batch-flag). Parameter TYPE_INFO rejected with a clear error: TVP (0xF3), CLR UDT (0xF0), `sql_variant` (0x62), legacy `image` (0x22). **Legacy `ntext` (0x63) and `text` (0x23) string parameters ARE decoded** — SqlClient sends the `sp_executesql` `@statement` / `@params` as `ntext` once they exceed nvarchar(4000) (the proc's declared parameter type), so any parameterized query over ~4000 chars arrives this way. Their wire value is the **legacy 4-byte-length form** (LONGLEN max size + 5-byte collation, then a 4-byte data length + the string bytes — `0xFFFFFFFF` length = NULL), NOT PLP. This was the multi-round SSMS Object-Explorer Databases-node blocker: SMO's HADR-aware user-database enumeration is a large parameterized query, so it always arrived as an `ntext` param and was rejected before executing — the node stayed empty with no surfaced error while every other server-side fix landed on a code path that never ran. Probe-confirmed wire shape 2026-07-15.
 
 Dispatch (`TdsSession.Rpc.cs`):
 
@@ -75,14 +75,14 @@ COLMETADATA's 5 bytes = packed uint (LCID bits 0–19, flags 20–27, version ni
 
 ## Login response shape
 
-ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_english`) → INFO 5703 → ENVCHANGE(SQL collation, type 7: the server collation's 5-byte structure) → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, version 17.0) → ENVCHANGE(packet size) → DONE. Server name in every token is `SIMULATED` (matches `SERVERPROPERTY`). **The collation ENVCHANGE is load-bearing for RPC**: SqlClient stores it as the default collation it stamps onto outbound parameter TYPE_INFO, and without it every parameterized command dies client-side in a `NullReferenceException` before any bytes hit the wire.
+ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_english`) → INFO 5703 → ENVCHANGE(SQL collation, type 7: the server collation's 5-byte structure) → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, ProgVersion `17.0` with a **0 build** in the low 16 bits) → ENVCHANGE(packet size) → DONE. Server name in every token is `SIMULATED` (matches `SERVERPROPERTY`). The 0 build makes `SqlConnection.ServerVersion` report `"17.00.0000"` — a deliberate "not a real SQL Server build" marker, and probed harmless (SMO's Object-Explorer Databases node populates regardless; the enumeration gate was ntext RPC-parameter support, not the reported version — a hypothesis worth recording since `ServerVersion` is a *different* source from `SERVERPROPERTY('ProductVersion')` and one might reasonably expect SMO to gate on it). **The collation ENVCHANGE is load-bearing for RPC**: SqlClient stores it as the default collation it stamps onto outbound parameter TYPE_INFO, and without it every parameterized command dies client-side in a `NullReferenceException` before any bytes hit the wire.
 
 ## Divergences / deferred
 
 - Login INFO states are approximations.
 - No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating), no `SqlBulkCopy`.
 - Credential-enforcement edges not modeled: `ALTER LOGIN … DISABLE` parses but doesn't block login; password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
-- RPC parameter gaps: TVP / UDT / `sql_variant` / legacy-LOB parameters rejected with ERROR 50000; `sp_cursor*` and other well-known ProcIDs likewise.
+- RPC parameter gaps: TVP / UDT / `sql_variant` / `image` parameters rejected with ERROR 50000 (`text`/`ntext` string params ARE accepted); `sp_cursor*` and other well-known ProcIDs likewise.
 - Attention is acked only between messages (no mid-stream cancel).
 - SPID in packet headers truncates to 16 bits.
 

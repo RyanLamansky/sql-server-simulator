@@ -304,4 +304,80 @@ public sealed class CollationMetadataTests
     public void DatabasePropertyEx_MissingCloseParen_RaisesSyntaxError()
         => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'Status' extra"));
+
+    // === COLLATIONPROPERTY(collation_name, property) ===
+    // Probe-confirmed against SQL Server 2025 (2026-07-14). Real SQL Server
+    // projects sql_variant; the simulator surfaces the bare base type
+    // (int for CodePage/LCID/ComparisonStyle/Version, nvarchar for Name).
+
+    [TestMethod]
+    public void CollationProperty_CodePage_ReturnsAnsiCodePage()
+        => AreEqual(1252, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'CodePage')"));
+
+    [TestMethod]
+    public void CollationProperty_Lcid_ReturnsLocaleId()
+        => AreEqual(1033, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'LCID')"));
+
+    [TestMethod]
+    public void CollationProperty_ComparisonStyle_ReturnsBitmask()
+        => AreEqual(196609, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'ComparisonStyle')"));
+
+    [TestMethod]
+    public void CollationProperty_Version_SqlCollation_IsZero()
+        => AreEqual(0, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'Version')"));
+
+    [TestMethod]
+    public void CollationProperty_Version_HundredSeriesCollation_IsTwo()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('Latin1_General_100_CI_AS', 'Version')"));
+
+    [TestMethod]
+    public void CollationProperty_Name_ReturnsCollationName()
+        => AreEqual("SQL_Latin1_General_CP1_CI_AS", new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'Name')"));
+
+    // ComparisonStyle tracks the suffix flags — accent-insensitive adds bit 2,
+    // case-sensitive clears bit 1, KS/WS clear the ignore-kana/width bits, and
+    // binary collations report 0. Probe-confirmed values.
+    [TestMethod]
+    public void CollationProperty_ComparisonStyle_TracksSuffixFlags()
+    {
+        var sim = new Simulation();
+        AreEqual(196611, sim.ExecuteScalar("SELECT COLLATIONPROPERTY('Latin1_General_100_CI_AI', 'ComparisonStyle')"));
+        AreEqual(196608, sim.ExecuteScalar("SELECT COLLATIONPROPERTY('Latin1_General_100_CS_AS', 'ComparisonStyle')"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COLLATIONPROPERTY('Latin1_General_100_CI_AS_KS_WS', 'ComparisonStyle')"));
+        AreEqual(0, sim.ExecuteScalar("SELECT COLLATIONPROPERTY('Latin1_General_100_BIN2', 'ComparisonStyle')"));
+    }
+
+    // CodePage derives from the collation model, so a UTF-8 collation reports
+    // 65001 and a Japanese collation reports 932.
+    [TestMethod]
+    public void CollationProperty_CodePage_DerivesFromCollationModel()
+    {
+        var sim = new Simulation();
+        AreEqual(65001, sim.ExecuteScalar("SELECT COLLATIONPROPERTY('Latin1_General_100_CI_AS_SC_UTF8', 'CodePage')"));
+        AreEqual(932, sim.ExecuteScalar("SELECT COLLATIONPROPERTY('Japanese_CI_AS', 'CodePage')"));
+    }
+
+    // SSMS's per-database follow-up passes a scalar subquery as the collation
+    // argument with a constant property; the constant property still drives the
+    // static int type and the subquery resolves at runtime.
+    [TestMethod]
+    public void CollationProperty_SubqueryCollationArg_Resolves()
+        => AreEqual(1252, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY((select collation_name from sys.databases where name = 'simulated'), 'CodePage')"));
+
+    [TestMethod]
+    public void CollationProperty_UnknownProperty_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'Bogus')"));
+
+    [TestMethod]
+    public void CollationProperty_UnrecognizedCollation_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "SELECT COLLATIONPROPERTY('Not_A_Collation', 'CodePage')"));
 }

@@ -86,7 +86,7 @@ internal sealed class TdsRpcRequest
         return token switch
         {
             0x22 => throw Unsupported("image"),
-            0x23 => throw Unsupported("text"),
+            0x23 => DecodeLegacyLob(reader, name, isOutput, ansi: true),
             0x24 => DecodeGuid(reader, name, isOutput),
             0x26 => DecodeIntN(reader, name, isOutput),
             0x28 => DecodeDate(reader, name, isOutput),
@@ -94,7 +94,7 @@ internal sealed class TdsRpcRequest
             0x2A => DecodeDateTime2(reader, name, isOutput),
             0x2B => DecodeDateTimeOffset(reader, name, isOutput),
             0x62 => throw Unsupported("sql_variant"),
-            0x63 => throw Unsupported("ntext"),
+            0x63 => DecodeLegacyLob(reader, name, isOutput, ansi: false),
             0x68 => DecodeBit(reader, name, isOutput),
             0x6A => DecodeDecimal(reader, name, isOutput),
             0x6C => DecodeDecimal(reader, name, isOutput),
@@ -387,6 +387,29 @@ internal sealed class TdsRpcRequest
     }
 
     /// <summary>Reads the 5-byte collation structure, returning whether its fUTF8 bit is set.</summary>
+    /// <summary>
+    /// Decodes a legacy large-object string RPC parameter — <c>text</c> (0x23,
+    /// CP1252) or <c>ntext</c> (0x63, UTF-16). SqlClient sends the
+    /// <c>sp_executesql</c> statement / declaration parameters as <c>ntext</c>
+    /// once they exceed nvarchar(4000) (the proc's declared parameter type),
+    /// so large parameterized queries — SMO's Object-Explorer database
+    /// enumeration among them — arrive this way. TYPE_INFO is a 4-byte LONGLEN
+    /// max size + the 5-byte collation; the value is PLP (uint64 total length,
+    /// all-ones = NULL, then length-prefixed chunks) exactly like the MAX
+    /// string types.
+    /// </summary>
+    private static TdsRpcParameter DecodeLegacyLob(Reader reader, string name, bool isOutput, bool ansi)
+    {
+        _ = reader.ReadUInt32();
+        var utf8 = ReadCollation(reader);
+        var encoding = ansi ? (utf8 ? Encoding.UTF8 : CharSqlType.Cp1252Encoder) : Encoding.Unicode;
+        var dbType = ansi ? DbType.AnsiString : DbType.String;
+        var dataLength = reader.ReadUInt32();
+        return dataLength == 0xFFFFFFFF
+            ? new TdsRpcParameter(name, isOutput, dbType, null, size: -1)
+            : new TdsRpcParameter(name, isOutput, dbType, encoding.GetString(reader.ReadBytes(checked((int)dataLength))), size: -1);
+    }
+
     private static bool ReadCollation(Reader reader)
     {
         var info = reader.ReadUInt32();
