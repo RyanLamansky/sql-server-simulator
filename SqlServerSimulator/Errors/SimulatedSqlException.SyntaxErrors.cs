@@ -33,6 +33,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1038: a select-list column alias resolved to
+    /// the empty string — <c>AS ''</c>, <c>AS []</c>, <c>AS ""</c>, bare
+    /// <c>''</c>, or the alias-on-left <c>'' = expr</c>. Shares SQL Server's
+    /// wording with the SELECT INTO missing-column-name diagnostic but lands
+    /// at State 4 (probe-confirmed against SQL Server 2025), distinct from
+    /// SELECT INTO's State 5.
+    /// </summary>
+    internal static SimulatedSqlException EmptyColumnAlias() =>
+        new("An object or column name is missing or empty. For SELECT INTO statements, verify each column has a name. For other statements, look for empty alias names. Aliases defined as \"\" or [] are not allowed. Change the alias to a valid name.", 1038, 15, 4);
+
+    /// <summary>
     /// Mimics SQL Server error 195: a <c>SET</c> statement names an option
     /// that isn't in the recognized set — and the parser saw enough of the
     /// rest of the shape (ON/OFF or a value token) to recognize it was meant

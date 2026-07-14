@@ -22,6 +22,14 @@ public sealed class AtAtKeywordExpansionTests
         => AreEqual(32767, new Simulation().ExecuteScalar("select @@max_connections"));
 
     [TestMethod]
+    public void AtAt_MicrosoftVersion_ReturnsProductVersionEncoding()
+        => AreEqual(285212672, new Simulation().ExecuteScalar("select @@microsoftversion"));
+
+    [TestMethod]
+    public void AtAt_MicrosoftVersion_ComposesInExpression()
+        => AreEqual(17, new Simulation().ExecuteScalar("select @@microsoftversion / 16777216"));
+
+    [TestMethod]
     public void AtAt_Langid_ReturnsZero()
         => AreEqual((short)0, new Simulation().ExecuteScalar("select @@langid"));
 

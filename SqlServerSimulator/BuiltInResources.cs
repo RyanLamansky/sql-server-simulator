@@ -1,6 +1,7 @@
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace SqlServerSimulator;
 
@@ -1140,7 +1141,110 @@ internal static class BuiltInResources
             new("is_linked", SqlType.Bit, null, false),
         ], EnumerateSysServers);
 
+        // sys.dm_os_host_info: single-row, server-scope DMV describing the
+        // host operating system. SSMS selects host_platform from it on every
+        // connect. The row reflects the actual .NET host process rather than a
+        // canned Windows row: host_platform via OperatingSystem.Is*,
+        // host_architecture via RuntimeInformation.OSArchitecture (uppercased),
+        // and on Linux host_distribution / host_release parsed from
+        // /etc/os-release. host_sku is 48 on Windows and NULL elsewhere
+        // (matching real SQL Server on Linux); os_language_version is 1033;
+        // host_service_pack_level is the empty string. Computed once into
+        // DmOsHostInfoRows since host identity is fixed for the process lifetime.
+        Sys("dm_os_host_info",
+        [
+            new("host_platform", SqlType.NVarchar, 256, false),
+            new("host_distribution", SqlType.NVarchar, 256, false),
+            new("host_release", SqlType.NVarchar, 256, false),
+            new("host_service_pack_level", SqlType.NVarchar, 256, false),
+            new("host_sku", SqlType.Int32, null, true),
+            new("os_language_version", SqlType.Int32, null, false),
+            new("host_architecture", SqlType.NVarchar, 256, false),
+        ], (batch, database) => DmOsHostInfoRows);
+
         return views;
+    }
+
+    /// <summary>
+    /// The single row projected by <c>sys.dm_os_host_info</c>. Materialized
+    /// once at first access — the host operating system, architecture, and
+    /// distribution can't change during the process lifetime, so the row is
+    /// shared across every read (matching how the constant catalog-view cells
+    /// elsewhere are reused).
+    /// </summary>
+    private static readonly SqlValue[][] DmOsHostInfoRows = [BuildDmOsHostInfoRow()];
+
+    private static SqlValue[] BuildDmOsHostInfoRow()
+    {
+        string platform, distribution, release;
+        SqlValue sku;
+        if (OperatingSystem.IsWindows())
+        {
+            platform = "Windows";
+            distribution = "Windows";
+            var version = Environment.OSVersion.Version;
+            release = string.Create(CultureInfo.InvariantCulture, $"{version.Major}.{version.Minor}");
+            sku = SqlValue.FromInt32(48);
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            // Real SQL Server never runs on macOS; report the OS honestly
+            // rather than mislabeling it 'Linux'. host_sku is NULL as on Linux.
+            platform = "macOS";
+            distribution = "macOS";
+            release = "";
+            sku = SqlValue.Null(SqlType.Int32);
+        }
+        else
+        {
+            platform = "Linux";
+            var osRelease = ReadOsRelease();
+            distribution = osRelease.TryGetValue("NAME", out var name) && name.Length > 0 ? name : "Linux";
+            release = osRelease.TryGetValue("VERSION_ID", out var versionId) ? versionId : "";
+            sku = SqlValue.Null(SqlType.Int32);
+        }
+
+        var architecture = RuntimeInformation.OSArchitecture.ToString().ToUpperInvariant();
+        return
+        [
+            SqlValue.FromNVarchar(platform),
+            SqlValue.FromNVarchar(distribution),
+            SqlValue.FromNVarchar(release),
+            SqlValue.FromNVarchar(""),
+            sku,
+            SqlValue.FromInt32(1033),
+            SqlValue.FromNVarchar(architecture),
+        ];
+    }
+
+    /// <summary>
+    /// Parses the <c>KEY=value</c> pairs of <c>/etc/os-release</c>, stripping a
+    /// single layer of surrounding double quotes from each value. Any file-
+    /// access failure yields an empty map so callers fall back to defaults —
+    /// this must never throw, since it runs during static initialization.
+    /// </summary>
+    private static Dictionary<string, string> ReadOsRelease()
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var line in File.ReadLines("/etc/os-release"))
+            {
+                var separator = line.IndexOf('=', StringComparison.Ordinal);
+                if (separator <= 0)
+                    continue;
+                var key = line[..separator];
+                var value = line[(separator + 1)..].Trim();
+                if (value.Length >= 2 && value[0] == '"' && value[^1] == '"')
+                    value = value[1..^1];
+                result[key] = value;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        return result;
     }
 
     /// <summary>

@@ -33,6 +33,11 @@ internal sealed class Value : Expression
             case AtAtKeyword.Version:
                 this.Constant = SqlValue.FromNVarchar("SQL Server Simulator");
                 return;
+            case AtAtKeyword.MicrosoftVersion:
+                // (major << 24) | (minor << 16) | build, self-consistent with
+                // SERVERPROPERTY('ProductVersion') = "17.0.0.0" → 0x11000000.
+                this.Constant = SqlValue.FromInt32(0x11000000);
+                return;
             case AtAtKeyword.MaxPrecision:
                 this.Constant = SqlValue.FromByte(38);
                 return;

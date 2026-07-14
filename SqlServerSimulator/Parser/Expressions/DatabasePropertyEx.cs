@@ -1,13 +1,23 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>DATABASEPROPERTYEX(database_name, property_name)</c>: returns
-/// the named property of a database as <c>sql_variant</c> (the simulator
-/// returns the matching scalar type per-property). NULL database / NULL
-/// property → NULL result; unknown database → NULL; unknown property →
-/// NULL (matches real SQL Server, probe-confirmed 2026-05-16).
+/// the named property of a database. Real SQL Server projects this as
+/// <c>sql_variant</c> carrying a per-property inner base type; the
+/// simulator doesn't model sql_variant, so it surfaces the bare true type
+/// instead — numeric properties as <see cref="SqlType.Int32"/> /
+/// <see cref="SqlType.TinyInt"/>, string properties as
+/// <see cref="SqlType.NVarchar"/>. When the property-name argument is a
+/// compile-time constant the true type flows to the projection schema;
+/// when it isn't, the type falls back to <see cref="SqlType.NVarchar"/>
+/// and the runtime value is coerced to match (the static/runtime parity
+/// contract; only the property name drives the type — the database-name
+/// argument may be non-constant). NULL database / NULL property → NULL
+/// result; unknown database → NULL; unknown property → NULL (matches real
+/// SQL Server, probe-confirmed 2026-05-16).
 /// </summary>
 /// <remarks>
 /// Closed accept-list of recognized property names mirrors what BACPAC
@@ -20,6 +30,22 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class DatabasePropertyEx : Expression
 {
+    private static readonly FrozenDictionary<string, (SqlType Type, Func<Database, SqlValue> Produce)> Properties = new Dictionary<string, (SqlType Type, Func<Database, SqlValue> Produce)>
+    {
+        ["Status"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("ONLINE")),
+        ["Version"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
+        ["Recovery"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("FULL")),
+        ["Collation"] = (SqlType.NVarchar, db => SqlValue.FromNVarchar(db.CollationName)),
+        ["UserAccess"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("MULTI_USER")),
+        ["IsAutoClose"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
+        ["IsAutoShrink"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
+        ["SnapshotIsolationState"] = (SqlType.Int32, db => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0)),
+        ["IsReadCommittedSnapshotOn"] = (SqlType.Int32, db => SqlValue.FromInt32(db.ReadCommittedSnapshot ? 1 : 0)),
+        ["ComparisonStyle"] = (SqlType.Int32, _ => SqlValue.FromInt32(196609)),
+        ["LCID"] = (SqlType.Int32, _ => SqlValue.FromInt32(1033)),
+        ["SQLSortOrder"] = (SqlType.TinyInt, db => SqlValue.FromByte(SortIdFor(db.CollationName))),
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+
     private readonly Expression dbNameArg;
     private readonly Expression propertyArg;
 
@@ -48,26 +74,25 @@ internal sealed class DatabasePropertyEx : Expression
         if (!runtime.Batch.Connection.Simulation.Databases.TryGetValue(dbName, out var db))
             return SqlValue.Null(SqlType.NVarchar);
 
-        // Property-name lookup is case-insensitive (SQL Server convention).
-        // Use the Span overload (SSS003) — the upper-cased form drives the
-        // switch without allocating.
-        Span<char> upper = stackalloc char[property.Length];
-        return property.AsSpan().ToUpperInvariant(upper) switch
-        {
-            6 when upper.SequenceEqual("STATUS") => SqlValue.FromNVarchar("ONLINE"),
-            7 when upper.SequenceEqual("VERSION") => SqlValue.FromInt32(0),
-            8 when upper.SequenceEqual("RECOVERY") => SqlValue.FromNVarchar("FULL"),
-            9 when upper.SequenceEqual("COLLATION") => SqlValue.FromNVarchar(db.CollationName),
-            10 when upper.SequenceEqual("USERACCESS") => SqlValue.FromNVarchar("MULTI_USER"),
-            11 when upper.SequenceEqual("ISAUTOCLOSE") => SqlValue.FromInt32(0),
-            12 when upper.SequenceEqual("ISAUTOSHRINK") => SqlValue.FromInt32(0),
-            22 when upper.SequenceEqual("SNAPSHOTISOLATIONSTATE") => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0),
-            25 when upper.SequenceEqual("ISREADCOMMITTEDSNAPSHOTON") => SqlValue.FromInt32(db.ReadCommittedSnapshot ? 1 : 0),
-            _ => SqlValue.Null(SqlType.NVarchar),
-        };
+        if (!Properties.TryGetValue(property, out var def))
+            return SqlValue.Null(SqlType.NVarchar);
+
+        var value = def.Produce(db);
+        // A non-constant property name couldn't resolve a true type at parse
+        // time (GetSqlType fell back to NVarchar); coerce so runtime agrees.
+        return this.propertyArg is Value ? value : value.CoerceTo(SqlType.NVarchar);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        => this.propertyArg is Value { Constant: { IsNull: false } constant }
+            && Properties.TryGetValue(constant.CoerceTo(SqlType.NVarchar).AsString, out var def)
+            ? def.Type
+            : SqlType.NVarchar;
+
+    // Derive the SQL sort-order id from the collation name; real SQL Server
+    // reports 0 for collations with no SQL_* sort order.
+    private static byte SortIdFor(string collationName)
+        => Collation.SqlServerSortOrders.TryGetValue(collationName, out var so) ? checked((byte)so.OrderNumber) : (byte)0;
 
     internal override string DebugDisplay() => $"DATABASEPROPERTYEX({this.dbNameArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
 }

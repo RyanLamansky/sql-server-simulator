@@ -601,7 +601,31 @@ internal sealed partial class Selection
                         {
                             context.MoveNextRequired();
                             var rhs = Expression.Parse(context);
-                            expressions.Add(Expression.AssignName(rhs, aliasCandidate));
+                            expressions.Add(AssignColumnAlias(rhs, aliasCandidate.Value));
+                        }
+                        else
+                        {
+                            context.RestoreCheckpoint(checkpoint);
+                            expressions.Add(Expression.Parse(context));
+                        }
+                    }
+                    break;
+
+                // Column-alias-on-left with a string-literal name: the legacy
+                // `'alias' = expr` form. A string literal at projection-
+                // element-start is otherwise a projected value, so peek past
+                // it for `=` exactly as the identifier form above does. Only
+                // string literals qualify — binary (`0x…`) literals fall to
+                // the default value-parse path.
+                case Literal { Value.Type.Category: SqlTypeCategory.String } aliasLiteralCandidate:
+                    {
+                        var checkpoint = context.SaveCheckpoint();
+                        _ = context.MoveNext();
+                        if (context.Token is Operator { Character: '=' })
+                        {
+                            context.MoveNextRequired();
+                            var rhs = Expression.Parse(context);
+                            expressions.Add(AssignColumnAlias(rhs, aliasLiteralCandidate.Value.AsString));
                         }
                         else
                         {
@@ -642,11 +666,21 @@ internal sealed partial class Selection
                     goto ExitWhileTokenLoop;
 
                 case Name name:
-                    expressions[^1] = Expression.AssignName(expressions[^1], name);
+                    expressions[^1] = AssignColumnAlias(expressions[^1], name.Value);
+                    continue;
+
+                // Bare postfix string-literal alias: `expr 'alias'`. T-SQL has
+                // no implicit string concatenation, so a string literal
+                // directly following a complete select-list expression is
+                // always an alias (including when the expression is itself a
+                // string literal). Binary literals aren't valid aliases and
+                // fall through to the Msg 102 catch-all below.
+                case Literal { Value.Type.Category: SqlTypeCategory.String } aliasLiteral:
+                    expressions[^1] = AssignColumnAlias(expressions[^1], aliasLiteral.Value.AsString);
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.As }:
-                    expressions[^1] = Expression.AssignName(expressions[^1], context.GetNextRequired<Name>());
+                    expressions[^1] = AssignColumnAlias(expressions[^1], ReadAliasName(context.GetNextRequired()));
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
@@ -726,6 +760,29 @@ internal sealed partial class Selection
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
             ResolveAssignmentMode(expressions), intoTarget);
     }
+
+    /// <summary>
+    /// Wraps a projection expression in its column alias, mirroring SQL
+    /// Server's rejection of an empty alias ("" / [] / '' / N'') with Msg
+    /// 1038. Shared by every select-list alias site: the AS form, the bare
+    /// postfix form, and the alias-on-left <c>alias = expr</c> form.
+    /// </summary>
+    private static NamedExpression AssignColumnAlias(Expression expression, string alias) =>
+        alias.Length == 0
+            ? throw SimulatedSqlException.EmptyColumnAlias()
+            : new NamedExpression(expression, alias);
+
+    /// <summary>
+    /// Reads a column-alias name from the token following <c>AS</c>: an
+    /// identifier (quoted, bracketed, or bare) or a string literal
+    /// (single-quoted or <c>N</c>-prefixed). Anything else is Msg 102.
+    /// </summary>
+    private static string ReadAliasName(Token token) => token switch
+    {
+        Name name => name.Value,
+        Literal { Value.Type.Category: SqlTypeCategory.String } literal => literal.Value.AsString,
+        _ => throw SimulatedSqlException.SyntaxErrorNear(token),
+    };
 
     /// <summary>
     /// Walks the parsed projection list to detect <c>SELECT @v = expr</c>

@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
@@ -263,7 +264,7 @@ partial class Simulation
     /// "SET Statements" docs and probe-confirmed against SQL Server 2025
     /// (2026-05-14) for the canonical-shape entries.
     /// </summary>
-    private static readonly Dictionary<string, SetOptionKind> RecognizedOptions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, SetOptionKind> RecognizedOptions = new Dictionary<string, SetOptionKind>
     {
         ["ANSI_NULLS"] = SetOptionKind.OnOff,
         ["QUOTED_IDENTIFIER"] = SetOptionKind.OnOff,
@@ -295,7 +296,7 @@ partial class Simulation
         ["LANGUAGE"] = SetOptionKind.Identifier,
         ["DEADLOCK_PRIORITY"] = SetOptionKind.IntegerOrIdent,
         ["CONTEXT_INFO"] = SetOptionKind.Binary,
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Parses <c>SET @v = expr</c> and the compound forms <c>SET @v += expr</c>

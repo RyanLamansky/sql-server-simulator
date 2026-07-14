@@ -301,4 +301,61 @@ public sealed class CatalogViewTests
         cmd.CommandText = "select count(*) from sys.schemas";
         AreEqual(3, cmd.ExecuteScalar());
     }
+
+    [TestMethod]
+    public void DmOsHostInfo_SingleRow()
+        => AreEqual(1, new Simulation().ExecuteScalar("select count(*) from sys.dm_os_host_info"));
+
+    [TestMethod]
+    public void DmOsHostInfo_HostPlatformSelectableBySsmsQuery()
+    {
+        // SSMS issues exactly this on every connect.
+        var platform = (string)new Simulation().ExecuteScalar(
+            "SELECT host_platform FROM sys.dm_os_host_info")!;
+        IsTrue(platform is "Windows" or "Linux" or "macOS", $"unexpected host_platform '{platform}'");
+    }
+
+    [TestMethod]
+    public void DmOsHostInfo_ShapeReflectsHost()
+    {
+        // Values are host-dependent, so assert shape not exact strings.
+        using var reader = new Simulation().ExecuteReader("""
+            select host_platform, host_distribution, host_release, host_service_pack_level,
+                   host_sku, os_language_version, host_architecture
+            from sys.dm_os_host_info
+            """);
+        IsTrue(reader.Read());
+        var platform = reader.GetString(0);
+        IsTrue(platform is "Windows" or "Linux" or "macOS", $"unexpected host_platform '{platform}'");
+        IsGreaterThan(0, reader.GetString(1).Length);
+        AreEqual("", reader.GetString(3));
+        AreEqual(1033, reader.GetInt32(5));
+        IsGreaterThan(0, reader.GetString(6).Length);
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void DmOsHostInfo_PlatformConsistentWithCurrentHost()
+    {
+        var platform = (string)new Simulation().ExecuteScalar(
+            "select host_platform from sys.dm_os_host_info")!;
+        if (OperatingSystem.IsWindows())
+            AreEqual("Windows", platform);
+        else if (OperatingSystem.IsLinux())
+            AreEqual("Linux", platform);
+        else if (OperatingSystem.IsMacOS())
+            AreEqual("macOS", platform);
+    }
+
+    [TestMethod]
+    public void DmOsHostInfo_HostSkuNullOffWindows()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select host_sku from sys.dm_os_host_info");
+        IsTrue(reader.Read());
+        if (OperatingSystem.IsWindows())
+            AreEqual(48, reader.GetInt32(0));
+        else
+            IsTrue(reader.IsDBNull(0));
+    }
 }

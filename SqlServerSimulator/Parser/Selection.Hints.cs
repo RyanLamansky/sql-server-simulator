@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -38,7 +39,7 @@ internal sealed partial class Selection
     /// doesn't carry per-site rejection rules and real apps don't put it
     /// on regular tables.
     /// </remarks>
-    private static readonly HashSet<string> TableHintNames = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenSet<string> TableHintNames = new HashSet<string>
     {
         "NOLOCK", "READPAST", "READUNCOMMITTED", "READCOMMITTED", "READCOMMITTEDLOCK",
         "REPEATABLEREAD", "SERIALIZABLE", "SNAPSHOT", "HOLDLOCK", "UPDLOCK", "XLOCK",
@@ -47,7 +48,7 @@ internal sealed partial class Selection
         "IGNORE_CONSTRAINTS", "IGNORE_TRIGGERS",
         "FORCESEEK", "FORCESCAN", "INDEX", "SPATIAL_WINDOW_MAX_CELLS",
         "READONLY", "REMOTE",
-    };
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// First-word vocabulary accepted inside <c>OPTION (...)</c>. Each entry
@@ -59,7 +60,7 @@ internal sealed partial class Selection
     /// <c>MAXRECURSION</c> alone has runtime effect — it overrides the per-CTE
     /// recursion limit, so its argument is parsed strictly.
     /// </summary>
-    private static readonly HashSet<string> OptionHintFirstWords = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenSet<string> OptionHintFirstWords = new HashSet<string>
     {
         "RECOMPILE", "MAXRECURSION", "MAXDOP", "FAST",
         "LOOP", "HASH", "MERGE",
@@ -71,7 +72,7 @@ internal sealed partial class Selection
         "QUERYTRACEON",
         "TABLE", "PARAMETERIZATION",
         "ORDER", "CONCAT",
-    };
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Recognized hint modifiers that affect phase-1b data-lock acquisition.

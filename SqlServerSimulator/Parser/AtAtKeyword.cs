@@ -14,6 +14,7 @@ enum AtAtKeyword
     LockTimeout,
     MaxConnections,
     MaxPrecision,
+    MicrosoftVersion,
     NestLevel,
     Options,
     ProcId,

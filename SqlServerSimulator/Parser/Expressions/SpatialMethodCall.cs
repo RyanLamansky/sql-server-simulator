@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -27,7 +28,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class SpatialMethodCall : Expression
 {
-    private static readonly HashSet<string> KnownMethodNames = new(StringComparer.Ordinal)
+    private static readonly FrozenSet<string> KnownMethodNames = new HashSet<string>
     {
         "ToString",
         "STAsText",
@@ -97,7 +98,7 @@ internal sealed class SpatialMethodCall : Expression
         "EnvelopeAngle",
         "EnvelopeCenter",
         "InstanceOf",
-    };
+    }.ToFrozenSet(StringComparer.Ordinal);
 
     private readonly Expression target;
     private readonly string methodName;

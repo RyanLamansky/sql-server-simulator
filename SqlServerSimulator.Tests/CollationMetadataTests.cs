@@ -214,9 +214,42 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'Status')"));
 
     [TestMethod]
-    public void DatabasePropertyEx_Version_ReturnsZero()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+    public void DatabasePropertyEx_Version_ReturnsZeroAsInt()
+        => AreEqual(0, new Simulation().ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'Version')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_Version_SurfacesAsIntType()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "SELECT DATABASEPROPERTYEX('simulated', 'Version')");
+        IsTrue(reader.Read());
+        AreEqual("int", reader.GetDataTypeName(0));
+        _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
+    }
+
+    [TestMethod]
+    public void DatabasePropertyEx_ComparisonStyle_ReturnsInt()
+        => AreEqual(196609, new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'ComparisonStyle')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_Lcid_ReturnsInt()
+        => AreEqual(1033, new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'LCID')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_SqlSortOrder_ReturnsByte52OnDefaultCollation()
+        => AreEqual((byte)52, new Simulation().ExecuteScalar(
+            "SELECT DATABASEPROPERTYEX('simulated', 'SQLSortOrder')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_NonConstantProperty_FallsBackToNVarchar()
+    {
+        var sim = new Simulation();
+        AreEqual("0", sim.ExecuteScalar(
+            "declare @p nvarchar(30) = 'Version'; SELECT DATABASEPROPERTYEX('simulated', @p)"));
+    }
 
     [TestMethod]
     public void DatabasePropertyEx_Recovery_ReturnsFull()
@@ -229,23 +262,23 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'UserAccess')"));
 
     [TestMethod]
-    public void DatabasePropertyEx_IsAutoClose_ReturnsZero()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+    public void DatabasePropertyEx_IsAutoClose_ReturnsZeroAsInt()
+        => AreEqual(0, new Simulation().ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'IsAutoClose')"));
 
     [TestMethod]
-    public void DatabasePropertyEx_IsAutoShrink_ReturnsZero()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+    public void DatabasePropertyEx_IsAutoShrink_ReturnsZeroAsInt()
+        => AreEqual(0, new Simulation().ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'IsAutoShrink')"));
 
     [TestMethod]
     public void DatabasePropertyEx_SnapshotIsolationState_ReflectsToggle()
     {
         var sim = new Simulation();
-        AreEqual("0", sim.ExecuteScalar(
+        AreEqual(0, sim.ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'SnapshotIsolationState')"));
         _ = sim.ExecuteNonQuery("ALTER DATABASE simulated SET ALLOW_SNAPSHOT_ISOLATION ON");
-        AreEqual("1", sim.ExecuteScalar(
+        AreEqual(1, sim.ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'SnapshotIsolationState')"));
     }
 
@@ -253,10 +286,10 @@ public sealed class CollationMetadataTests
     public void DatabasePropertyEx_IsReadCommittedSnapshotOn_ReflectsToggle()
     {
         var sim = new Simulation();
-        AreEqual("0", sim.ExecuteScalar(
+        AreEqual(0, sim.ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'IsReadCommittedSnapshotOn')"));
         _ = sim.ExecuteNonQuery("ALTER DATABASE simulated SET READ_COMMITTED_SNAPSHOT ON");
-        AreEqual("1", sim.ExecuteScalar(
+        AreEqual(1, sim.ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'IsReadCommittedSnapshotOn')"));
     }
 

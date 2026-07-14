@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -166,7 +167,7 @@ partial class Simulation
     /// option's syntax shape as probed against SQL Server 2025 — see
     /// <c>/tmp/dbopts-probe</c> for the verification matrix.
     /// </summary>
-    private static readonly Dictionary<string, AlterDatabaseOptionKind> RecognizedDatabaseOptions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, AlterDatabaseOptionKind> RecognizedDatabaseOptions = new Dictionary<string, AlterDatabaseOptionKind>
     {
         ["ANSI_NULLS"] = AlterDatabaseOptionKind.OnOff,
         ["ANSI_PADDING"] = AlterDatabaseOptionKind.OnOff,
@@ -184,7 +185,7 @@ partial class Simulation
         ["OPTIMIZED_LOCKING"] = AlterDatabaseOptionKind.EqualsOnOff,
         ["TARGET_RECOVERY_TIME"] = AlterDatabaseOptionKind.IntegerWithUnit,
         ["QUERY_STORE"] = AlterDatabaseOptionKind.QueryStore,
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Recognized QUERY_STORE sub-option names inside <c>= ON ( … )</c>. Each
@@ -194,7 +195,7 @@ partial class Simulation
     /// into via <see cref="SkipBalancedParens"/>. Probed against SQL Server
     /// 2025 — unknown sub-option names raise Msg 102.
     /// </summary>
-    private static readonly HashSet<string> RecognizedQueryStoreSubOptions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenSet<string> RecognizedQueryStoreSubOptions = new HashSet<string>
     {
         "OPERATION_MODE",
         "CLEANUP_POLICY",
@@ -206,7 +207,7 @@ partial class Simulation
         "MAX_PLANS_PER_QUERY",
         "WAIT_STATS_CAPTURE_MODE",
         "QUERY_CAPTURE_POLICY",
-    };
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Cursor enters on the option name. Advances past the value tail per

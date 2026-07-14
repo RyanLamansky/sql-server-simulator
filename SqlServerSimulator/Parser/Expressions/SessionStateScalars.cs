@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -75,7 +76,7 @@ internal sealed class ContextInfoFunction : Expression
 /// </summary>
 internal sealed class ConnectionProperty : Expression
 {
-    private static readonly Dictionary<string, string?> Properties = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, string?> Properties = new Dictionary<string, string?>
     {
         ["net_transport"] = "TCP",
         ["protocol_type"] = "TSQL",
@@ -85,7 +86,7 @@ internal sealed class ConnectionProperty : Expression
         ["local_tcp_port"] = null,
         ["client_net_address"] = null,
         ["sni_consumer_node"] = null,
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     private readonly Expression nameArg;
 

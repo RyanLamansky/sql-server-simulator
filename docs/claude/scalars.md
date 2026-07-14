@@ -170,6 +170,7 @@ Constants whose values don't carry real session/server identity in the simulator
 - **`@@TEXTSIZE`** — -1 (matches SQL Server's documented default).
 - **`@@OPTIONS`** — 5432 (composite of ANSI/ARITHABORT/QUOTED_IDENTIFIER/CONCAT_NULL_YIELDS_NULL flags matching the simulator's defaults).
 - **`@@VERSION`** — `"SQL Server Simulator"`.
+- **`@@MICROSOFTVERSION`** — int `0x11000000` (285212672), the `(major << 24) | (minor << 16) | build` packing of version `17.0.0`, self-consistent with `SERVERPROPERTY('ProductVersion')` = `"17.0.0.0"`.
 - **`@@REMSERVER`** — NULL (deprecated in SQL Server proper too).
 
 Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catalog-views.md`](catalog-views.md).
