@@ -120,3 +120,40 @@ internal sealed class DbName : Expression
 
     internal override string DebugDisplay() => this.idArg is null ? "DB_NAME()" : $"DB_NAME({this.idArg.DebugDisplay()})";
 }
+
+/// <summary>
+/// SQL <c>HAS_DBACCESS('name')</c>: 1 when the named database is hosted (the
+/// simulator has no per-login database-access model, so every hosted database
+/// is accessible), NULL for an unknown / empty / NULL name. Result type is
+/// <see cref="SqlType.Int32"/>. Probe-confirmed against SQL Server 2025
+/// (2026-07-15): 1 for every accessible database, name lookup is
+/// case-insensitive, and a missing argument raises Msg 174. SSMS calls
+/// <c>has_dbaccess('msdb')</c> at connect to decide whether to surface
+/// Agent features — msdb isn't modeled, so it gets NULL, same as a real
+/// server without msdb access.
+/// </summary>
+internal sealed class HasDbAccess : Expression
+{
+    private readonly Expression nameArg;
+
+    public HasDbAccess(ParserContext context)
+    {
+        if (context.Token is Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.FunctionRequiresNArguments("has_dbaccess", 1);
+        this.nameArg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var name = this.nameArg.Run(runtime);
+        return !name.IsNull && runtime.Batch.Connection.Simulation.Databases.ContainsKey(name.CoerceTo(SqlType.NVarchar).AsString)
+            ? SqlValue.FromInt32(1)
+            : SqlValue.Null(SqlType.Int32);
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override string DebugDisplay() => $"HAS_DBACCESS({this.nameArg.DebugDisplay()})";
+}

@@ -759,6 +759,7 @@ internal abstract class Expression
                 "CONTEXT_INFO" => new ContextInfoFunction(context),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),
                 "ERROR_NUMBER" => new ErrorNumberFunction(context),
+                "HAS_DBACCESS" => new HasDbAccess(context),
                 "PERCENT_RANK" => WindowExpression.ParsePercentRank(context),
                 "ROWCOUNT_BIG" => new RowCountBig(context),
                 "SWITCHOFFSET" => new SwitchOffset(context),

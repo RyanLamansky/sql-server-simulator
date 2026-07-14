@@ -59,6 +59,8 @@ Database ids: **master is always `database_id` 1, and user databases take 5, 6, 
 
 **`DB_ID([name])`** / **`DB_NAME([id])`** (`Parser/Expressions/DatabaseScalarFunctions.cs`): round-trip the connection's view of `Simulation.Databases` by name and id via `DbId.DatabasesWithIds` (master = 1, user databases from 5). Zero-arg `DB_ID()` returns the current database's id, zero-arg `DB_NAME()` returns its name. Unknown name / out-of-range id → NULL. NULL arg → NULL. Result types: `DB_ID` → `smallint`; `DB_NAME` → `sysname`.
 
+**`HAS_DBACCESS('name')`** (same file): int 1 when the named database is hosted — the simulator has no per-login database-access model, so hosted ⇒ accessible — NULL for unknown / empty / NULL names (case-insensitive lookup; missing argument → Msg 174). Probe-confirmed against SQL Server 2025 (2026-07-15). SSMS calls `has_dbaccess('msdb')` at connect to gate Agent features; unmodeled msdb gets NULL, reading as "no access", which is the honest answer.
+
 ## Three-part-name reach for metadata scalars
 
 Probe-confirmed against SQL Server 2025 (2026-05-23):

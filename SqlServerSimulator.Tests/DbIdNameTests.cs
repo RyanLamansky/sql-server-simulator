@@ -60,4 +60,38 @@ public sealed class DbIdNameTests
     [TestMethod]
     public void DbId_DbName_RoundTrip()
         => AreEqual("simulated", new Simulation().ExecuteScalar("select db_name(db_id())"));
+
+    [TestMethod]
+    public void HasDbAccess_HostedDatabase_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar("select has_dbaccess('master')"));
+
+    [TestMethod]
+    public void HasDbAccess_CaseInsensitive()
+        => AreEqual(1, new Simulation().ExecuteScalar("select has_dbaccess('SiMuLaTeD')"));
+
+    // SSMS probes msdb at connect to decide whether to surface Agent
+    // features; the simulator doesn't model msdb, so NULL — same as a real
+    // server where the login can't see it.
+    [TestMethod]
+    public void HasDbAccess_UnknownDatabase_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select has_dbaccess('msdb')"));
+
+    [TestMethod]
+    public void HasDbAccess_EmptyOrNullName_ReturnsNull()
+    {
+        var simulation = new Simulation();
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select has_dbaccess('')"));
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select has_dbaccess(null)"));
+    }
+
+    [TestMethod]
+    public void HasDbAccess_NoArgument_RaisesMsg174()
+    {
+        var ex = new Simulation().AssertSqlError("select has_dbaccess()", 174);
+        AreEqual("The has_dbaccess function requires 1 argument(s).", ex.Message);
+    }
+
+    [TestMethod]
+    public void HasDbAccess_VariableArgument_Resolves()
+        => AreEqual(1, new Simulation().ExecuteScalar("declare @n sysname = 'master' select has_dbaccess(@n)"));
 }
