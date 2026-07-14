@@ -560,7 +560,19 @@ public sealed partial class Simulation
     /// normalizes by advancing one token when <c>Token</c> isn't already at a
     /// recognizable statement boundary.
     /// </remarks>
-    internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command)
+    /// <param name="command">The command whose <see cref="DbCommand.CommandText"/> is dispatched.</param>
+    /// <param name="continueOnError">
+    /// When <see langword="true"/>, a statement-terminating error outside any
+    /// TRY frame is emitted as a <see cref="SimulatedErrorOutcome"/> and the
+    /// batch continues to the next statement (real SQL Server's default
+    /// severity model). Only the TDS wire path passes <see langword="true"/>;
+    /// the in-process ADO surface keeps its long-standing fail-fast contract
+    /// (first error throws), and its reader filters outcomes on
+    /// <see cref="SimulatedQueryResult"/> so it never sees the error outcome
+    /// anyway. Batch-aborting errors (deadlock class 13, class ≥ 17) still
+    /// propagate regardless of this flag.
+    /// </param>
+    internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command, bool continueOnError = false)
     {
         // CommandType.StoredProcedure: CommandText is the procedure name and
         // Parameters maps by name to the proc's declared parameters. Bypass
@@ -595,7 +607,7 @@ public sealed partial class Simulation
         if (cacheKey is not null)
             _ = Interlocked.Increment(ref this.PlanCacheMisses);
 
-        var batch = new BatchContext(command);
+        var batch = new BatchContext(command) { ContinueOnError = continueOnError };
         // Stash the prepared cache-key components on the batch so the SELECT
         // arm can promote inline (the iterator's post-foreach code is
         // unreachable when the consumer disposes the reader without draining
@@ -938,6 +950,7 @@ public sealed partial class Simulation
         connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         List<SimulatedStatementOutcome>? outcomes = null;
         SimulatedSqlException? caught = null;
+        SimulatedSqlException? continuedError = null;
         var deferredNameError = false;
         try
         {
@@ -967,10 +980,12 @@ public sealed partial class Simulation
                 // other numbers and still propagate.
                 if (batch.IsSkipping && IsDeferrableNameResolutionError(ex))
                     deferredNameError = true;
-                else if (batch.TryFrameDepth == 0)
-                    throw;
-                else
+                else if (batch.TryFrameDepth > 0)
                     caught = ex;
+                else if (batch.ContinueOnError && IsStatementTerminating(ex))
+                    continuedError = ex;
+                else
+                    throw;
             }
         }
         finally
@@ -989,6 +1004,25 @@ public sealed partial class Simulation
             var parser = batch.Parser;
             while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                 parser.MoveNextOptional();
+            yield break;
+        }
+
+        if (continuedError is not null)
+        {
+            // Wire-only statement-terminating continuation: the statement
+            // failed but the batch proceeds to the next one (real SQL Server's
+            // default, non-XACT_ABORT severity model). Set @@ERROR so a
+            // following statement observes it, but do NOT touch InFlightError /
+            // ErrorSignaled — those are TRY/CATCH-only state, and this error is
+            // bound for the client, not a CATCH block. Same cursor-recovery
+            // scan the deferred-name and TRY-caught paths use, then emit the
+            // error into the outcome stream so the wire writes its token(s) and
+            // continues; the outer dispatch loop resumes at the next statement.
+            connection.LastErrorNumber = continuedError.Number;
+            var parser = batch.Parser;
+            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
+                parser.MoveNextOptional();
+            yield return new SimulatedErrorOutcome(continuedError);
             yield break;
         }
 
@@ -1046,6 +1080,29 @@ public sealed partial class Simulation
     /// </summary>
     private static bool IsDeferrableNameResolutionError(SimulatedSqlException ex)
         => ex.Number is 207 or 208;
+
+    /// <summary>
+    /// True when <paramref name="ex"/> is a statement-terminating error that
+    /// ends the current statement but lets the batch continue to the next one
+    /// (SQL Server's default severity model). Severity (<see cref="SimulatedSqlException.Class"/>)
+    /// 11..16 are statement-terminating; severity ≤ 10 are informational (not
+    /// raised as errors) and ≥ 17 are batch/connection-terminating. Deadlock
+    /// (Msg 1205, class 13) is the one in-range exception — it aborts the batch
+    /// — so it is excluded. Consulted only on the wire path
+    /// (<see cref="BatchContext.ContinueOnError"/>).
+    /// </summary>
+    /// <remarks>
+    /// Known divergence: a genuine syntax error (e.g. Msg 102, class 15)
+    /// occurring mid-batch continues over the wire rather than failing the
+    /// whole batch as real SQL Server does at compile time. The simulator
+    /// interleaves parse and execution (it never modeled a compile-then-run
+    /// split), and real tooling such as SMO never sends syntactically invalid
+    /// batches — the batches that rely on continuation (DROP #tmp cleanup,
+    /// etc.) are all runtime errors. Distinguishing parse-origin from
+    /// runtime-origin errors is out of scope.
+    /// </remarks>
+    private static bool IsStatementTerminating(SimulatedSqlException ex)
+        => ex.Class is >= 11 and <= 16 && ex.Number != 1205;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte)
     {

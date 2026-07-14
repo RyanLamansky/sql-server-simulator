@@ -437,4 +437,90 @@ public sealed class CatalogViewTests
     public void SysConfigurations_ReadableViaThreePartMasterName()
         => AreEqual(106, new Simulation().ExecuteScalar(
             "select count(*) from master.sys.configurations"));
+
+    // === sys.databases: full 98-column projection (SQL Server 2025) ===
+
+    [TestMethod]
+    public void SysDatabases_Projects98Columns()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.databases where name = 'simulated'");
+        AreEqual(98, reader.FieldCount);
+    }
+
+    [TestMethod]
+    public void SysDatabases_KeyColumnTypes_DatabaseIdIsInt_StateOnline()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select name, database_id, source_database_id, owner_sid, create_date,
+                   state_desc, physical_database_name
+            from sys.databases where name = 'simulated'
+            """);
+        AreEqual(typeof(string), reader.GetFieldType(0));
+        AreEqual(typeof(int), reader.GetFieldType(1));
+        AreEqual(typeof(int), reader.GetFieldType(2));
+        AreEqual(typeof(byte[]), reader.GetFieldType(3));
+        AreEqual(typeof(DateTime), reader.GetFieldType(4));
+        IsTrue(reader.Read());
+        AreEqual("simulated", reader.GetString(0));
+        AreEqual(5, reader.GetInt32(1));
+        IsTrue(reader.IsDBNull(2));
+        AreEqual("ONLINE", reader.GetString(5));
+        AreEqual("simulated", reader.GetString(6));
+    }
+
+    [TestMethod]
+    public void SysDatabases_CodeDescPairs_InternallyConsistent()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select user_access, user_access_desc, state, state_desc,
+                   recovery_model, recovery_model_desc,
+                   snapshot_isolation_state, snapshot_isolation_state_desc
+            from sys.databases where name = 'simulated'
+            """);
+        IsTrue(reader.Read());
+        AreEqual((byte)0, reader.GetByte(0));
+        AreEqual("MULTI_USER", reader.GetString(1));
+        AreEqual((byte)0, reader.GetByte(2));
+        AreEqual("ONLINE", reader.GetString(3));
+        AreEqual((byte)3, reader.GetByte(4));
+        AreEqual("SIMPLE", reader.GetString(5));
+        AreEqual((byte)0, reader.GetByte(6));
+        AreEqual("OFF", reader.GetString(7));
+    }
+
+    // The model template reports FULL recovery (per the reference instance);
+    // every other database reports SIMPLE.
+    [TestMethod]
+    public void SysDatabases_ModelRecoveryModel_IsFull()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select recovery_model, recovery_model_desc from sys.databases where name = 'model'");
+        IsTrue(reader.Read());
+        AreEqual((byte)1, reader.GetByte(0));
+        AreEqual("FULL", reader.GetString(1));
+    }
+
+    // SMO's Object-Explorer "Databases" node enumeration for a v17 server;
+    // filtering out the four system databases leaves only the user database.
+    [TestMethod]
+    public void SysDatabases_SmoStyleEnumeration_ReturnsUserDatabaseRow()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select name, database_id, has_dbaccess(name), state_desc,
+                   recovery_model_desc, owner_sid, create_date,
+                   source_database_id, containment
+            from sys.databases
+            where name not in ('master', 'tempdb', 'model', 'msdb')
+            order by name
+            """);
+        IsTrue(reader.Read());
+        AreEqual("simulated", reader.GetString(0));
+        AreEqual(5, reader.GetInt32(1));
+        AreEqual(1, reader.GetInt32(2));
+        AreEqual("ONLINE", reader.GetString(3));
+        AreEqual("SIMPLE", reader.GetString(4));
+        AreEqual((byte)0, reader.GetByte(8));
+        IsFalse(reader.Read());
+    }
 }

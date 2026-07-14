@@ -271,7 +271,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private async ValueTask StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
     {
-        using var outcomes = simulation.CreateResultSetsForCommand(command).GetEnumerator();
+        using var outcomes = simulation.CreateResultSetsForCommand(command, continueOnError: true).GetEnumerator();
 
         var hasOutcome = outcomes.MoveNext();
         var anyOutcome = hasOutcome;
@@ -307,6 +307,22 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 if ((queryStatus & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
                 writer.WriteDoneToken(doneToken, queryStatus, rows);
+            }
+            else if (outcome is SimulatedErrorOutcome errorOutcome)
+            {
+                // Statement-terminating error the engine chose to continue past
+                // (continueOnError). Emit its error token(s) and a DONE with
+                // DONE_ERROR; the more/final bit follows the same rule as any
+                // other outcome, so a mid-batch error carries DONE_MORE and a
+                // trailing error closes with the final DONE. The batch loop
+                // then proceeds to the next outcome — real SQL Server's
+                // non-XACT_ABORT behavior for a failed statement mid-batch.
+                WriteErrors(writer, errorOutcome.Exception);
+                hasOutcome = outcomes.MoveNext();
+                var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneError);
+                if ((status & Tds.DoneMore) == 0)
+                    this.WriteDatabaseChangeIfAny(writer);
+                writer.WriteDoneToken(doneToken, status, 0);
             }
             else
             {

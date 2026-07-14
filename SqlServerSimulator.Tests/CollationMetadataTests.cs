@@ -206,7 +206,7 @@ public sealed class CollationMetadataTests
         // the row-shape assertions to the simulated database by name.
         var sim = new Simulation();
         AreEqual("simulated", sim.ExecuteScalar("SELECT name FROM sys.databases WHERE name = 'simulated'"));
-        AreEqual((short)5, sim.ExecuteScalar("SELECT database_id FROM sys.databases WHERE name = 'simulated'"));
+        AreEqual(5, sim.ExecuteScalar("SELECT database_id FROM sys.databases WHERE name = 'simulated'"));
         AreEqual("ONLINE", sim.ExecuteScalar("SELECT state_desc FROM sys.databases WHERE name = 'simulated'"));
     }
 

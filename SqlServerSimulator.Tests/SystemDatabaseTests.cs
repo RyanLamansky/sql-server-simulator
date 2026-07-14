@@ -49,29 +49,29 @@ public sealed class SystemDatabaseTests
 
     [TestMethod]
     public void SimulatedUserDatabase_HasDatabaseIdFive()
-        => AreEqual((short)5, new Simulation().ExecuteScalar("select database_id from sys.databases where name = 'simulated'"));
+        => AreEqual(5, new Simulation().ExecuteScalar("select database_id from sys.databases where name = 'simulated'"));
 
     [TestMethod]
     public void SysDatabases_ListsFourSystemDatabasesThenUserDatabase_AllOnline()
     {
         using var reader = new Simulation().ExecuteReader(
             "select name, database_id, state_desc from sys.databases order by database_id");
-        List<(string Name, short Id, string State)> rows =
+        List<(string Name, int Id, string State)> rows =
         [
-            .. reader.EnumerateRecords().Select(r => (Name: r.GetString(0), Id: r.GetInt16(1), State: r.GetString(2))),
+            .. reader.EnumerateRecords().Select(r => (Name: r.GetString(0), Id: r.GetInt32(1), State: r.GetString(2))),
         ];
         HasCount(5, rows);
-        AreEqual(("master", (short)1), (rows[0].Name, rows[0].Id));
-        AreEqual(("tempdb", (short)2), (rows[1].Name, rows[1].Id));
-        AreEqual(("model", (short)3), (rows[2].Name, rows[2].Id));
-        AreEqual(("msdb", (short)4), (rows[3].Name, rows[3].Id));
-        AreEqual(("simulated", (short)5), (rows[4].Name, rows[4].Id));
+        AreEqual(("master", 1), (rows[0].Name, rows[0].Id));
+        AreEqual(("tempdb", 2), (rows[1].Name, rows[1].Id));
+        AreEqual(("model", 3), (rows[2].Name, rows[2].Id));
+        AreEqual(("msdb", 4), (rows[3].Name, rows[3].Id));
+        AreEqual(("simulated", 5), (rows[4].Name, rows[4].Id));
         IsTrue(rows.All(r => r.State == "ONLINE"));
     }
 
     [TestMethod]
     public void ThreePartRead_MasterSysDatabases_Resolves()
-        => AreEqual((short)1, new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "select database_id from master.sys.databases where name = 'master'"));
 
     [TestMethod]

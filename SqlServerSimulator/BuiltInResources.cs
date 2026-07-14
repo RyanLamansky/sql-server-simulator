@@ -1094,22 +1094,115 @@ internal static class BuiltInResources
             new("unit_conversion_factor", SqlType.Float, null, true),
         ], EnumerateSysSpatialReferenceSystems);
 
-        // sys.databases: real SQL Server emits ~95 columns; the simulator
-        // exposes the load-bearing subset that tooling actually queries (name,
-        // database_id, compatibility_level, collation_name, snapshot-isolation
-        // state, and the common boolean toggles). Single row for the current
-        // database; multi-database support would extend this enumeration.
+        // sys.databases: the full 98-column projection SQL Server 2025 emits,
+        // so SSMS's SMO Object-Explorer enumeration (which references
+        // owner_sid / create_date / state_desc / recovery_model_desc /
+        // containment / the is_* option flags) resolves every column. One row
+        // per Database via DatabasesWithIds. Modeled columns read live Database
+        // state (name / database_id / compatibility_level / collation_name /
+        // snapshot-isolation trio / recovery_model / state); the remaining
+        // option-flag columns carry a stock freshly-created-user-database
+        // profile as constant defaults (see EnumerateSysDatabases).
         Sys("databases",
         [
             new("name", SqlType.SystemName, 128, false),
-            new("database_id", SqlType.SmallInt, null, false),
-            new("compatibility_level", SqlType.TinyInt, null, true),
+            new("database_id", SqlType.Int32, null, false),
+            new("source_database_id", SqlType.Int32, null, true),
+            new("owner_sid", SqlType.Varbinary, 85, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("compatibility_level", SqlType.TinyInt, null, false),
             new("collation_name", SqlType.SystemName, 128, true),
-            new("snapshot_isolation_state", SqlType.TinyInt, null, false),
-            new("snapshot_isolation_state_desc", nvarchar60Catalog, 60, true),
-            new("is_read_committed_snapshot_on", SqlType.Bit, null, false),
-            new("state", SqlType.TinyInt, null, false),
+            new("user_access", SqlType.TinyInt, null, true),
+            new("user_access_desc", nvarchar60Catalog, 60, true),
+            new("is_read_only", SqlType.Bit, null, true),
+            new("is_auto_close_on", SqlType.Bit, null, false),
+            new("is_auto_shrink_on", SqlType.Bit, null, true),
+            new("state", SqlType.TinyInt, null, true),
             new("state_desc", nvarchar60Catalog, 60, true),
+            new("is_in_standby", SqlType.Bit, null, true),
+            new("is_cleanly_shutdown", SqlType.Bit, null, true),
+            new("is_supplemental_logging_enabled", SqlType.Bit, null, true),
+            new("snapshot_isolation_state", SqlType.TinyInt, null, true),
+            new("snapshot_isolation_state_desc", nvarchar60Catalog, 60, true),
+            new("is_read_committed_snapshot_on", SqlType.Bit, null, true),
+            new("recovery_model", SqlType.TinyInt, null, true),
+            new("recovery_model_desc", nvarchar60Catalog, 60, true),
+            new("page_verify_option", SqlType.TinyInt, null, true),
+            new("page_verify_option_desc", nvarchar60Catalog, 60, true),
+            new("is_auto_create_stats_on", SqlType.Bit, null, true),
+            new("is_auto_create_stats_incremental_on", SqlType.Bit, null, true),
+            new("is_auto_update_stats_on", SqlType.Bit, null, true),
+            new("is_auto_update_stats_async_on", SqlType.Bit, null, true),
+            new("is_ansi_null_default_on", SqlType.Bit, null, true),
+            new("is_ansi_nulls_on", SqlType.Bit, null, true),
+            new("is_ansi_padding_on", SqlType.Bit, null, true),
+            new("is_ansi_warnings_on", SqlType.Bit, null, true),
+            new("is_arithabort_on", SqlType.Bit, null, true),
+            new("is_concat_null_yields_null_on", SqlType.Bit, null, true),
+            new("is_numeric_roundabort_on", SqlType.Bit, null, true),
+            new("is_quoted_identifier_on", SqlType.Bit, null, true),
+            new("is_recursive_triggers_on", SqlType.Bit, null, true),
+            new("is_cursor_close_on_commit_on", SqlType.Bit, null, true),
+            new("is_local_cursor_default", SqlType.Bit, null, true),
+            new("is_fulltext_enabled", SqlType.Bit, null, true),
+            new("is_trustworthy_on", SqlType.Bit, null, true),
+            new("is_db_chaining_on", SqlType.Bit, null, true),
+            new("is_parameterization_forced", SqlType.Bit, null, true),
+            new("is_master_key_encrypted_by_server", SqlType.Bit, null, false),
+            new("is_query_store_on", SqlType.Bit, null, true),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_subscribed", SqlType.Bit, null, false),
+            new("is_merge_published", SqlType.Bit, null, false),
+            new("is_distributor", SqlType.Bit, null, false),
+            new("is_sync_with_backup", SqlType.Bit, null, false),
+            new("service_broker_guid", SqlType.UniqueIdentifier, null, false),
+            new("is_broker_enabled", SqlType.Bit, null, false),
+            new("log_reuse_wait", SqlType.TinyInt, null, true),
+            new("log_reuse_wait_desc", nvarchar60Catalog, 60, true),
+            new("is_date_correlation_on", SqlType.Bit, null, false),
+            new("is_cdc_enabled", SqlType.Bit, null, false),
+            new("is_encrypted", SqlType.Bit, null, true),
+            new("is_honor_broker_priority_on", SqlType.Bit, null, true),
+            new("replica_id", SqlType.UniqueIdentifier, null, true),
+            new("group_database_id", SqlType.UniqueIdentifier, null, true),
+            new("resource_pool_id", SqlType.Int32, null, true),
+            new("default_language_lcid", SqlType.SmallInt, null, true),
+            new("default_language_name", nvarchar128Catalog, 128, true),
+            new("default_fulltext_language_lcid", SqlType.Int32, null, true),
+            new("default_fulltext_language_name", nvarchar128Catalog, 128, true),
+            new("is_nested_triggers_on", SqlType.Bit, null, true),
+            new("is_transform_noise_words_on", SqlType.Bit, null, true),
+            new("two_digit_year_cutoff", SqlType.SmallInt, null, true),
+            new("containment", SqlType.TinyInt, null, true),
+            new("containment_desc", nvarchar60Catalog, 60, true),
+            new("target_recovery_time_in_seconds", SqlType.Int32, null, true),
+            new("delayed_durability", SqlType.Int32, null, true),
+            new("delayed_durability_desc", nvarchar60Catalog, 60, true),
+            new("is_memory_optimized_elevate_to_snapshot_on", SqlType.Bit, null, true),
+            new("is_federation_member", SqlType.Bit, null, true),
+            new("is_remote_data_archive_enabled", SqlType.Bit, null, true),
+            new("is_mixed_page_allocation_on", SqlType.Bit, null, true),
+            new("is_temporal_history_retention_enabled", SqlType.Bit, null, true),
+            new("catalog_collation_type", SqlType.Int32, null, false),
+            new("catalog_collation_type_desc", nvarchar60Catalog, 60, true),
+            new("physical_database_name", nvarchar128Catalog, 128, true),
+            new("is_result_set_caching_on", SqlType.Bit, null, true),
+            new("is_accelerated_database_recovery_on", SqlType.Bit, null, true),
+            new("is_tempdb_spill_to_remote_store", SqlType.Bit, null, true),
+            new("is_stale_page_detection_on", SqlType.Bit, null, true),
+            new("is_memory_optimized_enabled", SqlType.Bit, null, true),
+            new("is_data_retention_enabled", SqlType.Bit, null, true),
+            new("is_ledger_on", SqlType.Bit, null, true),
+            new("is_change_feed_enabled", SqlType.Bit, null, true),
+            new("is_data_lake_replication_enabled", SqlType.Bit, null, true),
+            new("is_event_stream_enabled", SqlType.Bit, null, true),
+            new("data_compaction", SqlType.TinyInt, null, true),
+            new("data_compaction_desc", nvarchar60Catalog, 60, true),
+            new("data_lake_log_publishing", SqlType.TinyInt, null, true),
+            new("data_lake_log_publishing_desc", nvarchar60Catalog, 60, true),
+            new("is_vorder_enabled", SqlType.Bit, null, true),
+            new("is_proactive_statistics_refresh_on", SqlType.Bit, null, true),
+            new("is_optimized_locking_on", SqlType.Bit, null, true),
         ], EnumerateSysDatabases);
 
         // sys.fn_helpcollations() — table-valued metadata function listing the
@@ -2705,31 +2798,165 @@ internal static class BuiltInResources
     }
 
     /// <summary>
+    /// Fixed <c>create_date</c> seed for <c>sys.databases</c> rows — the
+    /// simulator doesn't track per-database creation timestamps, so every
+    /// row reports this constant (matching real SQL Server's non-null,
+    /// datetime-typed column).
+    /// </summary>
+    private static readonly DateTime SysDatabasesCreateDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// Fixed <c>service_broker_guid</c> for every <c>sys.databases</c> row.
+    /// Service Broker isn't modeled; the column is non-null in real SQL
+    /// Server, so a stable constant stands in.
+    /// </summary>
+    private static readonly Guid SysDatabasesBrokerGuid = new("00000000-0000-0000-0000-000000000001");
+
+    /// <summary>
     /// Rows for <c>sys.databases</c>. One row per <see cref="Database"/>
     /// hosted by the connected <see cref="Simulation"/>; matches real SQL
-    /// Server's "instance-scoped catalog view" semantic. State is always
-    /// <c>0 / ONLINE</c>; snapshot-isolation columns track each
-    /// <see cref="Database"/>'s live <c>AllowSnapshotIsolation</c> /
-    /// <c>ReadCommittedSnapshot</c> flags.
+    /// Server's "instance-scoped catalog view" semantic. Full 98-column
+    /// projection: modeled columns read live <see cref="Database"/> state
+    /// (name / database_id / compatibility_level / collation_name /
+    /// snapshot-isolation trio / recovery_model / physical_database_name),
+    /// state is always <c>0 / ONLINE</c>, and the remaining option-flag
+    /// columns carry the stock defaults a freshly created user database
+    /// reports on SQL Server 2025 (user_access MULTI_USER, page_verify
+    /// CHECKSUM, containment NONE, log_reuse_wait NOTHING, delayed_durability
+    /// DISABLED, catalog_collation DATABASE_DEFAULT). recovery_model is FULL
+    /// for the <c>model</c> template and SIMPLE elsewhere, mirroring the
+    /// reference instance. Code↔desc pairs are always internally consistent.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch, Database database)
     {
-        // Ordered by database_id via DatabasesWithIds (master = 1, user
-        // databases from 5) — matching real SQL Server's sys.databases
-        // ordering by database_id.
+        var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
+        var zeroByte = SqlValue.FromByte(0);
+        var ownerSid = SqlValue.FromVarbinary([0x01]);
+        var createDate = SqlValue.FromDateTime(SysDatabasesCreateDate);
+        var brokerGuid = SqlValue.FromGuid(SysDatabasesBrokerGuid);
+        var multiUser = SqlValue.FromNVarchar("MULTI_USER");
+        var online = SqlValue.FromNVarchar("ONLINE");
+        var checksum = SqlValue.FromNVarchar("CHECKSUM");
+        var nothing = SqlValue.FromNVarchar("NOTHING");
+        var none = SqlValue.FromNVarchar("NONE");
+        var disabled = SqlValue.FromNVarchar("DISABLED");
+        var databaseDefault = SqlValue.FromNVarchar("DATABASE_DEFAULT");
+        var unsupported = SqlValue.FromNVarchar("UNSUPPORTED");
+        var recoveryTime = SqlValue.FromInt32(60);
+        var zeroInt = SqlValue.FromInt32(0);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullSmallInt = SqlValue.Null(SqlType.SmallInt);
+        var nullBit = SqlValue.Null(SqlType.Bit);
+        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
+        var nullName = SqlValue.Null(SqlType.NVarchar);
+
+        // Ordered by database_id via DatabasesWithIds (master = 1, system
+        // databases 2-4, user databases from 5) — matching real SQL Server's
+        // sys.databases ordering by database_id.
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
-            var snapshotState = (byte)(db.AllowSnapshotIsolation ? 1 : 0);
+            var snapshotOn = db.AllowSnapshotIsolation;
+            var isModel = Collation.Baseline.Equals(db.Name, "model");
             yield return [
                 SqlValue.FromSystemName(db.Name),
-                SqlValue.FromInt16(id),
+                SqlValue.FromInt32(id),
+                nullInt,
+                ownerSid,
+                createDate,
                 SqlValue.FromByte((byte)db.CompatibilityLevel),
                 SqlValue.FromSystemName(db.CollationName),
-                SqlValue.FromByte(snapshotState),
-                SqlValue.FromNVarchar(db.AllowSnapshotIsolation ? "ON" : "OFF"),
+                zeroByte,
+                multiUser,
+                falseBit,
+                falseBit,
+                falseBit,
+                zeroByte,
+                online,
+                falseBit,
+                falseBit,
+                falseBit,
+                SqlValue.FromByte((byte)(snapshotOn ? 1 : 0)),
+                SqlValue.FromNVarchar(snapshotOn ? "ON" : "OFF"),
                 SqlValue.FromBoolean(db.ReadCommittedSnapshot),
-                SqlValue.FromByte(0),
-                SqlValue.FromNVarchar("ONLINE"),
+                SqlValue.FromByte(isModel ? (byte)1 : (byte)3),
+                SqlValue.FromNVarchar(isModel ? "FULL" : "SIMPLE"),
+                SqlValue.FromByte(2),
+                checksum,
+                trueBit,
+                falseBit,
+                trueBit,
+                falseBit,
+                falseBit,
+                trueBit,
+                falseBit,
+                trueBit,
+                trueBit,
+                trueBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                trueBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                brokerGuid,
+                falseBit,
+                zeroByte,
+                nothing,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                nullGuid,
+                nullGuid,
+                nullInt,
+                nullSmallInt,
+                nullName,
+                nullInt,
+                nullName,
+                nullBit,
+                nullBit,
+                nullSmallInt,
+                zeroByte,
+                none,
+                recoveryTime,
+                zeroInt,
+                disabled,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                zeroInt,
+                databaseDefault,
+                SqlValue.FromNVarchar(db.Name),
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                trueBit,
+                trueBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                zeroByte,
+                unsupported,
+                zeroByte,
+                unsupported,
+                falseBit,
+                falseBit,
+                falseBit,
             ];
         }
     }

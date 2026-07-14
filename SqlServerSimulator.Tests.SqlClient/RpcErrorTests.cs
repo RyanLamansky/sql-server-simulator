@@ -62,7 +62,7 @@ public sealed class RpcErrorTests
     }
 
     [TestMethod]
-    public async Task OutputParameterWithErrorInSameStatement_ThrowsAndLeavesOutputUnwritten()
+    public async Task OutputParameterBeforeErrorInBatch_ThrowsButWritesOutput()
     {
         var simulation = new Simulation();
         await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
@@ -77,8 +77,12 @@ public sealed class RpcErrorTests
         var ex = await Assert.ThrowsAsync<SqlException>(async () => await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
         AreEqual(8134, ex.Number);
 
-        // The statement faulted before the RETURNVALUE token was written, so the
-        // output parameter is never assigned the server-side value.
-        IsNull(output.Value);
+        // The `set @out = 5` ran, then the divide-by-zero (severity 16) ended
+        // its own statement but let the RPC continue — so the RETURNVALUE token
+        // still carries the assigned value. Probed against SQL Server 2025
+        // (2026-07-14): real SqlClient reports output.Value == 5 here, matching
+        // this. (Before wire error-continuation the simulator left it unwritten,
+        // which diverged from the reference.)
+        AreEqual(5, output.Value);
     }
 }
