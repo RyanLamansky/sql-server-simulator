@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -28,13 +29,18 @@ public sealed partial class Simulation
     public Simulation()
     {
         RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
-        // Every instance ships with a real `master` database (database_id 1),
-        // present from construction so `USE master`, `master.sys.*` three-part
-        // reads, and `master.dbo.<proc>` all resolve — SSMS leans on these on
-        // every connect. Seeded here under the ctor-time collation (baseline);
-        // the ServerCollationName object-initializer setter runs afterward and
-        // re-points master's collation to the chosen server collation.
-        this.Databases.Add(MasterDatabaseName, new Database(MasterDatabaseName, this.ServerCollation));
+        // Every instance ships with the four SQL Server system databases
+        // (master = 1, tempdb = 2, model = 3, msdb = 4), present from
+        // construction so `USE master`, `master.sys.*` three-part reads,
+        // `master.dbo.<proc>` calls, and SSMS's connect-time `has_dbaccess`
+        // / msdb catalog probes all resolve without an explicit import.
+        // Seeded here under the ctor-time collation (baseline); the
+        // ServerCollationName object-initializer setter runs afterward and
+        // re-points each system database's collation to the chosen server
+        // collation.
+        foreach (var (name, _) in SystemDatabaseIds)
+            this.Databases.Add(name, new Database(name, this.ServerCollation));
+        SeedMsdbPolicyHealthView(this.Databases[MsdbDatabaseName]);
     }
 
     /// <summary>
@@ -42,6 +48,65 @@ public sealed partial class Simulation
     /// </summary>
     /// <returns>A new simulated database connection instance.</returns>
     public SimulatedDbConnection CreateDbConnection() => new(this);
+
+    /// <summary>
+    /// Seeds <c>msdb.dbo.syspolicy_system_health_state</c> as an empty view so
+    /// SSMS's server-level Policy Health feature — which calls
+    /// <c>has_dbaccess('msdb')</c> at connect and then
+    /// <c>select … from msdb.dbo.syspolicy_system_health_state</c> — renders
+    /// cleanly instead of raising a permission error. On the real server this
+    /// is a view over the policy-store internals; the simulator ships the same
+    /// six-column shape (probe-confirmed 2026-07-14) with a body that yields no
+    /// rows. Constructing the <see cref="View"/> directly (rather than running
+    /// <c>CREATE VIEW</c> DDL) avoids materializing a connection during
+    /// construction — the body re-parses through the querying connection at
+    /// read time, and a FROM-less <c>WHERE 1 = 0</c> guarantees zero rows.
+    /// </summary>
+    private static void SeedMsdbPolicyHealthView(Database msdb)
+    {
+        var schema = msdb.Schemas[Database.DefaultSchemaName];
+        var withIdType = NVarcharSqlType.Get(400, msdb.Collation, Coercibility.Implicit);
+        var expressionType = NVarcharSqlType.Get(SqlType.MaxLengthSentinel, msdb.Collation, Coercibility.Implicit);
+        HeapColumn[] outputColumns =
+        [
+            new("health_state_id", SqlType.BigInt, maxLength: null, nullable: false),
+            new("policy_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_run_date", SqlType.DateTime, maxLength: null, nullable: false),
+            new("target_query_expression_with_id", withIdType, maxLength: 400, nullable: false),
+            new("target_query_expression", expressionType, maxLength: SqlType.MaxLengthSentinel, nullable: false),
+            new("result", SqlType.Bit, maxLength: null, nullable: false),
+        ];
+        // Wrap the typed projection in a derived table so the outer
+        // WHERE 1 = 0 is a standard filtered SELECT (a FROM-less SELECT whose
+        // final projection ends in an alias doesn't route a trailing WHERE
+        // through the parser's alias-continue path — only ORDER BY does). The
+        // schema surfaced to callers comes from the view's OutputColumns; the
+        // body only has to parse and yield zero rows.
+        const string bodyText =
+            "select health_state_id, policy_id, last_run_date, target_query_expression_with_id, " +
+            "target_query_expression, result from (select cast(null as bigint) as health_state_id, " +
+            "cast(null as int) as policy_id, cast(null as datetime) as last_run_date, " +
+            "cast(null as nvarchar(400)) as target_query_expression_with_id, " +
+            "cast(null as nvarchar(max)) as target_query_expression, cast(null as bit) as result) v " +
+            "where 1 = 0";
+        var view = new View(
+            schema,
+            "syspolicy_system_health_state",
+            msdb.AllocateObjectId(),
+            outputColumns,
+            bodyText,
+            withCheckOption: false,
+            createDate: DateTime.UtcNow,
+            baseTable: null,
+            baseColumnOrdinals: [],
+            rejectionReason: ViewUpdatabilityRejection.UnsupportedShape,
+            visibilityCheck: null,
+            checkOptionCheck: null)
+        {
+            DefinitionText = $"CREATE VIEW dbo.syspolicy_system_health_state AS {bodyText}",
+        };
+        schema.Views[view.Name] = view;
+    }
 
     /// <summary>
     /// Binds <paramref name="target"/> under <paramref name="name"/> so the
@@ -111,6 +176,42 @@ public sealed partial class Simulation
     /// </summary>
     internal const string MasterDatabaseName = "master";
 
+    /// <summary>The <c>tempdb</c> system database's name (<c>database_id</c> 2).</summary>
+    internal const string TempdbDatabaseName = "tempdb";
+
+    /// <summary>The <c>model</c> system database's name (<c>database_id</c> 3).</summary>
+    internal const string ModelDatabaseName = "model";
+
+    /// <summary>The <c>msdb</c> system database's name (<c>database_id</c> 4).</summary>
+    internal const string MsdbDatabaseName = "msdb";
+
+    /// <summary>
+    /// The four SQL Server system databases and their fixed <c>database_id</c>s,
+    /// in id order: <c>master</c> = 1, <c>tempdb</c> = 2, <c>model</c> = 3,
+    /// <c>msdb</c> = 4. Every <see cref="Simulation"/> seeds all four at
+    /// construction. This is the single source of truth for the reserved-id
+    /// block; user databases take ids from 5 in name order
+    /// (see <c>DatabasesWithIds</c>).
+    /// </summary>
+    internal static readonly (string Name, short Id)[] SystemDatabaseIds =
+    [
+        (MasterDatabaseName, 1),
+        (TempdbDatabaseName, 2),
+        (ModelDatabaseName, 3),
+        (MsdbDatabaseName, 4),
+    ];
+
+    /// <summary>
+    /// Case-insensitive set of the four system-database names. Consulted by
+    /// the initial-database fallback (a fresh connection never lands on a
+    /// system database) and the user-database id allocation
+    /// (<c>DatabasesWithIds</c> filters these out before numbering user
+    /// databases from 5). Keyed by <see cref="BuiltInToken.Comparer"/>.
+    /// </summary>
+    internal static readonly FrozenSet<string> SystemDatabaseNames =
+        new[] { MasterDatabaseName, TempdbDatabaseName, ModelDatabaseName, MsdbDatabaseName }
+            .ToFrozenSet(BuiltInToken.Comparer);
+
     /// <summary>
     /// Server-wide default collation name. Used as the seed for every
     /// <see cref="Database"/> created on this simulation — both the lazy
@@ -141,16 +242,19 @@ public sealed partial class Simulation
             ArgumentNullException.ThrowIfNull(value);
             this.ServerCollation = Collation.TryGet(value)
                 ?? throw new ArgumentException($"Collation '{value}' is not recognized by the simulator.", nameof(value));
-            // The ctor seeded `master` under the baseline collation before this
-            // object-initializer setter ran; re-point it so master.collation
-            // mirrors the chosen server collation (as real SQL Server's
-            // master.collation tracks the install-time server collation). The
-            // construction-time schema dict comparers don't rebuild — matching
-            // the documented ALTER DATABASE COLLATE quirk.
-            if (this.Databases.TryGetValue(MasterDatabaseName, out var master))
+            // The ctor seeded the system databases under the baseline collation
+            // before this object-initializer setter ran; re-point each so its
+            // collation mirrors the chosen server collation (as real SQL
+            // Server's system-database collations track the install-time server
+            // collation). The construction-time schema dict comparers don't
+            // rebuild — matching the documented ALTER DATABASE COLLATE quirk.
+            foreach (var (name, _) in SystemDatabaseIds)
             {
-                master.Collation = this.ServerCollation;
-                master.CollationName = this.ServerCollation.Name;
+                if (this.Databases.TryGetValue(name, out var systemDatabase))
+                {
+                    systemDatabase.Collation = this.ServerCollation;
+                    systemDatabase.CollationName = this.ServerCollation.Name;
+                }
             }
         }
     }
@@ -167,8 +271,9 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Per-database state hosted by this server instance, keyed by name.
-    /// Seeded at construction with the <see cref="MasterDatabaseName"/> system
-    /// database; <see cref="SimulatedDbConnection"/>'s constructor lazily seeds
+    /// Seeded at construction with the four system databases
+    /// (<see cref="SystemDatabaseIds"/>: master / tempdb / model / msdb);
+    /// <see cref="SimulatedDbConnection"/>'s constructor lazily seeds
     /// <see cref="DefaultDatabaseName"/> on first connection to a Simulation
     /// that has no user database (so the all-T-SQL use case keeps working
     /// without an explicit import / CREATE DATABASE).

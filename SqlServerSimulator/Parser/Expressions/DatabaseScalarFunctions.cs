@@ -9,12 +9,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL Server's projected column type for this function.
 /// </summary>
 /// <remarks>
-/// The simulator allocates ids via <see cref="DatabasesWithIds"/>: the
-/// <c>master</c> system database is always <c>database_id</c> 1, and user
-/// databases take 5, 6, … in case-insensitive name order (real SQL Server
-/// reserves 2-4 for tempdb / model / msdb, which the simulator doesn't model)
-/// — the same convention used to project <c>sys.databases.database_id</c>.
-/// Unknown name returns NULL; NULL argument returns NULL.
+/// The simulator allocates ids via <see cref="DatabasesWithIds"/>: the four
+/// system databases carry their fixed reserved ids (master = 1, tempdb = 2,
+/// model = 3, msdb = 4), and user databases take 5, 6, … in case-insensitive
+/// name order — the same convention used to project
+/// <c>sys.databases.database_id</c>. Unknown name returns NULL; NULL argument
+/// returns NULL.
 /// </remarks>
 internal sealed class DbId : Expression
 {
@@ -52,27 +52,27 @@ internal sealed class DbId : Expression
         simulation.Databases.Values.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Pairs each hosted database with its <c>database_id</c>: <c>master</c> is
-    /// always 1, and every other (user) database takes 5, 6, … in
-    /// case-insensitive name order. Real SQL Server reserves ids 2-4 for
-    /// tempdb / model / msdb, which the simulator doesn't model, so user
-    /// databases start at 5. Single source of truth for
-    /// <see cref="DbId"/> / <see cref="DbName"/>, <c>OBJECT_NAME</c>'s
-    /// database routing, <c>sys.databases.database_id</c>, and
-    /// <c>DBCC SHRINKDATABASE</c>'s numeric-id form.
+    /// Pairs each hosted database with its <c>database_id</c>: the four system
+    /// databases carry their fixed reserved ids (master = 1, tempdb = 2,
+    /// model = 3, msdb = 4, from <see cref="Simulation.SystemDatabaseIds"/>),
+    /// and every user database takes 5, 6, … in case-insensitive name order.
+    /// Single source of truth for <see cref="DbId"/> / <see cref="DbName"/>,
+    /// <c>OBJECT_NAME</c>'s database routing, <c>sys.databases.database_id</c>,
+    /// and <c>DBCC SHRINKDATABASE</c>'s numeric-id form. Yielded in
+    /// ascending id order (system databases first, then user databases).
     /// </summary>
     internal static IEnumerable<(Database Database, short Id)> DatabasesWithIds(Simulation simulation)
     {
-        foreach (var db in OrderedDatabases(simulation))
+        foreach (var (name, id) in Simulation.SystemDatabaseIds)
         {
-            if (BuiltInToken.Comparer.Equals(db.Name, Simulation.MasterDatabaseName))
-                yield return (db, 1);
+            if (simulation.Databases.TryGetValue(name, out var systemDatabase))
+                yield return (systemDatabase, id);
         }
-        short id = 5;
+        short userId = 5;
         foreach (var db in OrderedDatabases(simulation))
         {
-            if (!BuiltInToken.Comparer.Equals(db.Name, Simulation.MasterDatabaseName))
-                yield return (db, id++);
+            if (!Simulation.SystemDatabaseNames.Contains(db.Name))
+                yield return (db, userId++);
         }
     }
 
@@ -122,15 +122,16 @@ internal sealed class DbName : Expression
 }
 
 /// <summary>
-/// SQL <c>HAS_DBACCESS('name')</c>: 1 when the named database is hosted (the
-/// simulator has no per-login database-access model, so every hosted database
-/// is accessible), NULL for an unknown / empty / NULL name. Result type is
+/// SQL <c>HAS_DBACCESS('name')</c>: whether the current login can access the
+/// named database — <c>1</c> when accessible, <c>0</c> when it exists but is
+/// restricted, NULL for an unknown / empty / NULL name. Result type is
 /// <see cref="SqlType.Int32"/>. Probe-confirmed against SQL Server 2025
-/// (2026-07-15): 1 for every accessible database, name lookup is
-/// case-insensitive, and a missing argument raises Msg 174. SSMS calls
-/// <c>has_dbaccess('msdb')</c> at connect to decide whether to surface
-/// Agent features — msdb isn't modeled, so it gets NULL, same as a real
-/// server without msdb access.
+/// (2026-07-14): a normal login reads <c>1</c> for master / tempdb / msdb and
+/// any user database, but <c>0</c> for <c>model</c> (the restricted template
+/// database); name lookup is case-insensitive and a missing argument raises
+/// Msg 174. SSMS calls <c>has_dbaccess('msdb')</c> at connect to decide
+/// whether to surface Policy Health / Agent features — the simulator seeds
+/// msdb, so it answers <c>1</c> and the feature renders.
 /// </summary>
 internal sealed class HasDbAccess : Expression
 {
@@ -147,10 +148,17 @@ internal sealed class HasDbAccess : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var name = this.nameArg.Run(runtime);
-        return !name.IsNull && runtime.Batch.Connection.Simulation.Databases.ContainsKey(name.CoerceTo(SqlType.NVarchar).AsString)
-            ? SqlValue.FromInt32(1)
-            : SqlValue.Null(SqlType.Int32);
+        var arg = this.nameArg.Run(runtime);
+        if (arg.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        var name = arg.CoerceTo(SqlType.NVarchar).AsString;
+        if (!runtime.Batch.Connection.Simulation.Databases.ContainsKey(name))
+            return SqlValue.Null(SqlType.Int32);
+        // model is the restricted template database — inaccessible even to a
+        // normal login (probe-confirmed). Every other hosted database (system
+        // or user) is accessible since the simulator has no per-login
+        // database-access model.
+        return SqlValue.FromInt32(BuiltInToken.Comparer.Equals(name, Simulation.ModelDatabaseName) ? 0 : 1);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

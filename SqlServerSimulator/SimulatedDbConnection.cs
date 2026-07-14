@@ -36,13 +36,13 @@ public sealed class SimulatedDbConnection : DbConnection
     /// path.</item>
     /// <item>Otherwise pick the alphabetically-first user database — predictable
     /// fallback for the multi-import scenario, matching the ordering
-    /// <c>sys.databases</c> uses. The always-present <c>master</c> system
-    /// database is excluded from this pick so a fresh connection never lands on
-    /// master by default. Pending real <c>USE &lt;db&gt;</c>
-    /// support, the user can still inspect any database via catalog
-    /// views regardless of which one a connection's CurrentDatabase
+    /// <c>sys.databases</c> uses. The always-present system databases
+    /// (master / tempdb / model / msdb) are excluded from this pick so a fresh
+    /// connection never lands on one by default. Pending real
+    /// <c>USE &lt;db&gt;</c> support, the user can still inspect any database
+    /// via catalog views regardless of which one a connection's CurrentDatabase
     /// happens to be pointed at.</item>
-    /// <item>When no user database exists (only the seeded <c>master</c>),
+    /// <item>When no user database exists (only the seeded system databases),
     /// lazily seed the default — the first connection pays the cost of
     /// materializing the default when no import preceded it.</item>
     /// </list>
@@ -55,7 +55,7 @@ public sealed class SimulatedDbConnection : DbConnection
                 return existing;
             foreach (var kvp in simulation.Databases.OrderBy(static kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
             {
-                if (!BuiltInToken.Comparer.Equals(kvp.Key, Simulation.MasterDatabaseName))
+                if (!Simulation.SystemDatabaseNames.Contains(kvp.Key))
                     return kvp.Value;
             }
             var seeded = new Database(Simulation.DefaultDatabaseName, simulation.ServerCollation);
