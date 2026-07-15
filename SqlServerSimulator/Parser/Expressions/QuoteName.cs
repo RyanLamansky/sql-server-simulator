@@ -36,8 +36,15 @@ internal sealed class QuoteName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var nameValue = this.name.Run(runtime);
+        // The result carries the input argument's collation and coercibility
+        // (real SQL Server propagates the operand's collation through string
+        // functions). Pinning to the neutral SqlType.NVarchar instead would
+        // give a coercible-default Baseline value that collides with a
+        // database-default-collation literal under Msg 468 when the two are
+        // concatenated (SMO's Urn: 'text' + QUOTENAME(sys-catalog sysname)).
+        var resultType = ResultType(nameValue.Type);
         if (nameValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(resultType);
 
         char open, close;
         if (this.delimiter is null)
@@ -48,7 +55,7 @@ internal sealed class QuoteName : Expression
         {
             var delimValue = this.delimiter.Run(runtime);
             if (delimValue.IsNull)
-                return SqlValue.Null(SqlType.NVarchar);
+                return SqlValue.Null(resultType);
 
             // Multi-char delimiter argument: SQL Server picks the first character
             // (probe-confirmed: '<<' selects '<' which pairs with '>').
@@ -56,15 +63,15 @@ internal sealed class QuoteName : Expression
                 ? delimValue.AsString
                 : delimValue.CoerceTo(SqlType.NVarchar).AsString;
             if (delimString.Length == 0)
-                return SqlValue.Null(SqlType.NVarchar);
+                return SqlValue.Null(resultType);
 
             if (!TryResolveDelimiterPair(delimString[0], out open, out close))
-                return SqlValue.Null(SqlType.NVarchar);
+                return SqlValue.Null(resultType);
         }
 
         var nameString = nameValue.AsString;
         if (nameString.Length > MaxInputLength)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(resultType);
 
         // Closing-character doubling: only matters when open != close; when
         // they're identical (e.g. " or '), the same character gets doubled
@@ -72,10 +79,20 @@ internal sealed class QuoteName : Expression
         var doubled = nameString.Contains(close, StringComparison.Ordinal)
             ? nameString.Replace(close.ToString(), $"{close}{close}", StringComparison.Ordinal)
             : nameString;
-        return SqlValue.FromNVarchar($"{open}{doubled}{close}");
+        return SqlValue.FromNVarchar(resultType, $"{open}{doubled}{close}");
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResultType(this.name.GetSqlType(batch, resolveColumnType));
+
+    /// <summary>
+    /// <c>nvarchar(258)</c> carrying the input argument's collation and
+    /// coercibility (Baseline / coercible-default for non-string inputs).
+    /// </summary>
+    private static NVarcharSqlType ResultType(SqlType inputType) =>
+        NVarcharSqlType.Get(ResultLength, inputType.Collation ?? Collation.Baseline, inputType.Coercibility);
+
+    private const int ResultLength = 258;
 
     /// <summary>
     /// Maps the user-supplied delimiter character to the <c>(open, close)</c>

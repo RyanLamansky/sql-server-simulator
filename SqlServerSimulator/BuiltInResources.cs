@@ -171,6 +171,8 @@ internal static class BuiltInResources
         var temporalDescNone = SqlValue.FromNVarchar("NON_TEMPORAL_TABLE");
         var temporalDescHistory = SqlValue.FromNVarchar("HISTORY_TABLE");
         var temporalDescBase = SqlValue.FromNVarchar("SYSTEM_VERSIONED_TEMPORAL_TABLE");
+        var falseTableFlag = SqlValue.FromBoolean(false);
+        var ledgerTypeNone = SqlValue.FromByte(0);
         Sys("tables",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -184,6 +186,17 @@ internal static class BuiltInResources
             new("temporal_type", SqlType.TinyInt, null, true),
             new("temporal_type_desc", nvarchar60Catalog, 60, true),
             new("history_table_id", SqlType.Int32, null, true),
+            // Table-flavor flags SMO's Object-Explorer Tables node filters on.
+            // None of these table kinds are modeled (memory-optimized,
+            // filetable, external/PolyBase, graph node/edge, ledger), so each
+            // ships as a constant 0. ledger_type is tinyint (0 = NON_LEDGER_TABLE,
+            // probe-confirmed non-null on SQL Server 2025). See docs/claude/catalog-views.md.
+            new("is_memory_optimized", SqlType.Bit, null, false),
+            new("is_filetable", SqlType.Bit, null, false),
+            new("is_external", SqlType.Bit, null, false),
+            new("is_node", SqlType.Bit, null, false),
+            new("is_edge", SqlType.Bit, null, false),
+            new("ledger_type", SqlType.TinyInt, null, false),
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
@@ -209,6 +222,12 @@ internal static class BuiltInResources
                         tt,
                         ttd,
                         htid,
+                        falseTableFlag,
+                        falseTableFlag,
+                        falseTableFlag,
+                        falseTableFlag,
+                        falseTableFlag,
+                        ledgerTypeNone,
                     };
                 }));
 
@@ -252,7 +271,14 @@ internal static class BuiltInResources
         var systemTypeId = SqlType.TinyInt;
         var defaultCollation = SqlValue.FromSystemName("SQL_Latin1_General_CP1_CI_AS");
         var nullCollation = SqlValue.Null(SqlType.SystemName);
-        Sys("columns",
+        // sys.columns / sys.all_columns share one shape. is_sparse ships as a
+        // constant 0 (the simulator has no sparse-column storage); SMO's
+        // Object-Explorer HasSparseColumn probe reads it off sys.all_columns.
+        // sys.all_columns is user-object-parity with sys.columns here: real
+        // SQL Server also surfaces system objects' negative-object_id columns,
+        // but SMO correlates only on user tables' object_ids so the identical
+        // user-column row set suffices. See docs/claude/catalog-views.md.
+        HeapColumn[] ColumnsShape() =>
         [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
@@ -266,8 +292,12 @@ internal static class BuiltInResources
             new("is_identity", SqlType.Bit, null, false),
             new("is_computed", SqlType.Bit, null, false),
             new("collation_name", SqlType.SystemName, 128, true),
-        ], (batch, database) =>
-            EnumerateColumns(batch, database, defaultCollation, nullCollation));
+            new("is_sparse", SqlType.Bit, null, true),
+        ];
+        IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database) =>
+            EnumerateColumns(batch, database, defaultCollation, nullCollation);
+        Sys("columns", ColumnsShape(), ColumnRows);
+        Sys("all_columns", ColumnsShape(), ColumnRows);
 
         // sys.sql_modules: one row per programmable module (procedure / view /
         // DML + DDL trigger / scalar / inline / multi-statement function),
@@ -737,6 +767,40 @@ internal static class BuiltInResources
             new("optimize_for_sequential_key", SqlType.Bit, null, false),
             new("statistics_incremental", SqlType.Bit, null, true),
         ], EnumerateSysIndexes);
+
+        // sys.data_spaces: the simulator models a single PRIMARY row-filegroup
+        // (data_space_id = 1) — the same id every sys.indexes row reports for
+        // data_space_id, so SMO's LEFT JOIN idx.data_space_id → dsidx resolves.
+        // Probe-confirmed shape (SQL Server 2025): name / data_space_id / type
+        // char(2) / type_desc / is_default / is_system. 'FG' = ROWS_FILEGROUP;
+        // partition schemes ('PS' — what SMO's IsPartitioned probe compares
+        // against) aren't modeled, so type is always 'FG'. See
+        // docs/claude/catalog-views.md.
+        var filegroupType = SqlValue.FromChar(charTwo, "FG");
+        var filegroupTypeDesc = SqlValue.FromNVarchar("ROWS_FILEGROUP");
+        Sys("data_spaces",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_default", SqlType.Bit, null, true),
+            new("is_system", SqlType.Bit, null, true),
+        ], (batch, database) =>
+        {
+            _ = (batch, database);
+            return
+            [
+                [
+                    SqlValue.FromSystemName("PRIMARY"),
+                    SqlValue.FromInt32(1),
+                    filegroupType,
+                    filegroupTypeDesc,
+                    SqlValue.FromBoolean(true),
+                    SqlValue.FromBoolean(false),
+                ],
+            ];
+        });
 
         // sys.index_columns: probe-confirmed 10-column shape. One row per
         // (index, column) pair — KEY columns get key_ordinal = 1..N and
@@ -3892,6 +3956,7 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
                         CollationFor(col),
+                        falseBit,
                     ];
                 }
             }
@@ -3918,6 +3983,7 @@ internal static class BuiltInResources
                         falseBit,
                         falseBit,
                         CollationFor(col),
+                        falseBit,
                     ];
                 }
             }
@@ -3944,6 +4010,7 @@ internal static class BuiltInResources
                         falseBit,
                         falseBit,
                         CollationFor(col),
+                        falseBit,
                     ];
                 }
             }
@@ -3970,6 +4037,7 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
                         CollationFor(col),
+                        falseBit,
                     ];
                 }
             }
