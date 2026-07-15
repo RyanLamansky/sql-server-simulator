@@ -31,6 +31,27 @@ internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchC
 {
     public readonly string Name = name;
 
+    /// <summary>
+    /// Deterministic, process-stable <c>object_id</c> surfaced by
+    /// <c>OBJECT_ID('sys.&lt;view&gt;')</c>. Catalog views are registered
+    /// process-wide (not per-database) so they can't draw from a
+    /// <see cref="Database"/>'s object-id allocator; instead the id is a
+    /// 32-bit FNV-1a hash of the leaf name forced negative, keeping it stable
+    /// across runs and disjoint from the positive ids user objects allocate
+    /// (from 100). Load-bearing only for OBJECT_ID resolving to non-NULL —
+    /// SSMS's Query Store probe gates on
+    /// <c>OBJECT_ID(N'[sys].[database_query_store_options]') IS NOT NULL</c>.
+    /// Not byte-identical to real SQL Server's small fixed system-view ids.
+    /// </summary>
+    public readonly int ObjectId = ComputeObjectId(name);
+
+    private static int ComputeObjectId(string leafName)
+    {
+        var hash = Simulation.Fnv1a32.Initial;
+        hash.Mix(leafName);
+        return (int)(hash.Value | 0x8000_0000);
+    }
+
     public readonly HeapColumn[] Columns = columns;
 
     /// <summary>

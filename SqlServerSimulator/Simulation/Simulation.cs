@@ -979,10 +979,24 @@ public sealed partial class Simulation
                     continue;
                 }
 
+                var statementStartIndex = context.Token.StartIndex;
                 foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte))
                     yield return outcome;
                 requireSemicolonBeforeCte = true;
                 batch.HasDispatchedStatement = true;
+
+                // Non-progress guard: a statement dispatch that consumed zero
+                // tokens would re-dispatch the same position forever. Normal
+                // parses always consume at least the leading token, but the
+                // error-recovery scans stop at the next statement boundary —
+                // and when the failing token itself IS a boundary keyword
+                // (e.g. an orphaned ELSE after deferred-name recovery
+                // abandoned its IF mid-parse), the scan advances nothing.
+                // Discovered via SSMS's Query Store probe batch, where the
+                // wire path's continue-on-error turned this into an infinite
+                // error stream that exhausted host memory.
+                if (context.Token is { } afterDispatch && afterDispatch.StartIndex == statementStartIndex)
+                    context.MoveNextOptional();
             }
         }
         finally

@@ -17,8 +17,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Type codes today: <c>'U'</c> (user table), <c>'V'</c> (view), <c>'P'</c>
-/// (stored procedure), <c>'FN'</c> / <c>'IF'</c> (scalar / inline-TVF
+/// Type codes today: <c>'U'</c> (user table), <c>'V'</c> (view, including the
+/// registered <c>sys.*</c> / <c>INFORMATION_SCHEMA.*</c> catalog views),
+/// <c>'P'</c> (stored procedure), <c>'FN'</c> / <c>'IF'</c> (scalar / inline-TVF
 /// functions), <c>'TR'</c> (DML trigger). Other documented codes (<c>'TF'</c>,
 /// FK / DEFAULT constraint codes, …) return NULL pending those features.
 /// </para>
@@ -106,6 +107,13 @@ internal sealed class ObjectId : Expression
         {
             if (runtime.Batch.TryResolveView(parsed, out var view))
                 return SqlValue.FromInt32(view.ObjectId);
+            // Registered sys.* / INFORMATION_SCHEMA.* catalog views resolve as
+            // system views (type 'V'). Their id is process-stable but not
+            // byte-identical to real SQL Server's fixed system-view ids; the
+            // load-bearing property is non-NULL — SSMS's Query Store probe
+            // gates on OBJECT_ID('[sys].[database_query_store_options]').
+            if (runtime.Batch.TryResolveCatalogView(parsed, out var catalogView, out _))
+                return SqlValue.FromInt32(catalogView.ObjectId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }
