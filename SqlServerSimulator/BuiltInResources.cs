@@ -65,6 +65,7 @@ internal static partial class BuiltInResources
         RegisterSecurity(views);
         RegisterFullTextXmlSpatial(views);
         RegisterServerAndDatabases(views);
+        RegisterLegacyCompat(views);
         return views;
     }
 }

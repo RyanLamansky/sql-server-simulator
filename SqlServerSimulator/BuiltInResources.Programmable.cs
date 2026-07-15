@@ -195,6 +195,13 @@ internal static partial class BuiltInResources
         var tableDataType = SqlValue.FromSystemName("TABLE");
         Iso("ROUTINES",
         [
+            // SPECIFIC_* lead the ISO shape and mirror ROUTINE_* for T-SQL
+            // routines (no overloading, so the specific name equals the routine
+            // name). SSMS's aggregate-function enumeration joins
+            // sysobjects.name = INFORMATION_SCHEMA.ROUTINES.SPECIFIC_NAME.
+            new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
+            new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
+            new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
             new("ROUTINE_CATALOG", SqlType.SystemName, 128, true),
             new("ROUTINE_SCHEMA", SqlType.SystemName, 128, true),
             new("ROUTINE_NAME", SqlType.SystemName, 128, false),
@@ -939,10 +946,14 @@ internal static partial class BuiltInResources
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
             {
+                var name = SqlValue.FromSystemName(proc.Name);
                 yield return [
                     catalog,
                     schemaName,
-                    SqlValue.FromSystemName(proc.Name),
+                    name,
+                    catalog,
+                    schemaName,
+                    name,
                     procedureRoutineType,
                     nullDataType,
                     RoutineDefinition(proc.DefinitionText),
@@ -953,10 +964,14 @@ internal static partial class BuiltInResources
                 var dataType = fn is ScalarFunction scalarFn
                     ? SqlValue.FromSystemName(scalarFn.ReturnType.SqlServerName)
                     : tableDataType;
+                var name = SqlValue.FromSystemName(fn.Name);
                 yield return [
                     catalog,
                     schemaName,
-                    SqlValue.FromSystemName(fn.Name),
+                    name,
+                    catalog,
+                    schemaName,
+                    name,
                     functionRoutineType,
                     dataType,
                     RoutineDefinition(fn.DefinitionText),

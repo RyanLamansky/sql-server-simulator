@@ -23,53 +23,11 @@ partial class Simulation
         // different interned instance). A concurrent first-touch race is
         // benign: both threads build identical sets and the reference
         // assignment is atomic.
-        var lookup = collation.SystemProcedureLookup ??= new HashSet<string>(
-            [
-                // sp_executesql is a built-in proc with a special argument
-                // shape (param-defs and OUTPUT writeback to @-variables in
-                // the caller's scope) parsed by ParseSpExecuteSql rather
-                // than the generic EXEC-argument grammar.
-                "sp_executesql",
-                // Extended-property sprocs — all 3 share argument parsing +
-                // target resolution via InvokeSpExtendedProperty. The
-                // bacpac loader emits `EXEC sp_addextendedproperty …` for
-                // every `<SqlExtendedProperty>` element in model.xml; the
-                // update/drop variants round out the API.
-                "sp_addextendedproperty",
-                "sp_updateextendedproperty",
-                "sp_dropextendedproperty",
-                // Linked-server sprocs — sp_addlinkedserver / sp_dropserver
-                // carry semantic effect (activating / deactivating an entry
-                // in Simulation.ActiveLinkedServers); sp_addlinkedsrvlogin /
-                // sp_droplinkedsrvlogin / sp_serveroption parse-and-discard
-                // since the simulator has no principal-mapping or
-                // per-server-option model but BACPAC / migration scripts
-                // often emit them.
-                "sp_addlinkedserver",
-                "sp_dropserver",
-                "sp_addlinkedsrvlogin",
-                "sp_droplinkedsrvlogin",
-                "sp_serveroption",
-                "sp_set_session_context",
-                "sp_getapplock",
-                "sp_releaseapplock",
-                // xp_msver returns a one-result-set version/host-info table.
-                // SSMS calls master.dbo.xp_msver on connect; the leaf routes
-                // here from any current database (real SQL Server resolves
-                // sp_/xp_ system procs through master).
-                "xp_msver",
-                // xp_qv is SSMS's AlwaysOn-availability probe. It yields no
-                // result set and returns status 0; the simulator reports
-                // AlwaysOn as not-available (consistent with
-                // SERVERPROPERTY('IsHadrEnabled') = 0), so the @rc capture
-                // lands 0 and Object Explorer's Databases node populates.
-                "xp_qv",
-                // xp_instance_regread reads instance registry defaults. SSMS
-                // reads the SQLPath value (instance root) on connect to derive
-                // the SMO RootDirectory; the simulator returns a synthetic path.
-                "xp_instance_regread",
-            ],
-            collation);
+        // Canonical list + per-proc rationale live on BuiltInResources.SystemProcedureNames
+        // (shared with the sys.system_objects projection). Each xp_/sp_ leaf
+        // routes here from any current database (real SQL Server resolves
+        // sp_/xp_ system procs through master).
+        var lookup = collation.SystemProcedureLookup ??= new HashSet<string>(BuiltInResources.SystemProcedureNames, collation);
         return lookup.TryGetValue(leaf, out var canonical) ? canonical : null;
     }
 

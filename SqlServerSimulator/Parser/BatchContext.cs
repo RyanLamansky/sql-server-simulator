@@ -1654,12 +1654,18 @@ internal sealed class BatchContext
     {
         view = null;
         targetDatabase = null;
-        if (name.Count is not (2 or 3))
+        if (name.Count is not (1 or 2 or 3))
             return false;
         targetDatabase = this.CurrentDatabase;
         if (name.Count == 3 && !this.Connection.Simulation.Databases.TryGetValue(name[0], out targetDatabase))
             return false;
-        var key = $"{name.ImmediateQualifier}.{name.Leaf}";
+        // A 1-part name resolves only the legacy compatibility views registered
+        // under a bare (dot-less) key — sysobjects / sysusers, which live in the
+        // sys schema but resolve unqualified (probe-confirmed: bare `sysobjects`
+        // works, bare `objects` / `tables` raise Msg 208). Every modern catalog
+        // view is keyed `sys.<name>` / `INFORMATION_SCHEMA.<name>`, so a bare
+        // user-table name never collides.
+        var key = name.Count == 1 ? name.Leaf : $"{name.ImmediateQualifier}.{name.Leaf}";
         return Simulation.CatalogViews.TryGetValue(key, out view);
     }
 
