@@ -121,6 +121,24 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("with_check_option", SqlType.Bit, null, false),
+            new("is_date_correlation_view", SqlType.Bit, null, false),
+        ], EnumerateViews);
+
+        // sys.all_views shares sys.views' shape and row generator — user-view
+        // parity, like sys.all_objects / sys.all_columns. SMO's view-enumeration
+        // and Script-As queries read sys.all_views (filtering on v.type = 'V');
+        // the identical user-view row set suffices (the simulator surfaces no
+        // system views through it).
+        Sys("all_views",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
         ], EnumerateViews);
@@ -476,6 +494,8 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateViews(Parser.BatchContext batch, Database database)
     {
         var falseBit = SqlValue.FromBoolean(false);
+        var viewType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "V ");
+        var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
@@ -484,6 +504,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(view.ObjectId),
                     SqlValue.FromSystemName(view.Name),
                     SqlValue.FromInt32(view.Schema.SchemaId),
+                    viewType,
+                    viewTypeDesc,
                     SqlValue.FromBoolean(view.WithCheckOption),
                     falseBit,
                 ];

@@ -69,6 +69,24 @@ internal static partial class BuiltInResources
             new("execute_as_principal_id", SqlType.Int32, null, true),
         ], static (batch, database) => []);
 
+        // sys.assemblies: CLR assemblies aren't modeled, so this is an empty
+        // view with the documented SQL Server 2025 shape. SMO's CREATE-scripting
+        // trigger query LEFT JOINs it (via sys.assembly_modules.assembly_id) to
+        // pull a CLR trigger's assembly name; user triggers never appear here.
+        Sys("assemblies",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("assembly_id", SqlType.Int32, null, false),
+            new("clr_name", SqlType.NVarchar, 4000, true),
+            new("permission_set", SqlType.TinyInt, null, false),
+            new("permission_set_desc", nvarchar60Catalog, 60, true),
+            new("is_visible", SqlType.Bit, null, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_user_defined", SqlType.Bit, null, false),
+        ], static (batch, database) => []);
+
         // sys.foreign_keys: probe-confirmed 21-column shape against SQL
         // Server 2025 (2026-05-13). EF Core reads name / parent_object_id /
         // referenced_object_id / delete_referential_action /

@@ -298,6 +298,28 @@ internal static partial class BuiltInResources
             new("inline_type", SqlType.Bit, null, true),
             new("is_inlineable", SqlType.Bit, null, true),
         ], static (batch, database) => []);
+
+        // sys.all_sql_modules shares sys.sql_modules' shape and row generator —
+        // user-module parity, like sys.all_objects / sys.all_views. The
+        // simulator ships no system modules with stored T-SQL, so the union of
+        // system + user modules is just the user modules. SMO's Script-As
+        // trigger query LEFT JOINs sys.all_sql_modules to read
+        // uses_native_compilation / is_schema_bound off the trigger body.
+        Sys("all_sql_modules",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_ansi_nulls", SqlType.Bit, null, true),
+            new("uses_quoted_identifier", SqlType.Bit, null, true),
+            new("is_schema_bound", SqlType.Bit, null, true),
+            new("uses_database_collation", SqlType.Bit, null, true),
+            new("is_recompiled", SqlType.Bit, null, true),
+            new("null_on_null_input", SqlType.Bit, null, true),
+            new("execute_as_principal_id", SqlType.Int32, null, true),
+            new("uses_native_compilation", SqlType.Bit, null, true),
+            new("inline_type", SqlType.Bit, null, true),
+            new("is_inlineable", SqlType.Bit, null, true),
+        ], EnumerateSqlModules);
     }
 
     /// <summary>

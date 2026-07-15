@@ -719,6 +719,7 @@ partial class Simulation
         var inlineKeyKind = (KeyConstraintKind?)null;
         string? inlineKeyName = null;
         string? inlineFkName = null;
+        string? inlineDefaultName = null;
         while (true)
         {
             switch (context.Token)
@@ -797,6 +798,9 @@ partial class Simulation
                     context.MoveNextRequired();
                     switch (context.Token)
                     {
+                        case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
+                            inlineDefaultName = namedConstraint.Value;
+                            continue;
                         case ReservedKeyword { Keyword: Keyword.Check }:
                             var namedCheck = ParseInlineCheckPredicate(context);
                             pendingChecks.Add((namedConstraint.Value, namedCheck.Predicate, columnName.Value, namedCheck.Definition));
@@ -896,10 +900,10 @@ partial class Simulation
             // CONSTRAINT name was given. Real SQL Server's inline-DEFAULT
             // names look like DF__<table8>__<col>__<8hex>.
             newColumn.DefaultConstraint = new DefaultConstraint(
-                AutoDefaultName(tableName, columnName.Value),
+                inlineDefaultName ?? AutoDefaultName(tableName, columnName.Value),
                 defaultExpression,
                 context.CurrentDatabase.AllocateObjectId(),
-                isSystemNamed: true,
+                isSystemNamed: inlineDefaultName is null,
                 definition: defaultDefinition);
         }
         heapColumns.Add(newColumn);

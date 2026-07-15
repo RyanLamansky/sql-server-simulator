@@ -269,6 +269,24 @@ internal static partial class BuiltInResources
             new("is_advanced", SqlType.Bit, null, false),
         ], (batch, database) => ConfigurationsRows);
 
+        // sys.database_scoped_configurations: per-database configuration knobs.
+        // Real SQL Server types value / value_for_secondary as sql_variant;
+        // since sql_variant isn't modeled they surface as bigint (same
+        // substitution sys.configurations uses). Static defaults for a fresh
+        // database — the simulator doesn't track ALTER DATABASE SCOPED
+        // CONFIGURATION changes. SMO's Script-As database-property preamble
+        // reads value / value_for_secondary filtered by name (MAXDOP,
+        // LEGACY_CARDINALITY_ESTIMATION, PARAMETER_SNIFFING,
+        // QUERY_OPTIMIZER_HOTFIXES); the row set is independent of the database.
+        Sys("database_scoped_configurations",
+        [
+            new("configuration_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("value", SqlType.BigInt, null, true),
+            new("value_for_secondary", SqlType.BigInt, null, true),
+            new("is_value_default", SqlType.Bit, null, true),
+        ], (batch, database) => DatabaseScopedConfigurationRows);
+
         // sys.database_mirroring: one row per database (join key database_id),
         // surfaced so SSMS's Object-Explorer enumeration
         // (master.sys.databases LEFT JOIN sys.database_mirroring) populates the
@@ -782,6 +800,43 @@ internal static partial class BuiltInResources
                 SqlValue.FromNVarchar(description),
                 SqlValue.FromBoolean(isDynamic),
                 SqlValue.FromBoolean(isAdvanced),
+            ];
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Static <c>sys.database_scoped_configurations</c> rows — the fresh-database
+    /// defaults for the knobs SMO's Script-As preamble reads. The simulator
+    /// doesn't track <c>ALTER DATABASE SCOPED CONFIGURATION</c> changes, so the
+    /// set is fixed. <c>value_for_secondary</c> is NULL (no secondary replica);
+    /// <c>value</c> mirrors the primary. configuration_id values match SQL
+    /// Server 2025's assignment.
+    /// </summary>
+    private static readonly SqlValue[][] DatabaseScopedConfigurationRows = BuildDatabaseScopedConfigurationRows();
+
+    private static SqlValue[][] BuildDatabaseScopedConfigurationRows()
+    {
+        (int Id, string Name, long Value)[] data =
+        [
+            (1, "MAXDOP", 0),
+            (2, "LEGACY_CARDINALITY_ESTIMATION", 0),
+            (3, "PARAMETER_SNIFFING", 1),
+            (4, "QUERY_OPTIMIZER_HOTFIXES", 0),
+        ];
+        var nullValue = SqlValue.Null(SqlType.BigInt);
+        var isDefault = SqlValue.FromBoolean(true);
+        var rows = new SqlValue[data.Length][];
+        for (var i = 0; i < data.Length; i++)
+        {
+            rows[i] =
+            [
+                SqlValue.FromInt32(data[i].Id),
+                SqlValue.FromSystemName(data[i].Name),
+                SqlValue.FromInt64(data[i].Value),
+                nullValue,
+                isDefault,
             ];
         }
 
