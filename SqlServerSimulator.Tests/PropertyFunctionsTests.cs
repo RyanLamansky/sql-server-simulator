@@ -444,4 +444,82 @@ public sealed class PropertyFunctionsTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), null)"));
+
+    // === FILEPROPERTY ===
+    // The current database's modeled files are <db>_Data (file_id 1, primary
+    // data) and <db>_Log (file_id 2, log); the default simulation database is
+    // "simulated". Values / NULL cases probed against SQL Server 2025
+    // (2026-07-15). Returns int.
+
+    [TestMethod]
+    public void FileProperty_IsPrimaryFile_DataFile_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Data', 'IsPrimaryFile')"));
+
+    [TestMethod]
+    public void FileProperty_IsPrimaryFile_LogFile_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Log', 'IsPrimaryFile')"));
+
+    [TestMethod]
+    public void FileProperty_IsLogFile_LogFile_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Log', 'IsLogFile')"));
+
+    [TestMethod]
+    public void FileProperty_IsLogFile_DataFile_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Data', 'IsLogFile')"));
+
+    [TestMethod]
+    public void FileProperty_IsReadOnly_AlwaysZero()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Data', 'IsReadOnly')"));
+
+    // SpaceUsed on the data file equals SUM(allocation_units.total_pages),
+    // keeping SSMS's SpaceAvailable non-negative.
+    [TestMethod]
+    public void FileProperty_SpaceUsed_DataFile_MatchesAllocationUnitTotal()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, filler nvarchar(2000) null)");
+        _ = sim.ExecuteNonQuery("insert into t (id, filler) select value, replicate(N'x', 1000) from generate_series(1, 200)");
+        var sumTotal = sim.ExecuteScalar<long>("""
+            select sum(a.total_pages)
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            """);
+        AreEqual((int)sumTotal, sim.ExecuteScalar<int>("select fileproperty(N'simulated_Data', 'SpaceUsed')"));
+    }
+
+    [TestMethod]
+    public void FileProperty_SpaceUsed_LogFile_NonNull()
+        => IsGreaterThan(0, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Log', 'SpaceUsed')"));
+
+    // Property name is case-insensitive and trailing-space insensitive (SQL
+    // Server's internal = comparison).
+    [TestMethod]
+    public void FileProperty_Property_CaseAndTrailingSpaceInsensitive()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>(
+            "select fileproperty(N'simulated_Data', 'isPRIMARYfile ')"));
+
+    [TestMethod]
+    public void FileProperty_UnknownProperty_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select fileproperty(N'simulated_Data', 'NotAProperty')"));
+
+    [TestMethod]
+    public void FileProperty_UnknownFile_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select fileproperty(N'NoSuchFile', 'SpaceUsed')"));
+
+    [TestMethod]
+    public void FileProperty_NullFile_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select fileproperty(null, 'SpaceUsed')"));
+
+    [TestMethod]
+    public void FileProperty_NullProperty_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select fileproperty(N'simulated_Data', null)"));
 }

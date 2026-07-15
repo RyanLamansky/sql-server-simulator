@@ -1331,8 +1331,8 @@ internal static partial class BuiltInResources
 
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
-            yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", "/var/opt/mssql/data/" + db.Name + ".mdf", 640);
-            yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", "/var/opt/mssql/data/" + db.Name + "_log.ldf", 128);
+            yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", "/var/opt/mssql/data/" + db.Name + ".mdf", ComputeDataFileSizePages(db));
+            yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", "/var/opt/mssql/data/" + db.Name + "_log.ldf", LogFileSizePages);
         }
     }
 
@@ -1383,8 +1383,8 @@ internal static partial class BuiltInResources
             nullLsn,
         ];
 
-        yield return BuildFile(1, 0, rowsDesc, 1, database.Name + "_Data", "/var/opt/mssql/data/" + database.Name + ".mdf", 640);
-        yield return BuildFile(2, 1, logDesc, 0, database.Name + "_Log", "/var/opt/mssql/data/" + database.Name + "_log.ldf", 128);
+        yield return BuildFile(1, 0, rowsDesc, 1, database.Name + "_Data", "/var/opt/mssql/data/" + database.Name + ".mdf", ComputeDataFileSizePages(database));
+        yield return BuildFile(2, 1, logDesc, 0, database.Name + "_Log", "/var/opt/mssql/data/" + database.Name + "_log.ldf", LogFileSizePages);
     }
 
     /// <summary>

@@ -56,6 +56,21 @@ public sealed class DatabasePropertiesTests
         IsNotNull(configs["MAXDOP"]);
     }
 
+    // Database.SpaceAvailable drives two harvested space queries: SSMS's
+    // FILEPROPERTY(...,'SpaceUsed') files query and the
+    // sys.partitions ⋈ sys.allocation_units DbSize/SpaceUsed query. Retrieving
+    // it must not throw (FILEPROPERTY resolved, allocation_units modeled) and
+    // must be non-negative — a negative value means SUM(total_pages) exceeded
+    // the data-file size (sys.database_files.size), the self-consistency
+    // contract between allocation_units and database_files.
+    [TestMethod]
+    public void SpaceAvailable_RetrievableAndNonNegative()
+    {
+        var db = FixtureDatabase;
+        db.Refresh();
+        IsGreaterThanOrEqualTo(0.0, db.SpaceAvailable);
+    }
+
     // Reading a scoped-configuration Value drives SMO's
     // ISNULL(value_for_secondary, 'PRIMARY') projection — the string fallback
     // that a bigint value column rejected (Msg 245). It must not throw.

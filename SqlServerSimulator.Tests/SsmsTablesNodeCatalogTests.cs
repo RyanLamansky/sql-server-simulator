@@ -319,6 +319,113 @@ public sealed class SsmsTablesNodeCatalogTests
     }
 
     /// <summary>
+    /// sys.allocation_units emits one IN_ROW_DATA row per sys.partitions row,
+    /// joined on container_id = partition_id (the key SSMS's space query uses).
+    /// data_space_id = 1 (the single PRIMARY filegroup).
+    /// </summary>
+    [TestMethod]
+    public void AllocationUnits_OneInRowUnitPerPartition_JoinsOnContainerId()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null, b int null)");
+        _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
+        _ = sim.ExecuteNonQuery("create unique index ux_b on t(b)");
+        // Three partitions (clustered PK + two indexes) → three IN_ROW units,
+        // each joining to its partition on container_id = partition_id.
+        AreEqual(3, sim.ExecuteScalar<int>("""
+            select count(*)
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t') and a.type = 1
+            """));
+        AreEqual("IN_ROW_DATA", sim.ExecuteScalar("""
+            select distinct a.type_desc
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t') and a.type = 1
+            """));
+        AreEqual(1, sim.ExecuteScalar<int>("""
+            select distinct a.data_space_id
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t')
+            """));
+    }
+
+    /// <summary>
+    /// allocation_unit page counts read the live heap page total, so they grow
+    /// as rows are inserted — mirroring sys.partitions' live rows column.
+    /// </summary>
+    [TestMethod]
+    public void AllocationUnits_PageCountsMoveAfterInsert()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, filler nvarchar(2000) null)");
+        _ = sim.ExecuteNonQuery("insert into t (id, filler) select value, replicate(N'x', 1000) from generate_series(1, 5)");
+        var before = sim.ExecuteScalar<long>("""
+            select a.total_pages
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t') and a.type = 1
+            """);
+        _ = sim.ExecuteNonQuery("insert into t (id, filler) select value, replicate(N'x', 1000) from generate_series(6, 200)");
+        var after = sim.ExecuteScalar<long>("""
+            select a.total_pages
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t') and a.type = 1
+            """);
+        IsGreaterThan(before, after);
+        // IN_ROW total_pages = used_pages = data_pages (no separate index/IAM
+        // overhead modeled).
+        using var reader = sim.ExecuteReader("""
+            select a.total_pages, a.used_pages, a.data_pages
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t') and a.type = 1
+            """);
+        IsTrue(reader.Read());
+        AreEqual(after, reader.GetInt64(0));
+        AreEqual(after, reader.GetInt64(1));
+        AreEqual(after, reader.GetInt64(2));
+    }
+
+    /// <summary>
+    /// A table with off-row LOB pages surfaces one LOB_DATA unit (type 2) on
+    /// the base partition with data_pages = 0, matching real SQL Server.
+    /// </summary>
+    [TestMethod]
+    public void AllocationUnits_LobColumn_SurfacesLobDataUnit()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, big nvarchar(max) null)");
+        _ = sim.ExecuteNonQuery("insert into t (id, big) select value, replicate(cast(N'y' as nvarchar(max)), 10000) from generate_series(1, 50)");
+        using var reader = sim.ExecuteReader("""
+            select a.type_desc, a.total_pages, a.data_pages
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t') and a.type = 2
+            """);
+        IsTrue(reader.Read());
+        AreEqual("LOB_DATA", reader.GetString(0));
+        IsGreaterThan(0L, reader.GetInt64(1));
+        AreEqual(0L, reader.GetInt64(2));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// Self-consistency contract: the data file's size (sys.database_files) must
+    /// cover the SUM of allocation-unit total_pages, so SSMS's
+    /// SpaceAvailable = DbSize − SpaceUsed stays non-negative.
+    /// </summary>
+    [TestMethod]
+    public void AllocationUnits_TotalPages_NeverExceedDataFileSize()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, filler nvarchar(2000) null)");
+        _ = sim.ExecuteNonQuery("insert into t (id, filler) select value, replicate(N'x', 1000) from generate_series(1, 300)");
+        var dbSize = sim.ExecuteScalar<long>("select cast(size as bigint) from sys.database_files where type = 0");
+        var spaceUsed = sim.ExecuteScalar<long>("""
+            select sum(a.total_pages)
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            """);
+        IsGreaterThanOrEqualTo(spaceUsed, dbSize);
+    }
+
+    /// <summary>
     /// sys.stats emits one row per index sys.indexes reports (excluding the
     /// heap), with stats_id = index_id and name = index name. Auto-created
     /// column statistics (_WA_Sys_*) aren't modeled, so no_recompute /

@@ -164,6 +164,37 @@ internal static partial class BuiltInResources
             new("xml_compression_desc", varchar3Catalog, 3, true),
         ], EnumerateSysPartitions);
 
+        // sys.allocation_units: probe-confirmed 8-column shape against SQL
+        // Server 2025 (2026-07-15). One IN_ROW_DATA row per sys.partitions row
+        // (container_id = that partition's synthetic partition_id — the join
+        // key SSMS's space query uses), plus one LOB_DATA row per table that
+        // has off-row LOB pages (attached to the base heap/clustered partition,
+        // since the simulator's LOB-page chain is per-table, not per-index).
+        // ROW_OVERFLOW_DATA (type 3) isn't surfaced — the row encoder pushes
+        // oversize columns into the LOB chain, so there is no separate
+        // row-overflow allocation to report. total_pages / used_pages /
+        // data_pages all read the table's live heap page count
+        // (Heap.Pages.Count for IN_ROW, Heap.LobPages.Count for LOB); LOB rows
+        // report data_pages = 0, matching real. Because separate nonclustered-
+        // index storage isn't modeled, every index partition's IN_ROW unit
+        // reports the base heap's page count — an over-count for multi-index
+        // tables, kept self-consistent with sys.database_files.size (both
+        // derive from SumDataFilePages) so SSMS never computes negative
+        // SpaceAvailable. allocation_unit_id is synthetic-deterministic
+        // (distinct per partition/type; not SQL Server's real id). See
+        // docs/claude/catalog-views.md.
+        Sys("allocation_units",
+        [
+            new("allocation_unit_id", SqlType.BigInt, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("container_id", SqlType.BigInt, null, false),
+            new("data_space_id", SqlType.Int32, null, true),
+            new("total_pages", SqlType.BigInt, null, false),
+            new("used_pages", SqlType.BigInt, null, false),
+            new("data_pages", SqlType.BigInt, null, false),
+        ], EnumerateSysAllocationUnits);
+
         // sys.stats: one row per index sys.indexes reports, excluding the
         // heap (index_id = 0, which carries no statistics). stats_id =
         // index_id and name = index name, matching real SQL Server's
@@ -536,6 +567,100 @@ internal static partial class BuiltInResources
                 xmlOffDesc,
             ];
         }
+    }
+
+    /// <summary>
+    /// The raw allocation-unit stream shared by <see cref="EnumerateSysAllocationUnits"/>
+    /// and <see cref="SumDataFilePages"/>. Yields one IN_ROW_DATA tuple per
+    /// (table, index_id) that <see cref="EnumerateSysPartitions"/> reports —
+    /// container_id = the same synthetic partition_id — plus one LOB_DATA tuple
+    /// per table with off-row LOB pages, attached to the base heap/clustered
+    /// partition (the first identity yielded per table). Page counts read the
+    /// live <see cref="Storage.Heap"/> state (Pages.Count for IN_ROW,
+    /// LobPages.Count for LOB), so they track same-batch INSERT/DELETE. LOB
+    /// tuples report data_pages = 0, matching real SQL Server.
+    /// </summary>
+    private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages)> EnumerateAllocationUnitData(Database database)
+    {
+        HeapTable? lastTable = null;
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        {
+            var partitionId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
+            long dataPages = table.Heap.Pages.Count;
+            yield return (partitionId, 1, dataPages, dataPages, dataPages);
+            if (!ReferenceEquals(table, lastTable))
+            {
+                lastTable = table;
+                long lobPages = table.Heap.LobPages.Count;
+                if (lobPages > 0)
+                    yield return (partitionId, 2, lobPages, lobPages, 0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.allocation_units</c>: one per tuple from
+    /// <see cref="EnumerateAllocationUnitData"/>. allocation_unit_id is
+    /// synthetic-deterministic (partition_id shifted, low bits carrying the
+    /// type — distinct per partition/type, not SQL Server's real id);
+    /// data_space_id is always 1 (the single modeled PRIMARY filegroup).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysAllocationUnits(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var inRowDesc = SqlValue.FromNVarchar("IN_ROW_DATA");
+        var lobDesc = SqlValue.FromNVarchar("LOB_DATA");
+        var primaryDataSpace = SqlValue.FromInt32(1);
+        foreach (var (containerId, type, totalPages, usedPages, dataPages) in EnumerateAllocationUnitData(database))
+        {
+            yield return
+            [
+                SqlValue.FromInt64((containerId << 8) | type),
+                SqlValue.FromByte(type),
+                type == 2 ? lobDesc : inRowDesc,
+                SqlValue.FromInt64(containerId),
+                primaryDataSpace,
+                SqlValue.FromInt64(totalPages),
+                SqlValue.FromInt64(usedPages),
+                SqlValue.FromInt64(dataPages),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Live page total across every modeled allocation unit of
+    /// <paramref name="database"/> — the sum of <c>total_pages</c> over
+    /// <see cref="EnumerateAllocationUnitData"/>. Backs the data-file
+    /// <c>size</c> reported by <c>sys.database_files</c> / <c>sys.master_files</c>
+    /// (via <see cref="ComputeDataFileSizePages"/>) and FILEPROPERTY's
+    /// data-file <c>SpaceUsed</c>, keeping SSMS's
+    /// SpaceAvailable = size − SUM(total_pages) non-negative.
+    /// </summary>
+    internal static long SumDataFilePages(Database database)
+    {
+        long total = 0;
+        foreach (var (_, _, totalPages, _, _) in EnumerateAllocationUnitData(database))
+            total += totalPages;
+        return total;
+    }
+
+    /// <summary>Synthetic per-database log-file size, in 8 KB pages.</summary>
+    internal const int LogFileSizePages = 128;
+
+    /// <summary>Synthetic log-file <c>SpaceUsed</c> (pages) reported by FILEPROPERTY — a small fraction of <see cref="LogFileSizePages"/>.</summary>
+    internal const int LogFileUsedPages = 24;
+
+    /// <summary>
+    /// Synthetic data-file <c>size</c> (pages) for <paramref name="database"/>:
+    /// the live allocated-page total (<see cref="SumDataFilePages"/>) plus
+    /// generous headroom, floored at 640 pages so an empty database still
+    /// reports a plausible file. Guarantees size &gt; SUM(total_pages).
+    /// </summary>
+    internal static int ComputeDataFileSizePages(Database database)
+    {
+        var used = SumDataFilePages(database);
+        var size = used + Math.Max(512L, used / 2);
+        return (int)Math.Min(int.MaxValue, Math.Max(640L, size));
     }
 
     /// <summary>

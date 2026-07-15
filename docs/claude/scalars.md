@@ -207,6 +207,17 @@ Values derive from the collation model (`Collation.TryGetMetrics`) so any recogn
 - **Version** — the version ordinal from the numeric name token: unversioned / SQL_\* → 0, 90 → 1, 100 → 2, 140 → 3, 160 → 4.
 - **Name** — the collation's canonical name.
 
+## `FILEPROPERTY(file_name, property)`
+
+`Parser/Expressions/FileProperty.cs`: per-file metadata for a file of the **current** database. SSMS's Database Properties → General page reads it (`CAST(FILEPROPERTY(s.name, 'SpaceUsed') AS float) * 8` over `sys.database_files WHERE type = 1`) to compute the log file's used space, and `Database.SpaceAvailable` in SMO drives it. Returns **`int`** (probe-confirmed against SQL Server 2025, 2026-07-15). The simulator models exactly two files per database, mirroring `sys.database_files`: the primary data file `<db>_Data` (file_id 1, ROWS) and the log file `<db>_Log` (file_id 2, LOG). File names are matched with SQL Server's trailing-space-insensitive `=` semantics; property names are case-insensitive and trailing-space insensitive (the property arg is `TrimEnd(' ')`-ed before the switch, matching the probed reference which accepts `'SpaceUsed '`).
+
+- **SpaceUsed** — for the data file, `BuiltInResources.SumDataFilePages` (the live page total across every modeled allocation unit — the same value `sys.allocation_units` / `sys.database_files.size` derive from, so SSMS's `SpaceAvailable = size − SpaceUsed` stays non-negative); for the log file, a small synthetic constant (`BuiltInResources.LogFileUsedPages` = 24 pages, well under the 128-page log size — a fixed plausible value, since the simulator has no log to measure).
+- **IsReadOnly** — always 0 (no read-only files modeled).
+- **IsPrimaryFile** — 1 for the data file (file_id 1), 0 for the log file.
+- **IsLogFile** — 1 for the log file, 0 for the data file.
+
+An **unknown property**, an **unknown file name**, a **NULL file name**, or a **NULL property** all return NULL (all probe-confirmed). Data-file `SpaceUsed` is self-consistent with `sys.allocation_units` and `sys.database_files` — see the consistency contract in [`catalog-views.md`](catalog-views.md).
+
 ## `SQL_VARIANT_PROPERTY(expression, property)`
 
 `Parser/Expressions/SqlVariantProperty.cs`: reports one facet of the `sql_variant` that would capture `expression` — `BaseType` / `Precision` / `Scale` / `MaxLength` / `TotalBytes` / `Collation`. SSMS's Database Properties dialog reads `SQL_VARIANT_PROPERTY(value, 'BaseType')` off `sys.database_scoped_configurations`. Real SQL Server projects `sql_variant` with a per-property base type; the simulator doesn't model sql_variant, so — following the `SERVERPROPERTY` convention — it surfaces the inner base type directly: `BaseType` / `Collation` as `sysname`, the four numeric facets as `int`. That precise typing flows to the projection schema only when the property argument is a string **literal**; a non-literal (e.g. `DECLARE @p sysname='BaseType'`) falls back to `nvarchar` with a runtime coerce (static/runtime parity — a divergence from real, which always returns sql_variant). Property names are case-insensitive. A NULL expression, a NULL property, an unknown property, or a value whose type can't live in a sql_variant (MAX strings, LOB, xml, spatial, hierarchyid) all return NULL. Probe-confirmed against SQL Server 2025 (2026-07-16):
