@@ -474,6 +474,35 @@ internal static partial class BuiltInResources
             new("credential_id", SqlType.Int32, null, true),
         ], EnumerateSysMasterFiles);
 
+        // sys.database_files: the current-database view over master_files — one
+        // data file (file_id 1, type 0 ROWS) + one log file (file_id 2, type 1
+        // LOG). The join key is the database context (the resolved
+        // `database`), so a three-part `master.sys.database_files` read (SSMS
+        // reads it to derive the master data/log directory) returns master's
+        // two files. Names / file_ids / types agree with sys.master_files
+        // (`<db>_Data` / `<db>_Log`); real SQL Server has no database_id column
+        // here (implicitly the current database), so it is omitted.
+        Sys("database_files",
+        [
+            new("file_id", SqlType.Int32, null, false),
+            new("file_guid", SqlType.UniqueIdentifier, null, true),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("name", SqlType.NVarchar, 128, true),
+            new("physical_name", SqlType.NVarchar, 260, false),
+            new("state", SqlType.TinyInt, null, true),
+            new("state_desc", nvarchar60Catalog, 60, true),
+            new("size", SqlType.Int32, null, false),
+            new("max_size", SqlType.Int32, null, false),
+            new("growth", SqlType.Int32, null, false),
+            new("is_media_read_only", SqlType.Bit, null, false),
+            new("is_read_only", SqlType.Bit, null, false),
+            new("is_sparse", SqlType.Bit, null, false),
+            new("is_percent_growth", SqlType.Bit, null, false),
+            new("is_name_reserved", SqlType.Bit, null, false),
+        ], EnumerateSysDatabaseFiles);
+
         // sys.database_query_store_options: per-database view (join key is the
         // current database context, not a database_id column). Query Store is
         // never enabled in the simulator, so a user database returns exactly
@@ -1265,6 +1294,55 @@ internal static partial class BuiltInResources
             yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", "/var/opt/mssql/data/" + db.Name + ".mdf", 640);
             yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", "/var/opt/mssql/data/" + db.Name + "_log.ldf", 128);
         }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.database_files</c> — the current-database projection of
+    /// <see cref="EnumerateSysMasterFiles"/>: one data file (<c>file_id</c> 1,
+    /// <c>type</c> 0 ROWS) and one log file (<c>file_id</c> 2, <c>type</c> 1
+    /// LOG) for the resolved <paramref name="database"/>. Names / file_ids /
+    /// types agree with <c>sys.master_files</c>; there is no
+    /// <c>database_id</c> column (the view is implicitly current-database), so
+    /// a three-part <c>master.sys.database_files</c> read returns master's two
+    /// files. Synthetic contents mirror master_files: logical name
+    /// <c>&lt;db&gt;_Data</c> / <c>&lt;db&gt;_Log</c>, a plausible physical
+    /// path, a small page count, unlimited <c>max_size</c>, 64 MB growth.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDatabaseFiles(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var falseBit = SqlValue.FromBoolean(false);
+        var zeroByte = SqlValue.FromByte(0);
+        var onlineState = SqlValue.FromNVarchar("ONLINE");
+        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
+        var rowsDesc = SqlValue.FromNVarchar("ROWS");
+        var logDesc = SqlValue.FromNVarchar("LOG");
+        var unlimited = SqlValue.FromInt32(-1);
+        var growthKb = SqlValue.FromInt32(65536);
+
+        SqlValue[] BuildFile(int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
+        [
+            SqlValue.FromInt32(fileId),
+            nullGuid,
+            SqlValue.FromByte(type),
+            typeDesc,
+            SqlValue.FromInt32(dataSpaceId),
+            SqlValue.FromNVarchar(logicalName),
+            SqlValue.FromNVarchar(physicalName),
+            zeroByte,
+            onlineState,
+            SqlValue.FromInt32(sizePages),
+            unlimited,
+            growthKb,
+            falseBit,
+            falseBit,
+            falseBit,
+            falseBit,
+            falseBit,
+        ];
+
+        yield return BuildFile(1, 0, rowsDesc, 1, database.Name + "_Data", "/var/opt/mssql/data/" + database.Name + ".mdf", 640);
+        yield return BuildFile(2, 1, logDesc, 0, database.Name + "_Log", "/var/opt/mssql/data/" + database.Name + "_log.ldf", 128);
     }
 
     /// <summary>

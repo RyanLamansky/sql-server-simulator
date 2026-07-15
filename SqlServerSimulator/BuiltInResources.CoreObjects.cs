@@ -171,6 +171,12 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, true),
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
+            // No explicit object owner is modeled (ownership follows the
+            // schema), so principal_id is always NULL — matching real SQL
+            // Server for objects without an AUTHORIZATION override. SMO's
+            // Object-Explorer function / procedure / sequence enumeration
+            // reads ISNULL(o.principal_id, OBJECTPROPERTY(o.object_id,'OwnerId')).
+            new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
@@ -189,6 +195,7 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, true),
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
@@ -569,6 +576,7 @@ internal static partial class BuiltInResources
         SqlValue zeroParent, SqlValue notMsShipped)
     {
         _ = batch;
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
         foreach (var schema in database.Schemas.Values)
         {
             // Schema-resident objects in ObjectId order. SchemaObject's
@@ -586,6 +594,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromSystemName(obj.Name),
                     SqlValue.FromInt32(obj.SchemaId),
                     parent,
+                    nullPrincipal,
                     SqlValue.FromChar(charTwo, obj.ObjectTypeCode),
                     SqlValue.FromNVarchar(obj.ObjectTypeDescription),
                     SqlValue.FromDateTime(obj.CreateDate),
@@ -609,6 +618,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(key.Name),
                         schemaIdValue,
                         tableObjectId,
+                        nullPrincipal,
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkType : uqType,
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
                         createDate,
@@ -623,6 +633,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(chk.Name),
                         schemaIdValue,
                         tableObjectId,
+                        nullPrincipal,
                         checkType,
                         checkTypeDesc,
                         createDate,
@@ -637,6 +648,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(fk.Name),
                         schemaIdValue,
                         tableObjectId,
+                        nullPrincipal,
                         SqlValue.FromChar(charTwo, "F "),
                         SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT"),
                         createDate,

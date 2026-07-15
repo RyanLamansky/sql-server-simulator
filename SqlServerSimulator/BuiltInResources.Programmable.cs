@@ -121,10 +121,19 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
+            // principal_id is always NULL (ownership follows the schema, no
+            // AUTHORIZATION override modeled); ledger_view_type is a constant
+            // 0 (ledger unmodeled). SMO's Object-Explorer Views enumeration
+            // reads create_date, principal_id, is_ms_shipped, ledger_view_type.
+            new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, false),
             new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
+            new("ledger_view_type", SqlType.TinyInt, null, false),
         ], EnumerateViews);
 
         // sys.all_views shares sys.views' shape and row generator — user-view
@@ -137,10 +146,15 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, false),
             new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
+            new("ledger_view_type", SqlType.TinyInt, null, false),
         ], EnumerateViews);
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
@@ -244,6 +258,15 @@ internal static partial class BuiltInResources
             // table type, and scalar alias. SMO's SSMS column-node query reads
             // it off sys.types (baset) to pick the base-type join arm.
             new("is_assembly_type", SqlType.Bit, null, false),
+            // max_length (byte width, smallint), precision, scale — probe-
+            // confirmed to mirror the systypes length/xprec/xscale triple for
+            // system types (int 4/10/0, nvarchar 8000/0/0, sql_variant 8016/0/0),
+            // -1/0/0 for table types, and the underlying built-in's metadata
+            // for scalar alias types (UDDTs). SMO's User-Defined-Data-Types
+            // Object-Explorer node reads st.max_length / precision / scale.
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
         ], EnumerateSysTypes);
 
         // sys.table_types: per-database list of user-defined table types
@@ -281,6 +304,13 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("schema_id", SqlType.Int32, null, false),
+            // principal_id is always NULL (ownership follows the schema);
+            // create_date / modify_date come from the ALTER-preserving
+            // SchemaObject timestamps. SMO's Object-Explorer Sequences
+            // enumeration reads create_date and principal_id.
+            new("principal_id", SqlType.Int32, null, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
             new("start_value", SqlType.BigInt, null, false),
             new("increment", SqlType.BigInt, null, false),
             new("minimum_value", SqlType.BigInt, null, false),
@@ -293,6 +323,95 @@ internal static partial class BuiltInResources
             new("user_type_id", SqlType.Int32, null, false),
             new("is_exhausted", SqlType.Bit, null, false),
         ], EnumerateSysSequences);
+
+        // sys.plan_guides: plan guides aren't modeled, so the view is always
+        // empty. SMO's Object-Explorer Plan Guides node reads name / is_disabled;
+        // the full documented shape ships so a direct SELECT sees an authentic
+        // (empty) result. Probe-confirmed column shape (SQL Server 2025).
+        Sys("plan_guides",
+        [
+            new("plan_guide_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("query_text", SqlType.NVarchar, 4000, true),
+            new("scope_type", SqlType.TinyInt, null, false),
+            new("scope_type_desc", nvarchar60Catalog, 60, true),
+            new("scope_object_id", SqlType.Int32, null, true),
+            new("scope_batch", SqlType.NVarchar, 4000, true),
+            new("parameters", SqlType.NVarchar, 4000, true),
+            new("hints", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.assembly_types: the three CLR-backed system types shipped by
+        // SQL Server (hierarchyid / geometry / geography), all owned by the
+        // Microsoft.SqlServer.Types assembly (assembly_id 1). Probe-confirmed
+        // shape (SQL Server 2025): system_type_id 240; user_type_id 128/129/130;
+        // schema_id 4 (sys); is_user_defined 0; is_assembly_type 1; max_length
+        // 892 for hierarchyid, -1 for the two spatial types. SMO's User-Defined
+        // Types node reads name / assembly_id / is_user_defined / schema_id and
+        // filters is_user_defined = 1 (so these system rows surface nothing in
+        // that node — matching real SQL Server, which lists only user CLR types).
+        Sys("assembly_types",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
+            new("collation_name", SqlType.SystemName, 128, true),
+            new("is_nullable", SqlType.Bit, null, true),
+            new("is_user_defined", SqlType.Bit, null, false),
+            new("is_assembly_type", SqlType.Bit, null, false),
+            new("assembly_id", SqlType.Int32, null, false),
+            new("is_table_type", SqlType.Bit, null, false),
+        ], EnumerateAssemblyTypes);
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.assembly_types</c> — the three built-in CLR system types
+    /// (hierarchyid / geometry / geography), which the simulator models and
+    /// whose <c>sys.types.is_assembly_type</c> already reads 1. They belong to
+    /// the sys schema (schema_id 4) and the Microsoft.SqlServer.Types assembly
+    /// (assembly_id 1); <c>is_user_defined</c> is 0 (system-shipped), matching
+    /// SQL Server 2025. No user-defined CLR types are modeled.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateAssemblyTypes(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        _ = database;
+        var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var nullCollation = SqlValue.Null(SqlType.SystemName);
+        var zeroByte = SqlValue.FromByte(0);
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var assemblyId = SqlValue.FromInt32(1);
+        var systemTypeId = SqlValue.FromByte(240);
+        SqlValue[] Row(string name, int userTypeId, short maxLength) =>
+        [
+            SqlValue.FromSystemName(name),
+            systemTypeId,
+            SqlValue.FromInt32(userTypeId),
+            sysSchemaId,
+            nullPrincipal,
+            SqlValue.FromInt16(maxLength),
+            zeroByte,
+            zeroByte,
+            nullCollation,
+            trueBit,
+            falseBit,
+            trueBit,
+            assemblyId,
+            falseBit,
+        ];
+        yield return Row("hierarchyid", 128, 892);
+        yield return Row("geometry", 129, -1);
+        yield return Row("geography", 130, -1);
     }
 
     /// <summary>
@@ -312,6 +431,10 @@ internal static partial class BuiltInResources
         // xtype (col 1, used as system_type_id), xusertype (col 3, used as
         // user_type_id). is_user_defined is derived from a hardcoded set:
         // sysname is user-defined; everything else system.
+        // systypes columns: [4] length (max_length), [5] xprec (precision),
+        // [6] xscale (scale) — probe-confirmed to equal sys.types' triple.
+        var tableTypeMaxLength = SqlValue.FromInt16(-1);
+        var zeroByte = SqlValue.FromByte(0);
         foreach (var row in SystypesRowData)
         {
             var name = (string)row[0]!;
@@ -326,9 +449,13 @@ internal static partial class BuiltInResources
                 falseBit,
                 trueBit,
                 name is "hierarchyid" or "geometry" or "geography" ? trueBit : falseBit,
+                SqlValue.FromInt16(Convert.ToInt16(row[4]!, CultureInfo.InvariantCulture)),
+                SqlValue.FromByte(Convert.ToByte(row[5]!, CultureInfo.InvariantCulture)),
+                SqlValue.FromByte(Convert.ToByte(row[6]!, CultureInfo.InvariantCulture)),
             ];
         }
-        // User-defined table types: probe-confirmed system_type_id 243.
+        // User-defined table types: probe-confirmed system_type_id 243,
+        // max_length -1 / precision 0 / scale 0.
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -343,6 +470,9 @@ internal static partial class BuiltInResources
                     trueBit,
                     falseBit,
                     falseBit,
+                    tableTypeMaxLength,
+                    zeroByte,
+                    zeroByte,
                 ];
             }
         }
@@ -356,6 +486,12 @@ internal static partial class BuiltInResources
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
             {
+                // max_length / precision / scale come from the underlying
+                // built-in — reuse the sys.columns metadata computation via a
+                // synthesized column so alias-of-nvarchar(50) reports the same
+                // byte width (100) sys.columns would.
+                var (maxLength, precision, scale) = GetSysColumnMetadata(
+                    new HeapColumn(alias.Name, alias.UnderlyingType, alias.DeclaredMaxLength, alias.IsNullable));
                 yield return [
                     SqlValue.FromSystemName(alias.Name),
                     SqlValue.FromByte(alias.UnderlyingType.SystemTypeId),
@@ -365,6 +501,9 @@ internal static partial class BuiltInResources
                     falseBit,
                     alias.IsNullable ? trueBit : falseBit,
                     falseBit,
+                    SqlValue.FromInt16(maxLength),
+                    SqlValue.FromByte(precision),
+                    SqlValue.FromByte(scale),
                 ];
             }
         }
@@ -401,6 +540,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch, Database database)
     {
         var nullCache = SqlValue.Null(SqlType.Int32);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
@@ -413,6 +553,9 @@ internal static partial class BuiltInResources
                     SqlValue.FromSystemName(seq.Name),
                     SqlValue.FromInt32(seq.ObjectId),
                     schemaId,
+                    nullPrincipal,
+                    SqlValue.FromDateTime(seq.CreateDate),
+                    SqlValue.FromDateTime(seq.ModifyDate),
                     SqlValue.FromInt64(seq.StartValue),
                     SqlValue.FromInt64(seq.Increment),
                     SqlValue.FromInt64(seq.MinValue),
@@ -496,6 +639,8 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var viewType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "V ");
         var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var ledgerViewTypeNone = SqlValue.FromByte(0);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
@@ -504,10 +649,15 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(view.ObjectId),
                     SqlValue.FromSystemName(view.Name),
                     SqlValue.FromInt32(view.Schema.SchemaId),
+                    nullPrincipal,
                     viewType,
                     viewTypeDesc,
+                    SqlValue.FromDateTime(view.CreateDate),
+                    SqlValue.FromDateTime(view.ModifyDate),
+                    falseBit,
                     SqlValue.FromBoolean(view.WithCheckOption),
                     falseBit,
+                    ledgerViewTypeNone,
                 ];
             }
         }

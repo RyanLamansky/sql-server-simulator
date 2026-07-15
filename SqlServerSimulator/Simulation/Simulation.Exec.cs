@@ -64,6 +64,10 @@ partial class Simulation
                 // SERVERPROPERTY('IsHadrEnabled') = 0), so the @rc capture
                 // lands 0 and Object Explorer's Databases node populates.
                 "xp_qv",
+                // xp_instance_regread reads instance registry defaults. SSMS
+                // reads the SQLPath value (instance root) on connect to derive
+                // the SMO RootDirectory; the simulator returns a synthetic path.
+                "xp_instance_regread",
             ],
             collation);
         return lookup.TryGetValue(leaf, out var canonical) ? canonical : null;
@@ -157,6 +161,7 @@ partial class Simulation
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
+            "xp_instance_regread" => InvokeXpInstanceRegread(batch),
             "xp_msver" => InvokeXpMsver(batch),
             "xp_qv" => InvokeXpQv(batch, returnCodeVar),
             _ => throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),

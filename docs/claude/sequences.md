@@ -44,7 +44,7 @@ Bump sites:
 
 ## `sys.sequences` catalog view
 
-Shipped columns: `name`, `object_id`, `schema_id`, `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached` (always `true`), `cache_size` (always NULL), `current_value`, `system_type_id`, `user_type_id`, `is_exhausted`. The numeric range columns surface as `bigint` because the simulator tracks all sequence state in `long`; real SQL Server uses `sql_variant`, but SqlClient surfaces those as long-typed values for integer sequences anyway. Probe-confirmed: HiLo apps that read `current_value` get an `Int64` either way.
+Shipped columns: `name`, `object_id`, `schema_id`, `principal_id` (always NULL — ownership follows the schema), `create_date`, `modify_date` (both the ALTER-preserving `SchemaObject` timestamps), `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached` (always `true`), `cache_size` (always NULL), `current_value`, `system_type_id`, `user_type_id`, `is_exhausted`. The numeric range columns surface as `bigint` because the simulator tracks all sequence state in `long`; real SQL Server uses `sql_variant`, but SqlClient surfaces those as long-typed values for integer sequences anyway. Probe-confirmed: HiLo apps that read `current_value` get an `Int64` either way. **`create_date` / `principal_id` are load-bearing for the SSMS Sequences node**: SMO's enumeration selects `seq.create_date` and `ISNULL(seq.principal_id, OBJECTPROPERTY(seq.object_id, 'OwnerId'))`; before these columns existed the query raised Msg 207 and the node showed empty even when the database had sequences.
 
 ## EF Core HiLo (the main reach)
 
