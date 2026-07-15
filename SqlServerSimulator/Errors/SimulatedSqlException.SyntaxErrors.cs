@@ -16,6 +16,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UnclosedStringLiteral(string body) =>
         new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 8631: expression parsing consumed the thread's
+    /// stack down to the runtime's safety threshold. Real SQL Server raises
+    /// this from an actual stack probe (probe-confirmed 2026-07-15: a
+    /// 6000-term <c>1 + 1 + …</c> chain fails, 3000 succeeds — the threshold
+    /// is stack-dependent, not a fixed count); the simulator mirrors that via
+    /// <see cref="System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack"/>,
+    /// so the depth it tolerates scales with the calling thread's stack size.
+    /// Class 17 — batch-aborting, matching real.
+    /// </summary>
+    internal static SimulatedSqlException ServerStackLimitReached() =>
+        new("Internal error: Server stack limit has been reached. Please look for potentially deep nesting in your query, and try to simplify it.", 8631, 17, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 191: parenthesized-expression nesting exceeded
+    /// the structural limit. Probe-confirmed 2026-07-15: 1000 nested parens
+    /// succeed on the reference, 2000 raise this — the simulator's limit is
+    /// deliberately lower (512) so the structural Msg 191 fires before the
+    /// stack probe converts the same shape into Msg 8631 on default-size
+    /// (1 MB) threads.
+    /// </summary>
+    internal static SimulatedSqlException StatementNestedTooDeeply() =>
+        new("Some part of your SQL statement is nested too deeply. Rewrite the query or break it up into smaller queries.", 191, 15, 1);
+
     internal static SimulatedSqlException SyntaxErrorNearKeyword(ReservedKeyword token) => new($"Incorrect syntax near the keyword '{token}'.", 156, 15, 1);
 
     /// <summary>

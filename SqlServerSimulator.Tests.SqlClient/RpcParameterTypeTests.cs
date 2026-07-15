@@ -204,19 +204,26 @@ public sealed class RpcParameterTypeTests
     }
 
     // The @statement itself carrying > 4000 chars of real SQL (not padding) —
-    // ntext value must decode to the exact query the server then runs.
+    // ntext value must decode to the exact query the server then runs. The
+    // arithmetic chain stays shallow (200 terms) because expression parsing
+    // recurses per operator and default 1 MB thread stacks overflow near 700
+    // levels; a positionally-distinctive 3000-char literal carries the bulk
+    // of the statement past the nvarchar(4000) ntext threshold instead, and
+    // its char-exact round-trip is the decode-exactness evidence.
     [TestMethod]
     public async Task LargeStatement_NtextValue_DecodesExactly()
     {
         var simulation = new Simulation();
         await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
-        var terms = string.Join(" + ", Enumerable.Repeat("1", 3000));
-        await using var command = new SqlCommand($"SELECT ({terms}) AS total, @p AS p", connection);
+        var marker = string.Concat(Enumerable.Range(0, 500).Select(i => $"m{i:D4}"));
+        var terms = string.Join(" + ", Enumerable.Repeat("1", 200));
+        await using var command = new SqlCommand($"SELECT ({terms}) AS total, N'{marker}' AS marker, @p AS p", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.NVarChar, 20) { Value = "ok" });
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
-        AreEqual(3000, reader.GetInt32(0));
-        AreEqual("ok", reader.GetString(1));
+        AreEqual(200, reader.GetInt32(0));
+        AreEqual(marker, reader.GetString(1));
+        AreEqual("ok", reader.GetString(2));
     }
 }

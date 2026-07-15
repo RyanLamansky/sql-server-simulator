@@ -65,6 +65,16 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool QuotedIdentifiers = command.Connection!.QuotedIdentifiers;
 
     /// <summary>
+    /// Live <c>(</c>-nesting depth inside grouped-expression parsing,
+    /// maintained by <c>Expression.ParseGroupedExpression</c> (increment on
+    /// entry, decrement in <c>finally</c>). Crossing the structural limit
+    /// raises Msg 191; the companion stack-probe guard at
+    /// <see cref="Expression.Parse"/> entry raises Msg 8631 when actual
+    /// remaining stack runs low first.
+    /// </summary>
+    public int GroupingDepth;
+
+    /// <summary>
     /// The most recently identified token in the command string.
     /// </summary>
     public Token? Token;

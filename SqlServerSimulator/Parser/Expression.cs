@@ -41,6 +41,25 @@ internal abstract class Expression
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Expression Parse(ParserContext context)
     {
+        // Stack-probe guard: expression parsing recurses per operator /
+        // nesting level (TwoSidedExpression's parsing ctor re-enters Parse
+        // for its right side), and a .NET stack overflow is uncatchable and
+        // process-fatal — unacceptable for an in-process library fed a
+        // pathological query. Real SQL Server's Msg 8631 is likewise a
+        // genuine stack probe (threshold varies with its thread stack), so
+        // deferring to the runtime's own remaining-stack check is the
+        // faithful shape. Every recursive parse path (boolean chains, CASE,
+        // function arguments, subquery projections) passes through here at
+        // least once per nesting level, so this single site bounds them all.
+        try
+        {
+            System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+        }
+        catch (InsufficientExecutionStackException)
+        {
+            throw SimulatedSqlException.ServerStackLimitReached();
+        }
+
         Expression expression;
         switch (context.Token)
         {
@@ -547,20 +566,39 @@ internal abstract class Expression
     /// matching the lookahead contract <see cref="Parse"/>'s
     /// binary loop expects.
     /// </summary>
+    /// <summary>
+    /// Maximum <c>(</c>-nesting depth for grouped expressions before Msg 191.
+    /// Real SQL Server's structural limit is higher (1000 nested parens
+    /// succeed, 2000 fail — probe-confirmed 2026-07-15) but stack-dependent;
+    /// 512 keeps the structural error firing before <see cref="Parse"/>'s
+    /// stack probe would convert the same shape into Msg 8631 on a
+    /// default-size (1 MB) thread.
+    /// </summary>
+    private const int MaxGroupingDepth = 512;
+
     private static Expression ParseGroupedExpression(ParserContext context)
     {
-        context.MoveNextRequired();
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
+        if (++context.GroupingDepth > MaxGroupingDepth)
+            throw SimulatedSqlException.StatementNestedTooDeeply();
+        try
         {
-            var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
-            return inner.Schema.Length != 1
-                ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()
-                : context.Token is not Operator { Character: ')' }
-                    ? throw SimulatedSqlException.SyntaxErrorNear(context)
-                    : (Expression)new ScalarSubqueryExpression(inner);
-        }
+            context.MoveNextRequired();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
+            {
+                var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+                return inner.Schema.Length != 1
+                    ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()
+                    : context.Token is not Operator { Character: ')' }
+                        ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                        : (Expression)new ScalarSubqueryExpression(inner);
+            }
 
-        return new Parenthesized(Expression.Parse(context));
+            return new Parenthesized(Expression.Parse(context));
+        }
+        finally
+        {
+            context.GroupingDepth--;
+        }
     }
 
     private static Expression ResolveBuiltIn(string name, ParserContext context)
