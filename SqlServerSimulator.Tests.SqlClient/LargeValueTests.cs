@@ -56,6 +56,30 @@ public sealed class LargeValueTests
     }
 
     [TestMethod]
+    public async Task ObjectDefinition_LargeModule_RoundTripsOverWire()
+    {
+        // OBJECT_DEFINITION types as nvarchar(max) — a module definition can
+        // exceed the bounded 2-byte wire length prefix (WWI's DataLoadSimulation
+        // procs are ~250 KB). Before it was retyped, its length-0 nvarchar hit
+        // the bounded value path, overflowed the ushort length, and the
+        // OverflowException escaped the session's crash boundary as a silent
+        // transport-level error — the SMO API sweep's most severe find. A body
+        // over 32,767 chars is the reproduction threshold.
+        var simulation = new Simulation();
+        var padding = new string('x', 40000);
+        Wire.ExecInProc(simulation, $"create procedure dbo.big_proc as /* {padding} */ select 1");
+
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select object_definition(object_id('dbo.big_proc'))", connection);
+        var definition = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
+
+        IsNotNull(definition);
+        IsGreaterThan(40000, definition!.Length);
+        Contains(padding, definition);
+    }
+
+    [TestMethod]
     public async Task TenThousandRows_StreamOverWire()
     {
         var simulation = new Simulation();

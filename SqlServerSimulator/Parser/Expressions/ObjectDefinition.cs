@@ -14,8 +14,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>CREATE OR ALTER</c> — see <see cref="Simulation.BuildModuleDefinition"/>.
 /// Unlike <see cref="ObjectName"/>, there is no <c>database_id</c> argument
 /// (probe-confirmed against SQL Server 2025: <c>OBJECT_DEFINITION</c> takes a
-/// single argument). Result type is <see cref="SqlType.NVarchar"/>
-/// (<c>nvarchar(max)</c>), mirroring the JSON scalars.
+/// single argument). Result type is <see cref="SqlType.NVarcharMax"/>
+/// (<c>nvarchar(max)</c>) — a module definition can exceed the bounded
+/// 2-byte wire length prefix (WWI's DataLoadSimulation procs are ~250 KB),
+/// so it must stream as PLP.
 /// </summary>
 internal sealed class ObjectDefinition : Expression
 {
@@ -32,7 +34,7 @@ internal sealed class ObjectDefinition : Expression
     {
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.NVarcharMax);
         var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
 
         var database = runtime.Batch.CurrentDatabase;
@@ -49,13 +51,13 @@ internal sealed class ObjectDefinition : Expression
             if (ddlTrigger.ObjectId == id)
                 return Definition(ddlTrigger.DefinitionText);
         }
-        return SqlValue.Null(SqlType.NVarchar);
+        return SqlValue.Null(SqlType.NVarcharMax);
     }
 
     private static SqlValue Definition(string? text) =>
-        text is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(text);
+        text is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(SqlType.NVarcharMax, text);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => $"OBJECT_DEFINITION({this.idArg.DebugDisplay()})";
 }

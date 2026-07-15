@@ -448,7 +448,7 @@ internal static class TdsTypeCodec
         }
 
         var bytes = codec.WireEncoding.GetBytes(value.AsString);
-        writer.WriteUInt16(checked((ushort)bytes.Length));
+        writer.WriteUInt16(BoundedWireLength(bytes.Length));
         writer.WriteBytes(bytes);
     }
 
@@ -470,7 +470,7 @@ internal static class TdsTypeCodec
         }
 
         var text = value.AsString;
-        writer.WriteUInt16(checked((ushort)(text.Length * 2)));
+        writer.WriteUInt16(BoundedWireLength(text.Length * 2));
         writer.WriteUcs2(text);
     }
 
@@ -492,9 +492,27 @@ internal static class TdsTypeCodec
         }
 
         var bytes = value.AsBytes;
-        writer.WriteUInt16(checked((ushort)bytes.Length));
+        writer.WriteUInt16(BoundedWireLength(bytes.Length));
         writer.WriteBytes(bytes);
     }
+
+    /// <summary>
+    /// The 2-byte length prefix for a bounded (non-MAX) string / binary value.
+    /// An oversize value here would be a wire-encoding impossibility for the
+    /// declared bounded type; throw <see cref="InvalidDataException"/> — the
+    /// one exception type <c>TdsSession.RunAsync</c>'s catch boundary treats as
+    /// a clean session end — rather than letting an unchecked
+    /// <see cref="OverflowException"/> escape and kill the session as a silent
+    /// transport error. In practice the engine clamps values to their declared
+    /// bounds, so this fires only for a scalar mistyped as bounded-instead-of-
+    /// MAX (the class of bug that made OBJECT_DEFINITION's ~250 KB result crash
+    /// the session before it was retyped <see cref="SqlType.NVarcharMax"/>).
+    /// </summary>
+    private static ushort BoundedWireLength(int byteLength) =>
+        byteLength > ushort.MaxValue
+            ? throw new InvalidDataException(
+                $"A bounded string/binary value of {byteLength} bytes exceeds the {ushort.MaxValue}-byte wire limit for its declared type; a MAX type is required to stream it.")
+            : (ushort)byteLength;
 
     /// <summary>Known-length PLP: total length, one chunk, zero terminator.</summary>
     private static void WritePlpChunks(TdsTokenWriter writer, byte[] bytes)

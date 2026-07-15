@@ -316,6 +316,16 @@ internal abstract partial class SqlType
     public static readonly NVarcharSqlType NVarchar = NVarcharSqlType.Get(0, Collation.Baseline, Coercibility.CoercibleDefault);
 
     /// <remarks>
+    /// <c>nvarchar(max)</c> — the <see cref="MaxLengthSentinel"/> length. Distinct
+    /// from <see cref="NVarchar"/> (length 0 = "size from value"): a MAX-typed
+    /// value streams over the TDS wire as PLP, so it carries arbitrarily large
+    /// text without tripping the bounded 2-byte length prefix. Scalars whose
+    /// real-SQL-Server result is <c>nvarchar(max)</c> (<c>OBJECT_DEFINITION</c>,
+    /// the JSON constructors) must use this, not <see cref="NVarchar"/>.
+    /// </remarks>
+    public static readonly NVarcharSqlType NVarcharMax = NVarcharSqlType.Get(MaxLengthSentinel, Collation.Baseline, Coercibility.CoercibleDefault);
+
+    /// <remarks>
     /// SQL Server's <c>sysname</c> — historically <c>varchar(30)</c> in 6.5,
     /// modernly <c>nvarchar(128) NOT NULL</c>. Stored on disk identically to
     /// <see cref="NVarchar"/> (UTF-16 LE), but kept as a distinct
