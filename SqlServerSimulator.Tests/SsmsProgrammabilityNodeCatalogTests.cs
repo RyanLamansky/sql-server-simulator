@@ -177,6 +177,21 @@ public sealed class SsmsProgrammabilityNodeCatalogTests
     }
 
     [TestMethod]
+    public void Views_ScriptAsColumns_ZeroForOrdinaryView()
+    {
+        // SMO's Script View As query reads has_opaque_metadata and
+        // is_dropped_ledger_view — both nullable bit, 0 for every ordinary
+        // view (probe-confirmed against SQL Server 2025), on sys.views and
+        // sys.all_views alike.
+        var sim = new Simulation();
+        sim.ExecuteBatches("create view dbo.v as select 1 as c");
+        AreEqual(0, sim.ExecuteScalar(
+            "select cast(has_opaque_metadata as int) + cast(is_dropped_ledger_view as int) from sys.views where name = 'v'"));
+        AreEqual(0, sim.ExecuteScalar(
+            "select cast(has_opaque_metadata as int) + cast(is_dropped_ledger_view as int) from sys.all_views where name = 'v'"));
+    }
+
+    [TestMethod]
     public void ViewsNode_TrimmedSmoQuery_ReturnsCreatedView()
     {
         var sim = new Simulation();

@@ -134,6 +134,11 @@ internal static partial class BuiltInResources
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
             new("ledger_view_type", SqlType.TinyInt, null, false),
+            // has_opaque_metadata / is_dropped_ledger_view: both nullable bit
+            // on real, 0 for every ordinary view (probe-confirmed against
+            // SQL Server 2025) — SMO's Script-As view query reads both.
+            new("has_opaque_metadata", SqlType.Bit, null, true),
+            new("is_dropped_ledger_view", SqlType.Bit, null, true),
         ], EnumerateViews);
 
         // sys.all_views shares sys.views' shape and row generator — user-view
@@ -155,6 +160,8 @@ internal static partial class BuiltInResources
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
             new("ledger_view_type", SqlType.TinyInt, null, false),
+            new("has_opaque_metadata", SqlType.Bit, null, true),
+            new("is_dropped_ledger_view", SqlType.Bit, null, true),
         ], EnumerateViews);
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
@@ -658,6 +665,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromBoolean(view.WithCheckOption),
                     falseBit,
                     ledgerViewTypeNone,
+                    falseBit,
+                    falseBit,
                 ];
             }
         }
