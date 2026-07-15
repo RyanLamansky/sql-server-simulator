@@ -26,6 +26,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ParseDelete(ParserContext context)
     {
         context.MoveNextRequired();
+        var top = Selection.ParseDmlTopClause(context);
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             context.MoveNextRequired();
 
@@ -79,7 +80,7 @@ partial class Simulation
         {
             return leadingView is not null
                 ? throw new NotSupportedException($"Multi-source DELETE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — target the underlying table directly.")
-                : ExecuteJoinedDelete(context, leadingIdent, leadingTable, output);
+                : ExecuteJoinedDelete(context, leadingIdent, leadingTable, output, top);
         }
 
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
@@ -87,7 +88,7 @@ partial class Simulation
             : SimulatedSqlException.InvalidObjectName(leadingIdent));
         return table.IsTableValuedParameter
             ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
-            : ExecuteDeleteAgainstTable(context, table, output, leadingView);
+            : ExecuteDeleteAgainstTable(context, table, output, top, leadingView);
     }
 
     /// <summary>
@@ -98,6 +99,7 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         MutationOutputProjection? output,
+        Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
         BooleanExpression? where = null;
@@ -181,6 +183,8 @@ partial class Simulation
             deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers && !needsFullForHistory && !needsFullForFk) ? null : fullValues));
         }
 
+        ApplyDmlTopCap(top, deleted, context.Batch);
+
         // SI writer pre-flight: scan the version chain for snapshot-visible
         // tombstoned rows. A pre-delete payload matching WHERE means
         // another tx already removed a row our snapshot still sees —
@@ -205,7 +209,8 @@ partial class Simulation
         ParserContext context,
         MultiPartName leadingIdent,
         HeapTable? leadingTable,
-        MutationOutputProjection? output)
+        MutationOutputProjection? output,
+        Selection.DmlTopLimit? top)
     {
         var sourcesList = new List<FromSource>();
         var joinsList = new List<JoinSpec>();
@@ -266,6 +271,8 @@ partial class Simulation
             }
             deleted.Add((addr.Page, addr.Slot, fullValues));
         }
+
+        ApplyDmlTopCap(top, deleted, context.Batch);
 
         return CommitDelete(context, table, deleted, output, sourceView: null);
     }

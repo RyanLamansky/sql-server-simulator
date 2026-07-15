@@ -492,6 +492,75 @@ internal sealed partial class Selection
         };
     }
 
+    /// <summary>
+    /// A parsed <c>TOP (expr) [PERCENT]</c> limit on an UPDATE / DELETE /
+    /// INSERT statement. Unlike SELECT's <c>TOP</c>, the DML grammar requires
+    /// the parentheses — the legacy bare form (<c>UPDATE TOP 2 …</c>) is a
+    /// syntax error (Msg 102) on real SQL Server.
+    /// </summary>
+    internal readonly struct DmlTopLimit(Expression expression, bool percent)
+    {
+        public readonly Expression Expression = expression;
+        public readonly bool Percent = percent;
+    }
+
+    /// <summary>
+    /// Parses a leading <c>TOP (expr) [PERCENT]</c> on a DML statement when
+    /// present. Called with the cursor on the token immediately after the DML
+    /// verb (or after INSERT's optional <c>INTO</c>). Returns <c>null</c> when
+    /// the current token isn't <c>TOP</c>, leaving the cursor untouched;
+    /// otherwise consumes the whole clause and leaves the cursor on the token
+    /// that follows it. The parentheses are mandatory — a bare <c>TOP 2</c>
+    /// raises Msg 102 (the legacy no-paren form is SELECT-only).
+    /// </summary>
+    internal static DmlTopLimit? ParseDmlTopClause(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Top })
+            return null;
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // Passing the cursor at '(' lets Expression.Parse consume the whole
+        // parenthesized expression (numeric, arithmetic, @variable, or a
+        // parenthesized scalar subquery) and land on the following token.
+        var expression = Expression.Parse(context);
+        var percent = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })
+        {
+            percent = true;
+            context.MoveNextRequired();
+        }
+        return new DmlTopLimit(expression, percent);
+    }
+
+    /// <summary>
+    /// Resolves a DML <c>TOP</c> limit to a concrete row cap given the number
+    /// of candidate rows already collected. Validates the value the way SQL
+    /// Server does: a non-PERCENT value must be a non-negative integer
+    /// (Msg 1060 for non-integer / NULL, Msg 127 for negative); a PERCENT
+    /// value must be numeric in [0, 100] (Msg 1031, Msg 1014 for NULL), and
+    /// the cap is <c>ceil(candidateCount * pct / 100)</c> — probe-confirmed
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static int ResolveDmlTopCap(DmlTopLimit limit, int candidateCount, BatchContext batch)
+    {
+        var resolved = limit.Expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+        if (limit.Percent)
+        {
+            var pct = resolved.IsNull
+                ? throw SimulatedSqlException.TopClauseInvalidValue()
+                : resolved.CoerceTo(SqlType.Float).AsDouble;
+            return pct is < 0 or > 100
+                ? throw SimulatedSqlException.TopPercentOutOfRange()
+                : (int)Math.Ceiling(candidateCount * pct / 100.0);
+        }
+        var count = resolved.IsNull || !SqlType.IsIntegerCategory(resolved.Type)
+            ? throw SimulatedSqlException.TopFetchRequiresInteger()
+            : resolved.CoerceTo(SqlType.BigInt).AsInt64;
+        return count < 0
+            ? throw SimulatedSqlException.TopRowCountMustNotBeNegative()
+            : count < candidateCount ? (int)count : candidateCount;
+    }
+
     private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, List<WindowExpression> windows, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
     {
         var distinct = false;

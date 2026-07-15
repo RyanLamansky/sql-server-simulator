@@ -82,4 +82,37 @@ public sealed class RpcSmokeTests
         await using var sum = new SqlCommand("select sum(id) from t", connection);
         AreEqual(6, await sum.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    // The SSMS "Edit Top 200 Rows" commit shape: UPDATE TOP (200) with a
+    // parameterized SET and a multi-predicate concurrency WHERE, arriving as
+    // an sp_executesql RPC. Must update exactly the one matching row.
+    [TestMethod]
+    public async Task UpdateTop200_EditRowsShape_UpdatesOneRow()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table Invoices (
+                InvoiceID int identity primary key,
+                CustomerID int,
+                InvoiceDate datetime,
+                Total money);
+            insert Invoices (CustomerID, InvoiceDate, Total)
+            values (1, '2020-01-01', 100), (2, '2020-02-01', 200), (3, '2020-03-01', 300)
+            """);
+
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using var update = new SqlCommand(
+            "update top (200) Invoices set InvoiceDate = @p " +
+            "where InvoiceID = @k1 and CustomerID = @k2 and Total = @k3", connection);
+        _ = update.Parameters.AddWithValue("@p", new DateTime(2021, 6, 15));
+        _ = update.Parameters.AddWithValue("@k1", 2);
+        _ = update.Parameters.AddWithValue("@k2", 2);
+        _ = update.Parameters.AddWithValue("@k3", 200m);
+        AreEqual(1, await update.ExecuteNonQueryAsync(TestContext.CancellationToken));
+
+        await using var check = new SqlCommand("select InvoiceDate from Invoices where InvoiceID = 2", connection);
+        AreEqual(new DateTime(2021, 6, 15), await check.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

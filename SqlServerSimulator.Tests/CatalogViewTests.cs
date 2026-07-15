@@ -630,6 +630,29 @@ public sealed class CatalogViewTests
             select count(*) from #r
             """));
 
+    // === sys.synonyms: schema-scoped, always empty (CREATE SYNONYM unmodeled) ===
+
+    [TestMethod]
+    public void SysSynonyms_Projects13Columns_ZeroRows()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select * from sys.synonyms");
+        AreEqual(13, reader.FieldCount);
+        AreEqual("name", reader.GetName(0));
+        AreEqual("base_object_name", reader.GetName(12));
+        AreEqual(typeof(string), reader.GetFieldType(0));
+        AreEqual(typeof(int), reader.GetFieldType(1));
+        IsFalse(reader.Read());
+    }
+
+    // SSMS's "Edit Top 200 Rows" commit reads [db].sys.synonyms via a
+    // three-part name to test whether the edit target is a synonym; the
+    // read must resolve and return zero rows rather than Msg 208.
+    [TestMethod]
+    public void SysSynonyms_ThreePartName_ResolvesEmpty()
+        => AreEqual(0, new Simulation().ExecuteScalar(
+            "select count(*) from master.sys.synonyms"));
+
     // === sys.master_files: data + log file per database, no type-2 files ===
 
     [TestMethod]

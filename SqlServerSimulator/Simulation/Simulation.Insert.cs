@@ -14,7 +14,9 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ParseInsert(ParserContext context)
     {
-        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Into })
+        context.MoveNextRequired();
+        var top = Selection.ParseDmlTopClause(context);
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
@@ -33,7 +35,7 @@ partial class Simulation
             Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
 
         if (context.Batch.TryResolveView(destinationName, out var destinationView))
-            return ProcessViewInsert(destinationView, context);
+            return ProcessViewInsert(destinationView, context, top);
         if (!context.Batch.TryResolveTable(destinationName, out var destinationTable))
         {
             throw BatchContext.IsTableVariableName(destinationName.Leaf)
@@ -46,7 +48,7 @@ partial class Simulation
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
-        return ProcessHeapInsert(destinationTable, context);
+        return ProcessHeapInsert(destinationTable, context, top);
     }
 
     /// <summary>
@@ -62,11 +64,11 @@ partial class Simulation
     /// from <see cref="View.RejectionReason"/>. OUTPUT with a view target
     /// is rejected at the inner site (NotSupportedException).
     /// </summary>
-    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context) =>
+    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top) =>
         HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert)
-            ? ProcessInsteadOfInsertOnView(destinationView, context)
+            ? ProcessInsteadOfInsertOnView(destinationView, context, top)
             : destinationView.BaseTable is { } baseTable
-                ? ProcessHeapInsert(baseTable, context, destinationView)
+                ? ProcessHeapInsert(baseTable, context, top, destinationView)
                 : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
                     ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
                     : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
@@ -81,7 +83,7 @@ partial class Simulation
     /// any actual heap writes; this path simply fires the trigger and
     /// returns the would-be affected row count.
     /// </summary>
-    private static SimulatedNonQuery ProcessInsteadOfInsertOnView(View destinationView, ParserContext context)
+    private static SimulatedNonQuery ProcessInsteadOfInsertOnView(View destinationView, ParserContext context, Selection.DmlTopLimit? top)
     {
         var viewColumns = destinationView.OutputColumns;
 
@@ -121,6 +123,8 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
+
+        ApplyDmlTopCap(top, sourceRows, context.Batch);
 
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(sourceRows.Count);
@@ -185,7 +189,7 @@ partial class Simulation
     /// <c>ExecuteReader</c>); otherwise a plain <see cref="SimulatedNonQuery"/>
     /// is returned.
     /// </summary>
-    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, View? destinationView = null)
+    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, View? destinationView = null)
     {
         // Direct INSERT into a history sibling is rejected — history rows
         // are populated only by the engine via UPDATE / DELETE on the parent.
@@ -282,6 +286,8 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
+
+        ApplyDmlTopCap(top, sourceRows, context.Batch);
 
         decimal? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);

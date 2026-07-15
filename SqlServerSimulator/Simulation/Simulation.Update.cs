@@ -45,6 +45,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ParseUpdate(ParserContext context)
     {
         context.MoveNextRequired();
+        var top = Selection.ParseDmlTopClause(context);
         var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         context.Batch.RejectCrossDatabaseMutation(leadingIdent);
 
@@ -166,7 +167,7 @@ partial class Simulation
         {
             return leadingView is not null
                 ? throw new NotSupportedException($"Multi-source UPDATE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — the alias-form FROM clause can't compose with the view's visibility predicate. Target the underlying table directly.")
-                : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output);
+                : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top);
         }
 
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
@@ -174,7 +175,7 @@ partial class Simulation
             : SimulatedSqlException.InvalidObjectName(leadingIdent));
         return table.IsTableValuedParameter
             ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
-            : ExecuteUpdateAgainstTable(context, table, rawAssignments, output, leadingView);
+            : ExecuteUpdateAgainstTable(context, table, rawAssignments, output, top, leadingView);
     }
 
     /// <summary>
@@ -187,6 +188,7 @@ partial class Simulation
         HeapTable table,
         List<(string ColumnName, Expression Expr)> rawAssignments,
         MutationOutputProjection? output,
+        Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
@@ -277,6 +279,8 @@ partial class Simulation
             var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
             affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
         }
+
+        ApplyDmlTopCap(top, affected, context.Batch);
 
         // SI writer pre-flight: any row visible at our snapshot but
         // deleted by a concurrent committed tx (or in-flight foreign
@@ -369,7 +373,8 @@ partial class Simulation
         MultiPartName leadingIdent,
         HeapTable? leadingTable,
         List<(string ColumnName, Expression Expr)> rawAssignments,
-        MutationOutputProjection? output)
+        MutationOutputProjection? output,
+        Selection.DmlTopLimit? top)
     {
         var sourcesList = new List<FromSource>();
         var joinsList = new List<JoinSpec>();
@@ -435,7 +440,25 @@ partial class Simulation
             affected.Add((addr.Page, addr.Slot, newValues, oldSnapshot));
         }
 
+        ApplyDmlTopCap(top, affected, context.Batch);
+
         return CommitUpdate(context, table, affected, output, sourceView: null);
+    }
+
+    /// <summary>
+    /// Trims an affected-row list to the DML <c>TOP</c> cap in place. Always
+    /// resolves the limit (even when the list is empty) so a bad value
+    /// (negative / non-integer / out-of-range percent) raises before commit,
+    /// matching SQL Server's rejection with no rows changed. No-op when
+    /// <paramref name="top"/> is null.
+    /// </summary>
+    private static void ApplyDmlTopCap<T>(Selection.DmlTopLimit? top, List<T> rows, BatchContext batch)
+    {
+        if (top is not { } limit)
+            return;
+        var cap = Selection.ResolveDmlTopCap(limit, rows.Count, batch);
+        if (cap < rows.Count)
+            rows.RemoveRange(cap, rows.Count - cap);
     }
 
     /// <summary>

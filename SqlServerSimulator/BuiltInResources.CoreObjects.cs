@@ -204,6 +204,30 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
+        // sys.synonyms: schema-scoped synonym catalog. CREATE SYNONYM isn't
+        // modeled (the parser rejects it at Msg 102), so the view is always
+        // empty — but SSMS's "Edit Top 200 Rows" commit probes whether the
+        // edit target is a synonym via a three-part `[db].sys.synonyms` read,
+        // which must resolve and return zero rows rather than Msg 208. Column
+        // shape probe-confirmed against SQL Server 2025 (name sysname,
+        // base_object_name nvarchar(1035), type char(2), type_desc nvarchar(60)).
+        Sys("synonyms",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("base_object_name", SqlType.NVarchar, 1035, true),
+        ], static (_, _) => EmptyCatalogRows);
+
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
         // 100 for nvarchar(50), 5 for char(5), 16 for uniqueidentifier, 7 for

@@ -80,6 +80,29 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException TopFetchRequiresInteger() => new("The number of rows provided for a TOP or FETCH clauses row count parameter must be an integer.", 1060, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 127 — a <c>TOP (n)</c> / <c>FETCH</c> row-count
+    /// value resolved to a negative number. Reached by DML <c>TOP</c> (the
+    /// simulator's SELECT <c>TOP</c> path doesn't range-check). Wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException TopRowCountMustNotBeNegative() =>
+        new("A TOP N or FETCH rowcount value may not be negative.", 127, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1031 — a <c>TOP (n) PERCENT</c> value fell
+    /// outside the 0–100 range. Wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException TopPercentOutOfRange() =>
+        new("Percent values must be between 0 and 100.", 1031, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1014 — a <c>TOP</c> / <c>FETCH</c> clause
+    /// resolved to an invalid value (NULL for the <c>PERCENT</c> form).
+    /// Wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException TopClauseInvalidValue() =>
+        new("A TOP or FETCH clause contains an invalid value.", 1014, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 153 — fired when a FETCH clause appears
     /// without a preceding OFFSET (FETCH alone is invalid; OFFSET must
     /// always come first). Wording verbatim from the probed server.
