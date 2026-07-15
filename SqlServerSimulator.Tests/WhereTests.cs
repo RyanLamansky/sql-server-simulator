@@ -550,6 +550,38 @@ public class WhereTests
     public void Case_DoublyParenWrappedComparison_StillBooleanGroup()
         => AreEqual("yes", new Simulation().ExecuteScalar("select case when ((1) = (1)) then 'yes' else 'no' end"));
 
+    // === FROM-less SELECT with WHERE ===
+    // Real SQL Server accepts WHERE without FROM (`SELECT 1 WHERE 1 = 1`
+    // returns the row, `WHERE 1 = 0` returns none). The aliased-projection
+    // variant is the regression shape: the select-list alias-continue path
+    // once dropped WHERE to Msg 156, which broke SMO's PolicyStore
+    // enumeration (harvested from the SSMS shakedown, 2026-07-15).
+
+    [TestMethod]
+    public void FromLess_Where_True_ReturnsRow()
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 as x where 1 = 1"));
+
+    [TestMethod]
+    public void FromLess_Where_False_ReturnsNoRows()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var reader = connection.CreateCommand("select 1 as x, 2 as y where 1 = 0").ExecuteReader();
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void FromLess_Where_ThenOrderBy_Parses()
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 as x where 1 = 1 order by x"));
+
+    [TestMethod]
+    public void FromLess_Where_SmoPolicyStoreShape_Filters()
+        => AreEqual(
+            "SIMULATED",
+            new Simulation().ExecuteScalar(
+                "select cast(serverproperty(N'Servername') as sysname) as [Name] where (cast(serverproperty(N'Servername') as sysname) = 'SIMULATED')"));
+
     private static int CountWhere(DbConnection connection, string predicate)
     {
         using var reader = connection.CreateCommand($"select a from t where {predicate}").ExecuteReader();

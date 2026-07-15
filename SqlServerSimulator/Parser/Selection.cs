@@ -533,13 +533,16 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.Into }:
                 // A FROM-less SELECT can still carry a trailing ORDER BY
                 // (legal on real SQL Server: `SELECT 2 AS X ORDER BY X`
-                // returns the one row). When the final projection element ended
-                // in an alias, the alias-continue routes ORDER back to this
+                // returns the one row) or WHERE (`SELECT 1 AS x WHERE 1 = 1`;
+                // SMO's PolicyStore enumeration uses the aliased FROM-less
+                // WHERE shape). When the final projection element ended in an
+                // alias, the alias-continue routes ORDER / WHERE back to this
                 // pre-expression switch; fall through (like FROM / INTO) to the
-                // post-expression ORDER handler, which consumes the clause and
-                // its OFFSET / FETCH tail. Sorting is a no-op on the one
+                // post-expression handlers, which consume the clause and its
+                // OFFSET / FETCH tail. Sorting is a no-op on the one
                 // synthesized row, but the clause must parse rather than raise.
                 case ReservedKeyword { Keyword: Keyword.Order }:
+                case ReservedKeyword { Keyword: Keyword.Where }:
                     break;
 
                 case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp or Keyword.Current_Date or Keyword.Current_User or Keyword.Session_User or Keyword.System_user or Keyword.User }:
