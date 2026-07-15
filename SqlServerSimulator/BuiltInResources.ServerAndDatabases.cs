@@ -380,6 +380,22 @@ internal static partial class BuiltInResources
             new("cluster_connection_options", SqlType.NVarchar, 4000, true),
         ], static (_, _) => EmptyCatalogRows);
 
+        // sys.dm_hadr_cluster: single-row failover-clustering DMV. Probe-
+        // confirmed against a non-clustered SQL Server 2025: even with no
+        // cluster the view returns ONE row — empty cluster_name,
+        // quorum_type 0 / NODE_MAJORITY, quorum_state 1 / NORMAL_QUORUM —
+        // and SSMS's Select-Top-1000 server-properties batch reads it inside
+        // a TRY/CATCH that tolerates only permission errors, so an empty
+        // view (or Msg 208) escapes as a THROW.
+        Sys("dm_hadr_cluster",
+        [
+            new("cluster_name", SqlType.NVarchar, 256, false),
+            new("quorum_type", SqlType.TinyInt, null, false),
+            new("quorum_type_desc", nvarchar60Catalog, 60, false),
+            new("quorum_state", SqlType.TinyInt, null, false),
+            new("quorum_state_desc", nvarchar60Catalog, 60, false),
+        ], static (_, _) => DmHadrClusterRows);
+
         // sys.dm_hadr_database_replica_states: server-scope AlwaysOn DMV,
         // always empty (no AGs). SSMS's enumeration does
         // `insert into #tmp select group_database_id, synchronization_state,
@@ -612,6 +628,21 @@ internal static partial class BuiltInResources
     /// elsewhere are reused).
     /// </summary>
     private static readonly SqlValue[][] DmOsHostInfoRows = [BuildDmOsHostInfoRow()];
+
+    /// <summary>
+    /// The single <c>sys.dm_hadr_cluster</c> row — a non-clustered
+    /// instance's values, probe-confirmed against SQL Server 2025.
+    /// </summary>
+    private static readonly SqlValue[][] DmHadrClusterRows =
+    [
+        [
+            SqlValue.FromNVarchar(string.Empty),
+            SqlValue.FromByte(0),
+            SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "NODE_MAJORITY"),
+            SqlValue.FromByte(1),
+            SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "NORMAL_QUORUM"),
+        ],
+    ];
 
     private static SqlValue[] BuildDmOsHostInfoRow()
     {

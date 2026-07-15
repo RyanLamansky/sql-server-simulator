@@ -105,6 +105,92 @@ internal sealed class SUserName : Expression
 }
 
 /// <summary>
+/// SQL <c>SUSER_SID([login [, Param2]])</c>: returns the binary SID for a
+/// server login — the calling session's login with no argument. Mirrors the
+/// <c>sys.server_principals</c> sid surface: <c>sa</c> is the well-known
+/// single byte <c>0x01</c>, registry logins (<c>CREATE LOGIN</c>) get their
+/// deterministic 16-byte synthetic sid, and an unknown name returns NULL.
+/// The no-argument form returns <c>0x01</c>, matching the
+/// <c>sys.dm_exec_sessions.security_id</c> placeholder for the simulator's
+/// fixed session principal. The optional <c>Param2</c> (real's
+/// skip-name-validation flag) parses and is ignored. Result type is
+/// <c>varbinary(85)</c>.
+/// </summary>
+internal sealed class SUserSid : Expression
+{
+    private readonly Expression? loginArg;
+
+    public SUserSid(ParserContext context)
+    {
+        if (context.Token is Tokens.Operator { Character: ')' })
+            return;
+        this.loginArg = Parse(context);
+        if (context.Token is Tokens.Operator { Character: ',' })
+        {
+            context.MoveNextRequired();
+            _ = Parse(context);
+        }
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        if (this.loginArg is null)
+            return SqlValue.FromVarbinary([0x01]);
+        var nameValue = this.loginArg.Run(runtime);
+        if (nameValue.IsNull)
+            return SqlValue.Null(SqlType.Varbinary);
+        var name = nameValue.CoerceTo(SqlType.SystemName).AsString;
+        return Collation.Baseline.Equals(name, "sa")
+            ? SqlValue.FromVarbinary([0x01])
+            : runtime.Batch.Connection.Simulation.Logins.ContainsKey(name)
+                ? SqlValue.FromVarbinary(BuiltInResources.DeriveLoginSid(name))
+                : SqlValue.Null(SqlType.Varbinary);
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+
+    internal override string DebugDisplay() => this.loginArg is null ? "SUSER_SID()" : $"SUSER_SID({this.loginArg.DebugDisplay()})";
+}
+
+/// <summary>
+/// SQL <c>SID_BINARY(name)</c>: resolves a Windows / Entra-ID principal
+/// name to its binary SID. Probe-confirmed against SQL Server 2025: it
+/// returns NULL even for existing SQL-auth logins (<c>sid_binary(N'sa')</c>
+/// is NULL) — it only resolves directory principals, which the simulator
+/// never hosts — so a constant NULL <c>varbinary(85)</c> is faithful for
+/// every input the simulator can see. The argument is still parsed and
+/// evaluated (one required argument). SSMS's Select-Top-1000
+/// server-properties batch calls it on the service's Windows group name.
+/// </summary>
+internal sealed class SidBinary : Expression
+{
+    private readonly Expression arg;
+
+    public SidBinary(ParserContext context)
+    {
+        this.arg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        _ = this.arg.Run(runtime);
+        return SqlValue.Null(SqlType.Varbinary);
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+
+    internal override string DebugDisplay() => $"SID_BINARY({this.arg.DebugDisplay()})";
+}
+
+/// <summary>
 /// SQL <c>ORIGINAL_LOGIN()</c>: returns the original login of the session
 /// before any <c>EXECUTE AS</c> impersonation. The simulator doesn't model
 /// impersonation, so this always returns the placeholder login

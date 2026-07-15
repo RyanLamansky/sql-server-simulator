@@ -176,6 +176,22 @@ public sealed class SsmsProgrammabilityNodeCatalogTests
         AreEqual("master_Log", (string?)sim.ExecuteScalar("select name from master.sys.database_files where file_id = 2"));
     }
 
+    /// <summary>
+    /// Probe-confirmed against a non-clustered SQL Server 2025: the DMV
+    /// returns one row even with no failover cluster — empty name,
+    /// NODE_MAJORITY (0), NORMAL_QUORUM (1). SSMS's Select-Top-1000
+    /// server-properties batch reads it inside a TRY/CATCH that rethrows
+    /// everything except permission errors, so zero rows or Msg 208
+    /// escape to the user.
+    /// </summary>
+    [TestMethod]
+    public void DmHadrCluster_SingleNonClusteredRow()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            select iif(cluster_name = N'' and quorum_type = 0 and quorum_type_desc = N'NODE_MAJORITY'
+                       and quorum_state = 1 and quorum_state_desc = N'NORMAL_QUORUM', 1, 0)
+            from sys.dm_hadr_cluster
+            """));
+
     [TestMethod]
     public void Views_ScriptAsColumns_ZeroForOrdinaryView()
     {

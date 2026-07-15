@@ -228,3 +228,8 @@ Values derive from the collation model (`Collation.TryGetMetrics`) so any recogn
 - Any NULL arg → empty rowset (no error, no row). Bare untyped `NULL` is also accepted — the column type is inferred from the non-NULL siblings.
 - Fewer than 2 args → **Msg 313**; more than 3 → **Msg 8144**. (Real server raises the procedure-shaped error numbers even though `GENERATE_SERIES` is a TVF; verbatim wording probed.)
 - Internal generation uses `long` arithmetic for integer types and `decimal` for the decimal family. `bigint` near `MAX_INT64` terminates via the overflow-edge check (`cur > long.MaxValue - step`) before the addition would wrap, so `GENERATE_SERIES(MAX_INT-7, MAX_INT, 3)` yields three rows just like real SQL Server.
+
+## SUSER_SID / SID_BINARY
+
+- **`SUSER_SID([login [, Param2]])`** returns the server login's binary SID, mirroring the `sys.server_principals` sid surface: `sa` → the well-known single byte `0x01`, registry logins (`CREATE LOGIN`) → their deterministic 16-byte synthetic sid (`BuiltInResources.DeriveLoginSid`), unknown names → NULL, NULL → NULL. The no-argument form returns `0x01`, matching `sys.dm_exec_sessions.security_id` for the simulator's fixed session principal. The optional Param2 (real's skip-name-validation flag) parses and is ignored. Result type `varbinary(85)`-family (`SqlType.Varbinary`).
+- **`SID_BINARY(name)`** is constant NULL — probe-confirmed against SQL Server 2025: it resolves only Windows / Entra-ID directory principals and returns NULL even for existing SQL-auth logins, so NULL is faithful for every input the simulator can host. The argument still parses and evaluates. Surfaced by SSMS's Select-Top-1000 server-properties batch (`suser_sname(sid_binary(@SqlGroup))`).

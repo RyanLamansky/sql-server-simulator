@@ -133,9 +133,14 @@ partial class Simulation
         {
             // No error caught — skip-dispatch CATCH body to advance the
             // cursor past END CATCH. Matches the "outer skipping" branch in
-            // ParseWhileStatement.
+            // ParseWhileStatement. CatchDepth still bumps: it tracks LEXICAL
+            // containment, and the bare-THROW rethrow check (Msg 10704) is a
+            // compile-time structural rule that must accept a THROW inside a
+            // skipped CATCH body — SSMS's Select-Top-1000 server-properties
+            // batch has exactly that shape once its TRY body succeeds.
             var wasSkipModeFlag = batch.SkipModeFlag;
             batch.SkipModeFlag = true;
+            batch.CatchDepth++;
             try
             {
                 foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
@@ -143,6 +148,7 @@ partial class Simulation
             }
             finally
             {
+                batch.CatchDepth--;
                 batch.SkipModeFlag = wasSkipModeFlag;
             }
         }

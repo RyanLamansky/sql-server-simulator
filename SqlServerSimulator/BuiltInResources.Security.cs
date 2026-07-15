@@ -319,7 +319,7 @@ internal static partial class BuiltInResources
     /// four 32-bit quadrants with a per-quadrant-salted FNV-1a hash so the same
     /// name always maps to the same bytes without persisting a GUID.
     /// </summary>
-    private static byte[] DeriveLoginSid(string name)
+    internal static byte[] DeriveLoginSid(string name)
     {
         var sid = new byte[16];
         for (var quadrant = 0; quadrant < 4; quadrant++)

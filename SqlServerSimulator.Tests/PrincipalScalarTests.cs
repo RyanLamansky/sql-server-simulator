@@ -86,4 +86,43 @@ public sealed class PrincipalScalarTests
         => AreEqual(1, new Simulation().ExecuteScalar("""
             select iif(current_user = user_name() and user_name() = original_login() and user = current_user, 1, 0)
             """));
+
+    // === SUSER_SID / SID_BINARY ===
+
+    [TestMethod]
+    public void SuserSid_NoArg_ReturnsWellKnownSid()
+        => CollectionAssert.AreEqual(new byte[] { 0x01 }, (byte[]?)new Simulation().ExecuteScalar("select suser_sid()"));
+
+    [TestMethod]
+    public void SuserSid_Sa_ReturnsWellKnownSid()
+        => CollectionAssert.AreEqual(new byte[] { 0x01 }, (byte[]?)new Simulation().ExecuteScalar("select suser_sid(N'sa')"));
+
+    [TestMethod]
+    public void SuserSid_RegistryLogin_MatchesServerPrincipalsSid()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login probe_login with password = 'p@ss'");
+        AreEqual(1, sim.ExecuteScalar(
+            "select iif(suser_sid(N'probe_login') = (select sid from sys.server_principals where name = N'probe_login'), 1, 0)"));
+    }
+
+    [TestMethod]
+    public void SuserSid_Unknown_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select suser_sid(N'nosuchlogin')"));
+
+    [TestMethod]
+    public void SuserSid_SecondParameter_Accepted()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select suser_sid(N'nosuchlogin', 0)"));
+
+    [TestMethod]
+    public void SidBinary_AlwaysNull_EvenForExistingLogin()
+    {
+        // Probe-confirmed against SQL Server 2025: SID_BINARY resolves only
+        // Windows / Entra-ID directory principals — it returns NULL even for
+        // an existing SQL-auth login, so constant NULL is faithful here.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login probe_login2 with password = 'p@ss'");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select sid_binary(N'probe_login2')"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select sid_binary(N'')"));
+    }
 }

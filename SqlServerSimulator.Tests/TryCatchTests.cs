@@ -163,6 +163,24 @@ public sealed class TryCatchTests
     public void Throw_NoArgs_OutsideCatch_Msg10704()
         => new Simulation().AssertSqlError("throw", 10704);
 
+    /// <summary>
+    /// The Msg 10704 check is lexical — a bare THROW inside a CATCH whose
+    /// TRY body succeeded (so the CATCH skip-parses) must not raise it.
+    /// SSMS's Select-Top-1000 server-properties batch has this shape:
+    /// the CATCH rethrows unless ERROR_NUMBER() is a tolerated permission
+    /// error, and the TRY body normally succeeds.
+    /// </summary>
+    [TestMethod]
+    public void Throw_NoArgs_InsideSkippedCatch_Parses()
+        => AreEqual(7, new Simulation().ExecuteScalar("""
+            declare @x int;
+            begin try set @x = 1 end try
+            begin catch
+                if (error_number() not in (297, 300)) begin throw end
+            end catch
+            select 7
+            """));
+
     [TestMethod]
     public void Throw_NoArgs_InsideCatch_Rethrows()
     {
