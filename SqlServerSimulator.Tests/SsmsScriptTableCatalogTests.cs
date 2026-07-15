@@ -226,6 +226,39 @@ public sealed class SsmsScriptTableCatalogTests
         AreEqual("SCHEMA_AND_DATA", reader.GetString(8));
     }
 
+    // Replication isn't modeled, so is_replicated is a constant 0. SMO's Table
+    // property-bag projects tbl.is_replicated AS [Replicated]; a missing column
+    // fails the whole bag query Msg 207 and every Table property errors.
+    [TestMethod]
+    public void Tables_IsReplicated_FalseForUserTable()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>("""
+            create table t (id int not null primary key);
+            select count(*) from sys.tables where name = 't' and is_replicated = 0
+            """));
+
+    // The full modeled sys.tables column set resolves in one projection — the
+    // SMO Table property-bag reads every column, so one missing name fails the
+    // bag query and every Table property errors.
+    [TestMethod]
+    public void Tables_FullModeledColumnSet_Resolves()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
+        using var reader = sim.ExecuteReader("""
+            select object_id, name, schema_id, principal_id, type, type_desc,
+                   create_date, modify_date, is_ms_shipped, temporal_type,
+                   temporal_type_desc, history_table_id, is_memory_optimized,
+                   is_filetable, is_external, is_node, is_edge, durability,
+                   durability_desc, ledger_type, ledger_view_id, uses_ansi_nulls,
+                   is_dropped_ledger_table, lock_escalation, lock_escalation_desc,
+                   filestream_data_space_id, lob_data_space_id, is_replicated
+            from sys.tables where name = 't'
+            """);
+        IsTrue(reader.Read());
+        AreEqual("t", reader.GetString(1));
+        AreEqual(28, reader.FieldCount);
+    }
+
     // === sys.columns columns SMO's CREATE-scripting column query reads ===
 
     [TestMethod]

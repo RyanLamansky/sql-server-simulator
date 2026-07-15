@@ -349,4 +349,60 @@ public sealed class SequenceTests
         // is the next value to emit: 3.
         AreEqual(3L, simulation.ExecuteScalar<long>("select current_value from sys.sequences where name = 'sysview2'"));
     }
+
+    /// <summary>
+    /// precision / scale mirror the sequence's declared numeric type
+    /// (int → 10/0, bigint → 19/0). SMO's Sequence property-bag query projects
+    /// them as [NumericPrecision] / [NumericScale]; a missing column would fail
+    /// the whole bag query Msg 207.
+    /// </summary>
+    [TestMethod]
+    public void SysSequences_PrecisionScale_MirrorDeclaredType()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create sequence sp_int as int start with 1;
+            create sequence sp_big as bigint start with 1
+            """);
+        using var reader = simulation.CreateCommand("""
+            select cast(precision as int), cast(scale as int)
+            from sys.sequences where name = 'sp_int'
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(10, reader.GetInt32(0));
+        AreEqual(0, reader.GetInt32(1));
+        reader.Close();
+
+        using var big = simulation.CreateCommand("""
+            select cast(precision as int), cast(scale as int)
+            from sys.sequences where name = 'sp_big'
+            """).ExecuteReader();
+        IsTrue(big.Read());
+        AreEqual(19, big.GetInt32(0));
+        AreEqual(0, big.GetInt32(1));
+    }
+
+    /// <summary>
+    /// Every modeled <c>sys.sequences</c> column resolves in a single projection
+    /// — the SMO Sequence property-bag reads the whole set, so one missing
+    /// column fails the bag query and every Sequence property errors.
+    /// </summary>
+    [TestMethod]
+    public void SysSequences_FullModeledColumnSet_Resolves()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence sq_full as int start with 1");
+        AreEqual(1, simulation.ExecuteScalar<int>("""
+            select count(*) from sys.sequences where name = 'sq_full' and (
+                name is not null and object_id is not null and schema_id is not null
+                and start_value is not null and increment is not null
+                and minimum_value is not null and maximum_value is not null
+                and is_cycling is not null and is_cached is not null
+                and current_value is not null and system_type_id is not null
+                and user_type_id is not null and is_exhausted is not null
+                and precision is not null and create_date is not null
+                and modify_date is not null and (cache_size is null or cache_size = 0)
+                and (principal_id is null or principal_id = 0) and (scale = 0 or scale is not null))
+            """));
+    }
 }

@@ -17,8 +17,8 @@ namespace SqlServerSimulator;
 /// with <c>INCLUDE</c>, one filtered); named + auto-named DEFAULT constraints;
 /// a CHECK constraint; a computed column; a <c>rowversion</c> column; a
 /// system-versioned temporal pair; extended properties on a table and a column;
-/// an AFTER INSERT trigger; a view and a stored procedure; and seed rows so
-/// <c>sys.partitions.rows</c> is non-zero.
+/// an AFTER INSERT trigger; a view, a stored procedure, and a sequence; and
+/// seed rows so <c>sys.partitions.rows</c> is non-zero.
 /// </summary>
 internal static class SmoFixture
 {
@@ -108,6 +108,7 @@ internal static class SmoFixture
                 PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo))
             WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = Application.EmployeeRolesHistory))
             """,
+            "CREATE SEQUENCE Sales.OrderNumber AS int START WITH 1000 INCREMENT BY 1",
             "CREATE VIEW Sales.CustomerSummary AS SELECT CustomerID, CustomerName FROM Sales.Customers",
             "CREATE PROCEDURE Sales.GetCustomerCount AS SELECT COUNT(*) AS Cnt FROM Sales.Customers",
             "CREATE TRIGGER Sales.trg_Customers_Insert ON Sales.Customers AFTER INSERT AS BEGIN SET NOCOUNT ON; END",

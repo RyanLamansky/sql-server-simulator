@@ -409,6 +409,26 @@ public sealed class StoredProcedureTests
     }
 
     [TestMethod]
+    public void Catalog_Sys_Procedures_FullModeledColumnSet_Resolves()
+    {
+        // The SMO StoredProcedure property-bag reads is_auto_executed (projected
+        // as [Startup]) alongside the rest; a missing column fails the whole bag
+        // query Msg 207 and every StoredProcedure property errors. Startup procs
+        // (sp_procoption) aren't modeled, so is_auto_executed is a constant 0.
+        using var connection = Open();
+        _ = connection.CreateCommand("create procedure dbo.p as select 1").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("""
+            select object_id, name, schema_id, type, type_desc, create_date,
+                   modify_date, is_ms_shipped, is_auto_executed
+            from sys.procedures where name = 'p'
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("p", reader.GetString(1));
+        IsFalse(reader.GetBoolean(7));  // is_ms_shipped
+        IsFalse(reader.GetBoolean(8));  // is_auto_executed
+    }
+
+    [TestMethod]
     public void Catalog_Sys_Objects_TypeP()
     {
         using var connection = Open();

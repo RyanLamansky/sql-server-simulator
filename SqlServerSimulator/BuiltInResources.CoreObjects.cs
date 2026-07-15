@@ -105,6 +105,12 @@ internal static partial class BuiltInResources
             // emit the TEXTIMAGE_ON clause; 0 suppresses it, matching the
             // single-filegroup model.
             new("lob_data_space_id", SqlType.Int32, null, false),
+            // Transactional / merge replication isn't modeled, so no table is an
+            // article — is_replicated is a constant 0 (nullable in real SQL
+            // Server). SMO's Table property-bag query projects tbl.is_replicated
+            // AS [Replicated]; without the column the whole bag query fails
+            // Msg 207 and every Table property errors.
+            new("is_replicated", SqlType.Bit, null, true),
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
@@ -146,6 +152,7 @@ internal static partial class BuiltInResources
                         lockEscalationTable,
                         SqlValue.Null(SqlType.Int32),
                         SqlValue.FromInt32(0),
+                        falseTableFlag,
                     };
                 }));
 

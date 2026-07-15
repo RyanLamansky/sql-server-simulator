@@ -166,9 +166,13 @@ internal static partial class BuiltInResources
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
         // the load-bearing surface — object_id / name / schema_id /
-        // create_date / modify_date / is_ms_shipped. Other documented
-        // columns (principal_id, is_auto_executed, is_execution_replicated,
-        // etc.) aren't modeled.
+        // create_date / modify_date / is_ms_shipped / is_auto_executed. Startup
+        // procedures (sp_procoption) aren't modeled, so is_auto_executed is a
+        // constant 0 (non-nullable bit); SMO's StoredProcedure property-bag
+        // query projects it as [Startup], and without the column the whole bag
+        // query fails Msg 207 and every StoredProcedure property errors. Other
+        // documented columns (principal_id, is_execution_replicated, etc.)
+        // aren't modeled.
         Sys("procedures",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -179,6 +183,7 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_auto_executed", SqlType.Bit, null, false),
         ], (batch, database) =>
             EnumerateProcedures(batch, database, charTwo, notMsShipped));
 
@@ -336,6 +341,14 @@ internal static partial class BuiltInResources
             new("system_type_id", SqlType.TinyInt, null, false),
             new("user_type_id", SqlType.Int32, null, false),
             new("is_exhausted", SqlType.Bit, null, false),
+            // precision / scale mirror the sequence's declared numeric type
+            // (int → 10/0, bigint → 19/0, decimal(p,s) → p/s). precision is
+            // non-nullable tinyint, scale nullable tinyint (real SQL Server
+            // shape). SMO's Sequence property-bag query projects them as
+            // [NumericPrecision] / [NumericScale]; without the columns the whole
+            // bag query fails Msg 207 and every Sequence property errors.
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, true),
         ], EnumerateSysSequences);
 
         // sys.plan_guides: plan guides aren't modeled, so the view is always
@@ -563,6 +576,7 @@ internal static partial class BuiltInResources
             foreach (var seq in schema.Sequences.Values.OrderBy(s => s.ObjectId))
             {
                 var (systemTypeId, userTypeId) = SequenceTypeIds(seq.DeclaredType);
+                var (precision, scale) = SequencePrecisionScale(seq.DeclaredType);
                 yield return [
                     SqlValue.FromSystemName(seq.Name),
                     SqlValue.FromInt32(seq.ObjectId),
@@ -581,6 +595,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromByte(systemTypeId),
                     SqlValue.FromInt32(userTypeId),
                     seq.IsExhausted ? trueBit : falseBit,
+                    SqlValue.FromByte(precision),
+                    SqlValue.FromByte(scale),
                 ];
             }
         }
@@ -600,6 +616,22 @@ internal static partial class BuiltInResources
         Int32SqlType => (56, 56),
         BigIntSqlType => (127, 127),
         DecimalSqlType => (106, 106),
+        _ => (0, 0),
+    };
+
+    /// <summary>
+    /// Maps a sequence's declared numeric type to the <c>(precision, scale)</c>
+    /// pair surfaced in <c>sys.sequences</c>: the integer types report their
+    /// documented decimal precision with scale 0 (tinyint 3, smallint 5, int 10,
+    /// bigint 19), and <c>decimal(p, s)</c> reports its declared precision/scale.
+    /// </summary>
+    private static (byte Precision, byte Scale) SequencePrecisionScale(SqlType type) => type switch
+    {
+        TinyIntSqlType => (3, 0),
+        SmallIntSqlType => (5, 0),
+        Int32SqlType => (10, 0),
+        BigIntSqlType => (19, 0),
+        DecimalSqlType d => (d.precision, d.scale),
         _ => (0, 0),
     };
 
@@ -624,6 +656,7 @@ internal static partial class BuiltInResources
         // avoid one SqlValue allocation per row.
         var procType = SqlValue.FromChar(charTwo, "P ");
         var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
+        var notAutoExecuted = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -638,6 +671,7 @@ internal static partial class BuiltInResources
                     createDate,
                     createDate,
                     notMsShipped,
+                    notAutoExecuted,
                 ];
             }
         }
