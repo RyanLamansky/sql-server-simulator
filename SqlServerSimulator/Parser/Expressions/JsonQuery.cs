@@ -35,7 +35,7 @@ internal sealed class JsonQuery : Expression
         var jsonValue = this.jsonInput.Run(runtime);
         var pathValue = this.pathInput.Run(runtime);
         if (jsonValue.IsNull || pathValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.NVarcharMax);
 
         var path = JsonPath.Parse(pathValue.AsString);
 
@@ -46,21 +46,21 @@ internal sealed class JsonQuery : Expression
         }
         catch (JsonException)
         {
-            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarchar);
+            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarcharMax);
         }
 
         using (doc)
         {
             var match = path.Walk(doc.RootElement);
             if (match is null)
-                return SqlValue.Null(SqlType.NVarchar);
+                return SqlValue.Null(SqlType.NVarcharMax);
 
             var subtree = JsonSubtree.Extract(match.Value, path.Mode);
-            return subtree is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(subtree);
+            return subtree is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
 }

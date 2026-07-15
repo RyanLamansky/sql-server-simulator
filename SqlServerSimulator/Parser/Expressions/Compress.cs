@@ -25,7 +25,7 @@ internal sealed class Compress(ParserContext context) : Expression
     {
         var value = this.operand.Run(runtime);
         if (value.IsNull)
-            return SqlValue.Null(SqlType.Varbinary);
+            return SqlValue.Null(SqlType.VarbinaryMax);
 
         var inputBytes = ExtractBytes(value);
         using var output = new MemoryStream();
@@ -33,7 +33,7 @@ internal sealed class Compress(ParserContext context) : Expression
         {
             gz.Write(inputBytes, 0, inputBytes.Length);
         }
-        return SqlValue.FromVarbinary(output.ToArray());
+        return SqlValue.FromVarbinary(SqlType.VarbinaryMax, output.ToArray());
     }
 
     private static byte[] ExtractBytes(SqlValue value)
@@ -51,7 +51,7 @@ internal sealed class Compress(ParserContext context) : Expression
         return System.Text.Encoding.Unicode.GetBytes(value.AsString);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.VarbinaryMax;
 
     internal override string DebugDisplay() => $"COMPRESS({this.operand.DebugDisplay()})";
 }

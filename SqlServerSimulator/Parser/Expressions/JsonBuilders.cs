@@ -247,7 +247,7 @@ internal static class JsonNullClauseParser
 /// <c>null</c> (Microsoft documents this default verbatim; note it is the
 /// opposite of both <c>JSON_ARRAY</c> and the <c>FOR JSON</c> clause, which
 /// omit NULLs by default). Duplicate keys are preserved verbatim (matching
-/// real SQL Server — no dedup). Result type is <see cref="SqlType.NVarchar"/>.
+/// real SQL Server — no dedup). Result type is <see cref="SqlType.NVarcharMax"/> (<c>nvarchar(max)</c>).
 /// </summary>
 /// <remarks>
 /// Probe-confirmed against SQL Server 2025 (2026-05-23): empty argument
@@ -325,10 +325,10 @@ internal sealed class JsonObject : Expression
             JsonValueRender.Append(sb, valueResult, embedRaw);
         }
         _ = sb.Append('}');
-        return SqlValue.FromNVarchar(sb.ToString());
+        return SqlValue.FromNVarchar(SqlType.NVarcharMax, sb.ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() =>
         $"JSON_OBJECT({string.Join(", ", this.entries.Select(e => $"{e.Key.DebugDisplay()}: {e.Value.DebugDisplay()}"))})";
@@ -338,7 +338,7 @@ internal sealed class JsonObject : Expression
 /// SQL <c>JSON_ARRAY([value1 [, ... valueN]] [null_clause])</c>: builds a
 /// JSON array string from a positional value list. Default null clause is
 /// <see cref="JsonNullClause.AbsentOnNull"/> (NULL values are omitted).
-/// Result type is <see cref="SqlType.NVarchar"/>.
+/// Result type is <see cref="SqlType.NVarcharMax"/> (<c>nvarchar(max)</c>).
 /// </summary>
 /// <remarks>
 /// Probe-confirmed against SQL Server 2025 (2026-05-23): empty argument
@@ -394,10 +394,10 @@ internal sealed class JsonArray : Expression
             JsonValueRender.Append(sb, result, embedRaw);
         }
         _ = sb.Append(']');
-        return SqlValue.FromNVarchar(sb.ToString());
+        return SqlValue.FromNVarchar(SqlType.NVarcharMax, sb.ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() =>
         $"JSON_ARRAY({string.Join(", ", this.items.Select(i => i.Value.DebugDisplay()))})";

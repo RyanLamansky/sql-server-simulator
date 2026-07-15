@@ -9,7 +9,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>/</c>, <c>\\b</c>, <c>\\f</c>, <c>\\n</c>, <c>\\r</c>, <c>\\t</c>,
 /// and control characters as <c>\uHHHH</c>). Real SQL Server documents
 /// only <c>'json'</c> as a valid escape mode. NULL input returns NULL.
-/// Result type is <see cref="SqlType.NVarchar"/>.
+/// Result type is <see cref="SqlType.NVarcharMax"/> (<c>nvarchar(max)</c>,
+/// matching real SQL Server) — escaping can more than double the input, so
+/// the result must stream as PLP rather than tripping the bounded wire prefix.
 /// </summary>
 internal sealed class StringEscape : Expression
 {
@@ -30,7 +32,7 @@ internal sealed class StringEscape : Expression
     {
         var v = this.textArg.Run(runtime);
         if (v.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.NVarcharMax);
         // Mode is validated for shape; only 'json' is documented. The
         // simulator accepts any string value and treats it as json (real
         // SQL Server raises Msg 9806 on unknown mode — minor divergence).
@@ -54,10 +56,10 @@ internal sealed class StringEscape : Expression
                     : sb.Append(c),
             };
         }
-        return SqlValue.FromNVarchar(sb.ToString());
+        return SqlValue.FromNVarchar(SqlType.NVarcharMax, sb.ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => $"STRING_ESCAPE({this.textArg.DebugDisplay()}, {this.modeArg.DebugDisplay()})";
 }
@@ -94,8 +96,9 @@ internal sealed class Translate : Expression
         var input = this.inputArg.Run(runtime);
         var chars = this.charsArg.Run(runtime);
         var translations = this.translationsArg.Run(runtime);
+        var resultType = ResolveResultType(input.Type);
         if (input.IsNull || chars.IsNull || translations.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(resultType);
         var charsStr = chars.CoerceTo(SqlType.NVarchar).AsString;
         var transStr = translations.CoerceTo(SqlType.NVarchar).AsString;
         if (charsStr.Length != transStr.Length)
@@ -107,10 +110,28 @@ internal sealed class Translate : Expression
             var idx = charsStr.IndexOf(c, StringComparison.Ordinal);
             _ = idx >= 0 ? sb.Append(transStr[idx]) : sb.Append(c);
         }
-        return SqlValue.FromNVarchar(sb.ToString());
+        return SqlValue.FromString(resultType, sb.ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResolveResultType(this.inputArg.GetSqlType(batch, resolveColumnType));
+
+    /// <summary>
+    /// TRANSLATE returns a value of the same length family as its input. A
+    /// MAX-form input (<c>varchar(max)</c> / <c>nvarchar(max)</c> or a
+    /// <c>text</c> / <c>ntext</c> LOB) carries unbounded length through to the
+    /// result, so it must project as <see cref="SqlType.NVarcharMax"/> to
+    /// stream over the wire as PLP; a bounded input keeps the existing
+    /// length-0 <c>nvarchar</c> shape (the simulator coerces every input to
+    /// nvarchar before processing — a minor pre-existing family divergence
+    /// from real, which preserves the varchar family for varchar input).
+    /// </summary>
+    private static NVarcharSqlType ResolveResultType(SqlType inputType) =>
+        inputType.IsLob
+            || inputType is NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+            || inputType is VarcharSqlType { length: SqlType.MaxLengthSentinel }
+            ? SqlType.NVarcharMax
+            : SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"TRANSLATE({this.inputArg.DebugDisplay()}, {this.charsArg.DebugDisplay()}, {this.translationsArg.DebugDisplay()})";
 }

@@ -22,6 +22,8 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// </summary>
 internal sealed class StringAggAggregator : Aggregator
 {
+    private const int MaxResultBytes = 8000;
+
     private readonly SqlType resultType;
 
     private readonly bool[]? orderDescending;
@@ -90,7 +92,7 @@ internal sealed class StringAggAggregator : Aggregator
             return SqlValue.Null(this.resultType);
 
         if (this.orderedBuffer is null)
-            return SqlValue.FromString(this.resultType, this.streamingBuffer.ToString());
+            return this.Materialize(this.streamingBuffer.ToString());
 
         // Sort under SqlValue.CompareTo with each column's direction; ties
         // resolve in encounter order (List<T>.Sort is unstable, but the
@@ -107,8 +109,34 @@ internal sealed class StringAggAggregator : Aggregator
                 _ = output.Append(this.orderedBuffer[i].Separator);
             _ = output.Append(this.orderedBuffer[i].Value);
         }
-        return SqlValue.FromString(this.resultType, output.ToString());
+        return this.Materialize(output.ToString());
     }
+
+    /// <summary>
+    /// Wraps the concatenated text in the aggregator's result type, first
+    /// enforcing SQL Server's 8000-byte limit for a bounded (non-MAX) operand:
+    /// an overflow raises Msg 9829 rather than silently truncating (or, on the
+    /// wire, overflowing the bounded 2-byte length prefix). A MAX-typed operand
+    /// streams unbounded and skips the check.
+    /// </summary>
+    private SqlValue Materialize(string result)
+    {
+        if (!IsMaxForm(this.resultType))
+        {
+            var byteLength = this.resultType is NVarcharSqlType or NCharSqlType || this.resultType == SqlType.NText
+                ? result.Length * 2
+                : CharSqlType.Cp1252Encoder.GetByteCount(result);
+            if (byteLength > MaxResultBytes)
+                throw SimulatedSqlException.StringAggResultExceededLimit();
+        }
+
+        return SqlValue.FromString(this.resultType, result);
+    }
+
+    private static bool IsMaxForm(SqlType type) =>
+        type.IsLob
+            || type is NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+            || type is VarcharSqlType { length: SqlType.MaxLengthSentinel };
 
     private int CompareOrderedRows(OrderedRow left, OrderedRow right)
     {

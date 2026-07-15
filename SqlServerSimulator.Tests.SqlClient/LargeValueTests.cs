@@ -79,6 +79,93 @@ public sealed class LargeValueTests
         Contains(padding, definition);
     }
 
+    // Each scalar below is nvarchar(max) on real SQL Server (probe-confirmed
+    // against SQL Server 2025). Before being retyped from the length-0
+    // "value-width" nvarchar, a result over 32,767 chars hit the codec's
+    // bounded 2-byte length prefix and overflowed the ushort — the same latent
+    // crash class as OBJECT_DEFINITION. Every expression here produces >40,000
+    // chars, so a bounded typing would kill the session; a max typing streams
+    // it as PLP. The inputs use CAST(... AS nvarchar(max)) so REPLICATE carries
+    // unbounded length through.
+    [DataRow("JSON_QUERY", "json_query(N'[0' + replicate(cast(N',0' as nvarchar(max)), 20000) + N']', '$')")]
+    [DataRow("JSON_MODIFY", "json_modify(N'{}', '$.a', replicate(cast(N'a' as nvarchar(max)), 40000))")]
+    [DataRow("JSON_OBJECT", "json_object('k': replicate(cast(N'a' as nvarchar(max)), 40000))")]
+    [DataRow("JSON_ARRAY", "json_array(replicate(cast(N'a' as nvarchar(max)), 40000))")]
+    [DataRow("STRING_ESCAPE", "string_escape(replicate(cast(N'a' as nvarchar(max)), 40000), 'json')")]
+    [DataRow("CONCAT", "concat(replicate(cast(N'a' as nvarchar(max)), 40000), N'b')")]
+    [DataRow("CONCAT_WS", "concat_ws(N',', replicate(cast(N'a' as nvarchar(max)), 40000), N'b')")]
+    [DataRow("TRANSLATE", "translate(replicate(cast(N'a' as nvarchar(max)), 40000), N'a', N'b')")]
+    [TestMethod]
+    public async Task NVarcharMaxScalars_LargeResult_RoundTripOverWire(string name, string expression)
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand($"select {expression}", connection);
+        var result = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
+
+        // 32,767 chars (65,535 bytes) is the bounded-nvarchar ushort-overflow
+        // threshold; each expression clears it (≥40,000 chars) and round-trips.
+        IsNotNull(result, name);
+        IsGreaterThan(32767, result!.Length, name);
+    }
+
+    [TestMethod]
+    public async Task Decompress_LargeResult_RoundTripsOverWire()
+    {
+        // COMPRESS / DECOMPRESS are varbinary(max) on real SQL Server; a large
+        // inflated payload exceeds the bounded wire prefix and must stream as
+        // PLP. 40,000 nvarchar(max) chars → 80,000 UTF-16 bytes inflated.
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select decompress(compress(replicate(cast(N'a' as nvarchar(max)), 40000)))", connection);
+        var result = (byte[]?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
+
+        IsNotNull(result);
+        HasCount(80000, result!);
+    }
+
+    [TestMethod]
+    public async Task StringAgg_LargeMaxOperand_RoundTripsOverWire()
+    {
+        // STRING_AGG over an nvarchar(max) operand streams unbounded, so a
+        // multi-row concatenation past the bounded wire prefix rides PLP.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (v nvarchar(max))");
+        Wire.ExecInProc(simulation,
+            "insert t (v) select replicate(cast(N'a' as nvarchar(max)), 40000) from generate_series(1, 3)");
+
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select string_agg(v, N',') from t", connection);
+        var result = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
+
+        IsNotNull(result);
+        IsGreaterThan(120000, result!.Length);
+    }
+
+    [TestMethod]
+    public async Task StringAgg_BoundedOperandOverflow_Raises9829OverWire()
+    {
+        // A bounded (non-MAX) STRING_AGG operand whose concatenation exceeds
+        // 8000 bytes raises Msg 9829 on real SQL Server (rather than truncating
+        // or, on the simulator's wire, overflowing the bounded length prefix).
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (v nvarchar(100))");
+        Wire.ExecInProc(simulation,
+            "insert t (v) select replicate(N'a', 100) from generate_series(1, 200)");
+
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select string_agg(v, N',') from t", connection);
+        var exception = await ThrowsExactlyAsync<SqlException>(
+            async () => await command.ExecuteScalarAsync(TestContext.CancellationToken));
+
+        AreEqual(9829, exception.Number);
+    }
+
     [TestMethod]
     public async Task TenThousandRows_StreamOverWire()
     {

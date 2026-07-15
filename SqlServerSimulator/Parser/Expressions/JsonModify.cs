@@ -10,10 +10,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>JSON_MODIFY(json, path, newValue)</c>: returns an updated copy
 /// of the JSON-text first argument with the value at the path replaced
-/// by the third argument. Result is typed <c>nvarchar</c> (the
-/// simulator's unspecified-length form, which the row encoder accepts
-/// into any nvarchar destination including the <c>nvarchar(MAX)</c>
-/// column EF Core's owned-types-as-JSON UPDATE targets).
+/// by the third argument. Result is typed <see cref="SqlType.NVarcharMax"/>
+/// (<c>nvarchar(max)</c>, matching real SQL Server) so an updated document
+/// larger than the bounded 2-byte wire length prefix streams as PLP rather
+/// than crashing the TDS session.
 /// </summary>
 /// <remarks>
 /// EF Core 10 emits this from <c>OwnsOne(...).ToJson()</c> partial-update
@@ -46,7 +46,7 @@ internal sealed class JsonModify : Expression
         var pathValue = this.pathInput.Run(runtime);
         var newSqlValue = this.newValueInput.Run(runtime);
         if (jsonInputValue.IsNull || pathValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.NVarcharMax);
 
         var path = JsonPath.Parse(pathValue.AsString);
 
@@ -57,18 +57,18 @@ internal sealed class JsonModify : Expression
         }
         catch (JsonException)
         {
-            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarchar);
+            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarcharMax);
         }
 
         if (path.Segments.Length == 0)
         {
             // Bare `$` — replaces the entire document with the new value.
-            return SqlValue.FromNVarchar(SqlValueAsJsonText(newSqlValue));
+            return SqlValue.FromNVarchar(SqlType.NVarcharMax, SqlValueAsJsonText(newSqlValue));
         }
 
         var (parent, leaf) = path.WalkForModify(root!);
         if (parent is null)
-            return SqlValue.FromNVarchar(root!.ToJsonString());
+            return SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
 
         var newNode = SqlValueToJsonNode(newSqlValue);
         if (leaf.IsIndex)
@@ -77,7 +77,7 @@ internal sealed class JsonModify : Expression
             {
                 return path.Mode == JsonPathMode.Strict
                     ? throw SimulatedSqlException.JsonStrictPathNotFound()
-                    : SqlValue.FromNVarchar(root!.ToJsonString());
+                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
             }
             if (leaf.Index < array.Count)
             {
@@ -98,7 +98,7 @@ internal sealed class JsonModify : Expression
             {
                 return path.Mode == JsonPathMode.Strict
                     ? throw SimulatedSqlException.JsonStrictPathNotFound()
-                    : SqlValue.FromNVarchar(root!.ToJsonString());
+                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
             }
             var leafName = leaf.Property!;
             if (obj.ContainsKey(leafName))
@@ -122,7 +122,7 @@ internal sealed class JsonModify : Expression
             }
         }
 
-        return SqlValue.FromNVarchar(root!.ToJsonString());
+        return SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
     }
 
     /// <summary>Renders a SQL value as standalone JSON text (the bare-<c>$</c> branch).</summary>
@@ -159,7 +159,7 @@ internal sealed class JsonModify : Expression
         : type == SqlType.Int32 ? value.AsInt32
         : value.AsInt64;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";
 }

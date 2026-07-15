@@ -74,30 +74,36 @@ internal sealed class StringConcat : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var anyNational = false;
+        var anyMax = false;
         for (var i = 0; i < this.arguments.Length; i++)
         {
-            if (IsNationalString(this.arguments[i].GetSqlType(batch, resolveColumnType)))
-                return SqlType.NVarchar;
+            var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
+            anyNational |= IsNationalString(type);
+            anyMax |= IsMaxForm(type);
         }
-        return SqlType.Varchar;
+        return ResolveResultType(anyNational, anyMax);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Resolve result type from runtime argument types: any national-string
-        // input promotes to nvarchar. Computed inline (not from a GetSqlType
-        // cache) because Run is reachable when GetSqlType wasn't called — e.g.
-        // when this expression is nested inside a function whose own
-        // GetSqlType doesn't cascade into operand types.
+        // input promotes to nvarchar, and any MAX-typed input widens the result
+        // to MAX so a concatenation larger than the bounded wire prefix streams
+        // as PLP. Computed inline (not from a GetSqlType cache) because Run is
+        // reachable when GetSqlType wasn't called — e.g. when this expression is
+        // nested inside a function whose own GetSqlType doesn't cascade into
+        // operand types.
         var values = new SqlValue[this.arguments.Length];
         var anyNational = false;
+        var anyMax = false;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             values[i] = this.arguments[i].Run(runtime);
-            if (IsNationalString(values[i].Type))
-                anyNational = true;
+            anyNational |= IsNationalString(values[i].Type);
+            anyMax |= IsMaxForm(values[i].Type);
         }
-        SqlType resultType = anyNational ? SqlType.NVarchar : SqlType.Varchar;
+        var resultType = ResolveResultType(anyNational, anyMax);
 
         if (this.kind == StringConcatKind.Concat)
         {
@@ -143,6 +149,28 @@ internal sealed class StringConcat : Expression
 
     private static bool IsNationalString(SqlType type) =>
         type is NVarcharSqlType or NCharSqlType || type == SqlType.NText;
+
+    /// <summary>
+    /// A MAX-form argument (<c>varchar(max)</c> / <c>nvarchar(max)</c> or a
+    /// <c>text</c> / <c>ntext</c> LOB) makes CONCAT / CONCAT_WS return a MAX
+    /// result — probe-confirmed against SQL Server 2025. A bounded / literal
+    /// argument does not.
+    /// </summary>
+    private static bool IsMaxForm(SqlType type) =>
+        type.IsLob
+            || type is NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+            || type is VarcharSqlType { length: SqlType.MaxLengthSentinel };
+
+    /// <summary>
+    /// National family wins <c>nvarchar</c> over <c>varchar</c>; a MAX input
+    /// widens the chosen family to its MAX form. The non-MAX forms keep the
+    /// length-0 "size from value" types (their pre-existing container-width
+    /// wire shape).
+    /// </summary>
+    private static SqlType ResolveResultType(bool anyNational, bool anyMax) =>
+        anyNational
+            ? (anyMax ? SqlType.NVarcharMax : SqlType.NVarchar)
+            : (anyMax ? SqlType.VarcharMax : SqlType.Varchar);
 
     private static string LowercaseName(StringConcatKind kind) => kind switch
     {

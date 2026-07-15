@@ -326,6 +326,16 @@ internal abstract partial class SqlType
     public static readonly NVarcharSqlType NVarcharMax = NVarcharSqlType.Get(MaxLengthSentinel, Collation.Baseline, Coercibility.CoercibleDefault);
 
     /// <remarks>
+    /// <c>varchar(max)</c> — the single-byte-charset counterpart of
+    /// <see cref="NVarcharMax"/>. Distinct from <see cref="Varchar"/> (length
+    /// 0 = "size from value"): a MAX-typed value streams over the TDS wire as
+    /// PLP, so it carries arbitrarily large text without tripping the bounded
+    /// 2-byte length prefix. Scalars whose real-SQL-Server result is
+    /// <c>varchar(max)</c> must use this, not <see cref="Varchar"/>.
+    /// </remarks>
+    public static readonly VarcharSqlType VarcharMax = VarcharSqlType.Get(MaxLengthSentinel, Collation.Baseline, Coercibility.CoercibleDefault);
+
+    /// <remarks>
     /// SQL Server's <c>sysname</c> — historically <c>varchar(30)</c> in 6.5,
     /// modernly <c>nvarchar(128) NOT NULL</c>. Stored on disk identically to
     /// <see cref="NVarchar"/> (UTF-16 LE), but kept as a distinct
@@ -337,10 +347,20 @@ internal abstract partial class SqlType
     /// <remarks>
     /// Stored as raw bytes — no encoding, no codepage conversion. The simulator
     /// treats the contents as immutable: callers shouldn't mutate the array
-    /// after passing it to <see cref="SqlValue.FromVarbinary"/> or after
+    /// after passing it to <see cref="SqlValue.FromVarbinary(byte[])"/> or after
     /// receiving it from <see cref="SqlValue.AsBytes"/>.
     /// </remarks>
     public static readonly VarbinarySqlType Varbinary = VarbinarySqlType.Unspecified;
+
+    /// <remarks>
+    /// <c>varbinary(max)</c> — the MAX-length form of <see cref="Varbinary"/>
+    /// (length 0 = "size from value"). A MAX-typed value streams over the TDS
+    /// wire as PLP, so it carries arbitrarily large byte payloads without
+    /// tripping the bounded 2-byte length prefix. Scalars whose real-SQL-Server
+    /// result is <c>varbinary(max)</c> (<c>COMPRESS</c> / <c>DECOMPRESS</c>)
+    /// must use this, not <see cref="Varbinary"/>.
+    /// </remarks>
+    public static readonly VarbinarySqlType VarbinaryMax = VarbinarySqlType.MaxForm;
 
     /// <remarks>
     /// SQL Server's deprecated <c>text</c> type: <c>varchar</c>-shaped CP1252

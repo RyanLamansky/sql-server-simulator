@@ -204,6 +204,33 @@ public sealed class AggregateTests
         AreEqual(DBNull.Value, connection.CreateCommand("select string_agg(s, ',') from t").ExecuteScalar());
     }
 
+    /// <summary>
+    /// A bounded (non-MAX) STRING_AGG operand whose concatenation exceeds 8000
+    /// bytes raises Msg 9829 on real SQL Server (probe-confirmed against SQL
+    /// Server 2025) rather than truncating — 200 rows × 100 nvarchar chars is
+    /// 40,000 bytes.
+    /// </summary>
+    [TestMethod]
+    public void StringAgg_BoundedOperandOverflow_Raises9829()
+        => new Simulation().AssertSqlError("""
+            create table t (v nvarchar(100));
+            insert t (v) select replicate(N'a', 100) from generate_series(1, 200);
+            select string_agg(v, N',') from t
+            """, 9829);
+
+    /// <summary>
+    /// A MAX-typed STRING_AGG operand streams unbounded (no 8000-byte limit),
+    /// so a large multi-row concatenation materializes intact — and, retyped
+    /// through the operand's <c>nvarchar(max)</c>, rides PLP over the wire.
+    /// </summary>
+    [TestMethod]
+    public void StringAgg_MaxOperand_NoLimitEnforced()
+        => AreEqual(120002, ((string)new Simulation().ExecuteScalar("""
+            create table t (v nvarchar(max));
+            insert t (v) select replicate(cast(N'a' as nvarchar(max)), 40000) from generate_series(1, 3);
+            select string_agg(v, N',') from t
+            """)!).Length);
+
     [TestMethod]
     public void StringAgg_WithinGroup_OrderByAsc_ReordersConcatenation()
         => AreEqual("alice,bob,charlie", Seeded("s nvarchar(20)", "('charlie'), ('alice'), ('bob')")

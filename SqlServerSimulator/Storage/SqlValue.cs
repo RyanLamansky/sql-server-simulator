@@ -140,6 +140,20 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.Varbinary, 0, value, isNull: false);
     }
 
+    /// <summary>
+    /// Non-NULL SQL <c>varbinary</c> value carrying an explicit varbinary type
+    /// (e.g. <see cref="SqlType.VarbinaryMax"/> for <c>varbinary(max)</c>
+    /// producers such as <c>COMPRESS</c> / <c>DECOMPRESS</c>, whose payload can
+    /// exceed the bounded 2-byte wire length prefix). The array is held by
+    /// reference; callers shouldn't mutate it after construction.
+    /// </summary>
+    public static SqlValue FromVarbinary(VarbinarySqlType type, byte[] value)
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        ArgumentNullException.ThrowIfNull(value);
+        return new(type, 0, value, isNull: false);
+    }
+
     /// <summary>Non-NULL SQL deprecated <c>text</c> value. Encoded as CP1252 bytes; same in-memory shape as <see cref="FromVarchar(string)"/>.</summary>
     public static SqlValue FromText(string value)
     {
@@ -154,7 +168,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.NText, 0, value, isNull: false);
     }
 
-    /// <summary>Non-NULL SQL deprecated <c>image</c> value. Same caller-owns-the-bytes contract as <see cref="FromVarbinary"/>.</summary>
+    /// <summary>Non-NULL SQL deprecated <c>image</c> value. Same caller-owns-the-bytes contract as <see cref="FromVarbinary(byte[])"/>.</summary>
     public static SqlValue FromImage(byte[] value)
     {
         ArgumentNullException.ThrowIfNull(value);

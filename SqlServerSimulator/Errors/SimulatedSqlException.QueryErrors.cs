@@ -642,4 +642,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException OutputClauseNotAllowedInInsertExec() =>
         new("The OUTPUT clause cannot be used in an INSERT...EXEC statement.", 483, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 9829: a <c>STRING_AGG</c> whose operand is a
+    /// bounded (non-MAX) string type produced a concatenation exceeding 8000
+    /// bytes. Real SQL Server raises this rather than truncating; a MAX-typed
+    /// operand streams unbounded and never trips it. Wording and Level 16
+    /// probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException StringAggResultExceededLimit() =>
+        new("STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation.", 9829, 16, 1);
 }

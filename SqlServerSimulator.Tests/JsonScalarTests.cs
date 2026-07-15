@@ -40,6 +40,23 @@ public sealed class JsonScalarTests
     public void JsonValue_NullJsonValue_ReturnsNull()
         => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"n\":null}', '$.n')"));
 
+    /// <summary>
+    /// JSON_VALUE is nvarchar(4000); a scalar string exactly 4000 chars long
+    /// returns intact (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void JsonValue_ScalarAtCap_ReturnsValue()
+        => AreEqual(4000, ((string)ExecuteScalar("select json_value('{\"a\":\"' + replicate(cast('x' as varchar(max)), 4000) + '\"}', '$.a')")!).Length);
+
+    /// <summary>
+    /// A scalar string longer than 4000 chars yields NULL in the default lax
+    /// mode (probe-confirmed: 4000 → value, 4001 → NULL). Enforcing the cap
+    /// also keeps the length-0 result within the bounded wire length prefix.
+    /// </summary>
+    [TestMethod]
+    public void JsonValue_ScalarOverCap_ReturnsNullLax()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"a\":\"' + replicate(cast('x' as varchar(max)), 4001) + '\"}', '$.a')"));
+
     /// <summary>Lax mode: scalar-only — non-scalar match yields NULL, not the JSON text.</summary>
     [TestMethod]
     public void JsonValue_ObjectMatch_ReturnsNullLax()

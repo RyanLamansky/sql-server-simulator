@@ -28,7 +28,7 @@ internal sealed class Decompress(ParserContext context) : Expression
     {
         var value = this.operand.Run(runtime);
         if (value.IsNull)
-            return SqlValue.Null(SqlType.Varbinary);
+            return SqlValue.Null(SqlType.VarbinaryMax);
 
         var compressed = value.AsBytes;
         try
@@ -37,7 +37,7 @@ internal sealed class Decompress(ParserContext context) : Expression
             using var gz = new GZipStream(input, CompressionMode.Decompress);
             using var output = new MemoryStream();
             gz.CopyTo(output);
-            return SqlValue.FromVarbinary(output.ToArray());
+            return SqlValue.FromVarbinary(SqlType.VarbinaryMax, output.ToArray());
         }
         catch (InvalidDataException)
         {
@@ -47,11 +47,11 @@ internal sealed class Decompress(ParserContext context) : Expression
             // the production path doesn't depend on the specific wording.
             // Returning NULL keeps the loader resilient; if a future test
             // pins the wording we can promote to a proper factory.
-            return SqlValue.Null(SqlType.Varbinary);
+            return SqlValue.Null(SqlType.VarbinaryMax);
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.VarbinaryMax;
 
     internal override string DebugDisplay() => $"DECOMPRESS({this.operand.DebugDisplay()})";
 }

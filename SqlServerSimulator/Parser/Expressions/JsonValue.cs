@@ -18,6 +18,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class JsonValue : Expression
 {
+    /// <summary>JSON_VALUE's <c>nvarchar(4000)</c> result cap; a longer scalar reads as NULL in lax mode.</summary>
+    private const int MaxScalarChars = 4000;
+
     private readonly Expression jsonInput;
     private readonly Expression pathInput;
 
@@ -57,7 +60,12 @@ internal sealed class JsonValue : Expression
             var element = match.Value;
             return element.ValueKind switch
             {
-                JsonValueKind.String => SqlValue.FromNVarchar(element.GetString()!),
+                // JSON_VALUE returns nvarchar(4000); a scalar string longer than
+                // 4000 chars yields NULL in the default lax mode (probe-confirmed
+                // against SQL Server 2025: 4000 → value, 4001 → NULL). Enforcing
+                // the cap also keeps the length-0 result within the bounded wire
+                // prefix — an uncapped multi-KB value would overflow it.
+                JsonValueKind.String => element.GetString() is { Length: <= MaxScalarChars } s ? SqlValue.FromNVarchar(s) : SqlValue.Null(SqlType.NVarchar),
                 JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
                 JsonValueKind.True => SqlValue.FromNVarchar("true"),
                 JsonValueKind.False => SqlValue.FromNVarchar("false"),
