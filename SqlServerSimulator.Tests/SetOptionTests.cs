@@ -102,4 +102,27 @@ public sealed class SetOptionTests
         // hand off cleanly.
         AreEqual(1, new Simulation().ExecuteScalar("SET ANSI_NULLS ON; SELECT 1"));
     }
+
+    [TestMethod]
+    public void LockTimeout_NegativeOne_ParsesAndReadsBack()
+        => AreEqual(-1, new Simulation().ExecuteScalar("SET LOCK_TIMEOUT 5000 SET LOCK_TIMEOUT -1 SELECT @@LOCK_TIMEOUT"));
+
+    [TestMethod]
+    public void Textsize_NegativeOne_Parses()
+        => AreEqual(1, new Simulation().ExecuteScalar("SET TEXTSIZE -1 SELECT 1"));
+
+    [TestMethod]
+    public void SmoScriptingPreamble_Parses()
+    {
+        // The exact semicolon-less SET barrage SMO's scripting connection
+        // sends before Script-As (harvested from the SSMS shakedown,
+        // 2026-07-16): signed LOCK_TIMEOUT and ANSI_NULL_DFLT_ON were the
+        // two gaps it surfaced.
+        AreEqual(1, new Simulation().ExecuteScalar(
+            "SET ROWCOUNT 0 SET TEXTSIZE 2147483647 SET NOCOUNT OFF SET CONCAT_NULL_YIELDS_NULL ON SET ARITHABORT ON"
+            + " SET LOCK_TIMEOUT -1 SET QUERY_GOVERNOR_COST_LIMIT 0 SET DEADLOCK_PRIORITY NORMAL"
+            + " SET TRANSACTION ISOLATION LEVEL READ COMMITTED  SET ANSI_NULLS ON SET ANSI_NULL_DFLT_ON ON"
+            + " SET ANSI_PADDING ON SET ANSI_WARNINGS ON SET CURSOR_CLOSE_ON_COMMIT OFF SET IMPLICIT_TRANSACTIONS OFF"
+            + " SET QUOTED_IDENTIFIER ON SELECT 1"));
+    }
 }

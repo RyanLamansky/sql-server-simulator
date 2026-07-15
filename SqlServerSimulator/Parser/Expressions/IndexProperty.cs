@@ -25,8 +25,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <see cref="KeyConstraint.Kind"/> for PK / UNIQUE constraints).</description></item>
 /// <item><description><c>IsAutoStatistics</c>, <c>IndexDepth</c>,
 /// <c>IndexFillFactor</c>, <c>IsHypothetical</c>, <c>IsPadIndex</c>,
-/// <c>IsStatistics</c> — always 0 (no B-tree storage; matches probed
-/// real-server behavior on a freshly-created index with no stats).</description></item>
+/// <c>IsStatistics</c>, <c>IsFulltextKey</c>,
+/// <c>IsOptimizedForSequentialKey</c> — always 0 (no B-tree storage;
+/// matches probed real-server behavior on a freshly-created index with
+/// no stats).</description></item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -129,6 +131,14 @@ internal sealed class IndexProperty : Expression
                 "ISSTATISTICS" => 0,
                 _ => null,
             },
+            13 => upper switch
+            {
+                // 0 for every modeled index — the full-text KEY index isn't
+                // surfaced through INDEXPROPERTY (probe-confirmed 0 on a
+                // non-full-text-key index).
+                "ISFULLTEXTKEY" => 0,
+                _ => null,
+            },
             14 => upper switch
             {
                 "ISHYPOTHETICAL" => 0,
@@ -142,6 +152,11 @@ internal sealed class IndexProperty : Expression
             16 => upper switch
             {
                 "ISAUTOSTATISTICS" => 0,
+                _ => null,
+            },
+            27 => upper switch
+            {
+                "ISOPTIMIZEDFORSEQUENTIALKEY" => 0,
                 _ => null,
             },
             _ => null,

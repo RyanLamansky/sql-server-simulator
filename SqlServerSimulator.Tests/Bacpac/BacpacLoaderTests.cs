@@ -132,6 +132,27 @@ public class BacpacLoaderTests
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.default_constraints;"));
     }
 
+    // DACFx emits DefaultExpressionScript already parenthesized (e.g.
+    // "(NEXT VALUE FOR ...)" / "(getdate())"). The loader must not add a second
+    // pair — real sys.default_constraints.definition carries exactly one outer
+    // pair, so an already-parenthesized script passes through unwrapped.
+    [TestMethod]
+    public void Default_ParenthesizedExpressionScript_NotDoubleWrapped()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t
+                .Column("Id", "int")
+                .Column("N", "int")
+                .PrimaryKey("PK_T", "Id")
+                .Default("DF_T_N", "N", "(1)"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("(1)", sim.ExecuteScalar("SELECT definition FROM sys.default_constraints WHERE name = 'DF_T_N';"));
+    }
+
     [TestMethod]
     public void DatabaseOption_ReadCommittedSnapshot_TogglesFlag()
     {

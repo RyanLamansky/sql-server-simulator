@@ -191,7 +191,21 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
             return (b.Collation ?? Baseline, cb);
         var aCol = a.Collation ?? Baseline;
         var bCol = b.Collation ?? Baseline;
-        return StringComparer.OrdinalIgnoreCase.Equals(aCol.Name, bCol.Name) ? (aCol, ca) : null;
+        if (StringComparer.OrdinalIgnoreCase.Equals(aCol.Name, bCol.Name))
+            return (aCol, ca);
+        // Two same-rank operands with different collations are unresolvable at
+        // Implicit / Explicit rank (Msg 468 / 457), but NOT at
+        // CoercibleDefault: SQL Server's coercibility rules make two
+        // coercible-default operands always resolve to the current database's
+        // default collation — they never conflict. The simulator doesn't thread
+        // the active database collation into this static resolver, so it picks
+        // the operand carrying a concrete (non-Baseline) collation over the
+        // Baseline fallback that unpinned system-function results use; for the
+        // ASCII identifiers these comparisons overwhelmingly involve, the
+        // choice is equality-neutral.
+        return ca == Coercibility.CoercibleDefault
+            ? (ReferenceEquals(aCol, Baseline) ? bCol : aCol, Coercibility.CoercibleDefault)
+            : null;
     }
 
     public abstract int Compare(string? x, string? y);

@@ -33,7 +33,9 @@ dotnet test
 
 Every `.csproj` sets `EnforceCodeStyleInBuild=true`, so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations. No separate `dotnet format` pass — it catches nothing build doesn't. CI matrix: Debug + Release. `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
 
-Full suite runs in ~3s; single-test filter (`--filter "FullyQualifiedName~Foo"`) under 100ms. Treat `dotnet test` as a verifier between micro-edits, not a checkpoint.
+A full build + test cycle runs 20–30s; single-test filter (`--filter "FullyQualifiedName~Foo"`) stays fast. Still cheap enough to treat `dotnet test` as a verifier between micro-edits, not a checkpoint.
+
+**No large binary files in the repo** (bacpacs included — the WWI/AW `.bacpac` fixtures live gitignored under `.vs/`, local-only). Tests get their data by scripting the key shapes in-code (`CREATE TABLE` + inserts, `BacpacBuilder` for import tests), never by committing a fixture blob.
 
 ## Architecture — load-bearing patterns
 

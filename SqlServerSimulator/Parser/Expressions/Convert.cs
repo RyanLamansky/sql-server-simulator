@@ -87,16 +87,18 @@ internal sealed class ConvertExpression : Expression
         }
 
         var sourceValue = this.source.Run(runtime);
+        var dbCollation = runtime.Batch.CurrentDatabase.Collation;
         if (sourceValue.IsNull)
-            return SqlValue.Null(this.targetType);
+            return Cast.RecollateStringResult(SqlValue.Null(this.targetType), this.targetType, sourceValue.Type, dbCollation);
 
+        SqlValue coerced;
         try
         {
             // Style is meaningful only for the six (source-family, target-
             // family) pairs listed below; the default arm and the no-style
             // branch both fall through to the styleless coercion, matching
             // SQL Server's "silently ignore unused style" behavior.
-            return styleCode is int sc
+            coerced = styleCode is int sc
                 ? (sourceValue.Type, this.targetType) switch
                 {
                     ({ Category: SqlTypeCategory.DateTime }, { Category: SqlTypeCategory.String })
@@ -117,11 +119,14 @@ internal sealed class ConvertExpression : Expression
         }
         catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
         {
-            return SqlValue.Null(this.targetType);
+            coerced = SqlValue.Null(this.targetType);
         }
+
+        return Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.targetType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        Cast.ResultStringType(this.targetType, this.source.GetSqlType(batch, resolveColumnType), batch.CurrentDatabase.Collation) ?? this.targetType;
 
     internal override string DebugDisplay() =>
         this.style is null

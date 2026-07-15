@@ -97,13 +97,28 @@ internal sealed class CaseExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.thens[0].GetSqlType(batch, resolveColumnType);
-        for (var i = 1; i < this.thens.Length; i++)
-            t = SqlType.Promote(t, this.thens[i].GetSqlType(batch, resolveColumnType));
+        SqlType? t = null;
+        foreach (var then in this.thens)
+            t = CombineArmType(t, then, batch, resolveColumnType);
         if (this.elseBranch is not null)
-            t = SqlType.Promote(t, this.elseBranch.GetSqlType(batch, resolveColumnType));
-        this.cachedResultType = t;
-        return t;
+            t = CombineArmType(t, this.elseBranch, batch, resolveColumnType);
+        // Every branch is a bare NULL literal (or the CASE has an implicit
+        // ELSE NULL only) — fall back to the untyped-NULL placeholder type.
+        this.cachedResultType = t ?? SqlType.Int32;
+        return this.cachedResultType;
+    }
+
+    // A bare NULL literal is typeless in SQL Server's CASE result-type
+    // resolution: it yields to the typed branches rather than forcing the
+    // literal's placeholder int type onto the whole expression. So
+    // `CASE WHEN … THEN 'x' ELSE NULL END` is nvarchar, not int. Only when
+    // every branch is an untyped NULL does the placeholder type stand.
+    private static SqlType? CombineArmType(SqlType? acc, Expression arm, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (arm is Value { Constant.IsNull: true })
+            return acc;
+        var armType = arm.GetSqlType(batch, resolveColumnType);
+        return acc is null ? armType : SqlType.Promote(acc, armType);
     }
 
     internal override string DebugDisplay() => "CASE ...";

@@ -46,7 +46,7 @@ Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and 
 |---|---|
 | 1 | DB options + schemas + UDDTs + sequences + roles + table types + filegroups (silent skip) + partition function/scheme/columnstore (silent skip) |
 | 2 | Tables (columns only, defaults inline, computed columns deferred to phase 8) |
-| 3 | Constraints (PK / UQ / CHECK / DEFAULT) |
+| 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
 | 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) |
 | 6 | Views |

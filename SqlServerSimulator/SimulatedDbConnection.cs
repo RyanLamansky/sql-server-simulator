@@ -100,6 +100,17 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool QuotedIdentifiers = true;
 
     /// <summary>
+    /// UTC instant this connection object was constructed, surfaced as
+    /// <c>sys.dm_exec_sessions.login_time</c> (and its
+    /// <c>last_request_start_time</c> / <c>last_request_end_time</c>
+    /// placeholders). Construction is the closest simulator analogue to a
+    /// login handshake — the TDS endpoint constructs one per authenticated
+    /// session, and in-process consumers construct via
+    /// <c>CreateDbConnection()</c>.
+    /// </summary>
+    internal readonly DateTime LoginTimeUtc = DateTime.UtcNow;
+
+    /// <summary>
     /// Session-scoped transaction-isolation level. Default is
     /// <see cref="IsolationLevel.ReadCommitted"/> (matches SQL Server's
     /// connection-default). Mutated by

@@ -85,6 +85,16 @@ partial class Simulation
             return true;
         }
 
+        // Integer-shaped options accept a signed value: SMO's scripting
+        // preamble sends `SET LOCK_TIMEOUT -1`, where `-1` tokenizes as an
+        // Operator('-') followed by the Numeric.
+        var negativeInteger = false;
+        if (firstKind is SetOptionKind.Integer or SetOptionKind.IntegerOrIdent && context.Token is Operator { Character: '-' })
+        {
+            negativeInteger = true;
+            context.MoveNextRequired();
+        }
+
         if (!ConsumeValueForKind(context, firstKind))
             return false;
 
@@ -100,7 +110,7 @@ partial class Simulation
         if (firstName.Equals("LOCK_TIMEOUT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
         {
             if (context.Token is Numeric { Value: { IsNull: false, Type: var t } literal } && t == SqlType.Int32)
-                context.Connection.LockTimeoutMillis = literal.AsInt32;
+                context.Connection.LockTimeoutMillis = negativeInteger ? -literal.AsInt32 : literal.AsInt32;
         }
 
         // CONTEXT_INFO carries semantic effect: store the binary value,
@@ -270,11 +280,17 @@ partial class Simulation
     /// <summary>
     /// Reads the value token following a ReservedKeyword SET option that
     /// takes an integer (ROWCOUNT / TEXTSIZE). Cursor on entry is positioned
-    /// at the option keyword; advances once and validates the next token is
-    /// a non-NULL <see cref="Numeric"/>.
+    /// at the option keyword; advances once (twice for a signed value —
+    /// <c>SET TEXTSIZE -1</c> is real's reset-to-default form) and validates
+    /// the value token is a non-NULL <see cref="Numeric"/>.
     /// </summary>
     private static bool ConsumeIntegerValue(ParserContext context)
-        => context.GetNextRequired() is Numeric { Value.IsNull: false };
+    {
+        var value = context.GetNextRequired();
+        if (value is Operator { Character: '-' })
+            value = context.GetNextRequired();
+        return value is Numeric { Value.IsNull: false };
+    }
 
     /// <summary>
     /// Reads the value token for an option's value-shape. Cursor on entry
@@ -315,6 +331,8 @@ partial class Simulation
     private static readonly FrozenDictionary<string, SetOptionKind> RecognizedOptions = new Dictionary<string, SetOptionKind>
     {
         ["ANSI_NULLS"] = SetOptionKind.OnOff,
+        ["ANSI_NULL_DFLT_ON"] = SetOptionKind.OnOff,
+        ["ANSI_NULL_DFLT_OFF"] = SetOptionKind.OnOff,
         ["QUOTED_IDENTIFIER"] = SetOptionKind.OnOff,
         ["ANSI_WARNINGS"] = SetOptionKind.OnOff,
         ["ANSI_PADDING"] = SetOptionKind.OnOff,

@@ -173,11 +173,18 @@ internal static class BuiltInResources
         var temporalDescBase = SqlValue.FromNVarchar("SYSTEM_VERSIONED_TEMPORAL_TABLE");
         var falseTableFlag = SqlValue.FromBoolean(false);
         var ledgerTypeNone = SqlValue.FromByte(0);
+        var lockEscalationTable = SqlValue.FromString(nvarchar60Catalog, "TABLE");
+        var durabilityDescSchemaAndData = SqlValue.FromString(nvarchar60Catalog, "SCHEMA_AND_DATA");
         Sys("tables",
         [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
+            // No explicit table owner is modeled (ownership follows the
+            // schema), so principal_id is always NULL — matching real SQL
+            // Server for tables without an AUTHORIZATION override. SMO's
+            // CREATE-scripting table query reads it.
+            new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, false),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
@@ -196,7 +203,40 @@ internal static class BuiltInResources
             new("is_external", SqlType.Bit, null, false),
             new("is_node", SqlType.Bit, null, false),
             new("is_edge", SqlType.Bit, null, false),
+            // Only memory-optimized tables have a non-default durability; every
+            // simulator table is disk-based, so durability is a constant 0 /
+            // SCHEMA_AND_DATA. SMO's CREATE-scripting table query reads it.
+            new("durability", SqlType.TinyInt, null, true),
+            new("durability_desc", nvarchar60Catalog, 60, true),
             new("ledger_type", SqlType.TinyInt, null, false),
+            // Ledger isn't modeled, so ledger_view_id (the object_id of the
+            // ledger view over an append-only / updatable ledger table) is
+            // always NULL — SMO's CREATE-scripting table query selects
+            // t.ledger_view_id to detect a ledger table.
+            new("ledger_view_id", SqlType.Int32, null, true),
+            // uses_ansi_nulls reflects the SET ANSI_NULLS state at CREATE time;
+            // every simulator table is created under ANSI_NULLS ON, so it is a
+            // constant 1. is_dropped_ledger_table is 0 (ledger unmodeled); SMO's
+            // CREATE-scripting table query reads both.
+            new("uses_ansi_nulls", SqlType.Bit, null, true),
+            new("is_dropped_ledger_table", SqlType.Bit, null, true),
+            // Lock escalation isn't tunable in the simulator, so every table
+            // reports the default TABLE escalation (0 / TABLE). SMO's
+            // CREATE-scripting table query reads lock_escalation to emit the
+            // LOCK_ESCALATION option when it differs from the default.
+            new("lock_escalation", SqlType.TinyInt, null, true),
+            new("lock_escalation_desc", nvarchar60Catalog, 60, true),
+            // FILESTREAM isn't modeled, so filestream_data_space_id is always
+            // NULL — SMO's index-scripting query LEFT JOINs sys.data_spaces on
+            // it to detect a FILESTREAM filegroup / partition scheme.
+            new("filestream_data_space_id", SqlType.Int32, null, true),
+            // The simulator models a single implicit PRIMARY filegroup with no
+            // separate LOB data space, so lob_data_space_id is a constant 0
+            // (probe-confirmed non-null; 0 = no distinct LOB filegroup). SMO's
+            // CREATE-scripting table query LEFT JOINs sys.data_spaces on it to
+            // emit the TEXTIMAGE_ON clause; 0 suppresses it, matching the
+            // single-filegroup model.
+            new("lob_data_space_id", SqlType.Int32, null, false),
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
@@ -214,6 +254,7 @@ internal static class BuiltInResources
                         SqlValue.FromInt32(t.ObjectId),
                         SqlValue.FromSystemName(t.Name),
                         SqlValue.FromInt32(t.SchemaId),
+                        SqlValue.Null(SqlType.Int32),
                         tableType,
                         tableTypeDesc,
                         SqlValue.FromDateTime(t.CreateDate),
@@ -227,7 +268,16 @@ internal static class BuiltInResources
                         falseTableFlag,
                         falseTableFlag,
                         falseTableFlag,
+                        SqlValue.FromByte(0),
+                        durabilityDescSchemaAndData,
                         ledgerTypeNone,
+                        SqlValue.Null(SqlType.Int32),
+                        SqlValue.FromBoolean(true),
+                        falseTableFlag,
+                        SqlValue.FromByte(0),
+                        lockEscalationTable,
+                        SqlValue.Null(SqlType.Int32),
+                        SqlValue.FromInt32(0),
                     };
                 }));
 
@@ -248,6 +298,24 @@ internal static class BuiltInResources
         var checkTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var zeroParent = SqlValue.FromInt32(0);
         Sys("objects",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, true),
+        ], (batch, database) =>
+            EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
+
+        // sys.all_objects: real SQL Server's superset of sys.objects that also
+        // surfaces system objects. SMO correlates only on user-object ids, so
+        // the identical user-object row set suffices (same parity contract as
+        // sys.all_columns vs sys.columns).
+        Sys("all_objects",
         [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, true),
@@ -305,11 +373,277 @@ internal static class BuiltInResources
             new("is_dropped_ledger_column", SqlType.Bit, null, true),
             new("vector_dimensions", SqlType.Int32, null, true),
             new("vector_base_type_desc", SqlType.NVarchar, 20, true),
+            // Ledger isn't modeled, so the ledger-view column-mapping pair is
+            // always NULL — SMO's CREATE-scripting column query selects
+            // ledger_view_column_type to detect a ledger-view column.
+            new("ledger_view_column_type", SqlType.Int32, null, true),
+            new("ledger_view_column_type_desc", nvarchar60Catalog, 60, true),
+            // Probe-confirmed columns SMO's SSMS CREATE-scripting column query
+            // reads off sys.all_columns. is_ansi_padded is derived from the
+            // type; default_object_id points at the column's DEFAULT constraint
+            // (0 when none); generated_always_type carries the temporal ROW
+            // START / END marker; is_hidden reflects a HIDDEN period column.
+            // Encryption (Always Encrypted), FILESTREAM, data masking, graph
+            // tables, and rules aren't modeled, so those columns are NULL / 0.
+            new("is_ansi_padded", SqlType.Bit, null, false),
+            new("column_encryption_key_id", SqlType.Int32, null, true),
+            new("default_object_id", SqlType.Int32, null, false),
+            new("encryption_algorithm_name", SqlType.SystemName, 128, true),
+            new("encryption_type", SqlType.Int32, null, true),
+            new("generated_always_type", SqlType.TinyInt, null, true),
+            new("graph_type", SqlType.Int32, null, true),
+            new("is_filestream", SqlType.Bit, null, false),
+            new("is_hidden", SqlType.Bit, null, true),
+            new("is_masked", SqlType.Bit, null, false),
+            new("is_rowguidcol", SqlType.Bit, null, false),
+            new("rule_object_id", SqlType.Int32, null, false),
         ];
         IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation);
         Sys("columns", ColumnsShape(), ColumnRows);
         Sys("all_columns", ColumnsShape(), ColumnRows);
+
+        // sys.periods: one row per table carrying a PERIOD FOR SYSTEM_TIME
+        // declaration. History tables are excluded (they hold no PERIOD of
+        // their own — the simulator copies PeriodColumns onto the history
+        // sibling for the FOR SYSTEM_TIME query machinery, but real SQL Server
+        // only surfaces the base table's period). The only period_type SQL
+        // Server defines is SYSTEM_TIME (1 / SYSTEM_TIME_PERIOD); the period
+        // name is always 'SYSTEM_TIME'. start_/end_column_id are the 1-based
+        // column ordinals of the ROW START / ROW END columns.
+        var systemTimeName = SqlValue.FromSystemName("SYSTEM_TIME");
+        var periodTypeSystemTime = SqlValue.FromByte(1);
+        var periodTypeDescSystemTime = SqlValue.FromString(nvarchar60Catalog, "SYSTEM_TIME_PERIOD");
+        Sys("periods",
+        [
+            new("name", SqlType.SystemName, 128, true),
+            new("period_type", SqlType.TinyInt, null, true),
+            new("period_type_desc", nvarchar60Catalog, 60, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("start_column_id", SqlType.Int32, null, false),
+            new("end_column_id", SqlType.Int32, null, false),
+        ], (batch, database) =>
+            database.Schemas.Values
+                .SelectMany(s => s.HeapTables.Values)
+                .Where(t => t.PeriodColumns is not null && !t.IsHistoryTable)
+                .OrderBy(t => t.ObjectId)
+                .Select(t => new SqlValue[]
+                {
+                    systemTimeName,
+                    periodTypeSystemTime,
+                    periodTypeDescSystemTime,
+                    SqlValue.FromInt32(t.ObjectId),
+                    SqlValue.FromInt32(t.PeriodColumns!.Value.StartOrdinal + 1),
+                    SqlValue.FromInt32(t.PeriodColumns.Value.EndOrdinal + 1),
+                }));
+
+        // sys.change_tracking_tables / sys.external_tables / sys.filetables:
+        // change tracking, PolyBase external tables, and FileTables aren't
+        // modeled, so each is an empty view with the documented SQL Server 2025
+        // shape. SMO's CREATE-scripting table query LEFT JOINs all three to
+        // detect those table flavors; the empty projection resolves the join
+        // to "not one of these".
+        Sys("change_tracking_tables",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("is_track_columns_updated_on", SqlType.Bit, null, false),
+            new("min_valid_version", SqlType.BigInt, null, true),
+            new("begin_version", SqlType.BigInt, null, true),
+            new("cleanup_version", SqlType.BigInt, null, true),
+        ], static (batch, database) => []);
+
+        Sys("external_tables",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("max_column_id_used", SqlType.Int32, null, true),
+            new("uses_ansi_nulls", SqlType.Bit, null, true),
+            new("data_source_id", SqlType.Int32, null, false),
+            new("file_format_id", SqlType.Int32, null, true),
+            new("location", SqlType.NVarchar, 4000, true),
+            new("reject_type", SqlType.NVarchar, 20, true),
+            new("reject_value", SqlType.Float, null, true),
+            new("reject_sample_value", SqlType.Float, null, true),
+            new("distribution_type", SqlType.TinyInt, null, true),
+            new("distribution_desc", SqlType.NVarchar, 120, true),
+            new("sharding_col_id", SqlType.Int32, null, true),
+            new("remote_schema_name", SqlType.NVarchar, 128, true),
+            new("remote_object_name", SqlType.NVarchar, 128, true),
+            new("rejected_row_location", SqlType.NVarchar, 4000, true),
+            new("table_options", SqlType.NVarchar, 1000, true),
+            new("partition_type", SqlType.Int32, null, false),
+            new("partition_desc", SqlType.NVarchar, 60, true),
+        ], static (batch, database) => []);
+
+        Sys("filetables",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("is_enabled", SqlType.Bit, null, false),
+            new("directory_name", SqlType.NVarchar, 256, false),
+            new("filename_collation_id", SqlType.Int32, null, false),
+            new("filename_collation_name", SqlType.NVarchar, 129, false),
+        ], static (batch, database) => []);
+
+        // sys.masked_columns: Dynamic Data Masking isn't modeled, so this is
+        // an empty view. Real SQL Server surfaces it as sys.columns filtered to
+        // is_masked = 1 plus a masking_function column; the simulator ships the
+        // load-bearing subset SMO's CREATE-scripting column query reads via a
+        // correlated subquery (object_id / column_id / masking_function).
+        Sys("masked_columns",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("column_id", SqlType.Int32, null, false),
+            new("is_masked", SqlType.Bit, null, true),
+            new("masking_function", SqlType.NVarchar, 4000, true),
+        ], static (batch, database) => []);
+
+        // sys.computed_columns: one row per computed column. Real SQL Server
+        // surfaces the full sys.columns shape plus definition / is_persisted /
+        // uses_database_collation; the simulator ships the load-bearing subset
+        // SMO's CREATE-scripting column query LEFT JOINs (object_id / column_id
+        // / definition / is_persisted). The computed-expression source text
+        // isn't retained by the model (only the parsed expression is), so
+        // definition is NULL — a known scripting-fidelity gap (the computed
+        // column scripts without its AS (…) body). See docs/claude/catalog-views.md.
+        Sys("computed_columns",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("column_id", SqlType.Int32, null, false),
+            new("is_nullable", SqlType.Bit, null, true),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_database_collation", SqlType.Bit, null, false),
+            new("is_persisted", SqlType.Bit, null, false),
+            new("is_computed", SqlType.Bit, null, true),
+        ], EnumerateComputedColumns);
+
+        // sys.identity_columns: one row per IDENTITY column. Real SQL Server
+        // types seed_value / increment_value / last_value as sql_variant; the
+        // simulator surfaces them as bigint (the same sql_variant-to-concrete
+        // substitution sys.sequences / sys.configurations use). SMO's
+        // CREATE-scripting column query reads seed_value / increment_value /
+        // is_not_for_replication. last_value tracks the identity high-water mark.
+        Sys("identity_columns",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("column_id", SqlType.Int32, null, false),
+            new("seed_value", SqlType.BigInt, null, true),
+            new("increment_value", SqlType.BigInt, null, true),
+            new("last_value", SqlType.BigInt, null, true),
+            new("is_not_for_replication", SqlType.Bit, null, true),
+        ], EnumerateIdentityColumns);
+
+        // sys.column_encryption_keys / sys.sensitivity_classifications: Always
+        // Encrypted CEKs and data-classification labels aren't modeled, so both
+        // are empty views with the documented SQL Server 2025 shape. SMO's
+        // CREATE-scripting column query joins both (CEK by name for
+        // ColumnEncryptionKeyName, classifications for sensitivity metadata).
+        Sys("column_encryption_keys",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("column_encryption_key_id", SqlType.Int32, null, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+        ], static (batch, database) => []);
+
+        Sys("sensitivity_classifications",
+        [
+            new("class", SqlType.Int32, null, false),
+            new("class_desc", SqlType.Varchar, 16, false),
+            new("major_id", SqlType.Int32, null, false),
+            new("minor_id", SqlType.Int32, null, false),
+            new("label", SqlType.SystemName, 128, true),
+            new("label_id", SqlType.SystemName, 128, true),
+            new("information_type", SqlType.SystemName, 128, true),
+            new("information_type_id", SqlType.SystemName, 128, true),
+            new("rank", SqlType.Int32, null, true),
+            new("rank_desc", SqlType.Varchar, 8, true),
+        ], static (batch, database) => []);
+
+        // sys.database_recovery_status / sys.change_tracking_databases /
+        // sys.database_filestream_options: recovery-fork bookkeeping, database
+        // change tracking, and FILESTREAM options aren't modeled, so all three
+        // are empty views with the documented SQL Server 2025 shape. SMO's
+        // database-properties preamble LEFT JOINs each by database_id; an empty
+        // projection resolves each property to its ISNULL default.
+        Sys("database_recovery_status",
+        [
+            new("database_id", SqlType.Int32, null, false),
+            new("database_guid", SqlType.UniqueIdentifier, null, true),
+            new("family_guid", SqlType.UniqueIdentifier, null, true),
+            new("last_log_backup_lsn", SqlType.GetDecimal(25, 0), null, true),
+            new("recovery_fork_guid", SqlType.UniqueIdentifier, null, true),
+            new("first_recovery_fork_guid", SqlType.UniqueIdentifier, null, true),
+            new("fork_point_lsn", SqlType.GetDecimal(25, 0), null, true),
+        ], static (batch, database) => []);
+
+        Sys("change_tracking_databases",
+        [
+            new("database_id", SqlType.Int32, null, false),
+            new("is_auto_cleanup_on", SqlType.TinyInt, null, true),
+            new("retention_period", SqlType.Int32, null, true),
+            new("retention_period_units", SqlType.TinyInt, null, true),
+            new("retention_period_units_desc", nvarchar60Catalog, 60, true),
+            new("max_cleanup_version", SqlType.BigInt, null, true),
+        ], static (batch, database) => []);
+
+        Sys("database_filestream_options",
+        [
+            new("database_id", SqlType.Int32, null, false),
+            new("non_transacted_access", SqlType.TinyInt, null, false),
+            new("non_transacted_access_desc", nvarchar60Catalog, 60, false),
+            new("directory_name", SqlType.NVarchar, 256, true),
+        ], static (batch, database) => []);
+
+        // sys.external_data_sources: PolyBase / external data sources aren't
+        // modeled, so this is an empty view with the documented SQL Server 2025
+        // shape. SMO's CREATE-scripting external-table query joins it.
+        Sys("external_data_sources",
+        [
+            new("data_source_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("location", SqlType.NVarchar, 4000, false),
+            new("type_desc", SqlType.NVarchar, 255, true),
+            new("type", SqlType.TinyInt, null, false),
+            new("resource_manager_location", SqlType.NVarchar, 4000, true),
+            new("credential_id", SqlType.Int32, null, false),
+            new("database_name", SqlType.NVarchar, 128, true),
+            new("shard_map_name", SqlType.NVarchar, 128, true),
+            new("connection_options", SqlType.NVarchar, 4000, true),
+            new("pushdown", SqlType.NVarchar, 256, false),
+        ], static (batch, database) => []);
+
+        // sys.external_file_formats: PolyBase external file formats aren't
+        // modeled, so this is an empty view with the documented SQL Server 2025
+        // shape. SMO's CREATE-scripting external-table query joins it.
+        Sys("external_file_formats",
+        [
+            new("file_format_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("format_type", SqlType.NVarchar, 100, false),
+            new("field_terminator", SqlType.NVarchar, 10, true),
+            new("string_delimiter", SqlType.NVarchar, 10, true),
+            new("date_format", SqlType.NVarchar, 50, true),
+            new("use_type_default", SqlType.Bit, null, true),
+            new("serde_method", SqlType.NVarchar, 255, true),
+            new("row_terminator", SqlType.NVarchar, 10, true),
+            new("encoding", SqlType.NVarchar, 10, true),
+            new("data_compression", SqlType.NVarchar, 255, true),
+            new("first_row", SqlType.Int32, null, true),
+            new("parser_version", SqlType.NVarchar, 32, true),
+        ], static (batch, database) => []);
 
         // sys.sql_modules: one row per programmable module (procedure / view /
         // DML + DDL trigger / scalar / inline / multi-statement function),
@@ -650,6 +984,37 @@ internal static class BuiltInResources
         ], (batch, database) =>
             EnumerateSysTriggers(batch, database, charTwo, parentClassObjectColumn, parentClassObjectColumnDesc));
 
+        // sys.trigger_events: one row per (DML trigger, event) pair. Real SQL
+        // Server types are 1 = INSERT, 2 = UPDATE, 3 = DELETE (distinct from
+        // the internal action-flag bit values); is_first / is_last default 0
+        // (no sp_settriggerorder modeled), event_group_type is NULL, and
+        // is_trigger_event is 1. SMO's CREATE-scripting trigger query LEFT JOINs
+        // it three times (one per DML event) to build the FOR clause.
+        Sys("trigger_events",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("type", SqlType.Int32, null, false),
+            new("type_desc", SqlType.NVarchar, 128, false),
+            new("is_first", SqlType.Bit, null, true),
+            new("is_last", SqlType.Bit, null, true),
+            new("event_group_type", SqlType.Int32, null, true),
+            new("event_group_type_desc", SqlType.NVarchar, 128, true),
+            new("is_trigger_event", SqlType.Bit, null, true),
+        ], EnumerateSysTriggerEvents);
+
+        // sys.assembly_modules: CLR (SQLCLR) modules aren't modeled, so this is
+        // an empty view with the documented SQL Server 2025 shape. SMO's
+        // CREATE-scripting trigger query LEFT JOINs it to detect a CLR trigger.
+        Sys("assembly_modules",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("assembly_id", SqlType.Int32, null, false),
+            new("assembly_class", SqlType.NVarchar, 128, true),
+            new("assembly_method", SqlType.NVarchar, 128, true),
+            new("null_on_null_input", SqlType.Bit, null, true),
+            new("execute_as_principal_id", SqlType.Int32, null, true),
+        ], static (batch, database) => []);
+
         // sys.foreign_keys: probe-confirmed 21-column shape against SQL
         // Server 2025 (2026-05-13). EF Core reads name / parent_object_id /
         // referenced_object_id / delete_referential_action /
@@ -806,7 +1171,7 @@ internal static class BuiltInResources
             new("allow_page_locks", SqlType.Bit, null, false),
             new("has_filter", SqlType.Bit, null, false),
             new("filter_definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
-            new("compression_delay", SqlType.Int32, null, false),
+            new("compression_delay", SqlType.Int32, null, true),
             new("suppress_dup_key_messages", SqlType.Bit, null, false),
             new("auto_created", SqlType.Bit, null, false),
             new("optimize_for_sequential_key", SqlType.Bit, null, false),
@@ -847,6 +1212,44 @@ internal static class BuiltInResources
             ];
         });
 
+        // sys.filegroups: the row-filegroup subset of sys.data_spaces — the
+        // simulator's single PRIMARY filegroup (data_space_id = 1). Adds the
+        // filegroup-specific columns (filegroup_guid / log_filegroup_id /
+        // is_read_only / is_autogrow_all_files) SMO's CREATE-scripting index /
+        // filegroup queries read. Probe-confirmed PRIMARY row (SQL Server 2025):
+        // is_default = 1, is_system = 0, the rest NULL / 0.
+        Sys("filegroups",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_default", SqlType.Bit, null, true),
+            new("is_system", SqlType.Bit, null, true),
+            new("filegroup_guid", SqlType.UniqueIdentifier, null, true),
+            new("log_filegroup_id", SqlType.Int32, null, true),
+            new("is_read_only", SqlType.Bit, null, true),
+            new("is_autogrow_all_files", SqlType.Bit, null, true),
+        ], (batch, database) =>
+        {
+            _ = (batch, database);
+            return
+            [
+                [
+                    SqlValue.FromSystemName("PRIMARY"),
+                    SqlValue.FromInt32(1),
+                    filegroupType,
+                    filegroupTypeDesc,
+                    SqlValue.FromBoolean(true),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.Null(SqlType.UniqueIdentifier),
+                    SqlValue.Null(SqlType.Int32),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromBoolean(false),
+                ],
+            ];
+        });
+
         // sys.index_columns: probe-confirmed 10-column shape. One row per
         // (index, column) pair — KEY columns get key_ordinal = 1..N and
         // index_column_id = 1..N; INCLUDE columns get key_ordinal = 0 and
@@ -864,6 +1267,189 @@ internal static class BuiltInResources
             new("column_store_order_ordinal", SqlType.TinyInt, null, true),
             new("data_clustering_ordinal", SqlType.TinyInt, null, true),
         ], EnumerateSysIndexColumns);
+
+        // sys.partitions: probe-confirmed 11-column shape against SQL Server
+        // 2025 (2026-07-15). One row per (object_id, index_id) that
+        // sys.indexes reports — the heap row (index_id = 0) or clustered
+        // (index_id = 1) plus every nonclustered index — all with
+        // partition_number = 1 (the simulator models a single, unpartitioned
+        // partition per index/heap). rows carries the table's live row count
+        // (HeapTable.Heap.RowCount), so it tracks INSERT/DELETE within the
+        // same batch. partition_id / hobt_id are synthetic-deterministic
+        // (distinct per object_id/index_id, not byte-matching SQL Server's
+        // allocation-unit ids). Compression isn't modeled, so
+        // data_compression = 0 (NONE) / xml_compression = 0 (OFF) always —
+        // a divergence from compression-enabled bacpacs (e.g. WWI-Full's
+        // PAGE compression). See docs/claude/catalog-views.md.
+        var varchar3Catalog = VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit);
+        Sys("partitions",
+        [
+            new("partition_id", SqlType.BigInt, null, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("partition_number", SqlType.Int32, null, false),
+            new("hobt_id", SqlType.BigInt, null, false),
+            new("rows", SqlType.BigInt, null, true),
+            new("filestream_filegroup_id", SqlType.SmallInt, null, false),
+            new("data_compression", SqlType.TinyInt, null, false),
+            new("data_compression_desc", nvarchar60Catalog, 60, true),
+            new("xml_compression", SqlType.Bit, null, true),
+            new("xml_compression_desc", varchar3Catalog, 3, true),
+        ], EnumerateSysPartitions);
+
+        // sys.stats: one row per index sys.indexes reports, excluding the
+        // heap (index_id = 0, which carries no statistics). stats_id =
+        // index_id and name = index name, matching real SQL Server's
+        // "an index-backing statistic shares the index's id and name". The
+        // simulator does NOT model auto-created column statistics (the
+        // _WA_Sys_* rows real SQL Server materializes on first predicate use),
+        // so auto_created / user_created are always 0 and no column-only stats
+        // appear — a divergence documented in catalog-views.md. Probe-confirmed
+        // 17-column shape (SQL Server 2025, 2026-07-15).
+        Sys("stats",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("stats_id", SqlType.Int32, null, false),
+            new("auto_created", SqlType.Bit, null, true),
+            new("user_created", SqlType.Bit, null, true),
+            new("no_recompute", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, true),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("is_temporary", SqlType.Bit, null, true),
+            new("is_incremental", SqlType.Bit, null, true),
+            new("has_persisted_sample", SqlType.Bit, null, true),
+            new("stats_generation_method", SqlType.Int32, null, false),
+            new("stats_generation_method_desc", VarcharSqlType.Get(80, Collation.Catalog, Coercibility.Implicit), 80, false),
+            new("auto_drop", SqlType.Bit, null, true),
+            new("replica_role_id", SqlType.TinyInt, null, true),
+            new("replica_role_desc", nvarchar60Catalog, 60, true),
+            new("replica_name", SqlType.SystemName, 128, true),
+        ], EnumerateSysStats);
+
+        // sys.internal_tables / sys.hash_indexes / sys.json_indexes /
+        // sys.index_resumable_operations / sys.selective_xml_index_paths /
+        // sys.filetable_system_defined_objects: features the simulator doesn't
+        // model (system internal tables, memory-optimized hash indexes, JSON
+        // indexes, resumable index builds, selective XML indexes, FileTables).
+        // Each ships as an empty view with the probe-confirmed full column
+        // shape (SQL Server 2025, 2026-07-15) so that SMO's index-enumeration
+        // mega-query — which LEFT JOINs all six and reads specific columns —
+        // resolves every reference without Msg 207 and returns the correct
+        // rows. The AlwaysOn-DMV precedent (full shape, zero rows).
+        Sys("internal_tables",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, true),
+            new("is_published", SqlType.Bit, null, true),
+            new("is_schema_published", SqlType.Bit, null, true),
+            new("internal_type", SqlType.TinyInt, null, true),
+            new("internal_type_desc", nvarchar60Catalog, 60, true),
+            new("parent_id", SqlType.Int32, null, true),
+            new("parent_minor_id", SqlType.Int32, null, true),
+            new("lob_data_space_id", SqlType.Int32, null, false),
+            new("filestream_data_space_id", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("hash_indexes",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, true),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("bucket_count", SqlType.Int32, null, false),
+            new("auto_created", SqlType.Bit, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("json_indexes",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, false),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("auto_created", SqlType.Bit, null, true),
+            new("optimize_for_array_search", SqlType.Bit, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("index_resumable_operations",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("sql_text", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("last_max_dop_used", SqlType.SmallInt, null, false),
+            new("partition_number", SqlType.Int32, null, true),
+            new("state", SqlType.TinyInt, null, false),
+            new("state_desc", nvarchar60Catalog, 60, true),
+            new("start_time", SqlType.DateTime, null, false),
+            new("last_pause_time", SqlType.DateTime, null, true),
+            new("total_execution_time", SqlType.Int32, null, false),
+            new("percent_complete", SqlType.Float, null, false),
+            new("page_count", SqlType.BigInt, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("selective_xml_index_paths",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("path_id", SqlType.Int32, null, true),
+            new("path", SqlType.NVarchar, 4000, true),
+            new("name", SqlType.SystemName, 128, true),
+            new("path_type", SqlType.TinyInt, null, true),
+            new("path_type_desc", NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), 128, true),
+            new("xml_component_id", SqlType.Int32, null, true),
+            new("xquery_type_description", SqlType.NVarchar, 4000, true),
+            new("is_xquery_type_inferred", SqlType.Bit, null, true),
+            new("xquery_max_length", SqlType.Int32, null, true),
+            new("is_xquery_max_length_inferred", SqlType.Bit, null, true),
+            new("is_node", SqlType.Bit, null, true),
+            new("system_type_id", SqlType.TinyInt, null, true),
+            new("user_type_id", SqlType.TinyInt, null, true),
+            new("max_length", SqlType.SmallInt, null, true),
+            new("precision", SqlType.TinyInt, null, true),
+            new("scale", SqlType.TinyInt, null, true),
+            new("collation_name", SqlType.NVarchar, 128, true),
+            new("is_singleton", SqlType.Bit, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("filetable_system_defined_objects",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
 
         // sys.dm_tran_locks: per-Hold rows across every schema-bound
         // SchemaLock, every HeapTable.TableDataLock, and every per-row
@@ -1102,6 +1688,64 @@ internal static class BuiltInResources
             new("language_id", SqlType.Int32, null, false),
             new("statistical_semantics", SqlType.Bit, null, false),
         ], EnumerateSysFullTextIndexColumns);
+
+        // sys.fulltext_stoplists / sys.registered_search_property_lists:
+        // full-text stoplists and search property lists aren't modeled, so both
+        // are empty views with the documented SQL Server 2025 shape. SMO's
+        // CREATE-scripting full-text-index query LEFT JOINs both by id.
+        Sys("fulltext_stoplists",
+        [
+            new("stoplist_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+        ], static (batch, database) => []);
+
+        Sys("registered_search_property_lists",
+        [
+            new("property_list_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+        ], static (batch, database) => []);
+
+        // sys.fulltext_languages: the per-LCID full-text language registry.
+        // Empty here — SMO's full-text-index-column query INNER JOINs it by
+        // language_id, and a table with no full-text index (the only kind the
+        // simulator models) yields no rows to join, so the empty view is inert.
+        Sys("fulltext_languages",
+        [
+            new("lcid", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+        ], static (batch, database) => []);
+
+        // sys.syslanguages: legacy per-language compatibility view. The
+        // simulator models only the default us_english language (langid 0 /
+        // lcid 1033), which is what a stock instance's default-language
+        // configuration (configuration_id 124, value_in_use 0) resolves to —
+        // SMO's server-settings query joins it by langid to name the default
+        // language. Load-bearing subset: langid / name / alias / lcid.
+        Sys("syslanguages",
+        [
+            new("langid", SqlType.SmallInt, null, false),
+            new("name", SqlType.NVarchar, 128, false),
+            new("alias", SqlType.NVarchar, 128, false),
+            new("lcid", SqlType.Int32, null, false),
+        ], static (batch, database) =>
+        {
+            _ = (batch, database);
+            return
+            [
+                [
+                    SqlValue.FromInt16(0),
+                    SqlValue.FromNVarchar("us_english"),
+                    SqlValue.FromNVarchar("English"),
+                    SqlValue.FromInt32(1033),
+                ],
+            ];
+        });
 
         // sys.xml_schema_collections: probe-confirmed 6-col shipped subset
         // against SQL Server 2025 (2026-05-15). Real SQL Server's
@@ -1369,6 +2013,76 @@ internal static class BuiltInResources
             new("os_language_version", SqlType.Int32, null, false),
             new("host_architecture", SqlType.NVarchar, 256, false),
         ], (batch, database) => DmOsHostInfoRows);
+
+        // sys.dm_exec_sessions: one row per live connection, server-scope.
+        // SMO's contained-authentication check reads
+        // `authenticating_database_id ... WHERE session_id = @@SPID` (always 1
+        // here — SQL-auth against master), and monitoring-flavored tooling
+        // reads the session-option columns. Where the simulator genuinely
+        // tracks session state the row reflects it live (quoted_identifier,
+        // lock_timeout, transaction_isolation_level, context_info, row_count
+        // = @@ROWCOUNT, prev_error = @@ERROR, open_transaction_count,
+        // database_id); the remainder are probe-confirmed fresh-session
+        // defaults from SQL Server 2025 (endpoint_id 4, group_id 2,
+        // client_version 7, text_size -1, arithabort 0, the ANSI bits).
+        // login_name mirrors the principal placeholders SUSER_SNAME() uses;
+        // security_id is sa's well-known single-byte SID. status is
+        // 'running' for the querying session, 'sleeping' for the rest.
+        Sys("dm_exec_sessions",
+        [
+            new("session_id", SqlType.SmallInt, null, false),
+            new("login_time", SqlType.DateTime, null, false),
+            new("host_name", SqlType.NVarchar, 128, true),
+            new("program_name", SqlType.NVarchar, 128, true),
+            new("host_process_id", SqlType.Int32, null, true),
+            new("client_version", SqlType.Int32, null, true),
+            new("client_interface_name", SqlType.NVarchar, 32, true),
+            new("security_id", SqlType.Varbinary, 85, false),
+            new("login_name", SqlType.NVarchar, 128, false),
+            new("nt_domain", SqlType.NVarchar, 128, true),
+            new("nt_user_name", SqlType.NVarchar, 128, true),
+            new("status", nvarchar60Catalog, 30, false),
+            new("context_info", SqlType.Varbinary, 128, true),
+            new("cpu_time", SqlType.Int32, null, false),
+            new("memory_usage", SqlType.Int32, null, false),
+            new("total_scheduled_time", SqlType.Int32, null, false),
+            new("total_elapsed_time", SqlType.Int32, null, false),
+            new("endpoint_id", SqlType.Int32, null, false),
+            new("last_request_start_time", SqlType.DateTime, null, false),
+            new("last_request_end_time", SqlType.DateTime, null, true),
+            new("reads", SqlType.BigInt, null, false),
+            new("writes", SqlType.BigInt, null, false),
+            new("logical_reads", SqlType.BigInt, null, false),
+            new("is_user_process", SqlType.Bit, null, false),
+            new("text_size", SqlType.Int32, null, false),
+            new("language", SqlType.NVarchar, 128, true),
+            new("date_format", SqlType.NVarchar, 3, true),
+            new("date_first", SqlType.SmallInt, null, false),
+            new("quoted_identifier", SqlType.Bit, null, false),
+            new("arithabort", SqlType.Bit, null, false),
+            new("ansi_null_dflt_on", SqlType.Bit, null, false),
+            new("ansi_defaults", SqlType.Bit, null, false),
+            new("ansi_warnings", SqlType.Bit, null, false),
+            new("ansi_padding", SqlType.Bit, null, false),
+            new("ansi_nulls", SqlType.Bit, null, false),
+            new("concat_null_yields_null", SqlType.Bit, null, false),
+            new("transaction_isolation_level", SqlType.SmallInt, null, false),
+            new("lock_timeout", SqlType.Int32, null, false),
+            new("deadlock_priority", SqlType.Int32, null, false),
+            new("row_count", SqlType.BigInt, null, false),
+            new("prev_error", SqlType.Int32, null, false),
+            new("original_security_id", SqlType.Varbinary, 85, false),
+            new("original_login_name", SqlType.NVarchar, 128, false),
+            new("last_successful_logon", SqlType.DateTime, null, true),
+            new("last_unsuccessful_logon", SqlType.DateTime, null, true),
+            new("unsuccessful_logons", SqlType.BigInt, null, true),
+            new("group_id", SqlType.Int32, null, false),
+            new("database_id", SqlType.SmallInt, null, false),
+            new("authenticating_database_id", SqlType.Int32, null, true),
+            new("open_transaction_count", SqlType.Int32, null, false),
+            new("page_server_reads", SqlType.BigInt, null, false),
+            new("contained_availability_group_id", SqlType.UniqueIdentifier, null, true),
+        ], EnumerateSysDmExecSessions);
 
         // sys.configurations: server-scoped static server-configuration
         // catalog. Real SQL Server types value / minimum / maximum /
@@ -2328,7 +3042,9 @@ internal static class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
-        var zeroInt = SqlValue.FromInt32(0);
+        // compression_delay is NULL for every rowstore index (probe-confirmed);
+        // it carries a minute-delay only for columnstore, which isn't modeled.
+        var nullCompressionDelay = SqlValue.Null(SqlType.Int32);
         var nullName = SqlValue.Null(SqlType.SystemName);
         var nullFilter = SqlValue.Null(SqlType.NVarchar);
         var heapDesc = SqlValue.FromNVarchar("HEAP");
@@ -2438,12 +3154,140 @@ internal static class BuiltInResources
                 allowLocks, // allow_page_locks
                 hasFilter,
                 filterDefinition,
-                zeroInt, // compression_delay
+                nullCompressionDelay,
                 falseBit, // suppress_dup_key_messages
                 falseBit, // auto_created
                 falseBit, // optimize_for_sequential_key
                 falseBit, // statistics_incremental
             ];
+    }
+
+    /// <summary>
+    /// Shared (table, index_id) identity stream backing <c>sys.partitions</c>
+    /// and <c>sys.stats</c>. Mirrors <see cref="EnumerateSysIndexes"/>'s
+    /// index-id assignment exactly: the heap (index_id = 0, IsHeap = true) or
+    /// clustered PRIMARY KEY (index_id = 1) leads, then UNIQUE-constraint and
+    /// CREATE-INDEX rows follow in object-id order at index_id = 2..N. Name is
+    /// the constraint/index name (null only for the heap).
+    /// </summary>
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> EnumerateTableIndexIdentities(Database database)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                KeyConstraint? primaryKey = null;
+                foreach (var k in table.KeyConstraints)
+                {
+                    if (k.Kind == KeyConstraintKind.PrimaryKey)
+                    {
+                        primaryKey = k;
+                        break;
+                    }
+                }
+                var hasPk = primaryKey is not null;
+                var nextIndexId = hasPk ? 2 : 1;
+                yield return (table, hasPk ? 1 : 0, hasPk ? primaryKey!.Name : null, !hasPk);
+
+                var others = new List<(int ObjectId, KeyConstraint? Key, Storage.Index? Index)>();
+                foreach (var k in table.KeyConstraints)
+                {
+                    if (!ReferenceEquals(k, primaryKey))
+                        others.Add((k.ObjectId, k, null));
+                }
+                foreach (var ix in table.Indexes)
+                    others.Add((ix.ObjectId, null, ix));
+                others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+
+                foreach (var (_, key, index) in others)
+                    yield return (table, nextIndexId++, key is not null ? key.Name : index!.Name, false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.partitions</c>: one per (object_id, index_id) that
+    /// <see cref="EnumerateSysIndexes"/> reports, all with partition_number = 1
+    /// (single, unpartitioned partition per index/heap). rows carries the
+    /// table's live <see cref="Storage.Heap.RowCount"/>, so it reflects
+    /// same-batch INSERT/DELETE. partition_id / hobt_id are synthetic-
+    /// deterministic (distinct per object_id/index_id; not SQL Server's
+    /// allocation-unit ids). Compression is unmodeled: data_compression = 0
+    /// (NONE), xml_compression = 0 (OFF).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysPartitions(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var partitionNumber = SqlValue.FromInt32(1);
+        var filestreamFg = SqlValue.FromInt16(0);
+        var noneCompression = SqlValue.FromByte(0);
+        var noneDesc = SqlValue.FromNVarchar("NONE");
+        var xmlOff = SqlValue.FromBoolean(false);
+        var xmlOffDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "OFF");
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        {
+            var objectId = table.ObjectId;
+            var partitionId = ((long)(uint)objectId << 16) | (uint)indexId;
+            var partitionIdValue = SqlValue.FromInt64(partitionId);
+            yield return
+            [
+                partitionIdValue,
+                SqlValue.FromInt32(objectId),
+                SqlValue.FromInt32(indexId),
+                partitionNumber,
+                partitionIdValue,
+                SqlValue.FromInt64(table.Heap.RowCount),
+                filestreamFg,
+                noneCompression,
+                noneDesc,
+                xmlOff,
+                xmlOffDesc,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.stats</c>: one per index <see cref="EnumerateSysIndexes"/>
+    /// reports, excluding the heap (index_id = 0 has no statistic). stats_id =
+    /// index_id and name = index name, matching real SQL Server's index-backing
+    /// statistic. Auto-created column statistics (_WA_Sys_*) aren't modeled, so
+    /// auto_created / user_created are always 0 and no column-only stats appear.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysStats(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullFilter = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
+        var zeroInt = SqlValue.FromInt32(0);
+        var methodDesc = SqlValue.FromVarchar(VarcharSqlType.Get(80, Collation.Catalog, Coercibility.Implicit), "Sort based statistics");
+        var nullRole = SqlValue.Null(SqlType.TinyInt);
+        var nullRoleDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
+        var nullName = SqlValue.Null(SqlType.SystemName);
+        foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database))
+        {
+            if (isHeap)
+                continue;
+            yield return
+            [
+                SqlValue.FromInt32(table.ObjectId),
+                name is not null ? SqlValue.FromSystemName(name) : nullName,
+                SqlValue.FromInt32(indexId),
+                falseBit, // auto_created
+                falseBit, // user_created
+                falseBit, // no_recompute
+                falseBit, // has_filter
+                nullFilter,
+                falseBit, // is_temporary
+                falseBit, // is_incremental
+                falseBit, // has_persisted_sample
+                zeroInt,  // stats_generation_method
+                methodDesc,
+                falseBit, // auto_drop
+                nullRole,
+                nullRoleDesc,
+                nullName, // replica_name
+            ];
+        }
     }
 
     /// <summary>
@@ -2652,6 +3496,52 @@ internal static class BuiltInResources
                 falseBit,
                 falseBit,
             ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.trigger_events</c>: one row per (DML trigger, event).
+    /// The internal <see cref="TriggerActions"/> bit flags (INSERT=1, UPDATE=2,
+    /// DELETE=4) map to real SQL Server's dense event type codes (INSERT=1,
+    /// UPDATE=2, DELETE=3). DDL triggers aren't surfaced (their events are DDL
+    /// event types, which SMO's per-table trigger query never reads).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysTriggerEvents(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullDesc = SqlValue.Null(NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit));
+        var eventTypeName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        (int Type, string Desc)[] events =
+        [
+            (1, "INSERT"),
+            (2, "UPDATE"),
+            (3, "DELETE"),
+        ];
+        var flags = new[] { TriggerActions.Insert, TriggerActions.Update, TriggerActions.Delete };
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
+            {
+                var objectId = SqlValue.FromInt32(trigger.ObjectId);
+                for (var i = 0; i < flags.Length; i++)
+                {
+                    if ((trigger.Actions & flags[i]) == 0)
+                        continue;
+                    yield return [
+                        objectId,
+                        SqlValue.FromInt32(events[i].Type),
+                        SqlValue.FromString(eventTypeName, events[i].Desc),
+                        falseBit,
+                        falseBit,
+                        nullInt,
+                        nullDesc,
+                        trueBit,
+                    ];
+                }
+            }
         }
     }
 
@@ -3387,6 +4277,108 @@ internal static class BuiltInResources
     /// to <c>sys.databases</c> on <c>database_id</c> and reads
     /// <c>ISNULL(mirroring_role, 0)</c> / <c>ISNULL(mirroring_state + 1, 0)</c>.
     /// </summary>
+    /// <summary>
+    /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
+    /// simulation, snapshotted under the registry lock. Session-backed
+    /// columns read the connection's real state; the rest are the
+    /// probe-confirmed fresh-session defaults documented at the
+    /// registration site.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDmExecSessions(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var simulation = batch.Connection.Simulation;
+        SimulatedDbConnection[] connections;
+        lock (simulation.Connections)
+            connections = [.. simulation.Connections];
+
+        var emptyName = SqlValue.FromNVarchar(string.Empty);
+        var nullName = SqlValue.Null(SqlType.NVarchar);
+        var saSid = SqlValue.FromVarbinary([0x01]);
+        var loginName = SqlValue.FromNVarchar(Parser.Expressions.PrincipalPlaceholders.CurrentLogin);
+        var zero = SqlValue.FromInt32(0);
+        var zeroBig = SqlValue.FromInt64(0);
+        var bitOn = SqlValue.FromBoolean(true);
+        var bitOff = SqlValue.FromBoolean(false);
+        var nullDateTime = SqlValue.Null(SqlType.DateTime);
+
+        foreach (var connection in connections)
+        {
+            var loginTime = SqlValue.FromDateTime(connection.LoginTimeUtc);
+            short databaseId = 1;
+            foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(simulation))
+            {
+                if (ReferenceEquals(db, connection.CurrentDatabase))
+                {
+                    databaseId = id;
+                    break;
+                }
+            }
+            var isolation = connection.SessionIsolationLevel switch
+            {
+                System.Data.IsolationLevel.ReadUncommitted => (short)1,
+                System.Data.IsolationLevel.RepeatableRead => (short)3,
+                System.Data.IsolationLevel.Serializable => (short)4,
+                System.Data.IsolationLevel.Snapshot => (short)5,
+                _ => (short)2,
+            };
+            yield return [
+                SqlValue.FromInt16((short)connection.Spid),
+                loginTime,
+                emptyName,
+                emptyName,
+                SqlValue.FromInt32(Environment.ProcessId),
+                SqlValue.FromInt32(7),
+                SqlValue.FromNVarchar("SqlServerSimulator"),
+                saSid,
+                loginName,
+                nullName,
+                nullName,
+                SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), ReferenceEquals(connection, batch.Connection) ? "running" : "sleeping"),
+                connection.ContextInfo is { } contextInfo ? SqlValue.FromVarbinary(contextInfo) : SqlValue.Null(SqlType.Varbinary),
+                zero,
+                zero,
+                zero,
+                zero,
+                SqlValue.FromInt32(4),
+                loginTime,
+                loginTime,
+                zeroBig,
+                zeroBig,
+                zeroBig,
+                bitOn,
+                SqlValue.FromInt32(-1),
+                SqlValue.FromNVarchar("us_english"),
+                SqlValue.FromNVarchar("mdy"),
+                SqlValue.FromInt16(7),
+                connection.QuotedIdentifiers ? bitOn : bitOff,
+                bitOff,
+                bitOn,
+                bitOff,
+                bitOn,
+                bitOn,
+                bitOn,
+                bitOn,
+                SqlValue.FromInt16(isolation),
+                SqlValue.FromInt32(connection.LockTimeoutMillis),
+                zero,
+                SqlValue.FromInt64(connection.LastStatementRowCount),
+                SqlValue.FromInt32(connection.LastErrorNumber),
+                saSid,
+                loginName,
+                nullDateTime,
+                nullDateTime,
+                SqlValue.Null(SqlType.BigInt),
+                SqlValue.FromInt32(2),
+                SqlValue.FromInt16(databaseId),
+                SqlValue.FromInt32(1),
+                SqlValue.FromInt32(connection.CurrentTransaction?.TranCount ?? 0),
+                zeroBig,
+                SqlValue.Null(SqlType.UniqueIdentifier),
+            ];
+        }
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateSysDatabaseMirroring(Parser.BatchContext batch, Database database)
     {
         _ = database;
@@ -3974,9 +4966,21 @@ internal static class BuiltInResources
     {
         _ = batch;
         var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
         var zeroInt = SqlValue.FromInt32(0);
         var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullSysName = SqlValue.Null(SqlType.SystemName);
         var nullVectorBaseType = SqlValue.Null(NVarcharSqlType.Get(20, Collation.Catalog, Coercibility.Implicit));
+        var nullLedgerViewColumnTypeDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
+        // is_ansi_padded is 1 for char / varchar / nchar / nvarchar / binary /
+        // varbinary (all simulator tables are created under ANSI_PADDING ON);
+        // 0 for every other type, including the deprecated LOB types
+        // text / ntext / image (probe-confirmed against SQL Server 2025). SMO's
+        // CREATE-scripting column query reads it as [AnsiPaddingStatus].
+        SqlValue AnsiPaddedFor(HeapColumn c) =>
+            c.Type.SystemTypeId is 165 or 167 or 173 or 175 or 231 or 239 ? trueBit : falseBit;
+        SqlValue DefaultObjectIdFor(HeapColumn c) =>
+            c.DefaultConstraint is { } df ? SqlValue.FromInt32(df.ObjectId) : zeroInt;
         // The per-database default collation flows from CurrentDatabase.
         // The captured defaultCollation arg is a legacy fallback; today the
         // active database's CollationName drives the value, with per-column
@@ -4016,6 +5020,20 @@ internal static class BuiltInResources
                         falseBit,
                         nullInt,
                         nullVectorBaseType,
+                        nullInt,
+                        nullLedgerViewColumnTypeDesc,
+                        AnsiPaddedFor(col),
+                        nullInt,
+                        DefaultObjectIdFor(col),
+                        nullSysName,
+                        nullInt,
+                        SqlValue.FromByte((byte)col.GeneratedAs),
+                        nullInt,
+                        falseBit,
+                        SqlValue.FromBoolean(col.IsHidden),
+                        falseBit,
+                        falseBit,
+                        zeroInt,
                     ];
                 }
             }
@@ -4049,6 +5067,20 @@ internal static class BuiltInResources
                         falseBit,
                         nullInt,
                         nullVectorBaseType,
+                        nullInt,
+                        nullLedgerViewColumnTypeDesc,
+                        AnsiPaddedFor(col),
+                        nullInt,
+                        DefaultObjectIdFor(col),
+                        nullSysName,
+                        nullInt,
+                        SqlValue.FromByte((byte)col.GeneratedAs),
+                        nullInt,
+                        falseBit,
+                        SqlValue.FromBoolean(col.IsHidden),
+                        falseBit,
+                        falseBit,
+                        zeroInt,
                     ];
                 }
             }
@@ -4082,6 +5114,20 @@ internal static class BuiltInResources
                         falseBit,
                         nullInt,
                         nullVectorBaseType,
+                        nullInt,
+                        nullLedgerViewColumnTypeDesc,
+                        AnsiPaddedFor(col),
+                        nullInt,
+                        DefaultObjectIdFor(col),
+                        nullSysName,
+                        nullInt,
+                        SqlValue.FromByte((byte)col.GeneratedAs),
+                        nullInt,
+                        falseBit,
+                        SqlValue.FromBoolean(col.IsHidden),
+                        falseBit,
+                        falseBit,
+                        zeroInt,
                     ];
                 }
             }
@@ -4115,6 +5161,91 @@ internal static class BuiltInResources
                         falseBit,
                         nullInt,
                         nullVectorBaseType,
+                        nullInt,
+                        nullLedgerViewColumnTypeDesc,
+                        AnsiPaddedFor(col),
+                        nullInt,
+                        DefaultObjectIdFor(col),
+                        nullSysName,
+                        nullInt,
+                        SqlValue.FromByte((byte)col.GeneratedAs),
+                        nullInt,
+                        falseBit,
+                        SqlValue.FromBoolean(col.IsHidden),
+                        falseBit,
+                        falseBit,
+                        zeroInt,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.computed_columns</c>: one row per computed column
+    /// across every table. The computed-expression source text isn't retained
+    /// by the model, so <c>definition</c> is NULL.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateComputedColumns(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
+        var nullDefinition = SqlValue.Null(SqlType.NVarchar);
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            {
+                var objectId = SqlValue.FromInt32(t.ObjectId);
+                for (var i = 0; i < t.Columns.Length; i++)
+                {
+                    var col = t.Columns[i];
+                    if (col.Computed is null)
+                        continue;
+                    yield return [
+                        objectId,
+                        SqlValue.FromSystemName(col.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromBoolean(col.Nullable),
+                        nullDefinition,
+                        falseBit,
+                        SqlValue.FromBoolean(col.IsPersisted),
+                        trueBit,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.identity_columns</c>: one row per IDENTITY column.
+    /// seed / increment / last are surfaced as bigint (sql_variant in real SQL
+    /// Server). last_value is the identity high-water mark, NULL before the
+    /// first insert.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateIdentityColumns(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var falseBit = SqlValue.FromBoolean(false);
+        var nullLast = SqlValue.Null(SqlType.BigInt);
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            {
+                var objectId = SqlValue.FromInt32(t.ObjectId);
+                for (var i = 0; i < t.Columns.Length; i++)
+                {
+                    var col = t.Columns[i];
+                    if (col.Identity is not { } identity)
+                        continue;
+                    yield return [
+                        objectId,
+                        SqlValue.FromSystemName(col.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromInt64(identity.Seed),
+                        SqlValue.FromInt64(identity.Increment),
+                        identity.Snapshot() is { } last ? SqlValue.FromInt64(last) : nullLast,
+                        falseBit,
                     ];
                 }
             }

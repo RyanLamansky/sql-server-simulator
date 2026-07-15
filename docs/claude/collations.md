@@ -20,7 +20,7 @@ Every string-categorized `SqlType` instance carries a `(Collation, Coercibility)
 | `Implicit` | Column reference, CAST of a column, computed-column expression | `CoercibleDefault` |
 | `Explicit` | `COLLATE` postfix on an expression | both lower ranks |
 
-`Collation.Resolve(SqlType, SqlType)` returns `(Collation, Coercibility)?`: the winning pair when one rank is higher, the shared collation when both are the same rank, `null` when both are the same rank but the collations differ (caller raises Msg 468 / 457).
+`Collation.Resolve(SqlType, SqlType)` returns `(Collation, Coercibility)?`: the winning pair when one rank is higher, the shared collation when both are the same rank, `null` when both are the same rank but the collations differ (caller raises Msg 468 / 457) — **except at `CoercibleDefault` rank, where two operands never conflict**. SQL Server's rules make two coercible-default operands always resolve to the current database's default collation; the simulator doesn't thread the active database collation into this static resolver, so it picks the operand carrying a concrete (non-`Baseline`) collation over the `Baseline` fallback that unpinned system-function results use — equality-neutral for the ASCII identifiers these comparisons overwhelmingly involve. Without this, a baseline-collated system-function result (e.g. `DATABASEPROPERTYEX(...)`) compared with a database-collation literal under a non-baseline database collation raised a spurious Msg 468 (surfaced by SMO's "Script Table as → CREATE To" against WWI's `Latin1_General_100_CI_AS`).
 
 ## Value-side compare path
 
@@ -50,6 +50,8 @@ The fast path uses `SqlValue.WithType` to re-tag a value with a different `SqlTy
 
 Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-confirmed). Unknown collation name raises Msg 448 at parse time.
 
+The pseudo-collations **`catalog_default`** and **`database_default`** resolve before the name lookup: `catalog_default` → `Collation.Catalog` (the fixed metadata collation), `database_default` → `context.Batch.CurrentDatabase.Collation` (resolved at parse time to the active database). SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns; both were previously rejected with Msg 448.
+
 ## Database default and `#temp` inheritance
 
 `Simulation.Create.cs`'s column wiring (shared by CREATE TABLE / ALTER TABLE ADD / DECLARE @t / CREATE TYPE AS TABLE / temp-table paths) resolves the column's pinned collation as: explicit `COLLATE` clause first, else the active database's `Database.CollationName`, else `Collation.Baseline`. So `#temp` tables created while a BACPAC-loaded non-default-collation database is active inherit that database's collation — avoiding the EF temp-join footgun (real SQL Server's tempdb is independent, but the common shape — tempdb matches server default which matches user DB — collapses to the same behavior).
@@ -70,6 +72,7 @@ Sites routed through the active DB collation:
 - `MERGE … OUTPUT $action` (`Simulation.Merge.MergeActionReference`).
 - `sys.fn_listextendedproperty` `value` projection column (`Selection.ListExtendedProperty`).
 - `SqlType.PromoteForArithmetic`'s string-concat path derives the result collation via `Collation.Resolve(a, b)` from the operands' coercibility ranks rather than defaulting to `Collation.Baseline`.
+- **`CAST` / `CONVERT` to a character type** (`Cast.ResultStringType`, shared by `Cast` and `ConvertExpression` at both `GetSqlType` and `Run`): a **character source** carries its collation and coercibility through; a **non-character source** yields the database default collation with `CoercibleDefault` coercibility. So `CAST(int AS varchar)` concatenates and compares cleanly with literals and other database-collation values (was `Collation.Baseline`, which raised Msg 457/468 under a non-baseline database — surfaced by SMO's `'extended_index_' + CAST(i.object_id AS varchar)` and `CONVERT(nvarchar(128), DATABASEPROPERTYEX(...))` patterns). Probe-confirmed against SQL Server 2025: `CAST(<char COLLATE X> AS varchar)` keeps `X`; `CAST(<int> AS varchar)` gets the database default.
 
 Probe-confirmed fidelity (real SQL Server CS database, 2026-05-22): `SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')` returns `'neq'` (literals don't case-fold under CS). The simulator now matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
 

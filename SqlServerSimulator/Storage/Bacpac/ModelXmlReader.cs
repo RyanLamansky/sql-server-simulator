@@ -1488,10 +1488,17 @@ internal static class ModelXmlReader
             ?? throw new InvalidDataException($"bacpac: DEFAULT '{constraintName}' missing ForColumn.");
         var script = ReadScriptProperty(element, "DefaultExpressionScript")
             ?? throw new InvalidDataException($"bacpac: DEFAULT '{constraintName}' missing DefaultExpressionScript.");
+        // DACFx already parenthesizes the default expression (e.g.
+        // "(NEXT VALUE FOR [Sequences].[InvoiceID])"). The ALTER-DEFAULT parser
+        // re-derives sys.default_constraints.definition as "(<inner>)", so
+        // wrapping an already-parenthesized script here would double the parens
+        // (real SQL Server stores a single outer pair). Only wrap when the
+        // script isn't already a parenthesized group.
+        var wrapped = script.StartsWith('(') ? script : $"({script})";
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} DEFAULT ({script}) FOR {Leaf(forColumn)};";
+        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} DEFAULT {wrapped} FOR {Leaf(forColumn)};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }

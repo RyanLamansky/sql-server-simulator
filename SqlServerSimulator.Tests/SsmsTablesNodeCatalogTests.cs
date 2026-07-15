@@ -247,4 +247,155 @@ public sealed class SsmsTablesNodeCatalogTests
     [TestMethod]
     public void SystemSqlModules_IsEmpty()
         => AreEqual(0, new Simulation().ExecuteScalar<int>("select count(*) from sys.system_sql_modules"));
+
+    /// <summary>
+    /// sys.partitions carries the table's live row count on the rows column
+    /// and tracks INSERTs made after the table was populated — the partition
+    /// row is projected from HeapTable.Heap.RowCount at read time, not cached.
+    /// </summary>
+    [TestMethod]
+    public void Partitions_ReportsLiveRowCount_AndUpdatesAfterInsert()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, x int null)");
+        _ = sim.ExecuteNonQuery("insert into t (id, x) values (1, 10), (2, 20), (3, 30)");
+        AreEqual(3L, sim.ExecuteScalar<long>(
+            "select rows from sys.partitions where object_id = object_id('t') and index_id = 1"));
+        _ = sim.ExecuteNonQuery("insert into t (id, x) values (4, 40), (5, 50)");
+        AreEqual(5L, sim.ExecuteScalar<long>(
+            "select rows from sys.partitions where object_id = object_id('t') and index_id = 1"));
+    }
+
+    /// <summary>
+    /// sys.partitions emits one row per (object_id, index_id) that sys.indexes
+    /// reports — the clustered PK plus every nonclustered index — with
+    /// partition_number = 1 (single, unpartitioned partition).
+    /// </summary>
+    [TestMethod]
+    public void Partitions_OneRowPerIndex_MirrorsSysIndexes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null, b int null)");
+        _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
+        _ = sim.ExecuteNonQuery("create unique index ux_b on t(b)");
+        AreEqual(
+            sim.ExecuteScalar<int>("select count(*) from sys.indexes where object_id = object_id('t')"),
+            sim.ExecuteScalar<int>("select count(*) from sys.partitions where object_id = object_id('t')"));
+        AreEqual(3, sim.ExecuteScalar<int>("select count(*) from sys.partitions where object_id = object_id('t')"));
+    }
+
+    /// <summary>
+    /// A table with no PRIMARY KEY is a heap: sys.partitions carries an
+    /// index_id = 0 row with the heap's live row count, matching sys.indexes'
+    /// HEAP row.
+    /// </summary>
+    [TestMethod]
+    public void Partitions_HeapTable_ReportsHeapRowWithRowCount()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table h (a int null)");
+        _ = sim.ExecuteNonQuery("insert into h values (1), (2)");
+        AreEqual(2L, sim.ExecuteScalar<long>(
+            "select rows from sys.partitions where object_id = object_id('h') and index_id = 0"));
+    }
+
+    /// <summary>
+    /// Compression isn't modeled: every sys.partitions row reports
+    /// data_compression = 0 (NONE) and xml_compression = 0 (OFF), so SMO's
+    /// HasCompressedPartitions probe filter matches nothing.
+    /// </summary>
+    [TestMethod]
+    public void Partitions_CompressionColumns_ReportNone()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            create table t (id int not null primary key);
+            select cast(data_compression as int), cast(xml_compression as int)
+            from sys.partitions where object_id = object_id('t') and index_id = 1
+            """);
+        IsTrue(reader.Read());
+        AreEqual(0, reader.GetInt32(0));
+        AreEqual(0, reader.GetInt32(1));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// sys.stats emits one row per index sys.indexes reports (excluding the
+    /// heap), with stats_id = index_id and name = index name. Auto-created
+    /// column statistics (_WA_Sys_*) aren't modeled, so no_recompute /
+    /// auto_created are 0 and only index-backing statistics appear.
+    /// </summary>
+    [TestMethod]
+    public void Stats_OneRowPerIndex_SharesIndexIdAndName()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null)");
+        _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
+        AreEqual(2, sim.ExecuteScalar<int>("select count(*) from sys.stats where object_id = object_id('t')"));
+        AreEqual("ix_a", (string?)sim.ExecuteScalar(
+            "select name from sys.stats where object_id = object_id('t') and stats_id = 2"));
+        AreEqual(0, sim.ExecuteScalar<int>(
+            "select cast(no_recompute as int) from sys.stats where object_id = object_id('t') and stats_id = 1"));
+    }
+
+    /// <summary>
+    /// A heap with no indexes has no sys.stats rows — the heap itself carries
+    /// no statistic and column-only auto-stats aren't modeled.
+    /// </summary>
+    [TestMethod]
+    public void Stats_HeapTableWithNoIndexes_IsEmpty()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table h (a int null)");
+        AreEqual(0, sim.ExecuteScalar<int>("select count(*) from sys.stats where object_id = object_id('h')"));
+    }
+
+    /// <summary>
+    /// The index-feature views for capabilities the simulator doesn't model
+    /// resolve (no Msg 208) and return zero rows, so SMO's index-scripting
+    /// mega-query LEFT JOINs them without incident.
+    /// </summary>
+    [TestMethod]
+    public void UnmodeledIndexFeatureViews_ResolveEmpty()
+    {
+        var sim = new Simulation();
+        foreach (var view in new[]
+        {
+            "internal_tables", "hash_indexes", "json_indexes", "index_resumable_operations",
+            "selective_xml_index_paths", "filetable_system_defined_objects",
+        })
+        {
+            AreEqual(0, sim.ExecuteScalar<int>($"select count(*) from sys.{view}"));
+        }
+    }
+
+    /// <summary>
+    /// sys.indexes.compression_delay is NULL for every rowstore index
+    /// (columnstore, which carries a minute delay, isn't modeled) — SMO reads
+    /// it as CAST(i.compression_delay AS int) with no ISNULL wrapper.
+    /// </summary>
+    [TestMethod]
+    public void Indexes_CompressionDelay_IsNullForRowstore()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>("""
+            create table t (id int not null primary key);
+            select cast(case when compression_delay is null then 1 else 0 end as int)
+            from sys.indexes where object_id = object_id('t') and index_id = 1
+            """));
+
+    /// <summary>
+    /// INDEXPROPERTY 'IsFulltextKey' and 'IsOptimizedForSequentialKey' return
+    /// 0 (not NULL) for a modeled index — SMO's index-scripting query reads
+    /// IsFulltextKey without an ISNULL wrapper, so NULL would surface a wrong
+    /// value.
+    /// </summary>
+    [TestMethod]
+    public void IndexProperty_FulltextKeyAndSequentialKey_ReturnZero()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null)");
+        _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
+        AreEqual(0, sim.ExecuteScalar<int>(
+            "select cast(indexproperty(object_id('t'), 'ix_a', 'IsFulltextKey') as int)"));
+        AreEqual(0, sim.ExecuteScalar<int>(
+            "select cast(indexproperty(object_id('t'), 'ix_a', 'IsOptimizedForSequentialKey') as int)"));
+    }
 }

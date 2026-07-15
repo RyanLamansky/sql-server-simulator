@@ -90,8 +90,16 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        var collation = Collation.TryGet(collationName)
-            ?? throw SimulatedSqlException.InvalidCollation(collationName);
+        // catalog_default / database_default are pseudo-collations SQL Server
+        // accepts in a COLLATE clause: catalog_default resolves to the fixed
+        // metadata (catalog) collation, database_default to the active
+        // database's collation. SMO's system-configuration query uses
+        // `name COLLATE catalog_default` to normalize catalog string columns.
+        var collation =
+            string.Equals(collationName, "catalog_default", StringComparison.OrdinalIgnoreCase) ? Collation.Catalog
+            : string.Equals(collationName, "database_default", StringComparison.OrdinalIgnoreCase) ? context.Batch.CurrentDatabase.Collation
+            : Collation.TryGet(collationName)
+                ?? throw SimulatedSqlException.InvalidCollation(collationName);
         return new CollateExpression(source, collation);
     }
 }

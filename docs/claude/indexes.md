@@ -183,7 +183,9 @@ One row per (table, index):
 - **CREATE UNIQUE INDEX** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 1`, `is_unique_constraint = 0`.
 - **Non-UNIQUE CREATE INDEX** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 0`.
 
-`index_id` assignment among non-PK entries follows allocation order (the simulator's `AllocateObjectId` is monotonic), matching SQL Server's declaration-order behavior.
+`index_id` assignment among non-PK entries follows allocation order (the simulator's `AllocateObjectId` is monotonic), matching SQL Server's declaration-order behavior. The `(object_id, index_id)` set every index row reports here is re-projected by `sys.partitions` (one partition-row per index/heap) and `sys.stats` (one stats-row per index, excluding the heap) via the shared `EnumerateTableIndexIdentities` helper — see [`catalog-views.md`](catalog-views.md).
+
+`compression_delay` is **NULL** on every row: it carries a minute-delay only for columnstore indexes (unmodeled), and is NULL for every rowstore index (probe-confirmed). SMO's index-scripting query reads it as `CAST(i.compression_delay AS int)` with no `ISNULL` wrapper.
 
 ### `sys.index_columns` — 10-column probe-confirmed shape
 

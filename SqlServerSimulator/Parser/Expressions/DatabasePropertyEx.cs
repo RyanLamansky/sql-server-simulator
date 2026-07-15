@@ -35,6 +35,15 @@ internal sealed class DatabasePropertyEx : Expression
         ["Status"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("ONLINE")),
         ["Version"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
         ["Recovery"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("FULL")),
+        // Updateability is always READ_WRITE (the simulator models no
+        // read-only databases at the DATABASEPROPERTYEX surface). SMO's
+        // database-properties preamble reads it as [IsUpdateable].
+        ["Updateability"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("READ_WRITE")),
+        // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is NULL —
+        // typed datetime (not the unknown-property NVarchar) so SMO's
+        // CAST(ISNULL(..., 0) AS datetime) resolves to 1900-01-01 rather than
+        // failing to convert the string '0' to datetime.
+        ["LastGoodCheckDbTime"] = (SqlType.DateTime, _ => SqlValue.Null(SqlType.DateTime)),
         ["Collation"] = (SqlType.NVarchar, db => SqlValue.FromNVarchar(db.CollationName)),
         ["UserAccess"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("MULTI_USER")),
         ["IsAutoClose"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),

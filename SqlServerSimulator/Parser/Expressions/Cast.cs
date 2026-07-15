@@ -50,17 +50,55 @@ internal sealed class Cast : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var sourceValue = this.source.Run(runtime);
+        var dbCollation = runtime.Batch.CurrentDatabase.Collation;
+        SqlValue coerced;
         try
         {
-            return ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
+            coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
         }
         catch (SimulatedSqlException ex) when (this.tryMode && IsConversionFailure(ex.Number))
         {
-            return SqlValue.Null(this.targetType);
+            coerced = SqlValue.Null(this.targetType);
         }
+
+        return RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => targetType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResultStringType(this.targetType, this.source.GetSqlType(batch, resolveColumnType), batch.CurrentDatabase.Collation) ?? this.targetType;
+
+    /// <summary>
+    /// Collation of a CAST/CONVERT result whose target is a character type.
+    /// Real SQL Server (probe-confirmed against SQL Server 2025): a character
+    /// source expression's collation and coercibility carry through; a
+    /// non-character source yields the database default collation with
+    /// coercibility <see cref="Coercibility.CoercibleDefault"/> (so
+    /// <c>CAST(int AS varchar)</c> concatenates and compares cleanly with
+    /// literals and other database-collation values rather than raising Msg 457
+    /// / 468). Returns <see langword="null"/> for non-string targets (nothing to
+    /// re-collate). Shared by <see cref="Cast"/> and <c>ConvertExpression</c>.
+    /// </summary>
+    internal static SqlType? ResultStringType(SqlType targetType, SqlType sourceType, Collation dbCollation) =>
+        targetType.Collation is null
+            ? null
+            : sourceType.Collation is { } sourceCollation
+                ? targetType.WithCollation(sourceCollation, sourceType.Coercibility)
+                : targetType.WithCollation(dbCollation, Coercibility.CoercibleDefault);
+
+    /// <summary>
+    /// Applies <see cref="ResultStringType"/> to a coerced CAST/CONVERT value,
+    /// re-typing it to the character result's collation. Non-string results
+    /// pass through unchanged.
+    /// </summary>
+    internal static SqlValue RecollateStringResult(SqlValue coerced, SqlType targetType, SqlType sourceType, Collation dbCollation)
+    {
+        var recollated = ResultStringType(targetType, sourceType, dbCollation);
+        return recollated is null ? coerced
+            : coerced.IsNull ? SqlValue.Null(recollated)
+            : recollated is CharSqlType && coerced.Type.Collation!.StorageEncoding != recollated.Collation!.StorageEncoding
+                ? SqlValue.FromString(recollated, coerced.AsString)
+                : coerced.WithType(recollated);
+    }
 
     internal override string DebugDisplay() =>
         $"{(this.tryMode ? "TRY_CAST" : "CAST")}({source.DebugDisplay()} AS {targetType})";
