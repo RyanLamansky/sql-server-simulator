@@ -1007,8 +1007,13 @@ internal readonly partial struct SqlValue
     /// <c>uniqueidentifier</c> CAST rules. Accepts the <c>D</c>
     /// (<c>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</c>) and <c>B</c> (the same
     /// surrounded by braces) forms, case-insensitive on hex, with trailing
-    /// whitespace allowed but leading whitespace rejected. Every parse
-    /// failure surfaces as the same Msg 8169.
+    /// whitespace allowed but leading whitespace rejected. A string longer
+    /// than the 36-char D-form is accepted by parsing the leading 36
+    /// characters and ignoring any trailing content (probe-confirmed:
+    /// <c>'…-xxxxxxxxxxxx' + arbitrary tail</c> converts to the leading GUID —
+    /// SSMS's Database Properties dialog leans on this, emitting an over-long
+    /// all-zero GUID literal via <c>ISNULL(mirroring_guid, '0000…0000')</c>).
+    /// Every parse failure surfaces as the same Msg 8169.
     /// </summary>
     private static Guid ParseGuid(string source)
     {
@@ -1020,7 +1025,9 @@ internal readonly partial struct SqlValue
         var trimmed = source.TrimEnd();
         return Guid.TryParseExact(trimmed, "D", out var g) || Guid.TryParseExact(trimmed, "B", out g)
             ? g
-            : throw SimulatedSqlException.ConversionFailedFromStringToUniqueIdentifier();
+            : source.Length >= 36 && Guid.TryParseExact(source.AsSpan(0, 36), "D", out g)
+                ? g
+                : throw SimulatedSqlException.ConversionFailedFromStringToUniqueIdentifier();
     }
 
     /// <summary>

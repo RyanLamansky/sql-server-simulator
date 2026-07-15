@@ -207,6 +207,16 @@ Values derive from the collation model (`Collation.TryGetMetrics`) so any recogn
 - **Version** — the version ordinal from the numeric name token: unversioned / SQL_\* → 0, 90 → 1, 100 → 2, 140 → 3, 160 → 4.
 - **Name** — the collation's canonical name.
 
+## `SQL_VARIANT_PROPERTY(expression, property)`
+
+`Parser/Expressions/SqlVariantProperty.cs`: reports one facet of the `sql_variant` that would capture `expression` — `BaseType` / `Precision` / `Scale` / `MaxLength` / `TotalBytes` / `Collation`. SSMS's Database Properties dialog reads `SQL_VARIANT_PROPERTY(value, 'BaseType')` off `sys.database_scoped_configurations`. Real SQL Server projects `sql_variant` with a per-property base type; the simulator doesn't model sql_variant, so — following the `SERVERPROPERTY` convention — it surfaces the inner base type directly: `BaseType` / `Collation` as `sysname`, the four numeric facets as `int`. That precise typing flows to the projection schema only when the property argument is a string **literal**; a non-literal (e.g. `DECLARE @p sysname='BaseType'`) falls back to `nvarchar` with a runtime coerce (static/runtime parity — a divergence from real, which always returns sql_variant). Property names are case-insensitive. A NULL expression, a NULL property, an unknown property, or a value whose type can't live in a sql_variant (MAX strings, LOB, xml, spatial, hierarchyid) all return NULL. Probe-confirmed against SQL Server 2025 (2026-07-16):
+
+- **BaseType** — the bare type name (`1` → `int`, `'abc'` → `varchar`, `N'abc'` → `nvarchar`, `CAST(1 AS bit)` → `bit`, `GETDATE()` → `datetime`). Decimal-family values report **`numeric`** — matching a numeric literal's inference (`1.5` → `numeric`). *Divergence*: the simulator has one decimal family, so `CAST(1 AS decimal)` also reports `numeric` where real reports `decimal`.
+- **Precision / Scale** — the value type's numeric/temporal precision-scale (`1.25` → 3 / 2; `1` → 10 / 0; `datetime` → 23 / 3; `time(7)` → 16 / 7). String / binary / guid → 0 / 0.
+- **MaxLength** — the type's declared byte width, *not* the value's length: `varchar(10)` → 10, `nvarchar(10)` → 20, `int` → 4, `decimal(5,2)` → 5, `char(5)` → 5, `datetime` → 8. A generic string literal takes the value's byte length (`'abc'` → 3, `N'abc'` → 6).
+- **TotalBytes** — the value's *actual* byte count plus a per-family overhead: strings **+8**, binary / decimal **+4**, the scale-carrying temporal types (time / datetime2 / datetimeoffset) **+3**, everything else **+2**. So `'abc'` → 11, `N'abc'` → 14, `1` → 6, `CAST(1 AS bit)` → 3, `decimal(5,2)` → 9.
+- **Collation** — a string value's collation name; NULL for non-strings.
+
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution. Yields one row per substring split on the single-character separator.
 

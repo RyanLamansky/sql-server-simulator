@@ -418,7 +418,7 @@ internal readonly partial struct SqlValue
         var bytes = this.AsBytes;
         var formatted = style switch
         {
-            0 => target is NVarcharSqlType or NCharSqlType
+            0 => target is NVarcharSqlType or NCharSqlType or SystemNameSqlType
                 ? Encoding.Unicode.GetString(bytes)
                 : Encoding.Latin1.GetString(bytes),
             1 => "0x" + Convert.ToHexString(bytes),

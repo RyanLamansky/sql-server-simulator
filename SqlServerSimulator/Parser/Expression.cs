@@ -535,7 +535,7 @@ internal abstract class Expression
 
     /// <summary>
     /// True when this expression's parse tree contains a
-    /// <see cref="Expressions.VariableReference"/> anywhere. Used by
+    /// <see cref="VariableReference"/> anywhere. Used by
     /// <c>STRING_SPLIT</c>'s <c>enable_ordinal</c> gate, which must reject
     /// every variable-bearing shape (real SQL Server: Msg 8748 —
     /// probe-confirmed the wrapped forms <c>CAST(@v AS int)</c>, <c>@v + 0</c>,
@@ -545,7 +545,7 @@ internal abstract class Expression
     /// declared in the batch), so the detection is a static parse-tree walk.
     /// Default is <see langword="false"/>; the same common-container subclasses
     /// that override <see cref="VisitColumnReferences"/> (plus
-    /// <see cref="Expressions.VariableReference"/> itself) recurse here, so a
+    /// <see cref="VariableReference"/> itself) recurse here, so a
     /// variable buried in a less-common container is a residual coverage gap.
     /// </summary>
     internal virtual bool ContainsVariableReference => false;
@@ -879,6 +879,11 @@ internal abstract class Expression
                 "DATABASEPROPERTYEX" => new DatabasePropertyEx(context),
                 "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
                 "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
+                _ => null
+            },
+            20 => uppercaseName switch
+            {
+                "SQL_VARIANT_PROPERTY" => new SqlVariantProperty(context),
                 _ => null
             },
             21 => uppercaseName switch

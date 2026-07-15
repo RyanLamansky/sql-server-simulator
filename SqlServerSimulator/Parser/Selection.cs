@@ -1108,15 +1108,22 @@ internal sealed partial class Selection
 
             var resolvedIsTvf = context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
                 && resolvedFn is InlineTableValuedFunction or MultiStatementTableValuedFunction;
-            context.RestoreCheckpoint(afterNameCheckpoint);
-            if (resolvedIsTvf)
-            {
-                context.RestoreCheckpoint(checkpoint);
-                return ParseSingleFromSource(context, depth, ChainedResolverForName);
-            }
-            // Restore + fall through to the generic syntax-error throw.
+            // A '(' after the name marks a function-call shape (TVF invocation).
+            // ParseObjectName leaves the cursor on the leaf; peek one past it.
+            var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
             context.RestoreCheckpoint(checkpoint);
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (resolvedIsTvf)
+                return ParseSingleFromSource(context, depth, ChainedResolverForName);
+            // A function-call shape that didn't resolve to a known TVF is a
+            // deferred name-resolution error (Msg 208), not a syntax error:
+            // real SQL Server binds the TVF name lazily, so an un-taken IF
+            // branch naming an unknown function (SSMS's EngineEdition-gated
+            // `CROSS APPLY sys.dm_os_volume_stats(...)` VolumeFreeSpace probe)
+            // compiles and is discarded. A bare table name after APPLY stays a
+            // genuine syntax error (Msg 102, probe-confirmed).
+            throw isFunctionCallShape
+                ? SimulatedSqlException.InvalidObjectName(resolvedName)
+                : SimulatedSqlException.SyntaxErrorNear(context);
         }
         if (next is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
