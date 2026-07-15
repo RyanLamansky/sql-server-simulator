@@ -78,11 +78,25 @@ public sealed class ReservedKeywordsTests
     ];
 
     /// <summary>
-    /// The only canonical entry the enum intentionally omits — a multi-word
-    /// reserved keyword whose component words don't independently behave as
-    /// reserved in real SQL Server (see class doc).
+    /// Canonical entries the enum intentionally omits because real SQL Server
+    /// doesn't enforce them as reserved:
+    /// <list type="bullet">
+    /// <item><c>WITHIN GROUP</c> — a multi-word reserved keyword whose
+    /// component words don't independently behave as reserved (see class
+    /// doc).</item>
+    /// <item><c>PRECISION</c> — appears on the documented list (it forms the
+    /// <c>DOUBLE PRECISION</c> type name) but is probe-confirmed (SQL Server
+    /// 2025, 2026-07-15) fully usable as an identifier in every position:
+    /// dotted member (<c>clmns.precision</c>), bare projection, alias
+    /// (<c>select 1 as precision</c>), table alias, and ORDER BY all succeed,
+    /// where genuinely-reserved words such as <c>FROM</c> / <c>USER</c> raise
+    /// Msg 156. SMO's SSMS column-node query reads <c>CAST(clmns.precision AS
+    /// int)</c> off sys.all_columns, so treating it as reserved blocked the
+    /// query. Reserving it would break valid SQL, so it stays out of the
+    /// enum.</item>
+    /// </list>
     /// </summary>
-    private static readonly HashSet<string> DocumentedOmissions = ["WITHIN GROUP"];
+    private static readonly HashSet<string> DocumentedOmissions = ["WITHIN GROUP", "PRECISION"];
 
     [TestMethod]
     public void Keyword_Enum_MatchesCanonicalReservedList()

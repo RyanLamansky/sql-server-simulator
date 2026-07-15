@@ -71,4 +71,86 @@ public sealed class BitManipulationTests
     [TestMethod]
     public void LeftShift_Bigint_LargeShift()
         => AreEqual(1073741824L, new Simulation().ExecuteScalar("select left_shift(cast(1 as bigint), 30)"));
+
+    // Unary ~ (bitwise NOT). Probe-confirmed against SQL Server 2025
+    // (2026-07-15): result keeps the operand's exact type, bit flips, NULL
+    // propagates, non-integer operands raise Msg 8117, and ~ binds tighter
+    // than every binary operator.
+
+    [TestMethod]
+    public void BitwiseNot_Int_ReturnsOnesComplement()
+        => AreEqual(-2, new Simulation().ExecuteScalar("select ~1"));
+
+    [TestMethod]
+    public void BitwiseNot_BitOne_FlipsToZero()
+        => IsFalse((bool)new Simulation().ExecuteScalar("select ~cast(1 as bit)")!);
+
+    [TestMethod]
+    public void BitwiseNot_BitZero_FlipsToOne()
+        => IsTrue((bool)new Simulation().ExecuteScalar("select ~cast(0 as bit)")!);
+
+    [TestMethod]
+    public void BitwiseNot_TinyintZero_Returns255PreservingType()
+        => AreEqual((byte)255, new Simulation().ExecuteScalar("select ~cast(0 as tinyint)"));
+
+    [TestMethod]
+    public void BitwiseNot_Smallint_PreservesType()
+        => AreEqual((short)-6, new Simulation().ExecuteScalar("select ~cast(5 as smallint)"));
+
+    [TestMethod]
+    public void BitwiseNot_Bigint_PreservesType()
+        => AreEqual(-6L, new Simulation().ExecuteScalar("select ~cast(5 as bigint)"));
+
+    [TestMethod]
+    public void BitwiseNot_Null_Propagates()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select ~cast(null as int)"));
+
+    [TestMethod]
+    public void BitwiseNot_DoubleApplication_RoundTrips()
+        => AreEqual(5, new Simulation().ExecuteScalar("select ~~5"));
+
+    // Precedence: ~ is SQL Server's highest-precedence operator, so it binds
+    // to the leftmost primary — `~2 + 1` is `(~2) + 1`, not `~(2 + 1)`.
+
+    [TestMethod]
+    public void BitwiseNot_BindsTighterThanAdd()
+        => AreEqual(-2, new Simulation().ExecuteScalar("select ~2 + 1"));
+
+    [TestMethod]
+    public void BitwiseNot_BindsTighterThanMultiply()
+        => AreEqual(-9, new Simulation().ExecuteScalar("select ~2 * 3"));
+
+    [TestMethod]
+    public void BitwiseNot_BindsTighterThanBitwiseAnd()
+        => AreEqual(1, new Simulation().ExecuteScalar("select ~2 & 3"));
+
+    [TestMethod]
+    public void BitwiseNot_SinksAcrossMixedChain()
+        => AreEqual(9, new Simulation().ExecuteScalar("select ~2 + 3 * 4"));
+
+    [TestMethod]
+    public void BitwiseNot_ParenthesizedOperand_AppliesToWhole()
+        => AreEqual(-4, new Simulation().ExecuteScalar("select ~(2 + 1)"));
+
+    [TestMethod]
+    public void BitwiseNot_DecimalLiteral_RaisesMsg8117()
+        => new Simulation().AssertSqlError("select ~1.5", 8117);
+
+    [TestMethod]
+    public void BitwiseNot_Decimal_RaisesMsg8117WithTypeName()
+        => new Simulation().AssertSqlError(
+            "select ~cast(1.5 as decimal(3,1))", 8117,
+            "Operand data type decimal is invalid for '~' operator.");
+
+    [TestMethod]
+    public void BitwiseNot_Float_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "select ~cast(1 as float)", 8117,
+            "Operand data type float is invalid for '~' operator.");
+
+    [TestMethod]
+    public void BitwiseNot_String_RaisesMsg8117()
+        => new Simulation().AssertSqlError(
+            "select ~'a'", 8117,
+            "Operand data type varchar is invalid for '~' operator.");
 }

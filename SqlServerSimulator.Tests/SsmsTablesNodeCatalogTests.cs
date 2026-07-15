@@ -146,4 +146,105 @@ public sealed class SsmsTablesNodeCatalogTests
         AreEqual(0, reader.GetInt32(5));
         IsFalse(reader.Read());
     }
+
+    // ---- Columns / Keys / Indexes / Triggers sub-node round (2026-07-15) ----
+
+    /// <summary>
+    /// SMO's column-node query projects <c>CAST(clmns.precision AS int)</c>.
+    /// PRECISION is a reserved keyword but — probe-confirmed against SQL Server
+    /// 2025 — is fully usable as an identifier in every position (dotted member,
+    /// bare projection, alias, ORDER BY), unlike genuinely-reserved words such
+    /// as FROM / USER which raise Msg 156.
+    /// </summary>
+    [TestMethod]
+    public void AllColumns_PrecisionMemberReference_Projects()
+        => AreEqual(10, new Simulation().ExecuteScalar<int>("""
+            create table t (id int not null primary key, amount decimal(10, 2) null);
+            select cast(clmns.precision as int) from sys.all_columns clmns
+            where clmns.object_id = object_id('t') and clmns.name = 'amount'
+            """));
+
+    [TestMethod]
+    public void Precision_AsColumnName_RoundTrips()
+        => AreEqual(7, new Simulation().ExecuteScalar<int>("""
+            create table t (precision int not null);
+            insert t (precision) values (7);
+            select precision from t
+            """));
+
+    [TestMethod]
+    public void Precision_AsColumnAlias_Projects()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>("select 1 as precision"));
+
+    /// <summary>
+    /// The Columns node reads the SQL-Server-2025 vector / ledger / column-set /
+    /// XML surface off sys.all_columns. None are modeled, so the constants are
+    /// 0 (is_xml_document / is_column_set / is_dropped_ledger_column),
+    /// xml_collection_id 0, and the vector_* pair NULL.
+    /// </summary>
+    [TestMethod]
+    public void AllColumns_ExposesVectorLedgerColumnSetConstants()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
+        using var reader = sim.ExecuteReader("""
+            select is_xml_document, xml_collection_id, is_column_set,
+                   is_dropped_ledger_column, vector_dimensions, vector_base_type_desc
+            from sys.all_columns where object_id = object_id('t') and name = 'id'
+            """);
+
+        IsTrue(reader.Read());
+        IsFalse(reader.GetBoolean(0));
+        AreEqual(0, reader.GetInt32(1));
+        IsFalse(reader.GetBoolean(2));
+        IsFalse(reader.GetBoolean(3));
+        IsTrue(reader.IsDBNull(4));
+        IsTrue(reader.IsDBNull(5));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// The index / key / FK sub-node queries branch on
+    /// <c>sys.table_types.is_memory_optimized</c> (constant 0 — no
+    /// memory-optimized types modeled) keyed by <c>type_table_object_id</c>,
+    /// which lines up with the table type's OBJECT-model id.
+    /// </summary>
+    [TestMethod]
+    public void TableTypes_ExposesIsMemoryOptimizedAndObjectId()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type dbo.OrderLines as table (line_id int not null, qty int null)");
+        using var reader = sim.ExecuteReader("""
+            select is_memory_optimized,
+                   cast(case when type_table_object_id > 0 then 1 else 0 end as int)
+            from sys.table_types where name = 'OrderLines'
+            """);
+
+        IsTrue(reader.Read());
+        IsFalse(reader.GetBoolean(0));
+        AreEqual(1, reader.GetInt32(1));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// The column-node base-type join arm tests <c>baset.is_assembly_type = 1</c>.
+    /// It is 0 for ordinary built-ins and 1 only for the CLR-backed system types
+    /// (hierarchyid / geometry / geography).
+    /// </summary>
+    [TestMethod]
+    public void SysTypes_IsAssemblyType_ZeroForIntOneForHierarchyId()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar<int>("select cast(is_assembly_type as int) from sys.types where name = 'int'"));
+        AreEqual(1, sim.ExecuteScalar<int>("select cast(is_assembly_type as int) from sys.types where name = 'hierarchyid'"));
+    }
+
+    /// <summary>
+    /// The Triggers sub-node query LEFT JOINs sys.system_sql_modules to detect a
+    /// WITH ENCRYPTION module. The simulator ships no system-defined modules, so
+    /// the view is always empty.
+    /// </summary>
+    [TestMethod]
+    public void SystemSqlModules_IsEmpty()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>("select count(*) from sys.system_sql_modules"));
 }

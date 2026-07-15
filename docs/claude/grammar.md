@@ -15,6 +15,15 @@ The dispatch loop drains optional `;`s at the top of each iteration and trusts e
 
 This is why semicolon-less statement sequences work for the full set, e.g. `select 1\nexec xp_msver`, `declare @x int\nuse master`, `if 1=1 select 1\nfetch c`. Before unification these predicates had drifted (EXEC/EXECUTE missing from several), so SSMS's semicolon-less AlwaysOn probe died with Msg 102.
 
+# Reserved keywords as identifiers
+
+The tokenizer classifies a bare word as a `ReservedKeyword` iff it matches a `Parser/Keyword.cs` enum member (`UnquotedString.CheckReserved`), and reserved words can't stand in as identifiers — `SELECT 1 AS from` / `c.user` raise **Msg 156**. So the enum is the sole gate on which words are usable as unquoted identifiers, and `Tests.Internal/ReservedKeywordsTests` pins it to Microsoft's [canonical reserved-keyword list](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/reserved-keywords-transact-sql) in both directions.
+
+Two canonical entries are **deliberately omitted** from the enum because real SQL Server doesn't actually enforce them as reserved (`ReservedKeywordsTests.DocumentedOmissions`):
+
+- **`WITHIN GROUP`** — a two-word entry whose component words aren't independently reserved (`WITHIN` is contextual; `GROUP` is covered).
+- **`PRECISION`** — on the list only because it forms the `DOUBLE PRECISION` type name, but probe-confirmed (SQL Server 2025, 2026-07-15) fully usable as an identifier in **every** position: dotted member (`clmns.precision`), bare projection (`SELECT precision FROM …`), alias (`SELECT 1 AS precision`), table alias, and `ORDER BY` all succeed. SMO's SSMS column-node query reads `CAST(clmns.precision AS int)` off `sys.all_columns`, so reserving it blocked a real client. Server behavior is authoritative over the doc list, so `Precision` is not a `Keyword`.
+
 # Double-quoted identifiers / `SET QUOTED_IDENTIFIER`
 
 `"…"` is dual-natured, switched by the session `QUOTED_IDENTIFIER` option (**default ON**). The tokenizer's `NextToken(…, bool quotedIdentifiers)` reads the parser flag threaded from `ParserContext.QuotedIdentifiers` (seeded from `SimulatedDbConnection.QuotedIdentifiers`):

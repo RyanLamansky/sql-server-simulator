@@ -293,6 +293,18 @@ internal static class BuiltInResources
             new("is_computed", SqlType.Bit, null, false),
             new("collation_name", SqlType.SystemName, 128, true),
             new("is_sparse", SqlType.Bit, null, true),
+            // Probe-confirmed constants (SQL Server 2025, 2026-07-15) that SMO's
+            // SSMS Object-Explorer column / index / key sub-node queries read
+            // off sys.all_columns: no XML documents, XML-schema collections,
+            // column sets, dropped ledger columns, or vector columns are
+            // modeled, so is_xml_document / is_column_set / is_dropped_ledger_column
+            // are 0, xml_collection_id is 0, and the vector_* pair is NULL.
+            new("is_xml_document", SqlType.Bit, null, false),
+            new("xml_collection_id", SqlType.Int32, null, false),
+            new("is_column_set", SqlType.Bit, null, true),
+            new("is_dropped_ledger_column", SqlType.Bit, null, true),
+            new("vector_dimensions", SqlType.Int32, null, true),
+            new("vector_base_type_desc", SqlType.NVarchar, 20, true),
         ];
         IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation);
@@ -324,6 +336,28 @@ internal static class BuiltInResources
             new("inline_type", SqlType.Bit, null, true),
             new("is_inlineable", SqlType.Bit, null, true),
         ], EnumerateSqlModules);
+
+        // sys.system_sql_modules: same shape as sys.sql_modules but scoped to
+        // system objects' module definitions. The simulator ships no
+        // system-defined modules with stored T-SQL, so this is always empty —
+        // which is exactly what SMO's SSMS Object-Explorer trigger sub-node
+        // query needs (it LEFT JOINs sys.system_sql_modules to distinguish a
+        // WITH ENCRYPTION module, and user triggers never appear here).
+        Sys("system_sql_modules",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_ansi_nulls", SqlType.Bit, null, true),
+            new("uses_quoted_identifier", SqlType.Bit, null, true),
+            new("is_schema_bound", SqlType.Bit, null, true),
+            new("uses_database_collation", SqlType.Bit, null, true),
+            new("is_recompiled", SqlType.Bit, null, true),
+            new("null_on_null_input", SqlType.Bit, null, true),
+            new("execute_as_principal_id", SqlType.Int32, null, true),
+            new("uses_native_compilation", SqlType.Bit, null, true),
+            new("inline_type", SqlType.Bit, null, true),
+            new("is_inlineable", SqlType.Bit, null, true),
+        ], static (batch, database) => []);
 
         // INFORMATION_SCHEMA.TABLES: ISO-standard 4-column shape. TABLE_TYPE
         // is 'BASE TABLE' for every user table; 'VIEW' (not modeled) would be
@@ -534,11 +568,21 @@ internal static class BuiltInResources
             new("is_user_defined", SqlType.Bit, null, false),
             new("is_table_type", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, false),
+            // is_assembly_type: 1 only for the CLR-backed system types
+            // (hierarchyid / geometry / geography); 0 for every other built-in,
+            // table type, and scalar alias. SMO's SSMS column-node query reads
+            // it off sys.types (baset) to pick the base-type join arm.
+            new("is_assembly_type", SqlType.Bit, null, false),
         ], EnumerateSysTypes);
 
         // sys.table_types: per-database list of user-defined table types
         // only. Probe-confirmed shipped subset: name / type_table_object_id /
-        // is_user_defined / schema_id / user_type_id.
+        // is_user_defined / schema_id / user_type_id / is_memory_optimized.
+        // is_memory_optimized is a constant 0 — memory-optimized table types
+        // aren't modeled, and SMO's SSMS Object-Explorer index/key/FK
+        // sub-node queries read it via
+        // (SELECT tt.is_memory_optimized FROM sys.table_types tt WHERE
+        //  tt.type_table_object_id = i.object_id).
         Sys("table_types",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -546,6 +590,7 @@ internal static class BuiltInResources
             new("is_user_defined", SqlType.Bit, null, false),
             new("schema_id", SqlType.Int32, null, false),
             new("user_type_id", SqlType.Int32, null, false),
+            new("is_memory_optimized", SqlType.Bit, null, false),
         ], EnumerateSysTableTypes);
 
         // sys.sequences: per-database list of user-defined sequence objects.
@@ -1913,6 +1958,7 @@ internal static class BuiltInResources
                 name == "sysname" ? trueBit : falseBit,
                 falseBit,
                 trueBit,
+                name is "hierarchyid" or "geometry" or "geography" ? trueBit : falseBit,
             ];
         }
         // User-defined table types: probe-confirmed system_type_id 243.
@@ -1928,6 +1974,7 @@ internal static class BuiltInResources
                     schemaId,
                     trueBit,
                     trueBit,
+                    falseBit,
                     falseBit,
                 ];
             }
@@ -1950,6 +1997,7 @@ internal static class BuiltInResources
                     trueBit,
                     falseBit,
                     alias.IsNullable ? trueBit : falseBit,
+                    falseBit,
                 ];
             }
         }
@@ -1994,6 +2042,7 @@ internal static class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSysTableTypes(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -2005,6 +2054,7 @@ internal static class BuiltInResources
                     trueBit,
                     schemaId,
                     SqlValue.FromInt32(tt.UserTypeId),
+                    falseBit,
                 ];
             }
         }
@@ -3924,6 +3974,9 @@ internal static class BuiltInResources
     {
         _ = batch;
         var falseBit = SqlValue.FromBoolean(false);
+        var zeroInt = SqlValue.FromInt32(0);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullVectorBaseType = SqlValue.Null(NVarcharSqlType.Get(20, Collation.Catalog, Coercibility.Implicit));
         // The per-database default collation flows from CurrentDatabase.
         // The captured defaultCollation arg is a legacy fallback; today the
         // active database's CollationName drives the value, with per-column
@@ -3957,6 +4010,12 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Computed is not null),
                         CollationFor(col),
                         falseBit,
+                        falseBit,
+                        zeroInt,
+                        falseBit,
+                        falseBit,
+                        nullInt,
+                        nullVectorBaseType,
                     ];
                 }
             }
@@ -3984,6 +4043,12 @@ internal static class BuiltInResources
                         falseBit,
                         CollationFor(col),
                         falseBit,
+                        falseBit,
+                        zeroInt,
+                        falseBit,
+                        falseBit,
+                        nullInt,
+                        nullVectorBaseType,
                     ];
                 }
             }
@@ -4011,6 +4076,12 @@ internal static class BuiltInResources
                         falseBit,
                         CollationFor(col),
                         falseBit,
+                        falseBit,
+                        zeroInt,
+                        falseBit,
+                        falseBit,
+                        nullInt,
+                        nullVectorBaseType,
                     ];
                 }
             }
@@ -4038,6 +4109,12 @@ internal static class BuiltInResources
                         SqlValue.FromBoolean(col.Computed is not null),
                         CollationFor(col),
                         falseBit,
+                        falseBit,
+                        zeroInt,
+                        falseBit,
+                        falseBit,
+                        nullInt,
+                        nullVectorBaseType,
                     ];
                 }
             }

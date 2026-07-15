@@ -54,6 +54,25 @@ internal abstract class TwoSidedExpression : Expression
         return rightTwo;
     }
 
+    /// <summary>
+    /// Sinks a tightest-binding unary prefix (the <c>~</c> bitwise-NOT, the
+    /// only operator SQL Server ranks above <c>* / %</c>) that parsed around
+    /// this whole binary sub-tree down to its leftmost leaf, then returns the
+    /// sub-tree. <c>~2 * 3</c> first parses as <c>~(2 * 3)</c> because the
+    /// prefix's operand parse consumes the full following expression; because
+    /// every binary operator binds looser than <c>~</c>, the prefix must
+    /// re-home onto <c>2</c>, giving <c>(~2) * 3</c>. Mirrors the intent of
+    /// <see cref="AdjustForPrecedence"/> but re-wraps a leaf rather than
+    /// re-parenting an operator node.
+    /// </summary>
+    internal Expression SinkUnaryPrefixToLeftmostLeaf(Func<Expression, Expression> wrap)
+    {
+        this.left = this.left is TwoSidedExpression leftTwo
+            ? leftTwo.SinkUnaryPrefixToLeftmostLeaf(wrap)
+            : wrap(this.left);
+        return this;
+    }
+
     public sealed override SqlValue Run(RuntimeContext runtime)
         => Run(left.Run(runtime), right.Run(runtime));
 

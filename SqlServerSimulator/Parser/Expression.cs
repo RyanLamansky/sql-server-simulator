@@ -76,6 +76,14 @@ internal abstract class Expression
                 return Expression.Parse(context.MoveNextRequiredReturnSelf());
             case Operator { Character: '-' }:
                 return new Subtract(new Value(Storage.SqlValue.FromInt32(0)), context).AdjustForPrecedence();
+            // Unary ~ (bitwise NOT) is SQL Server's highest-precedence
+            // operator, so — like unary minus — it early-returns rather than
+            // falling into the binary loop (preserving the surrounding
+            // terminator). The recursive Parse consumes the full following
+            // chain; BitwiseNot.Create re-homes the prefix onto the chain's
+            // leftmost leaf so `~2 * 3` binds as `(~2) * 3`.
+            case Operator { Character: '~' }:
+                return BitwiseNot.Create(Expression.Parse(context.MoveNextRequiredReturnSelf()));
         }
 
         expression = context.Token switch

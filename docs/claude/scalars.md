@@ -124,6 +124,14 @@ Five integer scalars sharing one dispatch file (`Parser/Expressions/BitManipulat
 - **`LEFT_SHIFT(num, n)`** — arithmetic left shift; high bits truncated when they overflow the input bit-width.
 - **`RIGHT_SHIFT(num, n)`** — **logical** right shift (high bits zero-filled, probe-confirmed against SQL Server 2025 — diverges from C#'s `>>` on signed types which is arithmetic). Result type preserves input.
 
+### Unary `~` (bitwise NOT)
+
+`~` (`Parser/Expressions/BitwiseNot.cs`) is the one's-complement prefix operator — tokenized as an `Operator` and parsed in `Expression.Parse`'s pre-primary switch alongside unary `+` / `-`. Probe-confirmed against SQL Server 2025 (2026-07-15):
+
+- **Result keeps the operand's exact integer type** — `~1` → `int` -2, `~CAST(0 AS tinyint)` → `tinyint` 255, `~CAST(5 AS smallint)` → `smallint` -6, `~CAST(5 AS bigint)` → `bigint` -6. `bit` flips: `~CAST(1 AS bit)` → 0, `~CAST(0 AS bit)` → 1. NULL propagates (typed).
+- **Only integer-category operands** (`bit` / `tinyint` / `smallint` / `int` / `bigint`). Every other operand — decimal / numeric / float / money / string / binary — raises **Msg 8117** (`OperandDataTypeInvalid`, wording `Operand data type <type> is invalid for '~' operator.`) with **no coercion attempt** (even a numeric string like `~'5'` rejects). `GetSqlType` enforces the same rule so projection schema and runtime agree.
+- **Highest-precedence operator** — binds tighter than `* / % + - & ^ |`, so `~2 * 3` = `(~2) * 3` = -9 and `~2 + 3 * 4` = `(~2) + (3*4)` = 9. Because the operand parse consumes the full following chain, `BitwiseNot.Create` re-homes the prefix onto the chain's leftmost leaf via `TwoSidedExpression.SinkUnaryPrefixToLeftmostLeaf` (the unary analogue of `AdjustForPrecedence`).
+
 ## CHECKSUM family
 
 - **`CHECKSUM(args...)` / `BINARY_CHECKSUM(args...)`** (`Parser/Expressions/ChecksumAndRowVersion.cs`) — fast 32-bit fold over the argument list. Implementation uses FNV-1a; semantic guarantee matches SQL Server (same inputs → same checksum, deterministically). **Bit-pattern divergence**: real SQL Server uses an undocumented byte-mix; the simulator's FNV-1a output won't match real SQL Server bit-for-bit. Same-value-same-checksum invariant holds; same-multiset-same-checksum doesn't (CHECKSUM is order-sensitive, unlike CHECKSUM_AGG). Result `int`.

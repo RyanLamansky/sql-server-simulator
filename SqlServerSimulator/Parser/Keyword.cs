@@ -126,7 +126,6 @@ enum Keyword
     Percent,
     Pivot,
     Plan,
-    Precision,
     Primary,
     Print,
     Proc,
