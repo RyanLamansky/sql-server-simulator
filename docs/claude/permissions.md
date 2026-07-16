@@ -122,10 +122,10 @@ The simulator doesn't enforce permissions, so these return values that let permi
 - `DATABASE_PRINCIPAL_ID([name])` — alias of `USER_ID` with the same lookup behavior; real SQL Server exposes both names against the same backing lookup.
 
 **Permission-check placeholders**:
-- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, sub-securable, sub-securable-class])` returns `1` for any non-NULL `permission` argument and NULL for NULL — the simulator doesn't enforce permissions, so any check passes. Real SQL Server returns 1 / 0 based on the actual grant; the always-1 stance lets code paths gated on this scalar fall through naturally.
-- `IS_MEMBER('public')` returns 1; `IS_MEMBER('<other-role>')` returns 0; NULL → NULL. Same pattern as real SQL Server's behavior for the default dbo principal (public membership is universal).
-- `IS_ROLEMEMBER(role [, principal])` — same `public → 1` / other → 0 / NULL → NULL shape as `IS_MEMBER`. The 2-arg form accepts a principal name; the simulator's single-principal model returns the same result regardless.
-- `IS_SRVROLEMEMBER(role [, login])` — returns 0 for any role (the simulator has no server-role model); NULL → NULL.
+- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, sub-securable, sub-securable-class])` returns `1` for any non-NULL `permission` argument and NULL for a NULL `permission` — the simulator doesn't enforce permissions, so any check passes. NULL `securable` / `securable_class` are legal and don't affect the result (real reads NULL securable as "the current server or database"; DacFx's bacpac-export gate sends `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` and requires 1 — probe-confirmed). Real SQL Server returns 1 / 0 based on the actual grant; the always-1 stance lets code paths gated on this scalar fall through naturally.
+- `IS_MEMBER(group_or_role)` — probe-confirmed 1/0/NULL shape for the dbo session principal: `public` and `db_owner` → 1 (dbo is always a member of both), the other eight fixed database roles → 0, a user-created role → membership per `sys.database_role_members` (dbo's principal id 1), any non-role / unknown name → NULL.
+- `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`. The 2-arg form accepts a principal name; the simulator's single-principal model returns the same result regardless.
+- `IS_SRVROLEMEMBER(role [, login])` — `public` → 1, the other eight fixed server roles → 0 (no server-role membership model), any other name (including database roles) → NULL; NULL → NULL. Probe-confirmed against a non-sysadmin login.
 
 ## Known gaps
 

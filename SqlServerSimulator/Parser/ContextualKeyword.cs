@@ -86,6 +86,7 @@ enum ContextualKeyword
     Scoped,
     Sequence,
     Sets,
+    Show_Statistics,
     ShrinkDatabase,
     ShrinkFile,
     Spatial,

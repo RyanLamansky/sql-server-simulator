@@ -43,10 +43,24 @@ public sealed partial class BacpacBuilder
     private readonly List<UserDefinedDataTypeDef> _uddts = [];
     private readonly List<(string ElementType, string Name)> _silentlySkipped = [];
     private readonly List<(string ElementType, string Name)> _unknownElements = [];
+    private string? _dspName;
 
     private BacpacBuilder() { }
 
     public static BacpacBuilder Create() => new();
+
+    /// <summary>
+    /// Sets the root <c>DataSchemaModel</c>'s <c>DspName</c> to the schema
+    /// provider for compatibility level <paramref name="level"/> (e.g. 130 →
+    /// <c>Microsoft.Data.Tools.Schema.Sql.Sql130DatabaseSchemaProvider</c>),
+    /// the attribute the loader reads to set the imported database's
+    /// compatibility level.
+    /// </summary>
+    public BacpacBuilder CompatibilityLevel(int level)
+    {
+        _dspName = $"Microsoft.Data.Tools.Schema.Sql.Sql{level}DatabaseSchemaProvider";
+        return this;
+    }
 
     /// <summary>
     /// Sets a database-level option that lands as a property on the
@@ -438,7 +452,10 @@ public sealed partial class BacpacBuilder
                 new XAttribute("Name", elementName)));
         }
 
-        var doc = new XDocument(new XElement(ns + "DataSchemaModel", model));
+        var rootElement = new XElement(ns + "DataSchemaModel", model);
+        if (_dspName is not null)
+            rootElement.SetAttributeValue("DspName", _dspName);
+        var doc = new XDocument(rootElement);
         var entry = archive.CreateEntry("model.xml");
         using var stream = entry.Open();
         using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));

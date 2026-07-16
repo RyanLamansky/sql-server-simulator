@@ -270,15 +270,13 @@ internal static partial class BuiltInResources
         ], (batch, database) => ConfigurationsRows);
 
         // sys.database_scoped_configurations: per-database configuration knobs.
-        // Real SQL Server types value / value_for_secondary as sql_variant;
-        // since sql_variant isn't modeled they surface as nvarchar. nvarchar —
-        // not bigint — because SSMS's Database Properties dialog reads them via
-        // ISNULL(value_for_secondary, 'PRIMARY') / ISNULL(value, 'NULL'): a
-        // string fallback that sql_variant tolerates but a bigint column
-        // rejects (Msg 245 converting 'PRIMARY' to bigint). A single concrete
-        // type can't reproduce sql_variant's per-row BaseType, so bit-valued
-        // knobs display as their numeric string ('0') rather than SSMS's
-        // ON/OFF — an inherent no-sql_variant divergence, not an engine error.
+        // value / value_for_secondary are sql_variant, matching real SQL Server:
+        // each row carries its own inner base type (MAXDOP int, the bit-valued
+        // knobs bit), so a bit knob reads back as bool (SSMS's ON/OFF) and
+        // DacFx's (bool)reader[value] unbox on LEGACY_CARDINALITY_ESTIMATION
+        // succeeds. SSMS's ISNULL(value_for_secondary, 'PRIMARY') /
+        // ISNULL(value, 'NULL') also work — the variant NULL falls through to
+        // the string fallback, and the ISNULL result stays sql_variant.
         // Static defaults for a fresh database — the simulator doesn't track
         // ALTER DATABASE SCOPED CONFIGURATION changes. The row set is
         // independent of the database.
@@ -286,8 +284,8 @@ internal static partial class BuiltInResources
         [
             new("configuration_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-            new("value", SqlType.NVarchar, 4000, true),
-            new("value_for_secondary", SqlType.NVarchar, 4000, true),
+            new("value", SqlType.SqlVariant, null, true),
+            new("value_for_secondary", SqlType.SqlVariant, null, true),
             new("is_value_default", SqlType.Bit, null, true),
         ], (batch, database) => DatabaseScopedConfigurationRows);
 
@@ -900,22 +898,24 @@ internal static partial class BuiltInResources
     /// Static <c>sys.database_scoped_configurations</c> rows — the fresh-database
     /// defaults for the knobs SMO's Script-As preamble reads. The simulator
     /// doesn't track <c>ALTER DATABASE SCOPED CONFIGURATION</c> changes, so the
-    /// set is fixed. <c>value_for_secondary</c> is NULL (no secondary replica);
-    /// <c>value</c> mirrors the primary. configuration_id values match SQL
+    /// set is fixed. <c>value</c> is <c>sql_variant</c> carrying each knob's
+    /// real inner base type (MAXDOP <c>int</c>; the remaining knobs <c>bit</c>,
+    /// probe-confirmed against SQL Server 2025); <c>value_for_secondary</c> is a
+    /// variant NULL (no secondary replica). configuration_id values match SQL
     /// Server 2025's assignment.
     /// </summary>
     private static readonly SqlValue[][] DatabaseScopedConfigurationRows = BuildDatabaseScopedConfigurationRows();
 
     private static SqlValue[][] BuildDatabaseScopedConfigurationRows()
     {
-        (int Id, string Name, string Value)[] data =
+        (int Id, string Name, SqlValue Value)[] data =
         [
-            (1, "MAXDOP", "0"),
-            (2, "LEGACY_CARDINALITY_ESTIMATION", "0"),
-            (3, "PARAMETER_SNIFFING", "1"),
-            (4, "QUERY_OPTIMIZER_HOTFIXES", "0"),
+            (1, "MAXDOP", SqlValue.FromVariant(SqlValue.FromInt32(0))),
+            (2, "LEGACY_CARDINALITY_ESTIMATION", SqlValue.FromVariant(SqlValue.FromBoolean(false))),
+            (3, "PARAMETER_SNIFFING", SqlValue.FromVariant(SqlValue.FromBoolean(true))),
+            (4, "QUERY_OPTIMIZER_HOTFIXES", SqlValue.FromVariant(SqlValue.FromBoolean(false))),
         ];
-        var nullValue = SqlValue.Null(SqlType.NVarchar);
+        var nullValue = SqlValue.Null(SqlType.SqlVariant);
         var isDefault = SqlValue.FromBoolean(true);
         var rows = new SqlValue[data.Length][];
         for (var i = 0; i < data.Length; i++)
@@ -924,7 +924,7 @@ internal static partial class BuiltInResources
             [
                 SqlValue.FromInt32(data[i].Id),
                 SqlValue.FromSystemName(data[i].Name),
-                SqlValue.FromNVarchar(data[i].Value),
+                data[i].Value,
                 nullValue,
                 isDefault,
             ];

@@ -118,6 +118,11 @@ internal static partial class BuiltInResources
             new("xml_collection_id", SqlType.Int32, null, false),
             new("is_readonly", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, false),
+            // Vector-typed parameters aren't modeled, so the pair is always
+            // NULL (mirroring sys.columns' vector pair). DacFx's parameter
+            // reverse-engineering reads both.
+            new("vector_dimensions", SqlType.Int32, null, true),
+            new("vector_base_type_desc", SqlType.NVarchar, 20, true),
         ];
         Sys("parameters", parameterColumns, EnumerateParameters);
 
@@ -305,6 +310,20 @@ internal static partial class BuiltInResources
             new("max_length", SqlType.SmallInt, null, false),
             new("precision", SqlType.TinyInt, null, false),
             new("scale", SqlType.TinyInt, null, false),
+            // collation_name: the database collation for the character-family
+            // types (char/varchar/nchar/nvarchar/text/ntext/sysname and alias
+            // types over them — probe-confirmed real reports the database
+            // collation there), NULL for everything else. principal_id /
+            // default_object_id: NULL / 0 (no per-type ownership or
+            // sp_bindefault model). DacFx's UDDT scripting reads all three.
+            new("collation_name", SqlType.SystemName, 128, true),
+            new("principal_id", SqlType.Int32, null, true),
+            new("default_object_id", SqlType.Int32, null, false),
+            // rule_object_id: object_id of a bound legacy CREATE RULE object
+            // (sp_bindrule). Rules aren't modeled, so this is always 0 —
+            // probe-confirmed real reports 0 for unbound types. DacFx's UDDT
+            // reverse-engineering query joins sys.objects ON rule_object_id.
+            new("rule_object_id", SqlType.Int32, null, false),
         ], EnumerateSysTypes);
 
         // sys.table_types: per-database list of user-defined table types only.
@@ -374,6 +393,11 @@ internal static partial class BuiltInResources
             new("is_cached", SqlType.Bit, null, false),
             new("cache_size", SqlType.Int32, null, true),
             new("current_value", SqlType.BigInt, null, false),
+            // last_used_value: sql_variant carrying the last emitted value in
+            // the sequence's declared type, NULL until the first NEXT VALUE FOR
+            // (and after ALTER … RESTART). DacFx's sequence reverse-engineering
+            // query projects [s].[last_used_value].
+            new("last_used_value", SqlType.SqlVariant, null, true),
             new("system_type_id", SqlType.TinyInt, null, false),
             new("user_type_id", SqlType.Int32, null, false),
             new("is_exhausted", SqlType.Bit, null, false),
@@ -445,7 +469,99 @@ internal static partial class BuiltInResources
             new("is_assembly_type", SqlType.Bit, null, false),
             new("assembly_id", SqlType.Int32, null, false),
             new("is_table_type", SqlType.Bit, null, false),
+            // assembly_class: the CLR type name (probe-confirmed
+            // Microsoft.SqlServer.Types.Sql{HierarchyId,Geometry,Geography}).
+            // DacFx's assembly-type scripting query joins it.
+            new("assembly_class", SqlType.SystemName, 128, true),
         ], EnumerateAssemblyTypes);
+
+        // sys.numbered_procedure_parameters / sys.function_order_columns:
+        // numbered stored procedures (CREATE PROCEDURE ...;N) and ordered-set
+        // aggregate order columns aren't modeled, so both ship empty with the
+        // full probe-confirmed shape (SQL Server 2025, 2026-07-16).
+        Sys("numbered_procedure_parameters",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("procedure_number", SqlType.SmallInt, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("parameter_id", SqlType.Int32, null, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
+            new("is_output", SqlType.Bit, null, false),
+            new("is_cursor_ref", SqlType.Bit, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("function_order_columns",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("order_column_id", SqlType.Int32, null, false),
+            new("column_id", SqlType.Int32, null, false),
+            new("is_descending", SqlType.Bit, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.external_languages / sys.external_libraries / sys.external_models:
+        // external-language runtimes (R/Python via CREATE EXTERNAL LANGUAGE),
+        // external libraries, and external AI models (sp_invoke_external_rest_
+        // endpoint / AI_GENERATE_EMBEDDINGS) aren't modeled, so all three ship
+        // empty with the full probe-confirmed shape (SQL Server 2025,
+        // 2026-07-16). external_models' parameters column is the json type on
+        // real SQL Server, substituted here as nvarchar(max) since the view is
+        // always empty. See docs/claude/catalog-views.md.
+        Sys("external_languages",
+        [
+            new("external_language_id", SqlType.Int32, null, false),
+            new("language", SqlType.SystemName, 128, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("external_libraries",
+        [
+            new("external_library_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("principal_id", SqlType.Int32, null, true),
+            new("language", SqlType.SystemName, 128, true),
+            new("scope", SqlType.Int32, null, false),
+            new("scope_desc", VarcharSqlType.Get(7, Collation.Catalog, Coercibility.Implicit), 7, false),
+        ], static (_, _) => EmptyCatalogRows);
+        // sys.external_library_files / sys.external_language_files: the
+        // per-platform binary payload rows for external libraries / languages.
+        // Both unmodeled, so both ship empty with the full probe-confirmed
+        // shape (SQL Server 2025 WideWorldImporters, 2026-07-16). DacFx reads
+        // these when reverse-engineering EXTERNAL LIBRARY / LANGUAGE objects.
+        Sys("external_library_files",
+        [
+            new("external_library_id", SqlType.Int32, null, false),
+            new("content", VarbinarySqlType.MaxForm, null, true),
+            new("platform", SqlType.TinyInt, null, true),
+            new("platform_desc", nvarchar60Catalog, 60, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("external_language_files",
+        [
+            new("external_language_id", SqlType.Int32, null, false),
+            new("content", VarbinarySqlType.MaxForm, null, true),
+            new("file_name", SqlType.SystemName, 128, true),
+            new("platform", SqlType.TinyInt, null, true),
+            new("platform_desc", nvarchar60Catalog, 60, true),
+            new("parameters", SqlType.SystemName, 128, true),
+            new("environment_variables", SqlType.SystemName, 128, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("external_models",
+        [
+            new("external_model_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("principal_id", SqlType.Int32, null, true),
+            new("location", SqlType.NVarchar, 4000, true),
+            new("api_format", SqlType.NVarchar, 100, true),
+            new("model_type_id", SqlType.Int32, null, true),
+            new("model_type_desc", NVarcharSqlType.Get(65, Collation.Catalog, Coercibility.Implicit), 65, true),
+            new("model", SqlType.NVarchar, 100, true),
+            new("credential_id", SqlType.Int32, null, true),
+            new("parameters", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("create_time", SqlType.GetDateTime2(7), null, true),
+            new("modify_time", SqlType.GetDateTime2(7), null, true),
+        ], static (_, _) => EmptyCatalogRows);
     }
 
     /// <summary>
@@ -468,7 +584,7 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var assemblyId = SqlValue.FromInt32(1);
         var systemTypeId = SqlValue.FromByte(240);
-        SqlValue[] Row(string name, int userTypeId, short maxLength) =>
+        SqlValue[] Row(string name, int userTypeId, short maxLength, string assemblyClass) =>
         [
             SqlValue.FromSystemName(name),
             systemTypeId,
@@ -484,10 +600,11 @@ internal static partial class BuiltInResources
             trueBit,
             assemblyId,
             falseBit,
+            SqlValue.FromSystemName(assemblyClass),
         ];
-        yield return Row("hierarchyid", 128, 892);
-        yield return Row("geometry", 129, -1);
-        yield return Row("geography", 130, -1);
+        yield return Row("hierarchyid", 128, 892, "Microsoft.SqlServer.Types.SqlHierarchyId");
+        yield return Row("geometry", 129, -1, "Microsoft.SqlServer.Types.SqlGeometry");
+        yield return Row("geography", 130, -1, "Microsoft.SqlServer.Types.SqlGeography");
     }
 
     /// <summary>
@@ -505,12 +622,17 @@ internal static partial class BuiltInResources
         var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
         // System types: project from SystypesRowData using its name (col 0),
         // xtype (col 1, used as system_type_id), xusertype (col 3, used as
-        // user_type_id). is_user_defined is derived from a hardcoded set:
-        // sysname is user-defined; everything else system.
+        // user_type_id). Every SystypesRowData row is is_user_defined = 0 —
+        // including sysname (probe-confirmed against SQL Server 2025; DacFx's
+        // UDDT scripting filters on is_user_defined = 1 and must not see it).
         // systypes columns: [4] length (max_length), [5] xprec (precision),
         // [6] xscale (scale) — probe-confirmed to equal sys.types' triple.
         var tableTypeMaxLength = SqlValue.FromInt16(-1);
         var zeroByte = SqlValue.FromByte(0);
+        var nullCollation = SqlValue.Null(SqlType.SystemName);
+        var databaseCollation = SqlValue.FromSystemName(database.CollationName);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var zeroDefaultObject = SqlValue.FromInt32(0);
         foreach (var row in SystypesRowData)
         {
             var name = (string)row[0]!;
@@ -521,13 +643,17 @@ internal static partial class BuiltInResources
                 SqlValue.FromByte(systemTypeId),
                 SqlValue.FromInt32(userTypeId),
                 sysSchemaId,
-                name == "sysname" ? trueBit : falseBit,
+                falseBit,
                 falseBit,
                 trueBit,
                 name is "hierarchyid" or "geometry" or "geography" ? trueBit : falseBit,
                 SqlValue.FromInt16(Convert.ToInt16(row[4]!, CultureInfo.InvariantCulture)),
                 SqlValue.FromByte(Convert.ToByte(row[5]!, CultureInfo.InvariantCulture)),
                 SqlValue.FromByte(Convert.ToByte(row[6]!, CultureInfo.InvariantCulture)),
+                name is "char" or "nchar" or "ntext" or "nvarchar" or "sysname" or "text" or "varchar" ? databaseCollation : nullCollation,
+                nullPrincipal,
+                zeroDefaultObject,
+                zeroDefaultObject,
             ];
         }
         // User-defined table types: probe-confirmed system_type_id 243,
@@ -549,6 +675,10 @@ internal static partial class BuiltInResources
                     tableTypeMaxLength,
                     zeroByte,
                     zeroByte,
+                    nullCollation,
+                    nullPrincipal,
+                    zeroDefaultObject,
+                    zeroDefaultObject,
                 ];
             }
         }
@@ -580,6 +710,10 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt16(maxLength),
                     SqlValue.FromByte(precision),
                     SqlValue.FromByte(scale),
+                    alias.UnderlyingType.Collation is not null ? databaseCollation : nullCollation,
+                    nullPrincipal,
+                    zeroDefaultObject,
+                    zeroDefaultObject,
                 ];
             }
         }
@@ -655,6 +789,7 @@ internal static partial class BuiltInResources
                     trueBit,
                     nullCache,
                     SqlValue.FromInt64(seq.CurrentValue),
+                    seq.LastUsedValueAsVariant,
                     SqlValue.FromByte(systemTypeId),
                     SqlValue.FromInt32(userTypeId),
                     seq.IsExhausted ? trueBit : falseBit,
@@ -793,6 +928,8 @@ internal static partial class BuiltInResources
         var zeroByte = SqlValue.FromByte(0);
         var zeroInt = SqlValue.FromInt32(0);
         var nullDefault = SqlValue.Null(SqlType.NVarchar);
+        var nullVectorDims = SqlValue.Null(SqlType.Int32);
+        var nullVectorDesc = SqlValue.Null(SqlType.NVarchar);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -823,6 +960,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         SqlValue.FromBoolean(isTvp),
                         trueBit,
+                        nullVectorDims,
+                        nullVectorDesc,
                     ];
                 }
             }
@@ -852,6 +991,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         falseBit,
                         trueBit,
+                        nullVectorDims,
+                        nullVectorDesc,
                     ];
                 }
                 for (var i = 0; i < fn.Parameters.Length; i++)
@@ -874,6 +1015,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         falseBit,
                         trueBit,
+                        nullVectorDims,
+                        nullVectorDesc,
                     ];
                 }
             }

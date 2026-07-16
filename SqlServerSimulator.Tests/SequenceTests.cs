@@ -351,6 +351,27 @@ public sealed class SequenceTests
     }
 
     /// <summary>
+    /// last_used_value is NULL until the first NEXT VALUE FOR (probe-confirmed:
+    /// a freshly created sequence reports NULL here even though current_value is
+    /// the start value), then reports the last emitted value as a sql_variant,
+    /// and resets to NULL after ALTER SEQUENCE … RESTART. DacFx's sequence
+    /// reverse-engineering query projects [s].[last_used_value].
+    /// </summary>
+    [TestMethod]
+    public void SysSequences_LastUsedValue_NullUntilFirstUse()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence lastused as int start with 5 increment by 1");
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select last_used_value from sys.sequences where name = 'lastused'"));
+        _ = simulation.ExecuteScalar("select next value for lastused");
+        AreEqual(5, simulation.ExecuteScalar("select last_used_value from sys.sequences where name = 'lastused'"));
+        _ = simulation.ExecuteScalar("select next value for lastused");
+        AreEqual(6, simulation.ExecuteScalar("select last_used_value from sys.sequences where name = 'lastused'"));
+        _ = simulation.ExecuteNonQuery("alter sequence lastused restart");
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select last_used_value from sys.sequences where name = 'lastused'"));
+    }
+
+    /// <summary>
     /// precision / scale mirror the sequence's declared numeric type
     /// (int → 10/0, bigint → 19/0). SMO's Sequence property-bag query projects
     /// them as [NumericPrecision] / [NumericScale]; a missing column would fail

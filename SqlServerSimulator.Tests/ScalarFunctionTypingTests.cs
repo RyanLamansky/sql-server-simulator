@@ -123,4 +123,49 @@ public sealed class ScalarFunctionTypingTests
             "select len(cast(0x010203 as image))",
             8116,
             "Argument data type image is invalid for argument 1 of len function.");
+
+    /// <summary>
+    /// DATALENGTH returns bigint for the three (MAX) operand types and int for
+    /// everything else, including bounded strings and xml — real's documented
+    /// split, probe-confirmed against SQL Server 2025. DacFx's bacpac-export
+    /// bulk reader emits DATALENGTH([maxCol]) before each MAX column and
+    /// validates the pair's wire types, so the bigint half is load-bearing.
+    /// </summary>
+    [TestMethod]
+    public void DataLength_MaxOperandsReturnBigint_BoundedReturnInt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (nv nvarchar(max), v varchar(max), vb varbinary(max), bounded nvarchar(40), x xml);
+            insert t values (N'ab', 'ab', 0x0102, N'ab', N'<r/>')
+            """);
+        using var reader = sim.ExecuteReader(
+            "select datalength(nv), datalength(v), datalength(vb), datalength(bounded), datalength(x) from t");
+        AreEqual(typeof(long), reader.GetFieldType(0));
+        AreEqual(typeof(long), reader.GetFieldType(1));
+        AreEqual(typeof(long), reader.GetFieldType(2));
+        AreEqual(typeof(int), reader.GetFieldType(3));
+        AreEqual(typeof(int), reader.GetFieldType(4));
+        IsTrue(reader.Read());
+        AreEqual(4L, reader.GetInt64(0));
+        AreEqual(2L, reader.GetInt64(1));
+        AreEqual(2L, reader.GetInt64(2));
+        AreEqual(4, reader.GetInt32(3));
+    }
+
+    /// <summary>
+    /// Binary-family promotion: (MAX) wins, mixed bounded pairs widen to
+    /// varbinary of the longer length. DacFx's row-size sampler compares
+    /// varbinary(N) columns against MAX-typed expressions; the missing arm
+    /// raised NotSupportedException ("Cross-category type promotion").
+    /// </summary>
+    [TestMethod]
+    public void VarbinaryPromotion_MaxWins_BoundedWidens()
+    {
+        var sim = new Simulation();
+        AreEqual(3, sim.ExecuteScalar(
+            "select datalength(isnull(cast(0x010203 as varbinary(100)), cast(0x as varbinary(max))))"));
+        AreEqual(2, sim.ExecuteScalar(
+            "select datalength(case when 1 = 1 then cast(0x0102 as varbinary(10)) else cast(0x as binary(4)) end)"));
+    }
 }

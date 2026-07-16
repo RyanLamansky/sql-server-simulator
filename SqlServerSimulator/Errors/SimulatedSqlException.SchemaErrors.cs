@@ -73,6 +73,31 @@ partial class SimulatedSqlException
         new($"Could not find database '{databaseName}'. The database either does not exist, or was dropped before a statement tried to use it. Verify if the database exists by querying the sys.databases catalog view.", 2520, 16, 12);
 
     /// <summary>
+    /// Mimics SQL Server error 2501: <c>DBCC SHOW_STATISTICS</c> could not
+    /// resolve its first argument to a table or object. Probe-confirmed against
+    /// SQL Server 2025: Class 16 State 45, and the name echoes the caller's raw
+    /// (bracketed) input verbatim inside double quotes.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindTableOrObject(string name) =>
+        new($"Cannot find a table or object with the name \"{name}\". Check the system catalog.", 2501, 16, 45);
+
+    /// <summary>
+    /// Mimics SQL Server error 2767: <c>DBCC SHOW_STATISTICS</c> resolved the
+    /// table but the named statistic isn't backed by any index on it. Probe-
+    /// confirmed against SQL Server 2025: Class 16 State 1.
+    /// </summary>
+    internal static SimulatedSqlException CouldNotLocateStatistics(string statisticsName) =>
+        new($"Could not locate statistics '{statisticsName}' in the system catalogs.", 2767, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2560: a <c>DBCC</c> statement's first parameter
+    /// is missing or NULL. Probe-confirmed against SQL Server 2025 for
+    /// <c>DBCC SHOW_STATISTICS(NULL, NULL)</c>: Class 16 State 9.
+    /// </summary>
+    internal static SimulatedSqlException DbccParameterIsIncorrect(int parameterNumber) =>
+        new($"Parameter {parameterNumber} is incorrect for this DBCC statement.", 2560, 16, 9);
+
+    /// <summary>
     /// Mimics SQL Server error 2760: a statement referenced a schema that
     /// doesn't exist (or whose principal the caller can't access). Probe-
     /// confirmed wording — real SQL Server uses the same Msg / wording for
@@ -1122,4 +1147,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException SpatialIndexRequiresSpatialColumn(string columnName, string tableName) =>
         new($"The requested spatial index on column '{columnName}' of table '{tableName}' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.", 12002, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6314: <c>XML_SCHEMA_NAMESPACE</c> named a
+    /// schema/collection pair that doesn't resolve. Probe-confirmed wording
+    /// against SQL Server 2025, including the space before the colon and
+    /// that only the collection name (not the relational schema) is quoted;
+    /// real raises this even for the built-in <c>sys</c> collection.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaCollectionNotInMetadata(string collectionName) =>
+        new($"Collection specified does not exist in metadata : '{collectionName}'", 6314, 16, 1);
 }

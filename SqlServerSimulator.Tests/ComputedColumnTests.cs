@@ -202,4 +202,42 @@ public sealed class ComputedColumnTests
                 insert t (a, b) values ('abcdefghij', 'klmnopqrstuvwxyz1234');
                 select c from t
                 """));
+
+    /// <summary>
+    /// sys.computed_columns.definition captures the parenthesized source text of
+    /// the AS (…) body — so DacFx / SMO re-emit a re-parseable computed column.
+    /// The captured text is wrapped in a single paren pair: an unparenthesized
+    /// body gains one, an already-parenthesized body is not double-wrapped.
+    /// is_persisted reflects the PERSISTED marker.
+    /// </summary>
+    [TestMethod]
+    public void ComputedColumn_Definition_CapturesParenthesizedSourceText()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table dbo.t (a int, b int, " +
+            "s1 as a + b, " +
+            "s2 as (a + b) persisted, " +
+            "s3 as (concat(a, 'x')))");
+        Assert.AreEqual("(a + b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's1'"));
+        Assert.AreEqual("(a + b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's2'"));
+        Assert.AreEqual("(concat(a, 'x'))", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's3'"));
+        Assert.IsTrue((bool)sim.ExecuteScalar("select is_persisted from sys.computed_columns where name = 's2'")!);
+        Assert.IsFalse((bool)sim.ExecuteScalar("select is_persisted from sys.computed_columns where name = 's1'")!);
+    }
+
+    /// <summary>
+    /// ALTER TABLE ADD of a computed column captures its definition the same way
+    /// as CREATE TABLE (both route through the shared column-definition parser),
+    /// which is also the path the bacpac loader replays for imported computed
+    /// columns.
+    /// </summary>
+    [TestMethod]
+    public void ComputedColumn_Definition_CapturedOnAlterTableAdd()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (a int, b int)");
+        _ = sim.ExecuteNonQuery("alter table dbo.t add c as (a * b)");
+        Assert.AreEqual("(a * b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 'c'"));
+    }
 }

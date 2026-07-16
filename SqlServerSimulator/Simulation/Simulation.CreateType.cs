@@ -64,8 +64,8 @@ partial class Simulation
 
         var fullName = $"{schema.Name}.{typeName.Leaf}";
         var heapColumns = new List<HeapColumn?>();
-        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
-        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
+        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
+        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
 
         if (!ParseColumnList(context, typeName.Leaf, isTableVariable: false, isTableType: true, heapColumns, pendingKeys, pendingChecks, pendingComputed))
@@ -114,7 +114,8 @@ partial class Simulation
                 maxLength: computedMaxLength,
                 nullable: pending.Nullable,
                 computedExpression: pending.Expression,
-                isPersisted: pending.Persisted);
+                isPersisted: pending.Persisted,
+                computedDefinition: pending.Definition);
         }
 
         // Inline-CHECK peer-ref check (Msg 8141) — same structural walk as

@@ -100,6 +100,58 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool QuotedIdentifiers = true;
 
     /// <summary>
+    /// Session-scoped <c>ANSI_NULLS</c> setting, surfaced by
+    /// <c>SESSIONPROPERTY('ANSI_NULLS')</c>. Defaults to <see langword="true"/>
+    /// (a fresh SqlClient session reports 1 — probe-confirmed). The simulator
+    /// doesn't model the <c>= NULL</c>-comparison semantic this option governs;
+    /// the field exists so the option's recorded state reads back consistently.
+    /// Mutated by top-level <c>SET ANSI_NULLS ON|OFF</c> (including the comma-list
+    /// form); like <c>QUOTED_IDENTIFIER</c>, SETs inside a procedure / function /
+    /// trigger body or dynamic SQL don't write here.
+    /// </summary>
+    internal bool AnsiNulls = true;
+
+    /// <summary>
+    /// Session-scoped <c>ANSI_PADDING</c> setting (default <see langword="true"/>),
+    /// surfaced by <c>SESSIONPROPERTY('ANSI_PADDING')</c>. Parse-and-discard for
+    /// storage semantics; recorded so the option reads back. Scoping mirrors
+    /// <see cref="AnsiNulls"/>.
+    /// </summary>
+    internal bool AnsiPadding = true;
+
+    /// <summary>
+    /// Session-scoped <c>ANSI_WARNINGS</c> setting (default <see langword="true"/>),
+    /// surfaced by <c>SESSIONPROPERTY('ANSI_WARNINGS')</c>. Recorded only.
+    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// </summary>
+    internal bool AnsiWarnings = true;
+
+    /// <summary>
+    /// Session-scoped <c>ARITHABORT</c> setting. Defaults to
+    /// <see langword="false"/> — a fresh SqlClient session reports 0
+    /// (probe-confirmed), the one option of this family that defaults off.
+    /// Surfaced by <c>SESSIONPROPERTY('ARITHABORT')</c>; recorded only.
+    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// </summary>
+    internal bool Arithabort;
+
+    /// <summary>
+    /// Session-scoped <c>CONCAT_NULL_YIELDS_NULL</c> setting (default
+    /// <see langword="true"/>), surfaced by
+    /// <c>SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')</c>. Recorded only.
+    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// </summary>
+    internal bool ConcatNullYieldsNull = true;
+
+    /// <summary>
+    /// Session-scoped <c>NUMERIC_ROUNDABORT</c> setting (default
+    /// <see langword="false"/>), surfaced by
+    /// <c>SESSIONPROPERTY('NUMERIC_ROUNDABORT')</c>. Recorded only.
+    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// </summary>
+    internal bool NumericRoundabort;
+
+    /// <summary>
     /// UTC instant this connection object was constructed, surfaced as
     /// <c>sys.dm_exec_sessions.login_time</c> (and its
     /// <c>last_request_start_time</c> / <c>last_request_end_time</c>

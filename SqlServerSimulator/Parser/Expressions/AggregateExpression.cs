@@ -223,8 +223,8 @@ internal sealed class AggregateExpression : Expression
     /// <see cref="ParserContext.Token"/> at the first argument (the caller
     /// — <see cref="Expression.ResolveBuiltIn"/> — has already consumed the
     /// opening <c>(</c>). Handles the kind-specific argument shapes:
-    /// <c>*</c> for COUNT-family star variants, optional <c>DISTINCT</c>
-    /// keyword, two-arg <c>STRING_AGG</c>. Leaves the token at the closing
+    /// <c>*</c> for COUNT-family star variants, optional <c>ALL</c> /
+    /// <c>DISTINCT</c> qualifier, two-arg <c>STRING_AGG</c>. Leaves the token at the closing
     /// <c>)</c>; the caller advances past it.
     /// </summary>
     public static AggregateExpression Parse(ParserContext context, AggregateKind kind)
@@ -245,10 +245,17 @@ internal sealed class AggregateExpression : Expression
         }
 
         var distinct = false;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Distinct })
+        switch (context.Token)
         {
-            distinct = true;
-            context.MoveNextRequired();
+            case ReservedKeyword { Keyword: Keyword.Distinct }:
+                distinct = true;
+                context.MoveNextRequired();
+                break;
+            case ReservedKeyword { Keyword: Keyword.All }:
+                // ALL is the grammar's explicit spelling of the default
+                // (COUNT(ALL x) = COUNT(x)); consumed with no effect.
+                context.MoveNextRequired();
+                break;
         }
 
         // APPROX_COUNT_DISTINCT is implicitly distinct regardless of keyword.

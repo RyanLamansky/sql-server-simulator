@@ -41,17 +41,15 @@ public sealed class SpatialWkbDecoderTests
     }
 
     [TestMethod]
-    public void SingleLineString_TwoPoints_Geography()
+    public void SingleLineSegment_TwoPoints_Geography()
     {
-        // Single-LineString shortcut: properties byte = 0x10, payload = 4-byte
-        // numPoints + numPoints × 16 bytes (lat, long pairs in geography).
-        // Build a 3-point line: (lat=0, long=0) → (lat=1, long=2) → (lat=3, long=4).
-        var wkb = BuildShortcutLineString(srid: 4326,
-            (0, 0),
-            (1, 2),
-            (3, 4));
+        // Single-line-segment shortcut: properties bit 0x10, payload = exactly
+        // two 16-byte (lat, long) pairs with NO numPoints field. Real SQL
+        // Server sets this bit only for a 2-point LineString (a 3+-point line
+        // takes the full layout). Points: (lat=0, long=0) → (lat=1, long=2).
+        var wkb = BuildShortcutLineSegment(srid: 4326, (0, 0), (1, 2));
         // Geography axis inversion: (lat, long) → (long lat).
-        AreEqual("LINESTRING (0 0, 2 1, 4 3)", SpatialWkbDecoder.TryDecode(wkb, isGeography: true));
+        AreEqual("LINESTRING (0 0, 2 1)", SpatialWkbDecoder.TryDecode(wkb, isGeography: true));
     }
 
     [TestMethod]
@@ -163,20 +161,19 @@ public sealed class SpatialWkbDecoderTests
     }
 
     /// <summary>
-    /// Builds a shortcut-form single LineString payload.
+    /// Builds a shortcut-form single-line-segment payload: header + exactly two
+    /// 16-byte coordinate pairs, no numPoints field (real's actual layout).
     /// </summary>
-    private static byte[] BuildShortcutLineString(int srid, params (double first, double second)[] coords)
+    private static byte[] BuildShortcutLineSegment(int srid, (double first, double second) a, (double first, double second) b)
     {
-        var buf = new byte[10 + (coords.Length * 16)];
+        var buf = new byte[6 + (2 * 16)];
         BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(0, 4), srid);
         buf[4] = 0x01;
-        buf[5] = 0x10; // IsSingleLineString
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(6, 4), coords.Length);
-        for (var i = 0; i < coords.Length; i++)
-        {
-            BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(10 + (i * 16), 8), coords[i].first);
-            BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(10 + (i * 16) + 8, 8), coords[i].second);
-        }
+        buf[5] = 0x10; // IsSingleLineSegment
+        BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(6, 8), a.first);
+        BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(14, 8), a.second);
+        BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(22, 8), b.first);
+        BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(30, 8), b.second);
         return buf;
     }
 

@@ -94,6 +94,12 @@ internal sealed class SqlVariantProperty : Expression
 
     private static SqlValue Compute(PropertyKind kind, SqlValue value)
     {
+        // A true sql_variant argument (the primary use — reading a
+        // sql_variant column such as sys.database_scoped_configurations.value)
+        // describes its inner value; a variant NULL yields NULL like any NULL.
+        if (value.Type is SqlVariantSqlType)
+            value = value.IsNull ? SqlValue.Null(SqlType.Int32) : value.AsVariantInner;
+
         var isStringResult = kind is PropertyKind.BaseType or PropertyKind.Collation;
         var nullResult = SqlValue.Null(isStringResult ? SqlType.SystemName : SqlType.Int32);
         return value.IsNull || Describe(value) is not { } info

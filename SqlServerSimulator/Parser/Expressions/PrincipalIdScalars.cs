@@ -72,8 +72,12 @@ internal enum PrincipalIdKind
 /// SQL <c>HAS_PERMS_BY_NAME(securable, securable_class, permission [, ...])</c>:
 /// returns 1 when the current principal has the given permission, 0
 /// otherwise. The simulator doesn't enforce permissions (GRANT/REVOKE
-/// modify metadata only), so this always returns 1 for non-NULL inputs.
-/// NULL on any required argument returns NULL.
+/// modify metadata only), so this returns 1 for any non-NULL
+/// <c>permission</c>. A NULL <c>permission</c> returns NULL; NULL
+/// <c>securable</c> / <c>securable_class</c> are legal (real reads them as
+/// "the current server or database" — DacFx's export permission gate sends
+/// <c>HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')</c>) and
+/// don't affect the result.
 /// </summary>
 internal sealed class HasPermsByName : Expression
 {
@@ -93,12 +97,14 @@ internal sealed class HasPermsByName : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        foreach (var a in this.args)
+        var permission = SqlValue.Null(SqlType.Int32);
+        for (var i = 0; i < this.args.Length; i++)
         {
-            if (a.Run(runtime).IsNull)
-                return SqlValue.Null(SqlType.Int32);
+            var v = this.args[i].Run(runtime);
+            if (i == 2)
+                permission = v;
         }
-        return SqlValue.FromInt32(1);
+        return permission.IsNull ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(1);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
@@ -108,18 +114,40 @@ internal sealed class HasPermsByName : Expression
 
 /// <summary>
 /// SQL <c>IS_MEMBER(group_or_role)</c>, <c>IS_ROLEMEMBER(role [, principal])</c>,
-/// and <c>IS_SRVROLEMEMBER(role [, login])</c>: role-membership checks.
-/// The simulator pre-seeds <c>public</c> at the database level (every
-/// principal is a member) and returns 1 for that case; other roles return
-/// 0. Unknown role or NULL argument returns NULL.
+/// and <c>IS_SRVROLEMEMBER(role [, login])</c>: role-membership checks for
+/// the session principal (<c>dbo</c> at the database level; the single
+/// login at the server level). Probe-confirmed shape: member → 1, known
+/// role without membership → 0, anything that isn't a role at that scope →
+/// NULL. Database scope: <c>public</c> and <c>db_owner</c> → 1 (dbo is
+/// always a member of both), the other fixed roles → 0, user-created roles
+/// consult <see cref="Database.RoleMembers"/>, non-role principals and
+/// unknown names → NULL. Server scope: <c>public</c> → 1, the other fixed
+/// server roles → 0 (no server-role membership model), everything else →
+/// NULL. NULL argument returns NULL.
 /// </summary>
 internal sealed class RoleMemberCheck : Expression
 {
     private readonly Expression roleArg;
     private readonly Expression? principalArg;
+    private readonly bool serverScope;
 
-    public RoleMemberCheck(ParserContext context)
+    /// <summary>Fixed database roles other than <c>public</c> / <c>db_owner</c> — dbo is not a member.</summary>
+    private static readonly string[] FixedDatabaseRolesWithoutDbo =
+    [
+        "db_accessadmin", "db_backupoperator", "db_datareader", "db_datawriter",
+        "db_ddladmin", "db_denydatareader", "db_denydatawriter", "db_securityadmin",
+    ];
+
+    /// <summary>Fixed server roles other than <c>public</c> — the simulator has no server-role membership.</summary>
+    private static readonly string[] FixedServerRolesWithoutPublic =
+    [
+        "bulkadmin", "dbcreator", "diskadmin", "processadmin",
+        "securityadmin", "serveradmin", "setupadmin", "sysadmin",
+    ];
+
+    public RoleMemberCheck(ParserContext context, bool serverScope)
     {
+        this.serverScope = serverScope;
         this.roleArg = Parse(context);
         if (context.Token is Tokens.Operator { Character: ',' })
             this.principalArg = Parse(context.MoveNextRequiredReturnSelf());
@@ -135,10 +163,40 @@ internal sealed class RoleMemberCheck : Expression
         if (this.principalArg?.Run(runtime).IsNull == true)
             return SqlValue.Null(SqlType.Int32);
         var roleName = role.CoerceTo(SqlType.NVarchar).AsString;
-        // `public` is the universal role; everyone is a member.
-        return BuiltInToken.Comparer.Equals(roleName, "public")
-            ? SqlValue.FromInt32(1)
-            : SqlValue.FromInt32(0);
+        if (BuiltInToken.Comparer.Equals(roleName, "public"))
+            return SqlValue.FromInt32(1);
+        if (this.serverScope)
+        {
+            foreach (var fixedRole in FixedServerRolesWithoutPublic)
+            {
+                if (BuiltInToken.Comparer.Equals(roleName, fixedRole))
+                    return SqlValue.FromInt32(0);
+            }
+            return SqlValue.Null(SqlType.Int32);
+        }
+
+        if (BuiltInToken.Comparer.Equals(roleName, "db_owner"))
+            return SqlValue.FromInt32(1);
+        foreach (var fixedRole in FixedDatabaseRolesWithoutDbo)
+        {
+            if (BuiltInToken.Comparer.Equals(roleName, fixedRole))
+                return SqlValue.FromInt32(0);
+        }
+
+        var database = runtime.Batch.CurrentDatabase;
+        if (database.Principals.TryGetValue(roleName, out var principal)
+            && principal.TypeCode == "R")
+        {
+            // dbo's principal id is 1; user-created role membership rides
+            // the GRANT-era membership list.
+            foreach (var (roleId, memberId) in database.RoleMembers)
+            {
+                if (roleId == principal.PrincipalId && memberId == 1)
+                    return SqlValue.FromInt32(1);
+            }
+            return SqlValue.FromInt32(0);
+        }
+        return SqlValue.Null(SqlType.Int32);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

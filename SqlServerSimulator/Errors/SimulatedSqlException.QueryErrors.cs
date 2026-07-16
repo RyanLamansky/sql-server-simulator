@@ -571,6 +571,17 @@ partial class SimulatedSqlException
         new($"\"{new string(hintName)}\" is not a recognized table hints option.", 321, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 10715 — fired when an <c>OPTION (USE HINT(...))</c>
+    /// clause names a string that isn't in <c>sys.dm_exec_valid_use_hints</c>.
+    /// Wording verbatim from the probe (2026-07-16 against SQL Server 2025),
+    /// including the single quotes on the offending name. Contrast the generic
+    /// OPTION-clause Msg 102 the rest of the hint grammar raises: <c>USE HINT</c>
+    /// is the one OPTION hint whose argument SQL Server validates by name.
+    /// </summary>
+    internal static SimulatedSqlException InvalidUseHint(string hintName) =>
+        new($"'{hintName}' is not a valid hint.", 10715, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8748: the third <c>enable_ordinal</c> argument
     /// to <c>STRING_SPLIT</c> isn't a parse-time constant (a variable or
     /// column reference was used). Wording probe-confirmed against SQL Server

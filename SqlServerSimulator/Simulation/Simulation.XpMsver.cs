@@ -28,18 +28,54 @@ partial class Simulation
 
     /// <summary>
     /// Handles <c>EXEC xp_msver</c> (also <c>dbo.xp_msver</c> /
-    /// <c>master.dbo.xp_msver</c> from any current database). Consumes any
-    /// argument list (cursor advance / syntax errors still fire in skip mode)
-    /// and yields the single version/host-info result set through the standard
-    /// outcome path, so an <c>INSERT … EXEC</c> consumer sees a normal
-    /// result-set enumerator. SSMS calls this on connect.
+    /// <c>master.dbo.xp_msver</c> from any current database, and the
+    /// name-form RPC path via a synthesized EXEC). Each argument is an
+    /// <c>@optname</c> value naming a single row to return; the result carries
+    /// only the requested rows, always in <c>Index</c> order regardless of
+    /// argument order (probe-confirmed against SQL Server 2025). With no
+    /// arguments every row is returned. An argument naming no row (an unknown
+    /// optname) is silently skipped — real SQL Server returns an empty set for
+    /// <c>EXEC xp_msver 'bogus'</c> rather than raising — and a duplicated
+    /// optname yields its row once. Name matching is case-insensitive. Yields
+    /// through the standard outcome path so an <c>INSERT … EXEC</c> consumer
+    /// sees a normal result-set enumerator. SSMS calls this on connect; DacFx's
+    /// bacpac export calls it by RPC with five repeated <c>@optname</c> params.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeXpMsver(BatchContext batch)
     {
-        _ = ParseExecArguments(batch.Parser, batch);
+        var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
-        yield return new SimulatedSqlResultSet(XpMsverSchema, XpMsverColumnNames, XpMsverRows);
+        yield return new SimulatedSqlResultSet(XpMsverSchema, XpMsverColumnNames, FilterXpMsverRows(arguments));
+    }
+
+    /// <summary>
+    /// Selects the <see cref="XpMsverRows"/> named by the <c>@optname</c>
+    /// arguments (case-insensitive by the row's <c>Name</c> cell), preserving
+    /// the source <c>Index</c> order. An empty / all-NULL argument set returns
+    /// every row.
+    /// </summary>
+    private static IReadOnlyList<SqlValue[]> FilterXpMsverRows(List<ProcArgument> arguments)
+    {
+        var requested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var argument in arguments)
+        {
+            if (argument.Value.IsNull)
+                continue;
+            _ = requested.Add(argument.Value.CoerceTo(SqlType.NVarchar).AsString);
+        }
+
+        if (requested.Count == 0)
+            return XpMsverRows;
+
+        var filtered = new List<SqlValue[]>();
+        foreach (var row in XpMsverRows)
+        {
+            if (requested.Contains(row[1].AsString))
+                filtered.Add(row);
+        }
+
+        return filtered;
     }
 
     private static SqlValue[] XpMsverRow(short index, string name, int? internalValue, string? characterValue) =>

@@ -73,8 +73,8 @@ partial class Simulation
             return false;
 
         var heapColumns = new List<HeapColumn?>();
-        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)>();
-        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)>();
+        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
+        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
@@ -146,7 +146,8 @@ partial class Simulation
                 maxLength: computedMaxLength,
                 nullable: pending.Nullable,
                 computedExpression: pending.Expression,
-                isPersisted: pending.Persisted);
+                isPersisted: pending.Persisted,
+                computedDefinition: pending.Definition);
         }
 
         // Schemas whose fixed-width stored columns alone exceed SQL Server's
@@ -438,7 +439,8 @@ partial class Simulation
                 computedExpression: pc.Computed,
                 isPersisted: pc.IsPersisted,
                 generatedAs: GeneratedAlwaysAsRow.None,
-                isHidden: pc.IsHidden);
+                isHidden: pc.IsHidden,
+                computedDefinition: pc.ComputedDefinition);
         }
         return new HeapTable(
             historyLeaf,
@@ -494,9 +496,9 @@ partial class Simulation
         bool isTableVariable,
         bool isTableType,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
-        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
         List<PendingForeignKey>? pendingForeignKeys = null)
     {
@@ -590,7 +592,8 @@ partial class Simulation
                         computedExpression: column.Computed,
                         isPersisted: column.IsPersisted,
                         generatedAs: column.GeneratedAs,
-                        isHidden: column.IsHidden);
+                        isHidden: column.IsHidden,
+                        computedDefinition: column.ComputedDefinition);
                 }
             }
         }
@@ -615,9 +618,9 @@ partial class Simulation
         bool isTableType,
         List<HeapColumn?> heapColumns,
         List<bool> explicitNull,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
-        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod,
         List<PendingForeignKey>? pendingForeignKeys,
         ref int identityCount)
@@ -629,10 +632,12 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
         {
             context.MoveNextRequired();
+            var computedStart = context.Token.StartIndex;
             var computed = Expression.Parse(context);
+            var computedDefinition = EnsureParenthesized(context.SourceTextFrom(computedStart));
             var (persisted, computedNullable) = ParseComputedSuffix(context);
             var computedIndex = heapColumns.Count;
-            pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable));
+            pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable, computedDefinition));
             heapColumns.Add(null);
             explicitNull.Add(false);
             // Inline PRIMARY KEY / UNIQUE after a computed column's
@@ -642,8 +647,8 @@ partial class Simulation
             // after computed-column materialization.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
             {
-                var inlineKind = ParseInlineKeyKindAndModifiers(context);
-                pendingKeys.Add((inlineKind, null, [computedIndex]));
+                var (inlineKind, inlineClustered) = ParseInlineKeyKindAndModifiers(context);
+                pendingKeys.Add((inlineKind, null, [computedIndex], inlineClustered));
             }
             return;
         }
@@ -717,6 +722,7 @@ partial class Simulation
         var isHidden = false;
         string? columnCollation = null;
         var inlineKeyKind = (KeyConstraintKind?)null;
+        var inlineKeyClustered = (bool?)null;
         string? inlineKeyName = null;
         string? inlineFkName = null;
         string? inlineDefaultName = null;
@@ -810,13 +816,13 @@ partial class Simulation
                             continue;
                         case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
                             inlineKeyName = namedConstraint.Value;
-                            inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                            (inlineKeyKind, inlineKeyClustered) = ParseInlineKeyKindAndModifiers(context);
                             continue;
                         default:
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
-                    inlineKeyKind = ParseInlineKeyKindAndModifiers(context);
+                    (inlineKeyKind, inlineKeyClustered) = ParseInlineKeyKindAndModifiers(context);
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Check }:
                     var inlineCheck = ParseInlineCheckPredicate(context);
@@ -848,7 +854,7 @@ partial class Simulation
         var actualNullable = nullable ?? (identity is null);
 
         if (inlineKeyKind is KeyConstraintKind kind)
-            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count]));
+            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered));
 
         if (identity is not null)
         {
@@ -918,6 +924,71 @@ partial class Simulation
     /// raises Msg 8183 — real SQL Server's blanket "computed columns must be
     /// persisted to carry a NULL/NOT NULL/CHECK/FK constraint" error.
     /// </summary>
+    /// <summary>
+    /// Wraps a captured computed-column expression's source text in a single
+    /// outer paren pair unless it is already fully parenthesized (a single
+    /// balanced group enclosing the whole expression). Mirrors SQL Server's
+    /// always-parenthesized <c>sys.computed_columns.definition</c> shape while
+    /// leaving the DacFx-emitted, already-parenthesized bacpac form untouched
+    /// (avoiding a redundant second pair). Quote / bracket literals are skipped
+    /// so parens inside string or delimited-identifier tokens don't miscount.
+    /// </summary>
+    private static string EnsureParenthesized(string text)
+    {
+        var trimmed = text.Trim();
+        return trimmed.Length >= 2 && trimmed[0] == '(' && IsSingleEnclosingParen(trimmed)
+            ? trimmed
+            : $"({trimmed})";
+    }
+
+    private static bool IsSingleEnclosingParen(string s)
+    {
+        var depth = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            switch (s[i])
+            {
+                case '\'':
+                    i = SkipDelimited(s, i, '\'');
+                    break;
+                case '"':
+                    i = SkipDelimited(s, i, '"');
+                    break;
+                case '[':
+                    i = SkipDelimited(s, i, ']');
+                    break;
+                case '(':
+                    depth++;
+                    break;
+                case ')':
+                    depth--;
+                    // Depth hits 0 before the final character → the opening
+                    // paren does not enclose the whole expression (e.g. `(a)+(b)`).
+                    if (depth == 0 && i != s.Length - 1)
+                        return false;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return depth == 0;
+    }
+
+    /// <summary>
+    /// Advances past a delimited run that opened at <paramref name="open"/>,
+    /// returning the index of its closing delimiter (or the last index when
+    /// unterminated, which a valid parsed expression never is).
+    /// </summary>
+    private static int SkipDelimited(string s, int open, char close)
+    {
+        for (var i = open + 1; i < s.Length; i++)
+        {
+            if (s[i] == close)
+                return i;
+        }
+        return s.Length - 1;
+    }
+
     private static (bool Persisted, bool Nullable) ParseComputedSuffix(ParserContext context)
     {
         var persisted = false;
@@ -1164,12 +1235,14 @@ partial class Simulation
     /// Parses the inline column-constraint shape <c>(PRIMARY KEY|UNIQUE) [CLUSTERED|NONCLUSTERED]</c>,
     /// entered with <see cref="ParserContext.Token"/> on the <c>PRIMARY</c> or
     /// <c>UNIQUE</c> keyword. Consumes the trailing <c>KEY</c> for PK and the
-    /// optional clustering modifier (which the simulator accepts and ignores
-    /// because it has no index storage to attach the modifier to). Returns
-    /// the parsed kind; leaves <see cref="ParserContext.Token"/> on the next
-    /// constraint keyword, comma, or closing paren.
+    /// optional clustering modifier. Returns the parsed kind plus the explicit
+    /// clustering choice (<c>null</c> when unspecified — the caller applies the
+    /// per-kind default: PK clustered, UNIQUE nonclustered); the flag drives
+    /// index-id allocation even though the simulator has no row-ordered storage.
+    /// Leaves <see cref="ParserContext.Token"/> on the next constraint keyword,
+    /// comma, or closing paren.
     /// </summary>
-    private static KeyConstraintKind ParseInlineKeyKindAndModifiers(ParserContext context)
+    private static (KeyConstraintKind Kind, bool? Clustered) ParseInlineKeyKindAndModifiers(ParserContext context)
     {
         KeyConstraintKind kind;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Primary })
@@ -1183,9 +1256,13 @@ partial class Simulation
             kind = KeyConstraintKind.Unique;
         }
         context.MoveNextRequired();
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Clustered or Keyword.NonClustered })
+        bool? clustered = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Clustered or Keyword.NonClustered } modifier)
+        {
+            clustered = modifier.Keyword == Keyword.Clustered;
             context.MoveNextRequired();
-        return kind;
+        }
+        return (kind, clustered);
     }
 
     /// <summary>
@@ -1199,9 +1276,9 @@ partial class Simulation
     private static void ParseTableLevelConstraint(
         ParserContext context,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
-        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable)> pendingComputed,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<PendingForeignKey>? pendingForeignKeys = null)
     {
         string? constraintName = null;
@@ -1227,7 +1304,7 @@ partial class Simulation
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        var kind = ParseInlineKeyKindAndModifiers(context);
+        var (kind, clustered) = ParseInlineKeyKindAndModifiers(context);
 
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1286,7 +1363,7 @@ partial class Simulation
         SkipOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
 
-        pendingKeys.Add((kind, constraintName, [.. ordinals]));
+        pendingKeys.Add((kind, constraintName, [.. ordinals], clustered));
     }
 
     /// <summary>
@@ -1305,7 +1382,7 @@ partial class Simulation
     internal static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
         IReadOnlyList<HeapColumn> heapColumns,
-        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals)> pendingKeys,
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered)> pendingKeys,
         Database database)
     {
         if (pendingKeys.Count == 0)
@@ -1344,7 +1421,8 @@ partial class Simulation
                 storageOrdinals[i] = storageOrdinal;
             }
 
-            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId());
+            var isClustered = pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey);
+            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId(), isClustered);
         }
 
         return resolved;

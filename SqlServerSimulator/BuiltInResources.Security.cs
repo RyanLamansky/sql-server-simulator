@@ -295,6 +295,173 @@ internal static partial class BuiltInResources
             new("target_type", SqlType.NVarchar, 100, true),
             new("target_id", SqlType.Int32, null, true),
         ], static (_, _) => EmptyCatalogRows);
+
+        // Encryption / key-management / audit / row-level-security catalog
+        // views for features the simulator doesn't model (symmetric &
+        // asymmetric key management, Always Encrypted column keys, database-
+        // scoped credentials, cryptographic providers, server audits, Row-
+        // Level Security policies & predicates). Each ships the full probe-
+        // confirmed shape (SQL Server 2025, 2026-07-16) with zero rows via the
+        // shared EmptyCatalogRows — DacFx's bacpac-export reverse-engineering
+        // references them (e.g. sys.symmetric_keys LEFT JOIN
+        // sys.cryptographic_providers) and must resolve to an empty result,
+        // not Msg 208. sql_variant columns (key_thumbprint /
+        // cryptographic_provider_algid) are substituted as nvarchar since the
+        // views are always empty, matching sys.asymmetric_keys. server_audits /
+        // server_file_audits / cryptographic_providers are server-scoped (the
+        // row generator ignores the database). See docs/claude/catalog-views.md.
+        var charFour = CharSqlType.Get(4, Collation.Catalog, Coercibility.Implicit);
+        Sys("symmetric_keys",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("symmetric_key_id", SqlType.Int32, null, false),
+            new("key_length", SqlType.Int32, null, false),
+            new("key_algorithm", charTwo, 2, false),
+            new("algorithm_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("key_guid", SqlType.UniqueIdentifier, null, true),
+            new("key_thumbprint", SqlType.NVarchar, 4000, true),
+            new("provider_type", nvarchar60Catalog, 60, true),
+            new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
+            new("cryptographic_provider_algid", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("cryptographic_providers",
+        [
+            new("provider_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("guid", SqlType.UniqueIdentifier, null, true),
+            new("version", SqlType.NVarchar, 24, true),
+            new("dll_path", SqlType.NVarchar, 520, true),
+            new("is_enabled", SqlType.Bit, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("crypt_properties",
+        [
+            new("class", SqlType.TinyInt, null, false),
+            new("class_desc", nvarchar60Catalog, 60, true),
+            new("major_id", SqlType.Int32, null, false),
+            new("thumbprint", SqlType.Varbinary, 32, false),
+            new("crypt_type", charFour, 4, false),
+            new("crypt_type_desc", nvarchar60Catalog, 60, true),
+            new("crypt_property", VarbinarySqlType.MaxForm, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("key_encryptions",
+        [
+            new("key_id", SqlType.Int32, null, false),
+            new("thumbprint", SqlType.Varbinary, 32, true),
+            new("crypt_type", charFour, 4, false),
+            new("crypt_type_desc", nvarchar60Catalog, 60, true),
+            new("crypt_property", VarbinarySqlType.MaxForm, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("column_master_keys",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("column_master_key_id", SqlType.Int32, null, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("key_store_provider_name", SqlType.SystemName, 128, true),
+            new("key_path", SqlType.NVarchar, 4000, true),
+            new("allow_enclave_computations", SqlType.Int32, null, false),
+            new("signature", SqlType.Varbinary, 8000, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("column_encryption_key_values",
+        [
+            new("column_encryption_key_id", SqlType.Int32, null, false),
+            new("column_master_key_id", SqlType.Int32, null, false),
+            new("encrypted_value", SqlType.Varbinary, 8000, true),
+            new("encryption_algorithm_name", SqlType.SystemName, 128, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("database_credentials",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, false),
+            new("credential_id", SqlType.Int32, null, false),
+            new("credential_identity", SqlType.NVarchar, 4000, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("target_type", SqlType.NVarchar, 60, true),
+            new("target_id", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("database_scoped_credentials",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, false),
+            new("credential_id", SqlType.Int32, null, false),
+            new("credential_identity", SqlType.NVarchar, 4000, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("target_type", SqlType.NVarchar, 60, true),
+            new("target_id", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("security_policies",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_enabled", SqlType.Bit, null, false),
+            new("is_not_for_replication", SqlType.Bit, null, false),
+            new("uses_database_collation", SqlType.Bit, null, true),
+            new("is_schema_bound", SqlType.Bit, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("security_predicates",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("security_predicate_id", SqlType.Int32, null, false),
+            new("target_object_id", SqlType.Int32, null, false),
+            new("predicate_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("predicate_type", SqlType.Int32, null, true),
+            new("predicate_type_desc", nvarchar60Catalog, 60, true),
+            new("operation", SqlType.Int32, null, true),
+            new("operation_desc", nvarchar60Catalog, 60, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("server_audits",
+        [
+            new("audit_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("audit_guid", SqlType.UniqueIdentifier, null, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("on_failure", SqlType.TinyInt, null, true),
+            new("on_failure_desc", nvarchar60Catalog, 60, true),
+            new("is_state_enabled", SqlType.Bit, null, true),
+            new("queue_delay", SqlType.Int32, null, true),
+            new("predicate", SqlType.NVarchar, 3000, true),
+            new("is_operator_audit", SqlType.Bit, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("server_file_audits",
+        [
+            new("audit_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("audit_guid", SqlType.UniqueIdentifier, null, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("on_failure", SqlType.TinyInt, null, true),
+            new("on_failure_desc", nvarchar60Catalog, 60, true),
+            new("is_state_enabled", SqlType.Bit, null, true),
+            new("queue_delay", SqlType.Int32, null, true),
+            new("predicate", SqlType.NVarchar, 3000, true),
+            new("max_file_size", SqlType.BigInt, null, true),
+            new("max_rollover_files", SqlType.Int32, null, true),
+            new("max_files", SqlType.Int32, null, true),
+            new("reserve_disk_space", SqlType.Bit, null, true),
+            new("log_file_path", SqlType.NVarchar, 260, true),
+            new("log_file_name", SqlType.NVarchar, 260, true),
+            new("retention_days", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
     }
 
     /// <summary>

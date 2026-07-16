@@ -40,6 +40,27 @@ public sealed class SubqueryTests
     public void Exists_MultiColumnInner_Allowed()
         => AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select 1, 2)"));
 
+    /// <summary>
+    /// Redundant parentheses around the EXISTS subquery are legal at any depth
+    /// (probe-confirmed against SQL Server 2025 — DacFx emits the
+    /// doubly-parenthesized form in its extended-properties query). A missing
+    /// close paren still raises a syntax error.
+    /// </summary>
+    [TestMethod]
+    public void Exists_RedundantParens_Accepted()
+    {
+        AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists ((select 1))"));
+        AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (((select 1)))"));
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (id int)");
+        AreEqual(1, sim.ExecuteScalar(
+            "select case when exists((select top 1 name from sys.tables)) then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    public void Exists_UnbalancedParens_RaisesSyntaxError()
+        => _ = new Simulation().AssertSqlError("select 1 where exists ((select 1)", 102);
+
     [TestMethod]
     public void Exists_Correlated_FiltersByMatch()
     {

@@ -33,6 +33,25 @@ public sealed class LargeValueTests
         AreEqual(value, read);
     }
 
+    /// <summary>
+    /// The concatenation of two CAST(… AS nvarchar(max)) operands selected
+    /// through a variable — DacFx's data-phase row-size sampler builds its
+    /// dynamic TABLESAMPLE SQL exactly this way, and the malformed wire value
+    /// killed the session as a transport-level error.
+    /// </summary>
+    [TestMethod]
+    public async Task NVarcharMax_CastConcat_SelectsOverWire()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using var command = new SqlCommand(
+            "declare @sql nvarchar(max); select @sql = cast(N'select 1' as nvarchar(max)) + cast(N'+1' as nvarchar(max)); select @sql",
+            connection);
+        AreEqual("select 1+1", (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
     [TestMethod]
     public async Task VarbinaryMax_300k_RoundTripsExactly()
     {

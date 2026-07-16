@@ -54,18 +54,21 @@ public sealed class DatabasePropertiesDrainTests
         => new Simulation().AssertSqlError(
             "SELECT CAST('00000000-0000-0000-0000-00000000000' AS uniqueidentifier)", 8169);
 
-    // sys.database_scoped_configurations.value / value_for_secondary surface as
-    // nvarchar (real: sql_variant). SSMS's Value/ValueForSecondary projection
-    // does ISNULL(value_for_secondary, 'PRIMARY') / ISNULL(value, 'NULL') — a
-    // string fallback that a bigint column rejected (Msg 245).
+    // sys.database_scoped_configurations.value / value_for_secondary are
+    // sql_variant. SSMS's Value/ValueForSecondary projection does
+    // ISNULL(value_for_secondary, 'PRIMARY') — the variant NULL falls through
+    // to the string fallback, and the ISNULL result stays sql_variant (its
+    // first argument's type), so it reads back as the string 'PRIMARY'.
     [TestMethod]
-    public void DatabaseScopedConfigurations_StringFallbackDoesNotConvertToNumeric()
+    public void DatabaseScopedConfigurations_StringFallbackReadsAsString()
         => AreEqual("PRIMARY", Scalar(
             "SELECT ISNULL(value_for_secondary, 'PRIMARY') FROM sys.database_scoped_configurations WHERE name = 'MAXDOP'"));
 
+    // MAXDOP's value is a sql_variant carrying int; the non-NULL primary short-
+    // circuits ISNULL and surfaces the inner int 0 (not a string).
     [TestMethod]
-    public void DatabaseScopedConfigurations_ValueReadsAsString()
-        => AreEqual("0", Scalar(
+    public void DatabaseScopedConfigurations_IntValueReadsAsInt()
+        => AreEqual(0, Scalar(
             "SELECT ISNULL(value, 'NULL') FROM sys.database_scoped_configurations WHERE name = 'MAXDOP'"));
 
     // sys.database_files gained drop_lsn (sys.master_files already had it); the

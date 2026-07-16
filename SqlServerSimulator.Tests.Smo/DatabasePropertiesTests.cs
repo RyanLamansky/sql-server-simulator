@@ -8,7 +8,7 @@ namespace SqlServerSimulator;
 /// files, and database-scoped configurations. These are the shapes SSMS's
 /// property-bag drain reaches once the earlier catalog layers resolve — the
 /// oracle for the wire-manifested fixes (varbinary→sysname filegroup-name
-/// decode, the nvarchar database_scoped_configurations value type,
+/// decode, the sql_variant database_scoped_configurations value type,
 /// sys.database_files.drop_lsn).
 /// </summary>
 [TestClass]

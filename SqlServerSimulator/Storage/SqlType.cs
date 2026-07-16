@@ -164,6 +164,7 @@ internal abstract partial class SqlType
     /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-type-precedence-transact-sql</remarks>
     public int Precedence => this switch
     {
+        SqlVariantSqlType => 18,
         _ when this == HierarchyId => 17,
         XmlSqlType => 17,
         SpatialSqlType => 17,
@@ -214,6 +215,7 @@ internal abstract partial class SqlType
         _ when this == Money => 60,
         _ when this == DateTime => 61,
         _ when this == Float => 62,
+        SqlVariantSqlType => 98,
         _ when this == NText => 99,
         _ when this == Bit => 104,
         DecimalSqlType => 106,
@@ -514,6 +516,15 @@ internal abstract partial class SqlType
     public static readonly XmlSqlType Xml = new();
 
     /// <remarks>
+    /// SQL Server's <c>sql_variant</c>: a value slot that carries its own base
+    /// type per cell. The single singleton is the column-level type; the inner
+    /// value's type varies per <see cref="SqlValue"/>. See
+    /// <see cref="SqlVariantSqlType"/> for the wrapper model and the
+    /// storage-codec inner-type descriptor.
+    /// </remarks>
+    public static readonly SqlVariantSqlType SqlVariant = new();
+
+    /// <remarks>
     /// SQL Server's <c>geography</c> CLR UDT — round-earth spatial values
     /// bound to a Spatial Reference Identifier. Stored in the simulator as
     /// raw-WKT UTF-16 (degraded-mode encoding); OGC + Microsoft-extension
@@ -755,6 +766,19 @@ internal abstract partial class SqlType
                 ? SimulatedSqlException.CannotFindDataType(name.Span, index)
                 : SimulatedSqlException.CannotFindDataTypeInCast(name.Span));
 
+        // sql_variant carries no length spec and isn't fixed / LOB / string-
+        // family, so it can't flow through the branches below; dispatch it
+        // here. A width spec (sql_variant(N)) is rejected like other
+        // no-width types.
+        if (resolved is SqlVariantSqlType)
+        {
+            return declaredMaxLength is not null
+                ? throw (columnName is not null
+                    ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
+                    : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
+                : (resolved, null);
+        }
+
         // SQL Server's pre-type-specific zero check: Msg 1001 fires before
         // any per-type validation (e.g. varchar(0), datetime(0)). datetime2 /
         // time / datetimeoffset are unaffected because their N=0 cases are
@@ -958,6 +982,7 @@ internal abstract partial class SqlType
         11 => upper switch
         {
             "HIERARCHYID" => HierarchyId,
+            "SQL_VARIANT" => SqlVariant,
             _ => null,
         },
         13 => upper switch

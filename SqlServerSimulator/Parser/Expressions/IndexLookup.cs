@@ -11,15 +11,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// emission order used by <c>sys.indexes</c> / <c>sys.index_columns</c>.
 /// </summary>
 /// <remarks>
-/// The emission order (probed against SQL Server 2025) is:
-/// <list type="number">
-/// <item><description><c>index_id = 1</c>: the table's PK as a clustered
-/// index — or, on a heap, a synthetic <c>index_id = 0</c> "HEAP" row that
-/// has no key columns (this function returns <c>null</c> for that case).</description></item>
-/// <item><description><c>index_id ≥ 2</c> (or ≥ 1 on a heap): remaining
-/// <see cref="KeyConstraint"/>s (UNIQUE) plus user
-/// <see cref="Index"/>es, sorted by <c>ObjectId</c>.</description></item>
-/// </list>
+/// Resolution defers entirely to <see cref="HeapTable.IndexIdentities"/> — the
+/// single index-id allocation authority — so <c>INDEX_COL</c> /
+/// <c>INDEXKEY_PROPERTY</c> / <c>STATS_DATE</c> agree with <c>sys.indexes</c>
+/// on every id. The clustered entry is <c>index_id = 1</c>; a heap's synthetic
+/// <c>index_id = 0</c> row has no key columns (this function returns <c>null</c>
+/// for ids below 1), and remaining indexes occupy 2..N.
 /// </remarks>
 internal static class IndexLookup
 {
@@ -34,36 +31,10 @@ internal static class IndexLookup
         if (indexId < 1)
             return null;
 
-        KeyConstraint? primaryKey = null;
-        foreach (var k in table.KeyConstraints)
+        foreach (var identity in table.IndexIdentities())
         {
-            if (k.Kind == KeyConstraintKind.PrimaryKey)
-            {
-                primaryKey = k;
-                break;
-            }
-        }
-
-        var hasPk = primaryKey is not null;
-        if (hasPk && indexId == 1)
-            return (primaryKey, null);
-
-        var others = new List<(int ObjectId, KeyConstraint? Key, Index? Index)>();
-        foreach (var k in table.KeyConstraints)
-        {
-            if (!ReferenceEquals(k, primaryKey))
-                others.Add((k.ObjectId, k, null));
-        }
-        foreach (var ix in table.Indexes)
-            others.Add((ix.ObjectId, null, ix));
-        others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
-
-        var ordinal = hasPk ? 2 : 1;
-        foreach (var (_, key, index) in others)
-        {
-            if (ordinal == indexId)
-                return (key, index);
-            ordinal++;
+            if (identity.IndexId == indexId)
+                return (identity.Constraint, identity.Index);
         }
         return null;
     }

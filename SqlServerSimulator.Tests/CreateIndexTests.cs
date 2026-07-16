@@ -386,6 +386,96 @@ public sealed class CreateIndexTests
     }
 
     [TestMethod]
+    public void SysIndexes_ClusteredIndexOnHeap_TakesId1AndSuppressesHeapRow()
+    {
+        // A CREATE CLUSTERED INDEX on a heap (no PK) occupies index_id 1 with
+        // type 1 / CLUSTERED and removes the heap row — exactly one sys.indexes
+        // row. This is the Application.PaymentMethods_Archive shape that broke
+        // DacFx's SqlTable query (which saw a duplicate heap row). Probe-
+        // confirmed against SQL Server 2025.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int, b int)",
+            "create clustered index ix_c on t(a)");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t')"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and index_id = 0"));
+        AreEqual(1, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_c'"));
+        AreEqual((byte)1, sim.ExecuteScalar("select type from sys.indexes where name = 'ix_c'"));
+        AreEqual("CLUSTERED", sim.ExecuteScalar("select type_desc from sys.indexes where name = 'ix_c'"));
+    }
+
+    [TestMethod]
+    public void SysIndexes_HeapWithNonclusteredIndexes_StartAtId2()
+    {
+        // On a heap the nonclustered index_ids start at 2 — index_id 1 (the
+        // clustered slot) is never reused. Probe-confirmed against SQL Server 2025.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, b int);
+            create index ix_a on t(a);
+            create index ix_b on t(b)
+            """);
+        AreEqual("HEAP", sim.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('t') and index_id = 0"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and index_id = 1"));
+        AreEqual(2, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_a'"));
+        AreEqual(3, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_b'"));
+    }
+
+    [TestMethod]
+    public void SysIndexes_ClusteredIndexAfterNonclustered_TakesId1KeepsOthers()
+    {
+        // The clustered index is always index_id 1 regardless of creation order;
+        // pre-existing nonclustered indexes keep their 2..N ids. Probe-confirmed.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, b int, c int);
+            create index ix_a on t(a);
+            create index ix_b on t(b);
+            create clustered index ix_c on t(c)
+            """);
+        AreEqual(1, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_c'"));
+        AreEqual(2, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_a'"));
+        AreEqual(3, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_b'"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and index_id = 0"));
+    }
+
+    [TestMethod]
+    public void SysIndexes_NonclusteredPrimaryKey_StaysHeapAndPkIsNonclustered()
+    {
+        // PRIMARY KEY NONCLUSTERED leaves the table a heap; the PK is a
+        // nonclustered index at index_id >= 2. Probe-confirmed against SQL
+        // Server 2025 (PK at id 2, ix_b at id 3, heap row at 0).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int not null primary key nonclustered, b int);
+            create index ix_b on t(b)
+            """);
+        AreEqual("HEAP", sim.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('t') and index_id = 0"));
+        AreEqual(2, sim.ExecuteScalar("select index_id from sys.indexes where object_id = object_id('t') and is_primary_key = 1"));
+        AreEqual("NONCLUSTERED", sim.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('t') and is_primary_key = 1"));
+        AreEqual(3, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_b'"));
+        AreEqual(0, sim.ExecuteScalar("select indexproperty(object_id('t'), (select name from sys.indexes where object_id = object_id('t') and is_primary_key = 1), 'IsClustered')"));
+    }
+
+    [TestMethod]
+    public void SysIndexes_UniqueClusteredConstraint_TakesId1AndSuppressesHeap()
+    {
+        // A UNIQUE CLUSTERED constraint occupies the clustered slot (index_id 1,
+        // type 1) and suppresses the heap row. Probe-confirmed against SQL
+        // Server 2025.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int not null, b int, constraint uq_a unique clustered (a));
+            create index ix_b on t(b)
+            """);
+        AreEqual(1, sim.ExecuteScalar("select index_id from sys.indexes where name = 'uq_a'"));
+        AreEqual("CLUSTERED", sim.ExecuteScalar("select type_desc from sys.indexes where name = 'uq_a'"));
+        IsTrue((bool)sim.ExecuteScalar("select is_unique_constraint from sys.indexes where name = 'uq_a'")!);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and index_id = 0"));
+        AreEqual(2, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_b'"));
+    }
+
+    [TestMethod]
     public void SysIndexColumns_OnlyIncludesNonHeapEntries()
         => AreEqual(0, new Simulation().ExecuteScalar("""
             create table t (id int, a int);

@@ -77,7 +77,7 @@ internal sealed class IndexProperty : Expression
         else if (FindKeyConstraint(table, indexName) is KeyConstraint kc)
         {
             isUnique = true;
-            isClustered = kc.Kind == KeyConstraintKind.PrimaryKey;
+            isClustered = kc.IsClustered;
         }
         else
         {

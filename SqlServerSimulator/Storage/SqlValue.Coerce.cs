@@ -35,6 +35,14 @@ internal readonly partial struct SqlValue
         if (this.IsNull)
             return Null(target);
 
+        // sql_variant wraps any base value (CAST(x AS sql_variant),
+        // ISNULL(variant, x) coercing the fallback); coercing a variant to a
+        // concrete type unwraps the inner value and re-coerces it.
+        if (target is SqlVariantSqlType)
+            return FromVariant(this);
+        if (this.Type is SqlVariantSqlType)
+            return this.AsVariantInner.CoerceTo(target);
+
         if (SqlType.IsIntegerCategory(this.Type) && SqlType.IsIntegerCategory(target))
         {
             var widened = this.Type == SqlType.Bit ? (this.AsBoolean ? 1L : 0L)

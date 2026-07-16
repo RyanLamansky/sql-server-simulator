@@ -382,6 +382,86 @@ internal sealed class HeapTable : SchemaObject
     public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
 
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
+
+    /// <summary>
+    /// The canonical <c>sys.indexes</c> identity rows for this table — the
+    /// single source of truth for index-id allocation that every consumer
+    /// reads (<c>sys.indexes</c> / <c>sys.index_columns</c> / <c>sys.stats</c>
+    /// / <c>sys.stats_columns</c> / <c>sys.partitions</c> /
+    /// <c>sys.dm_db_partition_stats</c> / <c>sys.allocation_units</c> /
+    /// <c>sys.key_constraints.unique_index_id</c> / <c>INDEX_COL</c> /
+    /// <c>INDEXKEY_PROPERTY</c> / <c>STATS_DATE</c>). Allocation mirrors SQL
+    /// Server exactly (probe-confirmed against SQL Server 2025, 2026-07-16):
+    /// <list type="bullet">
+    /// <item><description>The single <b>clustered</b> entry — a clustered
+    /// PRIMARY KEY / UNIQUE constraint (<see cref="KeyConstraint.IsClustered"/>)
+    /// or a <c>CREATE CLUSTERED INDEX</c> (<see cref="Index.IsClustered"/>),
+    /// whichever has the lowest object id — takes <c>index_id = 1</c>,
+    /// <c>type = 1</c>, and suppresses the HEAP row.</description></item>
+    /// <item><description>With no clustered entry the table is a heap: one
+    /// synthetic row at <c>index_id = 0</c>, <c>type = 0</c>, no backing
+    /// object.</description></item>
+    /// <item><description>Every remaining (nonclustered) constraint / index —
+    /// including a NONCLUSTERED PRIMARY KEY — takes <c>index_id = 2..N</c>,
+    /// <c>type = 2</c>, in object-id (creation) order. On a heap the
+    /// nonclustered ids still start at 2, never reusing the clustered slot's
+    /// id 1.</description></item>
+    /// </list>
+    /// </summary>
+    public List<IndexIdentity> IndexIdentities()
+    {
+        var entries = new List<(int ObjectId, bool Clustered, KeyConstraint? Key, Index? Index)>(this.KeyConstraints.Count + this.Indexes.Count);
+        foreach (var k in this.KeyConstraints)
+            entries.Add((k.ObjectId, k.IsClustered, k, null));
+        foreach (var ix in this.Indexes)
+            entries.Add((ix.ObjectId, ix.IsClustered, null, ix));
+        entries.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+
+        var clusteredIndex = -1;
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].Clustered)
+            {
+                clusteredIndex = i;
+                break;
+            }
+        }
+
+        var result = new List<IndexIdentity>(entries.Count + 1);
+        if (clusteredIndex < 0)
+        {
+            result.Add(new IndexIdentity(0, 0, null, null, null));
+        }
+        else
+        {
+            var clustered = entries[clusteredIndex];
+            result.Add(new IndexIdentity(1, 1, clustered.Key is not null ? clustered.Key.Name : clustered.Index!.Name, clustered.Key, clustered.Index));
+        }
+
+        var nextId = 2;
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (i == clusteredIndex)
+                continue;
+            var entry = entries[i];
+            result.Add(new IndexIdentity(nextId++, 2, entry.Key is not null ? entry.Key.Name : entry.Index!.Name, entry.Key, entry.Index));
+        }
+        return result;
+    }
+}
+
+/// <summary>
+/// One <c>(index_id, type, name, backing)</c> row a <see cref="HeapTable"/>
+/// projects into <c>sys.indexes</c> — the unit of the single index-id
+/// allocation authority (<see cref="HeapTable.IndexIdentities"/>). Exactly one
+/// of <see cref="Constraint"/> / <see cref="Index"/> is non-null for a real
+/// index row; both are null for the synthetic HEAP row. <c>type</c> is 0
+/// (HEAP), 1 (CLUSTERED), or 2 (NONCLUSTERED).
+/// </summary>
+internal readonly record struct IndexIdentity(int IndexId, byte Type, string? Name, KeyConstraint? Constraint, Index? Index)
+{
+    /// <summary>True for the synthetic HEAP row (index_id 0, no backing object).</summary>
+    public bool IsHeap => this.Type == 0;
 }
 
 /// <summary>

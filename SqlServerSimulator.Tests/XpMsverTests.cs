@@ -88,4 +88,45 @@ public sealed class XpMsverTests
     [TestMethod]
     public void XpMsver_CallableThroughMasterThreePartName()
         => HasCount(20, ReadRows("exec master.dbo.xp_msver"));
+
+    [TestMethod]
+    public void XpMsver_OptnameArguments_SelectOnlyRequestedRows()
+        => CollectionAssert.AreEqual(
+            new[] { "Platform", "ProcessorCount" },
+            ReadRows("exec xp_msver 'Platform', 'ProcessorCount'").Select(r => r.Name).ToList());
+
+    [TestMethod]
+    public void XpMsver_OptnameArguments_AlwaysOrderedByIndex_NotArgumentOrder()
+        => CollectionAssert.AreEqual(
+            new[] { (short)4, (short)16 },
+            ReadRows("exec xp_msver 'ProcessorCount', 'Platform'").Select(r => r.Index).ToList());
+
+    [TestMethod]
+    public void XpMsver_DacFxFiveOptnames_ReturnExactIndexOrderedSet()
+        => CollectionAssert.AreEqual(
+            new[] { (short)4, (short)7, (short)15, (short)16, (short)19 },
+            ReadRows("exec xp_msver 'PhysicalMemory', 'Platform', 'FileDescription', 'WindowsVersion', 'ProcessorCount'")
+                .Select(r => r.Index).ToList());
+
+    [TestMethod]
+    public void XpMsver_OptnameCaseInsensitive()
+    {
+        var row = ReadRows("exec xp_msver 'pLaTfOrM'").Single();
+        AreEqual("Platform", row.Name);
+    }
+
+    [TestMethod]
+    public void XpMsver_UnknownOptname_ReturnsEmptySet()
+        => IsEmpty(ReadRows("exec xp_msver 'BogusName'"));
+
+    [TestMethod]
+    public void XpMsver_DuplicateOptname_ReturnsRowOnce()
+        => HasCount(1, ReadRows("exec xp_msver 'Platform', 'Platform'"));
+
+    [TestMethod]
+    public void XpMsver_NamedOptnameArgument_Selects()
+    {
+        var row = ReadRows("exec xp_msver @optname = 'Platform'").Single();
+        AreEqual("Platform", row.Name);
+    }
 }

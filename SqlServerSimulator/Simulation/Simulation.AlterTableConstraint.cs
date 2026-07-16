@@ -202,7 +202,7 @@ partial class Simulation
     /// </summary>
     private static bool ParseAddKeyConstraint(ParserContext context, MultiPartName tableName, string? explicitName)
     {
-        var kind = ParseInlineKeyKindAndModifiers(context);
+        var (kind, clustered) = ParseInlineKeyKindAndModifiers(context);
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnNames = new List<string>();
@@ -282,7 +282,8 @@ partial class Simulation
         }
 
         var name = explicitName ?? AutoConstraintName(table.Name, kind, fullOrdinals, table.Columns);
-        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId());
+        var isClustered = clustered ?? (kind == KeyConstraintKind.PrimaryKey);
+        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered);
         ValidateExistingRowsForKeyConstraint(table, constraint);
         table.KeyConstraints.Add(constraint);
         return true;

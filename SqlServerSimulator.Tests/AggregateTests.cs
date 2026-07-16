@@ -42,6 +42,16 @@ public sealed class AggregateTests
     }
 
     [TestMethod]
+    public void Count_AllQualifier_IsDefaultNoDedup()
+    {
+        // ALL is the grammar's explicit spelling of the default; DacFx's
+        // permission probe reads COUNT(ALL [p].[state]).
+        using var connection = Seeded("a int", "(1), (2), (1), (null), (2)");
+        AreEqual(4, connection.CreateCommand("select count(all a) from t").ExecuteScalar());
+        AreEqual(6, connection.CreateCommand("select sum(all a) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
     public void Count_EmptyInput_ReturnsZero()
     {
         // Only aggregate that doesn't return NULL on empty input.

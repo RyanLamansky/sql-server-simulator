@@ -111,6 +111,30 @@ internal static partial class BuiltInResources
             // AS [Replicated]; without the column the whole bag query fails
             // Msg 207 and every Table property errors.
             new("is_replicated", SqlType.Bit, null, true),
+            // BULK INSERT / bcp table-lock behavior isn't modeled, so
+            // lock_on_bulk_load is a constant 0 (the fresh-table default,
+            // probe-confirmed bit non-null on SQL Server 2025). DacFx's
+            // bacpac-export reverse-engineering reads
+            // CAST([st].[lock_on_bulk_load] AS bit).
+            new("lock_on_bulk_load", SqlType.Bit, null, false),
+            // Replication isn't modeled, so the remaining publication flags
+            // are constant 0 alongside is_replicated. DacFx's table
+            // reverse-engineering reads all four in one ReplInfo CASE.
+            new("is_merge_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            // Remaining columns DacFx's SqlTable reverse-engineering reads.
+            // text-in-row / large-value storage options, CDC, and Stretch
+            // aren't modeled (constant 0 / false); the temporal history
+            // retention pair is -1/-1 (INFINITE) on a versioned table and
+            // NULL/NULL on history and non-temporal tables — all
+            // probe-confirmed against SQL Server 2025.
+            new("text_in_row_limit", SqlType.Int32, null, false),
+            new("large_value_types_out_of_row", SqlType.Bit, null, false),
+            new("is_tracked_by_cdc", SqlType.Bit, null, false),
+            new("is_remote_data_archive_enabled", SqlType.Bit, null, false),
+            new("history_retention_period", SqlType.Int32, null, true),
+            new("history_retention_period_unit", SqlType.Int32, null, true),
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
@@ -153,6 +177,16 @@ internal static partial class BuiltInResources
                         SqlValue.Null(SqlType.Int32),
                         SqlValue.FromInt32(0),
                         falseTableFlag,
+                        falseTableFlag, // lock_on_bulk_load
+                        falseTableFlag, // is_merge_published
+                        falseTableFlag, // is_schema_published
+                        falseTableFlag, // is_published
+                        SqlValue.FromInt32(0),
+                        falseTableFlag, // large_value_types_out_of_row
+                        falseTableFlag, // is_tracked_by_cdc
+                        falseTableFlag, // is_remote_data_archive_enabled
+                        t.SystemVersioning is not null ? SqlValue.FromInt32(-1) : SqlValue.Null(SqlType.Int32),
+                        t.SystemVersioning is not null ? SqlValue.FromInt32(-1) : SqlValue.Null(SqlType.Int32),
                     };
                 }));
 
@@ -189,6 +223,8 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
         ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
@@ -208,6 +244,8 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
         ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
@@ -608,8 +646,36 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var notPublished = SqlValue.FromBoolean(false);
+        var sysSchemaIdValue = SqlValue.FromInt32(Database.SysSchemaId);
+        var msShipped = SqlValue.FromBoolean(true);
         foreach (var schema in database.Schemas.Values)
         {
+            // Table types' internal type tables: one TYPE_TABLE ('TT') row per
+            // user table type, named TT_<type>_<object_id:X8>, homed in the
+            // sys schema with is_ms_shipped = 1 (all probe-confirmed against
+            // SQL Server 2025; the hex suffix is the object id, byte-matching
+            // real's convention). DacFx's table-type populator INNER JOINs
+            // sys.objects on type_table_object_id and NREs client-side when
+            // the parent row is absent.
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromInt32(tt.ObjectId),
+                    SqlValue.FromSystemName($"TT_{tt.Name}_{tt.ObjectId:X8}"),
+                    sysSchemaIdValue,
+                    zeroParent,
+                    nullPrincipal,
+                    SqlValue.FromChar(charTwo, "TT"),
+                    SqlValue.FromNVarchar("TYPE_TABLE"),
+                    SqlValue.FromDateTime(tt.CreateDate),
+                    SqlValue.FromDateTime(tt.ModifyDate),
+                    msShipped,
+                    notPublished,
+                    notPublished,
+                ];
+            }
+
             // Schema-resident objects in ObjectId order. SchemaObject's
             // ObjectTypeCode / ObjectTypeDescription supply the discriminators,
             // so adding a new schema-object kind (e.g. surfacing Sequences /
@@ -631,6 +697,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromDateTime(obj.CreateDate),
                     SqlValue.FromDateTime(obj.ModifyDate),
                     notMsShipped,
+                    notPublished,
+                    notPublished,
                 ];
 
                 // Constraint rows hang off HeapTable parents — emit them
@@ -655,6 +723,8 @@ internal static partial class BuiltInResources
                         createDate,
                         modifyDate,
                         notMsShipped,
+                        notPublished,
+                        notPublished,
                     ];
                 }
                 foreach (var chk in t.CheckConstraints)
@@ -670,6 +740,8 @@ internal static partial class BuiltInResources
                         createDate,
                         modifyDate,
                         notMsShipped,
+                        notPublished,
+                        notPublished,
                     ];
                 }
                 foreach (var fk in t.OutgoingForeignKeys)
@@ -685,6 +757,8 @@ internal static partial class BuiltInResources
                         createDate,
                         modifyDate,
                         notMsShipped,
+                        notPublished,
+                        notPublished,
                     ];
                 }
             }

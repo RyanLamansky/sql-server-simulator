@@ -42,16 +42,43 @@ public sealed class PrincipalIdAndPermsTests
         => AreEqual(1, new Simulation().ExecuteScalar("select has_perms_by_name('dbo.t', 'OBJECT', 'SELECT')"));
 
     [TestMethod]
-    public void HasPermsByName_NullSecurable_ReturnsNull()
-        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select has_perms_by_name(null, 'OBJECT', 'SELECT')"));
+    public void HasPermsByName_NullSecurable_Returns1()
+    {
+        // NULL securable = "the current database/server"; DacFx's bacpac-export
+        // permission gate reads both of these and requires 1 (probe-confirmed).
+        AreEqual(1, new Simulation().ExecuteScalar("select has_perms_by_name(null, N'DATABASE', N'VIEW DEFINITION')"));
+        AreEqual(1, new Simulation().ExecuteScalar("select has_perms_by_name(null, N'DATABASE', N'VIEW DATABASE STATE')"));
+        AreEqual(1, new Simulation().ExecuteScalar("select has_perms_by_name(null, null, 'CONNECT SQL')"));
+    }
+
+    [TestMethod]
+    public void HasPermsByName_NullPermission_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select has_perms_by_name('dbo.t', 'OBJECT', null)"));
 
     [TestMethod]
     public void IsMember_Public_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar("select is_member('public')"));
 
     [TestMethod]
-    public void IsMember_OtherRole_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("select is_member('db_owner')"));
+    public void IsMember_DbOwner_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar("select is_member('db_owner')"));
+
+    [TestMethod]
+    public void IsMember_OtherFixedRole_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar("select is_member('db_datareader')"));
+
+    [TestMethod]
+    public void IsMember_UnknownName_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select is_member('not_a_role')"));
+
+    [TestMethod]
+    public void IsMember_CreatedRole_Returns0WithoutMembership()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create role app_role").ExecuteNonQuery();
+        AreEqual(0, connection.CreateCommand("select is_member('app_role')").ExecuteScalar());
+    }
 
     [TestMethod]
     public void IsRoleMember_Public_Returns1()
@@ -60,4 +87,12 @@ public sealed class PrincipalIdAndPermsTests
     [TestMethod]
     public void IsSrvRoleMember_Public_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar("select is_srvrolemember('public')"));
+
+    [TestMethod]
+    public void IsSrvRoleMember_Sysadmin_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar("select is_srvrolemember('sysadmin')"));
+
+    [TestMethod]
+    public void IsSrvRoleMember_DatabaseRole_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select is_srvrolemember('db_owner')"));
 }

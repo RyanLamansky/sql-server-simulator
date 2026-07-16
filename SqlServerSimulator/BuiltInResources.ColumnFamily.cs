@@ -118,10 +118,10 @@ internal static partial class BuiltInResources
         // surfaces the full sys.columns shape plus definition / is_persisted /
         // uses_database_collation; the simulator ships the load-bearing subset
         // SMO's CREATE-scripting column query LEFT JOINs (object_id / column_id
-        // / definition / is_persisted). The computed-expression source text
-        // isn't retained by the model (only the parsed expression is), so
-        // definition is NULL — a known scripting-fidelity gap (the computed
-        // column scripts without its AS (…) body). See docs/claude/catalog-views.md.
+        // / definition / is_persisted). definition carries the captured
+        // parenthesized source text of the AS (…) body (HeapColumn.ComputedDefinition),
+        // so DacFx / SMO re-emit a re-parseable computed-column DDL.
+        // See docs/claude/catalog-views.md.
         Sys("computed_columns",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -324,8 +324,9 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.computed_columns</c>: one row per computed column
-    /// across every table. The computed-expression source text isn't retained
-    /// by the model, so <c>definition</c> is NULL.
+    /// across every table. <c>definition</c> is the captured parenthesized
+    /// source text of the computed expression (NULL only if a column somehow
+    /// lacks captured text).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateComputedColumns(Parser.BatchContext batch, Database database)
     {
@@ -348,7 +349,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(col.Name),
                         SqlValue.FromInt32(i + 1),
                         SqlValue.FromBoolean(col.Nullable),
-                        nullDefinition,
+                        col.ComputedDefinition is { } def ? SqlValue.FromNVarchar(def) : nullDefinition,
                         falseBit,
                         SqlValue.FromBoolean(col.IsPersisted),
                         trueBit,

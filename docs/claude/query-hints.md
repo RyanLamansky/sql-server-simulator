@@ -131,6 +131,35 @@ via first-word match + skip-tokens-to-comma-or-paren. The trailing
 words / numeric arguments / parenthesized payloads aren't validated
 beyond bracket balancing.
 
+### `USE HINT('name' [, 'name'] …)` — the one name-validated OPTION hint
+
+Every DacFx reverse-engineering query (`sqlpackage /Action:Export`) ends
+with `OPTION (USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'))`. Unlike
+the rest of the OPTION grammar (parse-and-discard, no argument check),
+`USE HINT` is the one hint whose string argument SQL Server validates by
+name, so the simulator does too (`ConsumeUseHint` in `Selection.Hints.cs`):
+
+- Each argument must be a **non-null string literal** (`'…'` or `N'…'`).
+  A non-string argument or empty parens raises the generic **Msg 102**
+  (probe-confirmed: `USE HINT()` → `Incorrect syntax near ')'`,
+  `USE HINT(123)` → `near '123'`).
+- Each name is matched **case-insensitively** against `ValidUseHintNames`
+  — the contents of `sys.dm_exec_valid_use_hints` on SQL Server 2025 (35
+  names, probed 2026-07-16). An unknown name raises **Msg 10715**
+  (`'<name>' is not a valid hint.`, class 15) — distinct from the generic
+  OPTION-clause Msg 102. Real accepts a lowercase argument.
+- Combines with other OPTION hints in either order
+  (`OPTION (MAXDOP 1, USE HINT('…'))` and the reverse both parse).
+- `USE PLAN N'…'` shares the `USE` first-word but is **not** `USE HINT`
+  — the parser peeks the second word and only intercepts `HINT`,
+  leaving `USE PLAN` (and any other `USE`-prefixed hint) on the generic
+  parse-and-discard skip.
+
+The valid-hints list is version-specific and grows across releases — an
+app targeting a hint added after SQL Server 2025 would need a refresh in
+`ValidUseHintNames`, the same trust-region trade-off the table-hint
+accept-list carries. Tests: `QueryHintTests.Option_UseHint_*`.
+
 Unknown first-word → **Msg 102** generic syntax error
 (`Incorrect syntax near '<name>'`). Probe-confirmed surprise: SQL
 Server's OPTION clause has no dedicated unknown-hint code — `BANANA`

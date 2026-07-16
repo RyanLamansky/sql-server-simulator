@@ -27,6 +27,36 @@ internal static class ModelXmlReader
     /// <summary>DACFx serialization namespace observed in AW2025's model.xml.</summary>
     private static readonly XNamespace Ns = "http://schemas.microsoft.com/sqlserver/dac/Serialization/2012/02";
 
+    /// <summary>
+    /// Parses the compatibility level out of the root DataSchemaModel's
+    /// <c>DspName</c> (e.g. <c>…Sql130DatabaseSchemaProvider</c> → 130) and
+    /// applies it to <paramref name="database"/>. A missing / unparsable /
+    /// unrecognized level leaves the construction-time default untouched.
+    /// </summary>
+    private static void ApplyCompatibilityLevel(XElement root, Database database)
+    {
+        var dsp = root.Attribute("DspName")?.Value;
+        if (dsp is null)
+            return;
+
+        const string suffix = "DatabaseSchemaProvider";
+        var end = dsp.IndexOf(suffix, StringComparison.Ordinal);
+        if (end <= 0)
+            return;
+
+        var start = end;
+        while (start > 0 && char.IsAsciiDigit(dsp[start - 1]))
+            start--;
+        if (start == end
+            || !int.TryParse(dsp.AsSpan(start, end - start), out var level)
+            || !Enum.IsDefined((CompatibilityLevel)level))
+        {
+            return;
+        }
+
+        database.CompatibilityLevel = (CompatibilityLevel)level;
+    }
+
     public static void Apply(Stream modelStream, Simulation simulation, Database database, BacpacImportResult result)
     {
         var settings = new XmlReaderSettings
@@ -41,6 +71,13 @@ internal static class ModelXmlReader
         var doc = XDocument.Load(xmlReader, LoadOptions.None);
         var model = doc.Root?.Element(Ns + "Model")
             ?? throw new InvalidDataException("bacpac: <DataSchemaModel><Model> root not found.");
+
+        // The database's declared compatibility level lives in the root
+        // DataSchemaModel's DspName (e.g. "…Sql130DatabaseSchemaProvider" → 130),
+        // not in any <Element>. Without applying it, an imported database would
+        // report the construction-time default (170) rather than its bacpac's
+        // declared level.
+        ApplyCompatibilityLevel(doc.Root, database);
 
         // Materialize once so dependency-ordered passes can iterate the same
         // element list multiple times. The cost is one O(N) walk + per-element

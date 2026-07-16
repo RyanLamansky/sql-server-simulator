@@ -401,6 +401,54 @@ public sealed class QueryHintTests
             """));
 
     [TestMethod]
+    public void Option_UseHint_MultipleNames_AcceptedAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            select 1 option (use hint('FORCE_LEGACY_CARDINALITY_ESTIMATION', 'DISABLE_OPTIMIZED_NESTED_LOOP'))
+            """));
+
+    [TestMethod]
+    public void Option_UseHint_LowercaseName_AcceptedCaseInsensitive()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            select 1 option (use hint('force_legacy_cardinality_estimation'))
+            """));
+
+    [TestMethod]
+    public void Option_UseHint_UnicodeLiteral_AcceptedAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            select 1 option (use hint(N'FORCE_LEGACY_CARDINALITY_ESTIMATION'))
+            """));
+
+    [TestMethod]
+    public void Option_UseHint_WithMaxDop_EitherOrder_AcceptedAsNoop()
+    {
+        // Probe-confirmed both orders combine with other OPTION hints.
+        AreEqual(1, new Simulation().ExecuteScalar("select 1 option (maxdop 1, use hint('FORCE_LEGACY_CARDINALITY_ESTIMATION'))"));
+        AreEqual(1, new Simulation().ExecuteScalar("select 1 option (use hint('FORCE_LEGACY_CARDINALITY_ESTIMATION'), maxdop 1)"));
+    }
+
+    [TestMethod]
+    public void Option_UseHint_UnknownName_RaisesMsg10715()
+        => new Simulation().AssertSqlError(
+            "select 1 option (use hint('BANANA_NOT_A_HINT'))",
+            10715, "'BANANA_NOT_A_HINT' is not a valid hint.");
+
+    [TestMethod]
+    public void Option_UseHint_EmptyParens_RaisesMsg102()
+        => new Simulation().AssertSqlError("select 1 option (use hint())", 102);
+
+    [TestMethod]
+    public void Option_UseHint_NonStringArg_RaisesMsg102()
+        => new Simulation().AssertSqlError("select 1 option (use hint(123))", 102);
+
+    /// <summary>
+    /// USE PLAN N'…' shares the USE first-word but isn't USE HINT — it must
+    /// still fall through to the generic parse-and-discard skip.
+    /// </summary>
+    [TestMethod]
+    public void Option_UsePlan_NotConfusedWithUseHint_AcceptedAsNoop()
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 option (use plan N'<ShowPlanXML />')"));
+
+    [TestMethod]
     public void Option_MultipleHints_AcceptedAsNoop()
         => AreEqual(1, new Simulation().ExecuteScalar("select 1 option (recompile, maxdop 4)"));
 

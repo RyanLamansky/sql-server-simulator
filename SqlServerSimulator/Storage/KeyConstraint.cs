@@ -19,13 +19,26 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered)
 {
     public readonly KeyConstraintKind Kind = kind;
 
     public readonly string Name = name;
 
     public readonly int[] StorageOrdinals = storageOrdinals;
+
+    /// <summary>
+    /// Whether this constraint's backing index is the table's clustered index.
+    /// A PRIMARY KEY defaults clustered (unless declared <c>NONCLUSTERED</c>);
+    /// a UNIQUE constraint defaults nonclustered (unless declared
+    /// <c>CLUSTERED</c>). Drives index-id allocation in
+    /// <see cref="HeapTable.IndexIdentities"/> — a clustered constraint takes
+    /// <c>index_id = 1</c> and suppresses the HEAP row. At most one clustered
+    /// index exists per table (real SQL Server's Msg 1902 invariant; not
+    /// enforced here — an over-declared second clustered entry falls back to a
+    /// nonclustered id).
+    /// </summary>
+    public readonly bool IsClustered = isClustered;
 
     /// <summary>
     /// Per-database object identifier for this constraint — allocated at

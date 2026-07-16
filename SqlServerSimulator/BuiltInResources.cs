@@ -64,6 +64,7 @@ internal static partial class BuiltInResources
         RegisterIndexes(views);
         RegisterSecurity(views);
         RegisterFullTextXmlSpatial(views);
+        RegisterServiceBroker(views);
         RegisterServerAndDatabases(views);
         RegisterLegacyCompat(views);
         return views;

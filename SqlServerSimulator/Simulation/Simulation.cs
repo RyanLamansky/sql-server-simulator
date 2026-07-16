@@ -871,6 +871,23 @@ public sealed partial class Simulation
         if (context.Token is not Name)
             throw SimulatedSqlException.CouldNotFindStoredProcedure(command.CommandText);
         var procName = BatchContext.ParseObjectName(context);
+
+        // System procedures (xp_msver, sp_getapplock, …) aren't in the user
+        // procedure namespace TryResolveProcedure searches — their dispatch
+        // lives in ParseExec's system-proc switch, which consumes arguments by
+        // parsing EXEC text. DacFx invokes xp_msver by name over TDS RPC, so
+        // route a name-form system-proc call through a synthesized top-level
+        // EXEC whose arguments are the RPC parameters literalized positionally.
+        // Positional (not named) synthesis is required because RPC callers may
+        // repeat a parameter name — DacFx passes five @optname parameters to
+        // xp_msver — which named-argument synthesis would reject as duplicates.
+        if (ResolveSystemProcedureName(batch.CurrentDatabase.Collation, procName.Leaf) is { } systemProcName)
+        {
+            foreach (var outcome in InvokeSystemProcedureFromRpc(batch.Connection, systemProcName, command.Parameters))
+                yield return outcome;
+            yield break;
+        }
+
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
 
@@ -935,6 +952,67 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Dispatches a name-form RPC call to a modeled system procedure by
+    /// synthesizing an equivalent top-level <c>EXEC &lt;name&gt; &lt;args&gt;</c>
+    /// batch, then running it through the standard statement dispatch so the
+    /// call reuses <see cref="ParseExec"/>'s system-proc switch. Each
+    /// non-<see cref="ParameterDirection.ReturnValue"/> parameter is literalized
+    /// positionally (see <see cref="LiteralizeRpcArgument"/>); output/return
+    /// writeback isn't wired for system procs (the modeled ones — xp_msver and
+    /// friends — return result sets, not OUTPUT values). Result sets stream back
+    /// through the yielded outcomes.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSystemProcedureFromRpc(
+        SimulatedDbConnection connection,
+        string canonicalName,
+        DbParameterCollection parameters)
+    {
+        var sql = new System.Text.StringBuilder("EXEC ").Append(canonicalName);
+        var first = true;
+        foreach (DbParameter parameter in parameters)
+        {
+            if (parameter.Direction is ParameterDirection.ReturnValue)
+                continue;
+            _ = sql.Append(first ? " " : ", ").Append(LiteralizeRpcArgument(parameter));
+            first = false;
+        }
+
+        using var childCommand = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // synthesized from a modeled system-proc name + literalized parameters, not free-form input
+        childCommand.CommandText = sql.ToString();
+#pragma warning restore CA2100
+        var childBatch = new BatchContext(childCommand);
+        var parser = childBatch.Parser;
+        parser.MoveNextOptional();
+        foreach (var outcome in DispatchStatementsUntil(childBatch, endKeyword: null))
+            yield return outcome;
+    }
+
+    /// <summary>
+    /// Renders one RPC parameter value as a T-SQL literal for the synthesized
+    /// system-proc EXEC: NULL as <c>NULL</c>, string-family values as an
+    /// <c>N'…'</c> literal (doubling embedded quotes), exact / approximate
+    /// numerics as a bare number, and any other type as a quoted string form.
+    /// The modeled system procs read only string / integer arguments, so the
+    /// numeric and string paths cover every realistic call.
+    /// </summary>
+    private static string LiteralizeRpcArgument(DbParameter parameter)
+    {
+        var declaredType = SqlType.GetByDbType(parameter.DbType);
+        var value = parameter.Value is null or DBNull
+            ? SqlValue.Null(declaredType)
+            : declaredType.ConvertParameter(parameter.Value);
+        return value.IsNull
+            ? "NULL"
+            : value.Type.Category switch
+            {
+                SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate =>
+                    value.CoerceTo(SqlType.NVarchar).AsString,
+                _ => $"N'{value.CoerceTo(SqlType.NVarchar).AsString.Replace("'", "''", StringComparison.Ordinal)}'",
+            };
+    }
+
+    /// <summary>
     /// Drives the per-statement dispatch loop until either end-of-batch
     /// (when <paramref name="endKeyword"/> is null — top-level call from
     /// <see cref="CreateResultSetsForCommand"/>) or the matching keyword
@@ -967,6 +1045,14 @@ public sealed partial class Simulation
                 // so RETURN inside a block exits the block dispatcher promptly
                 // (the block's "expect END" check has a matching short-circuit).
                 if (batch.ReturnSignaled)
+                    yield break;
+
+                // A batch-aborting name-resolution error (Msg 208 and kin)
+                // emitted under continueOnError stops the whole batch — real
+                // SQL Server does not run the statements after it. Breaking
+                // here rather than resuming at the next token is what kills the
+                // abandoned-mid-parse Msg 319 / 102 cascade.
+                if (batch.BatchAborted)
                     yield break;
 
                 if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)
@@ -1089,13 +1175,33 @@ public sealed partial class Simulation
                 // name resolution defers — syntax / structural errors carry
                 // other numbers and still propagate.
                 if (batch.IsSkipping && IsDeferrableNameResolutionError(ex))
+                {
                     deferredNameError = true;
+                }
                 else if (batch.TryFrameDepth > 0)
+                {
                     caught = ex;
-                else if (batch.ContinueOnError && IsStatementTerminating(ex))
+                }
+                else if (batch.ContinueOnError && IsBatchAbortingNameResolution(ex))
+                {
+                    // Bind-class name-resolution failure (missing object /
+                    // column / ambiguous / could-not-be-bound). Real SQL Server
+                    // aborts the remaining batch rather than continuing to the
+                    // next statement. Emit the one error, then set the flag the
+                    // dispatch loop breaks on — no cursor recovery scan, so the
+                    // OPTION (USE HINT(...)) tail's `USE` token is never
+                    // mis-dispatched as a `USE <database>` statement.
                     continuedError = ex;
+                    batch.BatchAborted = true;
+                }
+                else if (batch.ContinueOnError && IsStatementTerminating(ex))
+                {
+                    continuedError = ex;
+                }
                 else
+                {
                     throw;
+                }
             }
         }
         finally
@@ -1129,9 +1235,16 @@ public sealed partial class Simulation
             // error into the outcome stream so the wire writes its token(s) and
             // continues; the outer dispatch loop resumes at the next statement.
             connection.LastErrorNumber = continuedError.Number;
-            var parser = batch.Parser;
-            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                parser.MoveNextOptional();
+            // A batch-aborting error skips the cursor-recovery scan: the outer
+            // dispatch loop breaks on BatchAborted, so the cursor position no
+            // longer matters and scanning could only mis-stop on a keyword-like
+            // token inside the failed statement's own tail.
+            if (!batch.BatchAborted)
+            {
+                var parser = batch.Parser;
+                while (parser.Token is not null && !IsStatementBoundary(parser.Token))
+                    parser.MoveNextOptional();
+            }
             yield return new SimulatedErrorOutcome(continuedError);
             yield break;
         }
@@ -1213,6 +1326,29 @@ public sealed partial class Simulation
     /// </remarks>
     private static bool IsStatementTerminating(SimulatedSqlException ex)
         => ex.Class is >= 11 and <= 16 && ex.Number != 1205;
+
+    /// <summary>
+    /// True for the bind-class name-resolution failures that abort the whole
+    /// batch on real SQL Server rather than merely terminating their statement.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-16): with a
+    /// <c>SELECT 1; &lt;failing&gt;; SELECT 2</c> batch, the statements before
+    /// the failure stream their results and the single error surfaces, but the
+    /// statements after it never execute — for Msg 208 (invalid object),
+    /// Msg 207 (invalid column), Msg 209 (ambiguous column), Msg 4104 (multi-
+    /// part identifier could not be bound), and Msg 4121 (cannot find the
+    /// column / function). Contrast the statement-terminating errors that DO
+    /// let the batch continue: Msg 3701 (drop missing), Msg 8134 (divide by
+    /// zero), Msg 2812 (EXEC missing proc), a severity-16 RAISERROR. Consulted
+    /// only on the wire path (<see cref="BatchContext.ContinueOnError"/>); the
+    /// in-process path aborts by throwing on the first error regardless.
+    /// Divergence: real fails Msg 207 / 209 / 4104 at compile time so even the
+    /// statements *before* the failure don't run, whereas the simulator
+    /// interleaves parse and execution and has already streamed them — the same
+    /// compile-vs-runtime divergence <see cref="IsStatementTerminating"/>
+    /// documents. The abort-the-rest behavior matches either way.
+    /// </summary>
+    private static bool IsBatchAbortingNameResolution(SimulatedSqlException ex)
+        => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte)
     {
@@ -1439,6 +1575,7 @@ public sealed partial class Simulation
                 }
 
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShrink(context, batch, out outcome):
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShowStatistics(context, batch, out outcome):
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = 0;

@@ -89,6 +89,65 @@ internal static partial class BuiltInResources
         RegisterSysusers(views);
         RegisterSystemObjects(views);
         RegisterSptValues(views);
+        RegisterSysconfigures(views);
+    }
+
+    /// <summary>
+    /// Registers the legacy <c>sysconfigures</c> compatibility view — the
+    /// SQL-Server-2000-shaped projection of the server configuration catalog
+    /// that DacFx's bacpac-export preamble reads
+    /// (<c>SELECT [c].[value] FROM [master].[dbo].[sysconfigures] AS [c] WITH
+    /// (NOLOCK) WHERE [c].[config] = 1126</c>). Probe-confirmed against SQL
+    /// Server 2025: it resolves from every database under the bare leaf
+    /// (<c>sysconfigures</c>), the <c>sys.</c> qualifier, and the <c>dbo.</c>
+    /// qualifier — the three-part <c>master.dbo.sysconfigures</c> form DacFx
+    /// uses routes through the <c>dbo.</c> key. Not master-scoped (unlike
+    /// <c>spt_values</c>): every database exposes it.
+    /// <para>
+    /// Four columns (<c>value int</c>, <c>config int</c>, <c>comment
+    /// nvarchar</c>, <c>status smallint</c>) — narrower than
+    /// <c>sys.configurations</c>, and with no <c>name</c> column
+    /// (probe-confirmed: selecting <c>name</c> raises Msg 207). Rows mirror
+    /// <see cref="ConfigurationData"/>: <c>value</c> = the configured value,
+    /// <c>config</c> = configuration_id, <c>comment</c> = description, and
+    /// <c>status</c> = <c>is_dynamic + 2 * is_advanced</c> (probe-confirmed
+    /// mapping — config 1126 reports status 3 = dynamic + advanced, config 102
+    /// reports 1 = dynamic only).
+    /// </para>
+    /// </summary>
+    private static void RegisterSysconfigures(Dictionary<string, CatalogView> views)
+    {
+        HeapColumn[] columns =
+        [
+            new("value", SqlType.Int32, null, true),
+            new("config", SqlType.Int32, null, false),
+            new("comment", SqlType.NVarchar, 255, true),
+            new("status", SqlType.SmallInt, null, true),
+        ];
+        var rows = BuildSysconfiguresRows();
+        var view = new CatalogView("sysconfigures", columns, (_, _) => rows);
+        views["sysconfigures"] = view;
+        views["sys.sysconfigures"] = view;
+        views["dbo.sysconfigures"] = view;
+    }
+
+    private static SqlValue[][] BuildSysconfiguresRows()
+    {
+        var rows = new SqlValue[ConfigurationData.Length][];
+        for (var i = 0; i < ConfigurationData.Length; i++)
+        {
+            var (id, _, value, _, _, _, description, isDynamic, isAdvanced) = ConfigurationData[i];
+            var status = (short)((isDynamic ? 1 : 0) + (isAdvanced ? 2 : 0));
+            rows[i] =
+            [
+                SqlValue.FromInt32((int)value),
+                SqlValue.FromInt32(id),
+                SqlValue.FromNVarchar(description),
+                SqlValue.FromInt16(status),
+            ];
+        }
+
+        return rows;
     }
 
     /// <summary>

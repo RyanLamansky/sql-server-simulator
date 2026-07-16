@@ -279,6 +279,23 @@ internal sealed class BatchContext
     public bool ContinueOnError;
 
     /// <summary>
+    /// Set <see langword="true"/> when a batch-aborting error (a compile /
+    /// bind-class name-resolution failure — see
+    /// <c>Simulation.IsBatchAbortingNameResolution</c>) fires under
+    /// <see cref="ContinueOnError"/>. Unlike an ordinary statement-terminating
+    /// error, real SQL Server does not run the remaining statements after one
+    /// of these (probe-confirmed against SQL Server 2025: a mid-batch
+    /// <c>SELECT * FROM missing</c> streams the prior statements' results, the
+    /// one Msg 208, then stops — the following statements never execute). The
+    /// wire path emits the single error outcome and the dispatch loop breaks
+    /// on this flag rather than resuming at the next statement, so the
+    /// abandoned-mid-parse cascade of bogus Msg 319 / 102 syntax errors never
+    /// happens. The in-process path aborts by throwing instead, so it never
+    /// sets this.
+    /// </summary>
+    public bool BatchAborted;
+
+    /// <summary>
     /// Set <see langword="true"/> when this batch's parse captures state
     /// that can't be reused across invocations:
     /// <list type="bullet">

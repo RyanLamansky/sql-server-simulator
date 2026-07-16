@@ -110,7 +110,7 @@ Phase B (`WHEN NOT MATCHED BY TARGET` → insert unmatched source rows) is uncha
 
 - `Name`, `ObjectId` (allocated from the per-database counter).
 - `IsUnique` — drives enforcement.
-- `IsClustered` — captured for fidelity but doesn't alter storage; every table is a flat heap regardless.
+- `IsClustered` — doesn't alter storage (every table is a flat heap regardless), but **drives index-id allocation**: a clustered index takes `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)). `KeyConstraint.IsClustered` is the constraint-side equivalent (PK defaults clustered, UNIQUE defaults nonclustered).
 - `KeyColumns[]` — each entry pairs a storage ordinal with the ASC / DESC flag.
 - `IncludedColumns[]` — storage ordinals for INCLUDE columns; catalog-only.
 - `Filter` (BooleanExpression?) — only honored on UNIQUE indexes.
@@ -175,15 +175,23 @@ Multi-target `DROP INDEX ix1 ON t1, ix2 ON t2` resolves each entry independently
 
 ### `sys.indexes` — 24-column probe-confirmed shape
 
-One row per (table, index):
+One row per (table, index), with ids allocated by the single authority described in [Index-id allocation](#index-id-allocation):
 
-- **PK** (when present) at `index_id = 1`, `type = 1`, `type_desc = CLUSTERED`, `is_primary_key = 1`, `is_unique = 1`.
-- **HEAP row** (when no PK) at `index_id = 0`, `type = 0`, `type_desc = HEAP`, `name = NULL`. Matches SQL Server's "the table itself is the heap" semantic.
-- **UNIQUE constraints** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 1`, `is_unique_constraint = 1`.
+- **Clustered entry** (clustered PK / UNIQUE constraint or `CREATE CLUSTERED INDEX`) at `index_id = 1`, `type = 1`, `type_desc = CLUSTERED`. `is_primary_key` / `is_unique` / `is_unique_constraint` reflect the backing object (a non-unique `CREATE CLUSTERED INDEX` is `is_unique = 0`).
+- **HEAP row** (only when the table has no clustered index) at `index_id = 0`, `type = 0`, `type_desc = HEAP`, `name = NULL`. Matches SQL Server's "the table itself is the heap" semantic.
+- **UNIQUE constraints** (nonclustered) at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 1`, `is_unique_constraint = 1`.
 - **CREATE UNIQUE INDEX** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 1`, `is_unique_constraint = 0`.
-- **Non-UNIQUE CREATE INDEX** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 0`.
+- **Non-UNIQUE CREATE INDEX** and a **NONCLUSTERED PRIMARY KEY** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`.
 
-`index_id` assignment among non-PK entries follows allocation order (the simulator's `AllocateObjectId` is monotonic), matching SQL Server's declaration-order behavior. The `(object_id, index_id)` set every index row reports here is re-projected by `sys.partitions` (one partition-row per index/heap) and `sys.stats` (one stats-row per index, excluding the heap) via the shared `EnumerateTableIndexIdentities` helper — see [`catalog-views.md`](catalog-views.md).
+### Index-id allocation
+
+`HeapTable.IndexIdentities()` is the **single source of truth** every index-id consumer reads — `sys.indexes` / `sys.index_columns` / `sys.stats` / `sys.stats_columns` / `sys.partitions` / `sys.allocation_units` / `sys.dm_db_partition_stats` (through the shared `EnumerateTableIndexIdentities` flattening), `sys.key_constraints.unique_index_id`, and `INDEX_COL` / `INDEXKEY_PROPERTY` / `STATS_DATE` (through `IndexLookup.ResolveByIndexId`). It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name, KeyConstraint? Constraint, Index? Index)` — with SQL-Server-exact allocation (probe-confirmed against SQL Server 2025, 2026-07-16):
+
+- The single **clustered** entry — a clustered PK / UNIQUE constraint (`KeyConstraint.IsClustered`) or a `CREATE CLUSTERED INDEX` (`Index.IsClustered`), whichever has the lowest object id — takes `index_id = 1`, `type = 1`, and **suppresses the HEAP row**. The clustered index is always id 1 regardless of creation order (a `CREATE CLUSTERED INDEX` added after nonclustered indexes still lands at 1; those keep their ids).
+- With no clustered entry the table is a **heap**: one synthetic row at `index_id = 0`, `type = 0`, no backing object. Nonclustered ids on a heap still start at 2 — index_id 1 (the clustered slot) is never reused.
+- Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes `index_id = 2..N`, `type = 2`, in object-id (declaration) order (the simulator's `AllocateObjectId` is monotonic, so this matches SQL Server's declaration-order behavior).
+
+A PK defaults **clustered** (unless declared `NONCLUSTERED`); a UNIQUE constraint defaults **nonclustered** (unless declared `CLUSTERED`) — captured at parse time (`ParseInlineKeyKindAndModifiers` → `KeyConstraint.IsClustered`) across inline column constraints, table-level constraints, and `ALTER TABLE ADD CONSTRAINT` (the shape the bacpac loader emits). At most one clustered index exists per table (real's Msg 1902 invariant, not enforced — an over-declared second clustered entry falls back to a nonclustered id rather than raising).
 
 `compression_delay` is **NULL** on every row: it carries a minute-delay only for columnstore indexes (unmodeled), and is NULL for every rowstore index (probe-confirmed). SMO's index-scripting query reads it as `CAST(i.compression_delay AS int)` with no `ISNULL` wrapper.
 
@@ -197,6 +205,14 @@ One row per (index, column):
 
 `is_descending_key` reflects the per-column DESC flag from CREATE INDEX. `column_id` is the 1-based full-column ordinal from `sys.columns` (mapped back from the storage ordinal stored on the index).
 
+## `DBCC SHOW_STATISTICS(<table>, <stat>) WITH HISTOGRAM`
+
+DacFx's `sqlpackage /Action:Export` runs one `dbcc show_statistics(N'[schema].[table]', N'<index-or-stat-name>') with histogram` per table (using the PK / clustered-index statistic name) before bulk-reading it, to chunk the table into extraction ranges — so the DATA phase of a bacpac export needs this parsed. `TryParseShowStatistics` (`Simulation/Simulation.Dbcc.cs`) peeks past `DBCC`, restoring the cursor on any other subcommand. Both argument forms real accepts are handled: a `N'...'` string literal whose content is a 1- / 2-part bracketed name (DacFx's form, parsed with the same `ObjectId.TryParseObjectName` seam `OBJECT_ID` uses) and a bare dotted / bracketed identifier (`BatchContext.ParseObjectName`). The statement parses mid-batch (DacFx precedes it with a `SELECT TOP 1` probe in the same batch).
+
+The named statistic resolves against the table's index-backed stats via the canonical [`IndexIdentities()`](#index-id-allocation) allocator (a heap identity — null name — can't match); the leading key column is the first `KeyConstraint.StorageOrdinals` / `Index.KeyColumns` ordinal. The result set is the probe-confirmed 5 columns: `RANGE_HI_KEY` (typed as the **leading key column's own type** — `int` for an int PK, `datetime2` / `nvarchar` for those keys, reaching real SqlClient through the standard TDS codecs), `RANGE_ROWS` `real`, `EQ_ROWS` `real`, `DISTINCT_RANGE_ROWS` `bigint`, `AVG_RANGE_ROWS` `real`.
+
+**Histogram content**: the simulator scans the heap once (`Heap.EnumerateRows` + the array-typed `RowDecoder.DecodeColumn` fast path over `StoredColumns`), groups by distinct non-null leading-key value, sorts, and emits one step per distinct value up to 200 steps — beyond that, 200 boundary steps evenly spaced over the sorted distinct values, with `RANGE_ROWS` / `DISTINCT_RANGE_ROWS` folded from the skipped values between adjacent boundaries and `AVG_RANGE_ROWS` = `RANGE_ROWS / DISTINCT_RANGE_ROWS` (**1** when there are no range rows, matching real's convention — probe-confirmed). The **MIN value is always the first step and MAX the last**, matching real's histogram envelope — load-bearing for DacFx, whose bacpac-export chunker interpolates boundary parameters between adjacent steps and overflows its arithmetic client-side (`Double` → `Int32` conversion failure) when the MIN anchor is missing. Step *placement* still diverges from real's sampled max-diff algorithm; the values are honest and self-consistent with `COUNT(*)` / `MIN` / `MAX`. An empty table yields a 0-row result set. Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560 (all probe-confirmed class/state). Only `WITH HISTOGRAM` is modeled — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM` / `NO_INFOMSGS` combinations) raise `NotSupportedException` naming the option. `STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) remains a deferred gap — see [`backlog.md`](backlog.md).
+
 ## EF Migrations integration
 
 EF Core's SqlServer provider emits `CREATE INDEX` (and `CREATE UNIQUE INDEX` for `HasIndex().IsUnique()`) during `EnsureCreated` and during migrations' `Up()` methods. With the simulator:
@@ -208,8 +224,8 @@ EF Core's SqlServer provider emits `CREATE INDEX` (and `CREATE UNIQUE INDEX` for
 ## Fidelity gaps
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot. Both are rare in filtered predicates. A predicate the simulator accepts but can't render canonically (an `OR`, `NOT`, `BETWEEN`, or function call — all of which a real server *rejects* at CREATE for a filtered index) reports `filter_definition` NULL with `has_filter` still set.
-- **CLUSTERED keyword is decorative**: `CREATE CLUSTERED INDEX` is accepted but the resulting index reports `type_desc = NONCLUSTERED` in `sys.indexes`. Real SQL Server tracks one clustered index per table (replacing the heap); the simulator has no row-ordered storage to differentiate.
-- **Multiple clustered indexes**: real SQL Server raises Msg 1902 (`Cannot create more than one clustered index on table`). The simulator silently accepts a second CLUSTERED INDEX since clustering is decorative.
+- **CLUSTERED keyword drives allocation, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), but there's no row-ordered storage behind it — clustering never changes scan/seek behavior.
+- **Multiple clustered indexes**: real SQL Server raises Msg 1902 (`Cannot create more than one clustered index on table`). The simulator silently accepts a second CLUSTERED entry; only the lowest-object-id clustered entry claims `index_id = 1`, the rest fall back to nonclustered ids.
 - **WITH options ignored**: `FILLFACTOR`, `IGNORE_DUP_KEY`, `ONLINE`, `MAXDOP`, etc. all parse but have no behavior. `IGNORE_DUP_KEY = ON` notably should downgrade Msg 2601 to a warning + skip — not modeled.
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently. Real SQL Server rolls back all on any failure.

@@ -279,6 +279,24 @@ internal static partial class BuiltInResources
             new("replica_name", SqlType.SystemName, 128, true),
         ], EnumerateSysStats);
 
+        // sys.stats_columns: one row per KEY column of each index-backed
+        // statistic sys.stats reports (stats_id = index_id). Mirrors
+        // sys.index_columns' key-column rows exactly — stats_column_id =
+        // the key ordinal (1..N), column_id = the sys.columns id — but
+        // omits INCLUDE columns (a statistic covers only key columns;
+        // probe-confirmed against SQL Server 2025 WWI: stats_columns count
+        // per index-backed stat equals the index's is_included_column = 0
+        // count). Auto-created column statistics (_WA_Sys_*) aren't modeled,
+        // so no column-only stats_columns rows appear — same divergence as
+        // sys.stats. Probe-confirmed 4-column shape (SQL Server 2025).
+        Sys("stats_columns",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("stats_id", SqlType.Int32, null, false),
+            new("stats_column_id", SqlType.Int32, null, true),
+            new("column_id", SqlType.Int32, null, true),
+        ], EnumerateSysStatsColumns);
+
         // sys.internal_tables / sys.hash_indexes / sys.json_indexes /
         // sys.index_resumable_operations / sys.selective_xml_index_paths /
         // sys.filetable_system_defined_objects: features the simulator doesn't
@@ -402,17 +420,126 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
         ], static (_, _) => EmptyCatalogRows);
+
+        // sys.json_index_paths / sys.selective_xml_index_namespaces /
+        // sys.vector_indexes: index-feature views for capabilities the
+        // simulator doesn't model (JSON indexes, selective XML index
+        // namespaces, DiskANN vector indexes). Each ships the full
+        // probe-confirmed shape (SQL Server 2025, 2026-07-16) with zero
+        // rows via the shared EmptyCatalogRows — DacFx's bacpac-export
+        // reverse-engineering references them and must resolve to an empty
+        // (not Msg 208) result. See docs/claude/catalog-views.md.
+        Sys("json_index_paths",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("path", VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault), 8000, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("selective_xml_index_namespaces",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("is_default_uri", SqlType.Bit, null, true),
+            new("uri", SqlType.NVarchar, 4000, true),
+            new("prefix", SqlType.SystemName, 128, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("vector_indexes",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, false),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("auto_created", SqlType.Bit, null, true),
+            new("vector_index_type", nvarchar60Catalog, 60, true),
+            new("distance_metric", nvarchar60Catalog, 60, true),
+            new("build_parameters", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.partition_functions / sys.partition_schemes /
+        // sys.partition_range_values: table/index partitioning isn't modeled
+        // (every table reads as a single unpartitioned partition — see
+        // sys.data_spaces / sys.partitions), so all three ship empty with the
+        // full probe-confirmed shape (SQL Server 2025). partition_range_values'
+        // value column is sql_variant on real SQL Server; substituted here as
+        // nvarchar since the view is always empty (the same sql_variant→nvarchar
+        // substitution sys.asymmetric_keys uses). See docs/claude/catalog-views.md.
+        Sys("partition_functions",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("function_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("fanout", SqlType.Int32, null, false),
+            new("boundary_value_on_right", SqlType.Bit, null, false),
+            new("is_system", SqlType.Bit, null, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("partition_schemes",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_default", SqlType.Bit, null, true),
+            new("is_system", SqlType.Bit, null, true),
+            new("function_id", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("partition_range_values",
+        [
+            new("function_id", SqlType.Int32, null, false),
+            new("boundary_id", SqlType.Int32, null, false),
+            new("parameter_id", SqlType.Int32, null, false),
+            new("value", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.partition_parameters / sys.destination_data_spaces: the
+        // remaining partitioning-catalog surface DacFx's SqlPartitionFunction /
+        // SqlPartitionScheme populators read; partitioning isn't modeled, so
+        // both ship empty with the probe-confirmed shape (SQL Server 2025).
+        Sys("partition_parameters",
+        [
+            new("function_id", SqlType.Int32, null, false),
+            new("parameter_id", SqlType.Int32, null, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
+            new("collation_name", SqlType.SystemName, 128, true),
+            new("user_type_id", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("destination_data_spaces",
+        [
+            new("partition_scheme_id", SqlType.Int32, null, false),
+            new("destination_id", SqlType.Int32, null, false),
+            new("data_space_id", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
     }
 
     /// <summary>
-    /// Rows for <c>sys.indexes</c>: one row per (table, index) — PK / UQ
-    /// from <see cref="HeapTable.KeyConstraints"/>, plus
-    /// <c>CREATE INDEX</c>-declared entries from <see cref="HeapTable.Indexes"/>.
-    /// PK gets index_id = 1 with type_desc = CLUSTERED; tables without a
-    /// PK emit a HEAP row (index_id = 0, name = NULL). Remaining UQ /
-    /// user indexes get index_id starting at 2 in <c>ObjectId</c> order
-    /// (the simulator allocates object ids monotonically, so this matches
-    /// declaration order).
+    /// Rows for <c>sys.indexes</c>: one row per identity yielded by
+    /// <see cref="HeapTable.IndexIdentities"/> — the single index-id
+    /// allocation authority. The clustered entry (clustered PK / UNIQUE
+    /// constraint or <c>CREATE CLUSTERED INDEX</c>) lands at index_id = 1
+    /// type_desc = CLUSTERED and suppresses the HEAP row; a table with no
+    /// clustered index emits a HEAP row (index_id = 0, name = NULL); every
+    /// other index / constraint (incl. a NONCLUSTERED PK) lands at index_id
+    /// 2..N type_desc = NONCLUSTERED in object-id (declaration) order.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysIndexes(Parser.BatchContext batch, Database database)
     {
@@ -433,76 +560,51 @@ internal static partial class BuiltInResources
             foreach (var table in schema.HeapTables.Values)
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
-                KeyConstraint? primaryKey = null;
-                foreach (var k in table.KeyConstraints)
+                foreach (var identity in table.IndexIdentities())
                 {
-                    if (k.Kind == KeyConstraintKind.PrimaryKey)
+                    var typeDesc = identity.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc };
+                    SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition;
+                    if (identity.Constraint is { } key)
                     {
-                        primaryKey = k;
-                        break;
+                        var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
+                        name = SqlValue.FromSystemName(key.Name);
+                        isUnique = trueBit;
+                        isPrimaryKey = isPk ? trueBit : falseBit;
+                        isUniqueConstraint = isPk ? falseBit : trueBit;
+                        hasFilter = falseBit;
+                        filterDefinition = nullFilter;
                     }
-                }
-                var hasPk = primaryKey is not null;
-                var nextIndexId = hasPk ? 2 : 1;
-                yield return BuildIndexRow(
-                    name: hasPk ? SqlValue.FromSystemName(primaryKey!.Name) : nullName,
-                    objectId: tableObjectId,
-                    indexId: SqlValue.FromInt32(hasPk ? 1 : 0),
-                    type: hasPk ? SqlValue.FromByte(1) : zeroByte,
-                    typeDesc: hasPk ? clusteredDesc : heapDesc,
-                    isUnique: hasPk ? trueBit : falseBit,
-                    dataSpaceId: primaryDataSpace,
-                    isPrimaryKey: hasPk ? trueBit : falseBit,
-                    isUniqueConstraint: falseBit,
-                    hasFilter: falseBit,
-                    filterDefinition: nullFilter,
-                    falseBit, trueBit, zeroByte);
-
-                var others = new List<(int ObjectId, KeyConstraint? Key, Storage.Index? Index)>();
-                foreach (var k in table.KeyConstraints)
-                {
-                    if (!ReferenceEquals(k, primaryKey))
-                        others.Add((k.ObjectId, k, null));
-                }
-                foreach (var ix in table.Indexes)
-                    others.Add((ix.ObjectId, null, ix));
-                others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
-
-                foreach (var (_, key, index) in others)
-                {
-                    if (key is not null)
+                    else if (identity.Index is { } index)
                     {
-                        yield return BuildIndexRow(
-                            name: SqlValue.FromSystemName(key.Name),
-                            objectId: tableObjectId,
-                            indexId: SqlValue.FromInt32(nextIndexId++),
-                            type: SqlValue.FromByte(2),
-                            typeDesc: nonClusteredDesc,
-                            isUnique: trueBit,
-                            dataSpaceId: primaryDataSpace,
-                            isPrimaryKey: falseBit,
-                            isUniqueConstraint: trueBit,
-                            hasFilter: falseBit,
-                            filterDefinition: nullFilter,
-                            falseBit, trueBit, zeroByte);
+                        name = SqlValue.FromSystemName(index.Name);
+                        isUnique = index.IsUnique ? trueBit : falseBit;
+                        isPrimaryKey = falseBit;
+                        isUniqueConstraint = falseBit;
+                        hasFilter = index.Filter is not null ? trueBit : falseBit;
+                        filterDefinition = index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter;
                     }
                     else
                     {
-                        var hasFilter = index!.Filter is not null;
-                        yield return BuildIndexRow(
-                            name: SqlValue.FromSystemName(index.Name),
-                            objectId: tableObjectId,
-                            indexId: SqlValue.FromInt32(nextIndexId++),
-                            type: SqlValue.FromByte(2),
-                            typeDesc: nonClusteredDesc,
-                            isUnique: index.IsUnique ? trueBit : falseBit,
-                            dataSpaceId: primaryDataSpace,
-                            isPrimaryKey: falseBit,
-                            isUniqueConstraint: falseBit,
-                            hasFilter: hasFilter ? trueBit : falseBit,
-                            filterDefinition: index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter,
-                            falseBit, trueBit, zeroByte);
+                        name = nullName;
+                        isUnique = falseBit;
+                        isPrimaryKey = falseBit;
+                        isUniqueConstraint = falseBit;
+                        hasFilter = falseBit;
+                        filterDefinition = nullFilter;
                     }
+                    yield return BuildIndexRow(
+                        name: name,
+                        objectId: tableObjectId,
+                        indexId: SqlValue.FromInt32(identity.IndexId),
+                        type: SqlValue.FromByte(identity.Type),
+                        typeDesc: typeDesc,
+                        isUnique: isUnique,
+                        dataSpaceId: primaryDataSpace,
+                        isPrimaryKey: isPrimaryKey,
+                        isUniqueConstraint: isUniqueConstraint,
+                        hasFilter: hasFilter,
+                        filterDefinition: filterDefinition,
+                        falseBit, trueBit, zeroByte);
                 }
             }
         }
@@ -540,12 +642,13 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Shared (table, index_id) identity stream backing <c>sys.partitions</c>
-    /// and <c>sys.stats</c>. Mirrors <see cref="EnumerateSysIndexes"/>'s
-    /// index-id assignment exactly: the heap (index_id = 0, IsHeap = true) or
-    /// clustered PRIMARY KEY (index_id = 1) leads, then UNIQUE-constraint and
-    /// CREATE-INDEX rows follow in object-id order at index_id = 2..N. Name is
-    /// the constraint/index name (null only for the heap).
+    /// Shared (table, index_id) identity stream backing <c>sys.partitions</c>,
+    /// <c>sys.allocation_units</c>, <c>sys.dm_db_partition_stats</c>, and
+    /// <c>sys.stats</c>. A thin per-database flattening of
+    /// <see cref="HeapTable.IndexIdentities"/> — the same allocation authority
+    /// <see cref="EnumerateSysIndexes"/> reads — so every id these views report
+    /// agrees with <c>sys.indexes</c>. Name is the constraint/index name (null
+    /// only for the heap).
     /// </summary>
     private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> EnumerateTableIndexIdentities(Database database)
     {
@@ -553,31 +656,8 @@ internal static partial class BuiltInResources
         {
             foreach (var table in schema.HeapTables.Values)
             {
-                KeyConstraint? primaryKey = null;
-                foreach (var k in table.KeyConstraints)
-                {
-                    if (k.Kind == KeyConstraintKind.PrimaryKey)
-                    {
-                        primaryKey = k;
-                        break;
-                    }
-                }
-                var hasPk = primaryKey is not null;
-                var nextIndexId = hasPk ? 2 : 1;
-                yield return (table, hasPk ? 1 : 0, hasPk ? primaryKey!.Name : null, !hasPk);
-
-                var others = new List<(int ObjectId, KeyConstraint? Key, Storage.Index? Index)>();
-                foreach (var k in table.KeyConstraints)
-                {
-                    if (!ReferenceEquals(k, primaryKey))
-                        others.Add((k.ObjectId, k, null));
-                }
-                foreach (var ix in table.Indexes)
-                    others.Add((ix.ObjectId, null, ix));
-                others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
-
-                foreach (var (_, key, index) in others)
-                    yield return (table, nextIndexId++, key is not null ? key.Name : index!.Name, false);
+                foreach (var identity in table.IndexIdentities())
+                    yield return (table, identity.IndexId, identity.Name, identity.IsHeap);
             }
         }
     }
@@ -810,6 +890,58 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Rows for <c>sys.stats_columns</c>: one row per KEY column of each
+    /// index-backed statistic (stats_id = index_id), mirroring
+    /// <see cref="EnumerateSysIndexColumns"/>'s index-id assignment and
+    /// key-column ordering but omitting INCLUDE columns (a statistic covers
+    /// only the index key). stats_column_id = the 1-based key ordinal;
+    /// column_id = the <c>sys.columns</c> id via
+    /// <see cref="StorageOrdinalToColumnId"/>. HEAP rows (index_id = 0) carry
+    /// no statistic and are skipped, matching <see cref="EnumerateSysStats"/>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysStatsColumns(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableObjectId = SqlValue.FromInt32(table.ObjectId);
+                foreach (var identity in table.IndexIdentities())
+                {
+                    if (identity.IsHeap)
+                        continue;
+                    var ordinals = identity.Constraint is { } key ? key.StorageOrdinals : IndexKeyStorageOrdinals(identity.Index!);
+                    foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), ordinals, table))
+                        yield return row;
+                }
+            }
+        }
+
+        static int[] IndexKeyStorageOrdinals(Storage.Index index) =>
+            [.. index.KeyColumns.Select(static c => c.StorageOrdinal)];
+    }
+
+    /// <summary>
+    /// Materializes one <c>sys.stats_columns</c> row per key-column storage
+    /// ordinal of an index-backed statistic: stats_column_id = the 1-based
+    /// key ordinal, column_id = the resolved <c>sys.columns</c> id.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EmitStatsColumns(SqlValue tableObjectId, SqlValue statsIdValue, int[] storageOrdinals, HeapTable table)
+    {
+        for (var i = 0; i < storageOrdinals.Length; i++)
+        {
+            yield return
+            [
+                tableObjectId,
+                statsIdValue,
+                SqlValue.FromInt32(i + 1),
+                SqlValue.FromInt32(StorageOrdinalToColumnId(table, storageOrdinals[i])),
+            ];
+        }
+    }
+
+    /// <summary>
     /// Rows for <c>sys.index_columns</c>: one row per (index, column) for
     /// every index reported by <see cref="EnumerateSysIndexes"/>. KEY
     /// columns get key_ordinal = 1..N and index_column_id = 1..N; INCLUDE
@@ -828,44 +960,20 @@ internal static partial class BuiltInResources
             foreach (var table in schema.HeapTables.Values)
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
-                KeyConstraint? primaryKey = null;
-                foreach (var k in table.KeyConstraints)
+                foreach (var identity in table.IndexIdentities())
                 {
-                    if (k.Kind == KeyConstraintKind.PrimaryKey)
-                    {
-                        primaryKey = k;
-                        break;
-                    }
-                }
-                var nextIndexId = primaryKey is null ? 1 : 1;
-                if (primaryKey is not null)
-                {
-                    foreach (var row in EmitKeyConstraintColumns(tableObjectId, SqlValue.FromInt32(nextIndexId), primaryKey, table, falseBit, zeroByte, nullByte))
-                        yield return row;
-                    nextIndexId++;
-                }
-
-                var others = new List<(int ObjectId, KeyConstraint? Key, Storage.Index? Index)>();
-                foreach (var k in table.KeyConstraints)
-                {
-                    if (!ReferenceEquals(k, primaryKey))
-                        others.Add((k.ObjectId, k, null));
-                }
-                foreach (var ix in table.Indexes)
-                    others.Add((ix.ObjectId, null, ix));
-                others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
-
-                foreach (var (_, key, index) in others)
-                {
-                    var indexIdValue = SqlValue.FromInt32(nextIndexId++);
-                    if (key is not null)
+                    if (identity.IsHeap)
+                        continue;
+                    var indexIdValue = SqlValue.FromInt32(identity.IndexId);
+                    if (identity.Constraint is { } key)
                     {
                         foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, falseBit, zeroByte, nullByte))
                             yield return row;
                     }
                     else
                     {
-                        for (var i = 0; i < index!.KeyColumns.Length; i++)
+                        var index = identity.Index!;
+                        for (var i = 0; i < index.KeyColumns.Length; i++)
                         {
                             var keyCol = index.KeyColumns[i];
                             yield return [
@@ -904,9 +1012,8 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Materializes one row per key column of a PRIMARY KEY / UNIQUE
-    /// <see cref="KeyConstraint"/> for <c>sys.index_columns</c>. Shared
-    /// between the PK-at-index_id-1 emission and the non-PK UQ entries
-    /// in the ordered emission pass.
+    /// <see cref="KeyConstraint"/> for <c>sys.index_columns</c>, at the
+    /// index_id the shared allocation authority assigned the constraint.
     /// </summary>
     private static IEnumerable<SqlValue[]> EmitKeyConstraintColumns(
         SqlValue tableObjectId, SqlValue indexIdValue, KeyConstraint constraint, HeapTable table,

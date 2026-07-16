@@ -82,6 +82,20 @@ internal static partial class BuiltInResources
             new("principal_id", SqlType.Int32, null, true),
         ], static (batch, database) => []);
 
+        // sys.registered_search_properties: per-search-property-list entries.
+        // Search property lists aren't populated (sys.registered_search_
+        // property_lists is empty), so this ships empty with the full probe-
+        // confirmed shape (SQL Server 2025, 2026-07-16). DacFx references it.
+        Sys("registered_search_properties",
+        [
+            new("property_list_id", SqlType.Int32, null, false),
+            new("property_id", SqlType.Int32, null, false),
+            new("property_name", SqlType.NVarchar, 256, false),
+            new("property_set_guid", SqlType.UniqueIdentifier, null, false),
+            new("property_int_id", SqlType.Int32, null, false),
+            new("property_description", SqlType.NVarchar, 512, true),
+        ], static (_, _) => EmptyCatalogRows);
+
         // sys.fulltext_languages: the per-LCID full-text language registry.
         // Empty here — SMO's full-text-index-column query INNER JOINs it by
         // language_id, and a table with no full-text index (the only kind the
@@ -132,11 +146,18 @@ internal static partial class BuiltInResources
             new("modify_date", SqlType.DateTime, null, false),
         ], EnumerateSysXmlSchemaCollections);
 
-        // sys.xml_indexes: probe-confirmed 9-col shipped subset (real SQL
-        // Server's row is 26 cols including a long is_disabled / is_padded
-        // / allow_row_locks tail of admin flags). The simulator surfaces
-        // the AW-load-bearing core: identity, primary/secondary
-        // discriminator, and the FOR-PATH/VALUE/PROPERTY classifier.
+        // sys.xml_indexes: full 26-col shape (probe-confirmed against SQL
+        // Server 2025 WideWorldImporters, 2026-07-16). The load-bearing core
+        // (identity, primary/secondary discriminator, FOR-PATH/VALUE/PROPERTY
+        // classifier) keeps its original positions; the remaining columns
+        // DacFx's XML-index reverse-engineering query reads (fill_factor /
+        // is_padded / allow_row_locks / allow_page_locks / is_disabled /
+        // xml_index_type / xml_index_type_description / path_id + the shared
+        // index-admin tail) are appended after them. Values are the
+        // fresh-index defaults consistent with the sys.indexes / spatial_index
+        // modeled defaults. Real orders using_xml_index_id / secondary_type
+        // after the admin flags; the appended layout differs cosmetically but
+        // all consumers read by name.
         Sys("xml_indexes",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -148,6 +169,23 @@ internal static partial class BuiltInResources
             new("secondary_type", charOne, 1, true),
             new("secondary_type_desc", nvarchar60Catalog, 60, true),
             new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, true),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("xml_index_type", SqlType.TinyInt, null, true),
+            new("xml_index_type_description", nvarchar60Catalog, 60, true),
+            new("path_id", SqlType.Int32, null, true),
+            new("auto_created", SqlType.Bit, null, true),
         ], EnumerateSysXmlIndexes);
 
         // sys.spatial_indexes: probe-confirmed 23-col shape against SQL Server
@@ -367,6 +405,7 @@ internal static partial class BuiltInResources
         var charOneType = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
         var typeCode = SqlValue.FromByte(3);
         var typeDesc = SqlValue.FromNVarchar("XML");
+        var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var pathCode = SqlValue.FromChar(charOneType, "P");
         var pathDesc = SqlValue.FromNVarchar("PATH");
@@ -377,6 +416,17 @@ internal static partial class BuiltInResources
         var nullChar = SqlValue.Null(charOneType);
         var nullDesc = SqlValue.Null(SqlType.NVarchar);
         var nullInt = SqlValue.Null(SqlType.Int32);
+        // Appended-column constants: fresh-index defaults mirroring the
+        // sys.indexes / spatial_index modeled shape (data_space_id=1 PRIMARY,
+        // fill_factor=0, allow_row_locks / allow_page_locks true).
+        var zeroByte = SqlValue.FromByte(0);
+        var oneInt = SqlValue.FromInt32(1);
+        var zeroInt = SqlValue.FromInt32(0);
+        var nullFilter = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
+        var primaryXmlType = SqlValue.FromByte(0);
+        var secondaryXmlType = SqlValue.FromByte(1);
+        var primaryXmlDesc = SqlValue.FromNVarchar("PRIMARY_XML");
+        var secondaryXmlDesc = SqlValue.FromNVarchar("SECONDARY_XML");
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
@@ -404,6 +454,9 @@ internal static partial class BuiltInResources
                         XmlSecondaryIndexType.Property => (propertyCode, propertyDesc),
                         _ => (nullChar, nullDesc),
                     };
+                    var (xmlType, xmlDesc) = ix.IsPrimary
+                        ? (primaryXmlType, primaryXmlDesc)
+                        : (secondaryXmlType, secondaryXmlDesc);
                     yield return [
                         SqlValue.FromInt32(table.ObjectId),
                         SqlValue.FromSystemName(ix.Name),
@@ -414,6 +467,23 @@ internal static partial class BuiltInResources
                         secCode,
                         secDesc,
                         falseBit,
+                        falseBit,   // is_unique
+                        oneInt,     // data_space_id (PRIMARY)
+                        falseBit,   // ignore_dup_key
+                        falseBit,   // is_unique_constraint
+                        zeroByte,   // fill_factor
+                        falseBit,   // is_padded
+                        falseBit,   // is_disabled
+                        falseBit,   // is_hypothetical
+                        falseBit,   // is_ignored_in_optimization
+                        trueBit,    // allow_row_locks
+                        trueBit,    // allow_page_locks
+                        falseBit,   // has_filter
+                        nullFilter, // filter_definition
+                        xmlType,    // xml_index_type
+                        xmlDesc,    // xml_index_type_description
+                        zeroInt,    // path_id
+                        falseBit,   // auto_created
                     ];
                 }
             }

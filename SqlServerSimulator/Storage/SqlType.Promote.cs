@@ -33,10 +33,12 @@ internal abstract partial class SqlType
     /// </remarks>
     public static SqlType Promote(SqlType a, SqlType b) =>
         a == b ? a
+        : a is SqlVariantSqlType || b is SqlVariantSqlType ? SqlVariant
         : a is RowVersionSqlType ? PromoteFromRowVersion(b)
         : b is RowVersionSqlType ? PromoteFromRowVersion(a)
         : (a is VarbinarySqlType or BinarySqlType) && IsIntegerCategory(b) ? b
         : (b is VarbinarySqlType or BinarySqlType) && IsIntegerCategory(a) ? a
+        : (a is VarbinarySqlType or BinarySqlType) && (b is VarbinarySqlType or BinarySqlType) ? PromoteBinaryFamily(a, b)
         : a.Category switch
         {
             SqlTypeCategory.Approximate => PromoteFromApproximate(a, b),
@@ -61,6 +63,26 @@ internal abstract partial class SqlType
         other == Varbinary ? Varbinary
         : other is BinarySqlType ? other
         : throw SimulatedSqlException.OperandTypeClash(RowVersion, other);
+
+    /// <summary>
+    /// Binary-family unification: either operand being <c>varbinary(MAX)</c>
+    /// makes the result <c>varbinary(MAX)</c> (DacFx's bacpac-export row-size
+    /// sampler compares <c>varbinary(N)</c> columns against MAX-typed
+    /// expressions); otherwise a mixed or variable pair widens to
+    /// <c>varbinary</c> of the longer declared length, and a
+    /// <c>binary</c>/<c>binary</c> pair keeps the longer fixed form.
+    /// The unspecified length 0 stays unspecified so bare-<c>varbinary</c>
+    /// operands keep their fall-through semantics.
+    /// </summary>
+    private static SqlType PromoteBinaryFamily(SqlType a, SqlType b)
+    {
+        var aLen = a is VarbinarySqlType va ? va.length : ((BinarySqlType)a).length;
+        var bLen = b is VarbinarySqlType vb ? vb.length : ((BinarySqlType)b).length;
+        return aLen == MaxLengthSentinel || bLen == MaxLengthSentinel ? VarbinaryMax
+            : a is BinarySqlType && b is BinarySqlType ? (aLen >= bLen ? a : b)
+            : aLen == 0 || bLen == 0 ? Varbinary
+            : VarbinarySqlType.Get(Math.Max(aLen, bLen));
+    }
 
     /// <summary>
     /// Approximate (float/real) wins over every other numeric or string
@@ -224,6 +246,12 @@ internal abstract partial class SqlType
     /// </remarks>
     public static SqlType PromoteForArithmetic(SqlType a, SqlType b, char op)
     {
+        // sql_variant has no arithmetic / concatenation behavior — any operand
+        // pairing raises Msg 402 (probe-confirmed: `'v=' + variant` → "The data
+        // types varchar and sql_variant are incompatible in the add operator").
+        if (a is SqlVariantSqlType || b is SqlVariantSqlType)
+            throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, op == '+' ? "add" : BinaryOperatorWord(op));
+
         // Binary operands. One binary + one integer converts the binary side
         // to the integer type (Promote handles it — applies to arithmetic AND
         // bitwise). Binary + binary is varbinary/binary concatenation for '+',
@@ -491,6 +519,21 @@ internal abstract partial class SqlType
 
         var aLen = StringLengthForConcat(a);
         var bLen = StringLengthForConcat(b);
+        if (aLen == MaxLengthSentinel || bLen == MaxLengthSentinel)
+        {
+            // Either operand being (MAX) makes the concatenation (MAX) —
+            // matching real SQL Server (same max-ness propagation CONCAT
+            // applies). Summing the sentinel instead produced a negative
+            // length: nvarchar(max) + nvarchar(max) threw at Run time (the
+            // exception killed TDS sessions as a transport error — DacFx's
+            // data-phase row-size sampler builds its dynamic SQL exactly
+            // that way), and (MAX) + bounded silently typed the result as
+            // a tiny bounded string.
+            return national
+                ? NVarcharSqlType.Get(MaxLengthSentinel, resultCollation, resultCoercibility)
+                : VarcharSqlType.Get(MaxLengthSentinel, resultCollation, resultCoercibility);
+        }
+
         if (aLen == 0 || bLen == 0)
         {
             return national

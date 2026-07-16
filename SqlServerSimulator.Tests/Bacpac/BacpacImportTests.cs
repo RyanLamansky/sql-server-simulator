@@ -30,6 +30,45 @@ public class BacpacImportTests
         AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM T"));
     }
 
+    // A bacpac-imported computed column surfaces its ExpressionScript through
+    // sys.computed_columns.definition — the loader replays it as ALTER TABLE
+    // ADD col AS <script>, and the parser captures the definition text. DacFx's
+    // already-parenthesized script is stored without a redundant second pair.
+    [TestMethod]
+    public void ImportBacpac_ComputedColumn_SurfacesDefinition()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "People", t => t
+                .Column("FullName", "nvarchar(50)")
+                .Column("PreferredName", "nvarchar(50)")
+                .ComputedColumn("SearchName", "(concat([PreferredName],N' ',[FullName]))"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _, new BacpacImportOptions { DatabaseName = "wwi" });
+
+        AreEqual("(concat([PreferredName],N' ',[FullName]))",
+            sim.ExecuteScalar("SELECT definition FROM sys.computed_columns WHERE name = 'SearchName'"));
+    }
+
+    // The root DataSchemaModel's DspName carries the database's declared
+    // compatibility level (Sql130DatabaseSchemaProvider → 130); the loader
+    // applies it so sys.databases.compatibility_level reflects the bacpac
+    // rather than the construction-time default (170).
+    [TestMethod]
+    public void ImportBacpac_AppliesDeclaredCompatibilityLevel()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .CompatibilityLevel(130)
+            .Table("dbo", "T", t => t.Column("Id", "int").Row(1))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _, new BacpacImportOptions { DatabaseName = "audit" });
+
+        AreEqual((byte)130, sim.ExecuteScalar("SELECT compatibility_level FROM sys.databases WHERE name = 'audit'"));
+    }
+
     [TestMethod]
     public void ImportBacpac_DefaultStreamName_AfterDbUse_CollidesWithLazySeed()
     {

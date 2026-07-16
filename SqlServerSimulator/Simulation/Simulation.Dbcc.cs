@@ -19,6 +19,15 @@ partial class Simulation
         ["DbId", "FileId", "CurrentSize", "MinimumSize", "UsedPages", "EstimatedPages"];
 
     /// <summary>
+    /// Column names of the <c>DBCC SHOW_STATISTICS … WITH HISTOGRAM</c> result
+    /// set, probe-confirmed against SQL Server 2025. <c>RANGE_HI_KEY</c> is typed
+    /// dynamically as the statistic's leading key column type; the trailing four
+    /// are <c>real</c> / <c>real</c> / <c>bigint</c> / <c>real</c>.
+    /// </summary>
+    private static readonly string[] HistogramColumnNames =
+        ["RANGE_HI_KEY", "RANGE_ROWS", "EQ_ROWS", "DISTINCT_RANGE_ROWS", "AVG_RANGE_ROWS"];
+
+    /// <summary>
     /// Parses and executes the SHRINK family — <c>DBCC SHRINKDATABASE</c> /
     /// <c>DBCC SHRINKFILE</c> — peeking past the <c>DBCC</c> keyword. On any
     /// other subcommand it restores the cursor to <c>DBCC</c> (so
@@ -105,6 +114,211 @@ partial class Simulation
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Parses and executes <c>DBCC SHOW_STATISTICS(&lt;table&gt;, &lt;stat&gt;) WITH
+    /// HISTOGRAM</c> — DacFx's bacpac-export chunking probe — peeking past the
+    /// <c>DBCC</c> keyword and restoring the cursor (returning false) on any
+    /// other subcommand. Both argument forms real accepts are handled: a
+    /// <c>N'...'</c> string literal whose content is a 1- / 2-part bracketed name
+    /// (DacFx's form) and a bare dotted identifier. Only <c>WITH HISTOGRAM</c> is
+    /// modeled; the no-WITH three-result-set form and every other WITH option
+    /// (STAT_HEADER / DENSITY_VECTOR / STATS_STREAM / NO_INFOMSGS combinations)
+    /// raise <see cref="NotSupportedException"/> naming the unmodeled option.
+    /// </summary>
+    /// <remarks>
+    /// The named statistic is matched against the table's index-backed stats via
+    /// the canonical <see cref="HeapTable.IndexIdentities"/> allocator; a heap
+    /// identity (no backing index) can't match and a miss raises Msg 2767. The
+    /// histogram is generated honestly from live heap data but as a single bucket
+    /// (real emits up to ~200 steps): <c>RANGE_HI_KEY</c> = MAX of the leading key
+    /// column, <c>EQ_ROWS</c> = rows equal to that max, <c>RANGE_ROWS</c> = the
+    /// remaining non-null rows, <c>DISTINCT_RANGE_ROWS</c> = distinct non-null
+    /// values minus one, <c>AVG_RANGE_ROWS</c> = <c>RANGE_ROWS / DISTINCT_RANGE_ROWS</c>
+    /// (1 when there are no range rows, matching real's single-row convention).
+    /// An empty table yields an empty (0-row) result set.
+    /// </remarks>
+    private static bool TryParseShowStatistics(ParserContext context, BatchContext batch, out SimulatedStatementOutcome? outcome)
+    {
+        outcome = null;
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if ((context.Token as UnquotedString)?.ContextualKeyword != ContextualKeyword.Show_Statistics)
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return false;
+        }
+
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        context.MoveNextRequired();
+        var (tableName, tableText) = ParseShowStatisticsName(context, parameterNumber: 1);
+
+        if (context.GetNextRequired() is not Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        context.MoveNextRequired();
+        var (statName, _) = ParseShowStatisticsName(context, parameterNumber: 2);
+
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.With })
+            throw new NotSupportedException("DBCC SHOW_STATISTICS without WITH HISTOGRAM (the STAT_HEADER / DENSITY_VECTOR / HISTOGRAM three-result-set form) isn't modeled.");
+
+        var option = context.GetNextRequired<Name>();
+        if (!BuiltInToken.Equals(option.Value, "HISTOGRAM"))
+            throw new NotSupportedException($"DBCC SHOW_STATISTICS WITH {option.Value} isn't modeled; only WITH HISTOGRAM ships.");
+
+        var afterOption = context.SaveCheckpoint();
+        if (context.MoveNext() && context.Token is Operator { Character: ',' })
+            throw new NotSupportedException("DBCC SHOW_STATISTICS WITH HISTOGRAM combined with other options isn't modeled; only a bare WITH HISTOGRAM ships.");
+        context.RestoreCheckpoint(afterOption);
+
+        if (batch.IsSkipping)
+            return true;
+
+        if (!batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindTableOrObject(tableText);
+
+        outcome = BuildHistogram(table, statName.Leaf);
+        return true;
+    }
+
+    /// <summary>
+    /// Reads one <c>DBCC SHOW_STATISTICS</c> argument as an object name: a
+    /// <c>N'[schema].[table]'</c> string literal (parsed with the same seam
+    /// <c>OBJECT_ID</c> uses) or a bare dotted / bracketed identifier. Returns the
+    /// parsed <see cref="MultiPartName"/> plus the raw text real echoes in its
+    /// Msg 2501. A NULL or unparseable argument raises Msg 2560.
+    /// </summary>
+    private static (MultiPartName Name, string Display) ParseShowStatisticsName(ParserContext context, int parameterNumber)
+    {
+        if (context.Token is Literal literal)
+        {
+            if (literal.Value.IsNull)
+                throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber);
+            var text = literal.Value.CoerceTo(SqlType.NVarchar).AsString;
+            return ObjectId.TryParseObjectName(text, out var parsed)
+                ? (parsed, text)
+                : throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber);
+        }
+        var name = BatchContext.ParseObjectName(context);
+        return (name, name.ToString());
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="statisticsName"/> to an index-backed statistic on
+    /// <paramref name="table"/> and builds its single-bucket histogram result set.
+    /// The synthetic heap identity (no backing index) can't match; a miss raises
+    /// Msg 2767.
+    /// </summary>
+    private static SimulatedSqlResultSet BuildHistogram(HeapTable table, string statisticsName)
+    {
+        foreach (var identity in table.IndexIdentities())
+        {
+            if (identity.IsHeap || !BuiltInToken.Equals(identity.Name, statisticsName))
+                continue;
+
+            var leadingOrdinal = identity.Constraint is { } key
+                ? key.StorageOrdinals[0]
+                : identity.Index!.KeyColumns[0].StorageOrdinal;
+            return ComputeHistogram(table, leadingOrdinal);
+        }
+        throw SimulatedSqlException.CouldNotLocateStatistics(statisticsName);
+    }
+
+    /// <summary>
+    /// Scans <paramref name="table"/>'s live rows once, reading the leading key
+    /// column at <paramref name="leadingOrdinal"/> via the array-typed
+    /// <see cref="RowDecoder.DecodeColumn(HeapColumn[], System.ReadOnlySpan{byte}, int, Heap?)"/>
+    /// fast path, and folds the values into a multi-step histogram: one step
+    /// per distinct leading-key value up to 200 steps, else 200 boundary steps
+    /// evenly spaced over the sorted distinct values. The first step is always
+    /// the MIN value and the last the MAX, matching real SQL Server's
+    /// histogram envelope — DacFx's bacpac-export chunking interpolates
+    /// between adjacent RANGE_HI_KEY steps, and a histogram without the MIN
+    /// anchor overflows its boundary arithmetic client-side.
+    /// <c>RANGE_HI_KEY</c> carries the leading key column's own type so it
+    /// round-trips over the wire through the standard codecs. An empty table
+    /// yields a 0-row result set.
+    /// </summary>
+    private static SimulatedSqlResultSet ComputeHistogram(HeapTable table, int leadingOrdinal)
+    {
+        var keyType = table.Schema[leadingOrdinal];
+        SqlType[] schema = [keyType, SqlType.Real, SqlType.Real, SqlType.BigInt, SqlType.Real];
+
+        var storedColumns = table.StoredColumns;
+        var lobStore = table.Heap;
+        var counts = new Dictionary<SqlValueKey, (SqlValue Value, long Count)>();
+        foreach (var rowBytes in table.Heap.EnumerateRows())
+        {
+            var value = RowDecoder.DecodeColumn(storedColumns, rowBytes, leadingOrdinal, lobStore);
+            if (value.IsNull)
+                continue;
+            var key = new SqlValueKey([value]);
+            counts[key] = counts.TryGetValue(key, out var existing)
+                ? (existing.Value, existing.Count + 1)
+                : (value, 1);
+        }
+
+        if (counts.Count == 0)
+            return new SimulatedSqlResultSet(schema, HistogramColumnNames, Array.Empty<byte[]>());
+
+        var sorted = new (SqlValue Value, long Count)[counts.Count];
+        var n = 0;
+        foreach (var entry in counts.Values)
+            sorted[n++] = entry;
+        Array.Sort(sorted, static (a, b) => a.Value.CompareTo(b.Value));
+
+        // Boundary indices into the sorted distinct array: every distinct
+        // value when they fit in 200 steps, else 200 evenly-spaced indices.
+        // Index 0 (MIN) and index n-1 (MAX) are always present.
+        const int maxSteps = 200;
+        var stepIndexes = new List<int>(Math.Min(maxSteps, sorted.Length));
+        if (sorted.Length <= maxSteps)
+        {
+            for (var i = 0; i < sorted.Length; i++)
+                stepIndexes.Add(i);
+        }
+        else
+        {
+            var previous = -1;
+            for (var k = 0; k < maxSteps; k++)
+            {
+                var index = (int)((long)k * (sorted.Length - 1) / (maxSteps - 1));
+                if (index == previous)
+                    continue;
+                stepIndexes.Add(index);
+                previous = index;
+            }
+        }
+
+        var rows = new byte[stepIndexes.Count][];
+        var lowerExclusive = -1;
+        for (var step = 0; step < stepIndexes.Count; step++)
+        {
+            var boundary = stepIndexes[step];
+            long rangeRows = 0;
+            for (var i = lowerExclusive + 1; i < boundary; i++)
+                rangeRows += sorted[i].Count;
+            var distinctRangeRows = Math.Max(0, boundary - lowerExclusive - 1);
+            var avgRangeRows = distinctRangeRows == 0 ? 1f : (float)rangeRows / distinctRangeRows;
+            SqlValue[] row =
+            [
+                sorted[boundary].Value,
+                SqlValue.FromSingle(rangeRows),
+                SqlValue.FromSingle(sorted[boundary].Count),
+                SqlValue.FromInt64(distinctRangeRows),
+                SqlValue.FromSingle(avgRangeRows),
+            ];
+            rows[step] = RowEncoder.EncodeRow(schema, row);
+            lowerExclusive = boundary;
+        }
+
+        return new SimulatedSqlResultSet(schema, HistogramColumnNames, rows);
     }
 
     /// <summary>

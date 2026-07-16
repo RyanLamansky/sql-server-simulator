@@ -745,7 +745,7 @@ internal abstract class Expression
                 "HOST_NAME" => new HostName(context),
                 "INDEX_COL" => new IndexCol(context),
                 "ISNUMERIC" => new IsNumeric(context),
-                "IS_MEMBER" => new RoleMemberCheck(context),
+                "IS_MEMBER" => new RoleMemberCheck(context, serverScope: false),
                 "OBJECT_ID" => new ObjectId(context),
                 "PARSENAME" => new ParseName(context),
                 "QUOTENAME" => new QuoteName(context),
@@ -826,7 +826,7 @@ internal abstract class Expression
                 "FORMATMESSAGE" => new FormatMessage(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),
                 "INDEXPROPERTY" => new IndexProperty(context),
-                "IS_ROLEMEMBER" => new RoleMemberCheck(context),
+                "IS_ROLEMEMBER" => new RoleMemberCheck(context, serverScope: false),
                 "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
                 "LOGINPROPERTY" => new LoginProperty(context),
                 "STRING_ESCAPE" => new StringEscape(context),
@@ -852,12 +852,13 @@ internal abstract class Expression
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
                 "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),
                 "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
+                "SESSIONPROPERTY" => new SessionProperty(context),
                 "SESSION_CONTEXT" => new SessionContext(context),
                 _ => null
             },
             16 => uppercaseName switch
             {
-                "IS_SRVROLEMEMBER" => new RoleMemberCheck(context),
+                "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
                 "ORIGINAL_DB_NAME" => new OriginalDbName(context),
@@ -887,6 +888,7 @@ internal abstract class Expression
             20 => uppercaseName switch
             {
                 "SQL_VARIANT_PROPERTY" => new SqlVariantProperty(context),
+                "XML_SCHEMA_NAMESPACE" => new XmlSchemaNamespaceFunction(context),
                 _ => null
             },
             21 => uppercaseName switch

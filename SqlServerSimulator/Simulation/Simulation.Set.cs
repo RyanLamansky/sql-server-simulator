@@ -69,6 +69,7 @@ partial class Simulation
         if (firstKind == SetOptionKind.OnOff && context.Token is Operator { Character: ',' })
         {
             var affectsQuotedIdentifier = IsQuotedIdentifierOption(firstName);
+            var sessionOptionNames = new List<string> { firstName };
             while (context.Token is Operator { Character: ',' })
             {
                 if (context.GetNextRequired() is not UnquotedString next)
@@ -76,12 +77,17 @@ partial class Simulation
                 if (!RecognizedOptions.TryGetValue(next.Value, out var nextKind) || nextKind != SetOptionKind.OnOff)
                     throw SimulatedSqlException.UnrecognizedSetOption(next.Value);
                 affectsQuotedIdentifier |= IsQuotedIdentifierOption(next.Value);
+                sessionOptionNames.Add(next.Value);
                 context.MoveNextRequired();
             }
             if (context.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } commaOnOff)
                 return false;
+            var commaOn = commaOnOff.Keyword == Keyword.On;
             if (affectsQuotedIdentifier)
-                ApplyQuotedIdentifierOption(context, commaOnOff.Keyword == Keyword.On);
+                ApplyQuotedIdentifierOption(context, commaOn);
+            // Every listed option shares the trailing ON|OFF value.
+            foreach (var listed in sessionOptionNames)
+                RecordSessionStateOption(context, listed, commaOn);
             return true;
         }
 
@@ -100,6 +106,13 @@ partial class Simulation
 
         if (IsQuotedIdentifierOption(firstName) && context.Token is ReservedKeyword { Keyword: var qiOnOff })
             ApplyQuotedIdentifierOption(context, qiOnOff == Keyword.On);
+
+        // Record the six ANSI/arithmetic session toggles SESSIONPROPERTY reads
+        // (ANSI_NULLS / ANSI_PADDING / ANSI_WARNINGS / ARITHABORT /
+        // CONCAT_NULL_YIELDS_NULL / NUMERIC_ROUNDABORT). Other OnOff options
+        // no-op inside RecordSessionStateOption.
+        if (firstKind == SetOptionKind.OnOff && context.Token is ReservedKeyword { Keyword: var onOff })
+            RecordSessionStateOption(context, firstName, onOff == Keyword.On);
 
         // LOCK_TIMEOUT is the one Integer-shape option that has semantic
         // effect — it drives lock-acquisition wait via
@@ -168,6 +181,52 @@ partial class Simulation
         context.QuotedIdentifiers = on;
         if (batch.ProcFrame is null)
             context.Connection.QuotedIdentifiers = on;
+    }
+
+    /// <summary>
+    /// Records one of the six ANSI/arithmetic session toggles
+    /// <c>SESSIONPROPERTY</c> reads onto the connection. Scoping mirrors
+    /// <see cref="ApplyQuotedIdentifierOption"/>: the write is suppressed inside
+    /// a procedure / function / trigger body and inside dynamic SQL (a non-null
+    /// <see cref="BatchContext.ProcFrame"/> covers the dynamic-SQL sentinel too),
+    /// so only a top-level <c>SET</c> persists to the session — matching how
+    /// real SQL Server scopes these options. Runs regardless of
+    /// <see cref="BatchContext.IsSkipping"/> (a SET in a never-taken IF branch
+    /// still applies, as with QUOTED_IDENTIFIER). Option names outside the six
+    /// (other recognized OnOff options like XACT_ABORT) fall through the default
+    /// arm and no-op.
+    /// </summary>
+    private static void RecordSessionStateOption(ParserContext context, string optionName, bool on)
+    {
+        var batch = context.Batch;
+        if (batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is not null)
+            return;
+        var connection = context.Connection;
+        Span<char> upper = stackalloc char[optionName.Length];
+        _ = optionName.AsSpan().ToUpperInvariant(upper);
+        switch (upper)
+        {
+            case "ANSI_NULLS":
+                connection.AnsiNulls = on;
+                break;
+            case "ANSI_PADDING":
+                connection.AnsiPadding = on;
+                break;
+            case "ANSI_WARNINGS":
+                connection.AnsiWarnings = on;
+                break;
+            case "ARITHABORT":
+                connection.Arithabort = on;
+                break;
+            case "CONCAT_NULL_YIELDS_NULL":
+                connection.ConcatNullYieldsNull = on;
+                break;
+            case "NUMERIC_ROUNDABORT":
+                connection.NumericRoundabort = on;
+                break;
+            default:
+                break;
+        }
     }
 
     /// <summary>

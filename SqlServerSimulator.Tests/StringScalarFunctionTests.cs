@@ -141,11 +141,11 @@ public sealed class StringScalarFunctionTests
     /// </summary>
     [TestMethod]
     public void Replicate_VarcharMax_NoTruncation()
-        => AreEqual(10000, ExecuteScalar<int>("select datalength(REPLICATE(cast('a' as varchar(max)), 10000))"));
+        => AreEqual(10000L, ExecuteScalar<long>("select datalength(REPLICATE(cast('a' as varchar(max)), 10000))"));
 
     [TestMethod]
     public void Replicate_NvarcharMax_NoTruncation_DoubleBytes()
-        => AreEqual(20000, ExecuteScalar<int>("select datalength(REPLICATE(cast('a' as nvarchar(max)), 10000))"));
+        => AreEqual(20000L, ExecuteScalar<long>("select datalength(REPLICATE(cast('a' as nvarchar(max)), 10000))"));
 
     /// <summary>
     /// Probe-confirmed 2026-07-10 against a live FROM-source column: a
@@ -154,7 +154,7 @@ public sealed class StringScalarFunctionTests
     /// </summary>
     [TestMethod]
     public void Replicate_VarcharMaxColumn_NoTruncation()
-        => AreEqual(20000, ExecuteScalar<int>("""
+        => AreEqual(20000L, ExecuteScalar<long>("""
             create table t (v varchar(max));
             insert t values (replicate('a', 100));
             select datalength(REPLICATE(v, 200)) from t
@@ -166,7 +166,7 @@ public sealed class StringScalarFunctionTests
     /// </summary>
     [TestMethod]
     public void Replicate_NvarcharMaxColumn_NoTruncation_DoubleBytes()
-        => AreEqual(40000, ExecuteScalar<int>("""
+        => AreEqual(40000L, ExecuteScalar<long>("""
             create table t (v nvarchar(max));
             insert t values (replicate(N'a', 100));
             select datalength(REPLICATE(v, 200)) from t

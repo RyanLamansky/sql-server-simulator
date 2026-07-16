@@ -80,19 +80,19 @@ internal static class SpatialWkbDecoder
             return "POINT " + FormatCoord(first, second, isGeography);
         }
 
-        // Shortcut: single LineString — 4-byte numPoints then point pairs.
+        // Shortcut: single line segment — exactly two points, no count.
+        // Real SQL Server sets this bit only for a 2-point LineString and
+        // omits the numPoints field entirely (a 3+-point line takes the full
+        // layout below); the 38-byte payload is header + two 16-byte pairs.
         if ((properties & IsSingleLineString) != 0)
         {
-            if (wkb.Length < 10)
+            if (wkb.Length != 6 + (2 * 16))
                 return null;
-            var n = BinaryPrimitives.ReadInt32LittleEndian(wkb[6..10]);
-            if (n < 0 || wkb.Length != 10 + (n * 16))
-                return null;
-            var pts = ReadPointArray(wkb[10..], n);
+            var pts = ReadPointArray(wkb[6..], 2);
             if (pts is null)
                 return null;
             var sb = new StringBuilder("LINESTRING ");
-            AppendPointList(sb, pts, 0, n, isGeography);
+            AppendPointList(sb, pts, 0, 2, isGeography);
             return sb.ToString();
         }
 

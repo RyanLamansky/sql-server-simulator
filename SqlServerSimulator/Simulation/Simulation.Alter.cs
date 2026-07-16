@@ -468,6 +468,10 @@ partial class Simulation
                             sequence.CurrentValue = sequence.StartValue;
                         }
                         sequence.IsExhausted = false;
+                        // RESTART clears the runtime last-used marker (real
+                        // reports last_used_value NULL after a restart, until
+                        // the next NEXT VALUE FOR).
+                        sequence.LastUsedValue = null;
                         continue;
                     }
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Increment }:

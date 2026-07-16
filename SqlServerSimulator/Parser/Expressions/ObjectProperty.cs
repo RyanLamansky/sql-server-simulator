@@ -109,15 +109,26 @@ internal sealed class ObjectProperty : Expression
             },
             11 => upper switch
             {
+                // IsEncrypted is module-scoped: 0 for any SQL module (WITH
+                // ENCRYPTION isn't modeled), NULL for non-module objects —
+                // probe-confirmed (view → 0, table → NULL). DacFx enumerates
+                // encrypted procedures with `IsEncrypted = 1 OR IsEncrypted
+                // IS NULL`, so the NULL-for-unknown fallback enrolled every
+                // procedure as encrypted.
+                "ISENCRYPTED" => IsSqlModule(obj) ? 0 : null,
                 "ISMSSHIPPED" => 0,
                 "ISPROCEDURE" => obj is Procedure ? 1 : 0,
                 "ISUSERTABLE" => obj is HeapTable ? 1 : 0,
                 _ => null,
             },
+            13 => upper switch
+            {
+                "ISSCHEMABOUND" => 0,
+                _ => null,
+            },
             15 => upper switch
             {
                 "ISDETERMINISTIC" => obj is ScalarFunction ? 1 : 0,
-                "ISSCHEMABOUND" => 0,
                 "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
                 _ => null,
             },
@@ -127,9 +138,33 @@ internal sealed class ObjectProperty : Expression
                 "ISSCALARFUNCTION" => obj is ScalarFunction ? 1 : 0,
                 _ => null,
             },
+            // The module SET-option snapshot pair: every simulator module is
+            // created under QUOTED_IDENTIFIER ON / ANSI_NULLS ON (mirroring
+            // sys.sql_modules' constant uses_quoted_identifier /
+            // uses_ansi_nulls), and real returns NULL for non-module objects
+            // (probe-confirmed table → NULL).
+            17 => upper switch
+            {
+                "EXECISANSINULLSON" => IsSqlModule(obj) ? 1 : null,
+                _ => null,
+            },
+            19 => upper switch
+            {
+                "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? 1 : null,
+                _ => null,
+            },
             _ => null,
         };
     }
+
+    /// <summary>
+    /// True for objects carrying a SQL module body (the objects
+    /// <c>sys.sql_modules</c> rows exist for): procedures, views, triggers,
+    /// and the function family. Module-scoped OBJECTPROPERTY names return
+    /// NULL for everything else.
+    /// </summary>
+    private static bool IsSqlModule(SchemaObject obj) =>
+        obj is Procedure or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

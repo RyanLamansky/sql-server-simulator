@@ -284,12 +284,23 @@ internal abstract class BooleanExpression
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+        // Redundant parentheses around the subquery are legal at any depth —
+        // EXISTS((SELECT ...)), EXISTS(((SELECT ...))), … (probe-confirmed
+        // against SQL Server 2025; DacFx emits the doubly-parenthesized form
+        // in its extended-properties reverse-engineering query). Consume the
+        // extra opening parens and demand a matching close-paren count.
+        var extraParens = 0;
+        while (context.GetNextRequired() is Operator { Character: '(' })
+            extraParens++;
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextOptional();
+        for (var i = 0; i <= extraParens; i++)
+        {
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
         return new ExistsExpression(inner);
     }
 
@@ -1191,6 +1202,17 @@ internal abstract class BooleanExpression
     /// </summary>
     internal static bool? CompareValuesPromoted(SqlValue l, SqlValue r, string operatorName, Func<SqlValue, SqlValue, bool> compare)
     {
+        // sql_variant operands compare by their inner value: unwrap here so the
+        // downstream promote-and-compare runs on the base types (a variant int
+        // vs an int literal, a variant bit vs 0, etc.). A NULL variant stays
+        // wrapped — the NULL short-circuit below folds it to UNKNOWN. Full
+        // sql_variant datatype-family comparison rules (where a string variant
+        // never matches a numeric literal) are out of scope; see docs.
+        if (l.Type is SqlVariantSqlType && !l.IsNull)
+            l = l.AsVariantInner;
+        if (r.Type is SqlVariantSqlType && !r.IsNull)
+            r = r.AsVariantInner;
+
         if (l.Type.IsLob || r.Type.IsLob)
             throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
 

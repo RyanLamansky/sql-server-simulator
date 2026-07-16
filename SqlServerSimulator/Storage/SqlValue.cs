@@ -126,6 +126,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.Geometry, 0, value, isNull: false);
     }
 
+    /// <summary>
+    /// Non-NULL SQL <c>sql_variant</c> value wrapping <paramref name="inner"/>.
+    /// The inner value carries its own base type, which the variant surfaces
+    /// per row. Wrapping is idempotent — a variant never nests, so passing a
+    /// variant returns it unchanged. A NULL variant is
+    /// <see cref="Null(SqlType)"/> of <see cref="SqlType.SqlVariant"/>, not a
+    /// wrapped NULL.
+    /// </summary>
+    public static SqlValue FromVariant(SqlValue inner) =>
+        inner.Type is SqlVariantSqlType ? inner : new(SqlType.SqlVariant, 0, inner, isNull: false);
+
     /// <summary>Non-NULL SQL <c>sysname</c> value (encoded identically to <c>nvarchar</c>; identity preserved across system catalogs).</summary>
     public static SqlValue FromSystemName(string value)
     {
@@ -629,6 +640,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not uniqueidentifier.")
             : (Guid)this.reference!;
 
+    /// <summary>Returns the inner value carried by a non-NULL <c>sql_variant</c>. Throws if NULL or not a sql_variant value.</summary>
+    public SqlValue AsVariantInner => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type is not SqlVariantSqlType
+            ? throw new InvalidOperationException($"Value is {this.Type}, not sql_variant.")
+            : (SqlValue)this.reference!;
+
     /// <summary>Returns the value as the segment-array hierarchyid path. Throws if NULL or not a hierarchyid value.</summary>
     public int[][] AsHierarchyId => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
@@ -706,6 +724,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         var t when t == SqlType.Float => this.AsDouble,
         var t when t == SqlType.Real => this.AsSingle,
         var t when t == SqlType.Money || t == SqlType.SmallMoney => this.AsMoney,
+        // sql_variant surfaces the inner value's CLR object per row, so an
+        // untyped reader accessor hands back bool / int / string / … matching
+        // the per-cell base type (the DacFx (bool)reader[…] unbox path).
+        SqlVariantSqlType => this.AsVariantInner.ToObject(),
         _ => throw new NotSupportedException($"No object representation for {this.Type}."),
     };
 
@@ -714,7 +736,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         this.Type == other.Type
         && this.IsNull == other.IsNull
         && (this.IsNull
-            || (IsStringTypeRef(this.Type)
+            || (this.Type is SqlVariantSqlType
+                ? this.AsVariantInner.Equals(other.AsVariantInner)
+                : IsStringTypeRef(this.Type)
                 ? this.Type.Collation!.Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
                 : this.Type is DateTimeOffsetSqlType
                     ? this.primitive == other.primitive
@@ -796,6 +820,11 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                     VarbinarySqlType or BinarySqlType or ImageSqlType => this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes),
                     RowVersionSqlType => this.primitive.CompareTo(other.primitive),
                     HierarchyIdSqlType => HierarchyIdSqlType.ComparePaths(this.AsHierarchyId, other.AsHierarchyId),
+                    // sql_variant ordering compares the inner values; differing
+                    // inner base types fall to the inner CompareTo's own
+                    // cross-type rejection (SQL Server's full sql_variant sort
+                    // by type-family rank is out of scope — see docs).
+                    SqlVariantSqlType => this.AsVariantInner.CompareTo(other.AsVariantInner),
                     _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
                 },
                 _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
@@ -811,7 +840,12 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         if (this.IsNull)
             return hash.ToHashCode();
 
-        if (IsStringTypeRef(this.Type))
+        if (this.Type is SqlVariantSqlType)
+        {
+            // Identity is the inner value alone; equality unwraps to it.
+            hash.Add(this.AsVariantInner.GetHashCode());
+        }
+        else if (IsStringTypeRef(this.Type))
         {
             // Trailing spaces and case folding are part of equality, so the
             // hash must agree.
@@ -891,6 +925,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.Float => this.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Real => this.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+        SqlVariantSqlType => this.AsVariantInner.AsCurrentType(),
         _ => "?",
     };
 }

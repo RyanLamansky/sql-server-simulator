@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using System.Data;
 using System.Numerics;
 using SqlServerSimulator.Storage;
+using SqlServerSimulator.Storage.Bacpac;
 
 namespace SqlServerSimulator.Network;
 
@@ -26,7 +28,7 @@ internal static class TdsTypeCodec
         {
             switch (type)
             {
-                case TextSqlType or NTextSqlType or ImageSqlType or HierarchyIdSqlType or GeographySqlType or GeometrySqlType:
+                case TextSqlType or NTextSqlType or ImageSqlType or HierarchyIdSqlType:
                     throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
             }
         }
@@ -189,6 +191,28 @@ internal static class TdsTypeCodec
             case XmlSqlType:
                 writer.WriteByte(0xF1);
                 writer.WriteByte(0);
+                break;
+            case SqlVariantSqlType:
+                // SSVARIANTTYPE: a LONGLEN type whose TYPE_INFO is the type
+                // byte plus a 4-byte max length (8009 = 8000 data bytes + the
+                // 9-byte inner-type header cap). MS-TDS 2.2.5.4.3 / 2.2.5.5.3.
+                writer.WriteByte(0x62);
+                writer.WriteUInt32(8009);
+                break;
+            case SpatialSqlType spatial:
+                // UDTTYPE (MS-TDS 2.2.5.5.2): a PLP type whose TYPE_INFO is a
+                // ushort max-byte-size (0xFFFF = max) then the three B_VARCHAR
+                // names (db / schema / type) and the US_VARCHAR assembly-
+                // qualified type name. The db name is unavailable in this static
+                // codec (its call site can't thread it), so it goes empty; the
+                // schema/type/AQN carry the functional identity SqlClient and
+                // DacFx read. Probe-confirmed against SQL Server 2025 (2026-07-16).
+                writer.WriteByte(0xF0);
+                writer.WriteUInt16(0xFFFF);
+                writer.WriteBVarchar(string.Empty);
+                writer.WriteBVarchar("sys");
+                writer.WriteBVarchar(spatial.SqlServerName);
+                writer.WriteUsVarchar(SpatialAssemblyQualifiedName(spatial));
                 break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
@@ -378,9 +402,281 @@ internal static class TdsTypeCodec
                 else
                     WritePlpChunks(writer, System.Text.Encoding.Unicode.GetBytes(value.AsString));
                 break;
+            case SqlVariantSqlType:
+                WriteVariant(writer, value);
+                break;
+            case SpatialSqlType spatial:
+                if (value.IsNull)
+                {
+                    writer.WriteUInt64(ulong.MaxValue);
+                }
+                else
+                {
+                    var isGeography = spatial is GeographySqlType;
+                    WritePlpChunks(writer, SpatialWkbEncoder.Encode(value.AsString, isGeography, isGeography ? 4326 : 0));
+                }
+
+                break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
         }
+    }
+
+    /// <summary>
+    /// Writes a <c>sql_variant</c> cell per MS-TDS 2.2.5.5.3: a 4-byte total
+    /// length (0xFFFFFFFF for NULL) followed by the variant body — a 1-byte
+    /// base-type token, a 1-byte property-byte count, the property bytes
+    /// (collation + max length for strings, precision + scale for decimal,
+    /// scale for the fractional temporal types), then the inner value's raw
+    /// data bytes. The integer / bit / string / NULL forms the catalog surface
+    /// produces are the oracle-verified subset; the remaining base types follow
+    /// the same MS-TDS layout for completeness.
+    /// </summary>
+    private static void WriteVariant(TdsTokenWriter writer, SqlValue value)
+    {
+        // A NULL sql_variant is a zero total length: a non-NULL variant always
+        // carries at least the 2-byte type + prop-count header, so SqlClient
+        // reads length 0 as NULL (not the 0xFFFFFFFF charbin sentinel).
+        if (value.IsNull)
+        {
+            writer.WriteUInt32(0);
+            return;
+        }
+
+        var body = BuildVariantBody(value.AsVariantInner);
+        writer.WriteUInt32((uint)body.Length);
+        writer.WriteBytes(body);
+    }
+
+    private static byte[] BuildVariantBody(SqlValue inner)
+    {
+        var t = inner.Type;
+        switch (t)
+        {
+            case BitSqlType: return [0x32, 0, inner.AsBoolean ? (byte)1 : (byte)0];
+            case TinyIntSqlType: return [0x30, 0, inner.AsByte];
+            case SmallIntSqlType:
+                {
+                    var body = NumericBody(0x34, 2);
+                    BinaryPrimitives.WriteInt16LittleEndian(body.AsSpan(2), inner.AsInt16);
+                    return body;
+                }
+
+            case Int32SqlType:
+                {
+                    var body = NumericBody(0x38, 4);
+                    BinaryPrimitives.WriteInt32LittleEndian(body.AsSpan(2), inner.AsInt32);
+                    return body;
+                }
+
+            case BigIntSqlType:
+                {
+                    var body = NumericBody(0x7F, 8);
+                    BinaryPrimitives.WriteInt64LittleEndian(body.AsSpan(2), inner.AsInt64);
+                    return body;
+                }
+
+            case RealSqlType:
+                {
+                    var body = NumericBody(0x3B, 4);
+                    BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(2), BitConverter.SingleToUInt32Bits(inner.AsSingle));
+                    return body;
+                }
+
+            case FloatSqlType:
+                {
+                    var body = NumericBody(0x3E, 8);
+                    BinaryPrimitives.WriteUInt64LittleEndian(body.AsSpan(2), BitConverter.DoubleToUInt64Bits(inner.AsDouble));
+                    return body;
+                }
+
+            case SmallMoneySqlType:
+                {
+                    var body = NumericBody(0x7A, 4);
+                    BinaryPrimitives.WriteInt32LittleEndian(body.AsSpan(2), (int)inner.AsMoneyScaledUnits);
+                    return body;
+                }
+
+            case MoneySqlType:
+                {
+                    var body = NumericBody(0x3C, 8);
+                    var scaled = inner.AsMoneyScaledUnits;
+                    BinaryPrimitives.WriteInt32LittleEndian(body.AsSpan(2, 4), (int)(scaled >> 32));
+                    BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(6, 4), (uint)scaled);
+                    return body;
+                }
+
+            case UniqueIdentifierSqlType:
+                {
+                    var body = NumericBody(0x24, 16);
+                    _ = inner.AsGuid.TryWriteBytes(body.AsSpan(2));
+                    return body;
+                }
+
+            case DateSqlType:
+                {
+                    var body = NumericBody(0x28, 3);
+                    WriteThreeByteDaysSpan(body.AsSpan(2), inner.AsDate.DayNumber);
+                    return body;
+                }
+
+            case SmallDateTimeSqlType:
+                {
+                    var body = NumericBody(0x3A, 4);
+                    var dt = inner.AsSmallDateTime;
+                    BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(2, 2), (ushort)(dt.Date - Epoch1900).Days);
+                    BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(4, 2), (ushort)((dt.Hour * 60) + dt.Minute));
+                    return body;
+                }
+
+            case DateTimeSqlType:
+                {
+                    var body = NumericBody(0x3D, 8);
+                    var dt = inner.AsDateTime;
+                    var days = (dt.Date - Epoch1900).Days;
+                    var thirds = (uint)(((dt.TimeOfDay.Ticks * 3) + 50_000) / 100_000);
+                    if (thirds == 25_920_000)
+                    {
+                        days++;
+                        thirds = 0;
+                    }
+
+                    BinaryPrimitives.WriteInt32LittleEndian(body.AsSpan(2, 4), days);
+                    BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(6, 4), thirds);
+                    return body;
+                }
+
+            case TimeSqlType tm: return ScaledTemporalVariantBody(0x29, tm.precision, TimeValueBytes(tm.precision), inner.AsTime.Ticks, dayNumber: null);
+            case DateTime2SqlType dt2:
+                {
+                    var dt = inner.AsDateTime2;
+                    return ScaledTemporalVariantBody(0x2A, dt2.precision, TimeValueBytes(dt2.precision), dt.TimeOfDay.Ticks, DateOnly.FromDateTime(dt).DayNumber);
+                }
+
+            case DateTimeOffsetSqlType dto:
+                {
+                    var dtoValue = inner.AsDateTimeOffset;
+                    var utc = dtoValue.UtcDateTime;
+                    var body = ScaledTemporalVariantBody(0x2B, dto.precision, TimeValueBytes(dto.precision) + 2, utc.TimeOfDay.Ticks, DateOnly.FromDateTime(utc).DayNumber);
+                    BinaryPrimitives.WriteInt16LittleEndian(body.AsSpan(body.Length - 2), (short)dtoValue.Offset.TotalMinutes);
+                    return body;
+                }
+
+            case DecimalSqlType d: return BuildVariantDecimal(d, inner);
+            case VarcharSqlType v: return BuildVariantString(0xA7, v.Collation, inner, national: false);
+            case CharSqlType c: return BuildVariantString(0xAF, c.Collation, inner, national: false);
+            case NVarcharSqlType nv: return BuildVariantString(0xE7, nv.Collation, inner, national: true);
+            case SystemNameSqlType: return BuildVariantString(0xE7, null, inner, national: true);
+            case NCharSqlType nc: return BuildVariantString(0xEF, nc.Collation, inner, national: true);
+            case VarbinarySqlType: return BuildVariantBinary(0xA5, inner);
+            case BinarySqlType: return BuildVariantBinary(0xAD, inner);
+            default:
+                throw new NotSupportedException($"sql_variant inner type '{t.SqlServerName}' has no wire encoding.");
+        }
+    }
+
+    /// <summary>A variant body with a 0-property-byte header (type token + cbProps=0) sized for <paramref name="dataLength"/> data bytes.</summary>
+    private static byte[] NumericBody(byte typeToken, int dataLength)
+    {
+        var body = new byte[2 + dataLength];
+        body[0] = typeToken;
+        body[1] = 0;
+        return body;
+    }
+
+    private static byte[] ScaledTemporalVariantBody(byte typeToken, int scale, int dataLength, long timeTicks, int? dayNumber)
+    {
+        var body = new byte[3 + dataLength];
+        body[0] = typeToken;
+        body[1] = 1;
+        body[2] = (byte)scale;
+        var data = body.AsSpan(3);
+        var timeBytes = TimeValueBytes(scale);
+        WriteScaledTimeSpan(data[..timeBytes], timeTicks, scale);
+        if (dayNumber is { } dn)
+            WriteThreeByteDaysSpan(data.Slice(timeBytes, 3), dn);
+        return body;
+    }
+
+    private static byte[] BuildVariantString(byte typeToken, Collation? collation, SqlValue inner, bool national)
+    {
+        var codec = TdsCollationCodec.For(collation);
+        var data = national
+            ? System.Text.Encoding.Unicode.GetBytes(inner.AsString)
+            : codec.WireEncoding.GetBytes(inner.AsString);
+        var body = new byte[2 + 7 + data.Length];
+        body[0] = typeToken;
+        body[1] = 7;
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(2, 4), codec.Info);
+        body[6] = codec.SortId;
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(7, 2), (ushort)Math.Clamp(data.Length, national ? 2 : 1, 8000));
+        data.CopyTo(body.AsSpan(9));
+        return body;
+    }
+
+    private static byte[] BuildVariantBinary(byte typeToken, SqlValue inner)
+    {
+        var data = inner.AsBytes;
+        var body = new byte[2 + 2 + data.Length];
+        body[0] = typeToken;
+        body[1] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(2, 2), (ushort)Math.Clamp(data.Length, 1, 8000));
+        data.CopyTo(body.AsSpan(4));
+        return body;
+    }
+
+    private static byte[] BuildVariantDecimal(DecimalSqlType type, SqlValue inner)
+    {
+        var magnitudeBytes = MagnitudeBytes(type.precision);
+        // 2 prop bytes (precision, scale); data = 1 sign byte + magnitude.
+        var body = new byte[2 + 2 + 1 + magnitudeBytes];
+        body[0] = 0x6A;
+        body[1] = 2;
+        body[2] = type.precision;
+        body[3] = type.scale;
+
+        var number = inner.AsDecimal;
+        body[4] = number >= 0 ? (byte)1 : (byte)0;
+
+        Span<int> bits = stackalloc int[4];
+        _ = decimal.GetBits(Math.Abs(number), bits);
+        var storedScale = (bits[3] >> 16) & 0xFF;
+        var magnitude = ((BigInteger)(uint)bits[2] << 64) | ((ulong)(uint)bits[1] << 32) | (uint)bits[0];
+        if (storedScale < type.scale)
+        {
+            magnitude *= BigInteger.Pow(10, type.scale - storedScale);
+        }
+        else if (storedScale > type.scale)
+        {
+            var divisor = BigInteger.Pow(10, storedScale - type.scale);
+            var (quotient, remainder) = BigInteger.DivRem(magnitude, divisor);
+            if (remainder * 2 >= divisor)
+                quotient++;
+
+            magnitude = quotient;
+        }
+
+        _ = magnitude.TryWriteBytes(body.AsSpan(5, magnitudeBytes), out _, isUnsigned: true, isBigEndian: false);
+        return body;
+    }
+
+    private static void WriteScaledTimeSpan(Span<byte> destination, long ticks, int scale)
+    {
+        var units = ticks;
+        for (var i = scale; i < 7; i++)
+            units /= 10;
+        for (var i = 0; i < destination.Length; i++)
+        {
+            destination[i] = (byte)units;
+            units >>= 8;
+        }
+    }
+
+    private static void WriteThreeByteDaysSpan(Span<byte> destination, int dayNumber)
+    {
+        destination[0] = (byte)dayNumber;
+        destination[1] = (byte)(dayNumber >> 8);
+        destination[2] = (byte)(dayNumber >> 16);
     }
 
     private static bool WroteByteLengthNull(TdsTokenWriter writer, SqlValue value)
@@ -561,4 +857,21 @@ internal static class TdsTypeCodec
     }
 
     private static int MagnitudeBytes(byte precision) => precision <= 9 ? 4 : precision <= 19 ? 8 : precision <= 28 ? 12 : 16;
+
+    /// <summary>
+    /// The assembly-qualified CLR type name a UDT COLMETADATA advertises for a
+    /// spatial column — the string SqlClient exposes as
+    /// <c>UdtAssemblyQualifiedName</c> and uses to locate
+    /// <c>Microsoft.SqlServer.Types</c>. When that assembly is absent (the
+    /// common DacFx case) SqlClient returns the raw serialization bytes via
+    /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token match SQL Server 2025
+    /// (probed 2026-07-16).
+    /// </summary>
+    private static string SpatialAssemblyQualifiedName(SpatialSqlType type)
+    {
+        const string tail = ", Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
+        return type is GeographySqlType
+            ? "Microsoft.SqlServer.Types.SqlGeography" + tail
+            : "Microsoft.SqlServer.Types.SqlGeometry" + tail;
+    }
 }

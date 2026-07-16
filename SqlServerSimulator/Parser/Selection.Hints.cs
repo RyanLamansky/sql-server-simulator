@@ -55,10 +55,12 @@ internal sealed partial class Selection
     /// is matched case-insensitively against the leading token; trailing
     /// words (<c>PLAN</c> / <c>ORDER</c> / <c>UNION</c> / <c>GROUP</c> /
     /// <c>JOIN</c>), arguments (<c>MAXDOP N</c> / <c>FAST N</c>), and nested
-    /// parens (<c>OPTIMIZE FOR (...)</c>, <c>USE HINT (...)</c>) are
-    /// consumed-and-discarded by <see cref="ConsumeOneOptionHint"/>.
-    /// <c>MAXRECURSION</c> alone has runtime effect — it overrides the per-CTE
-    /// recursion limit, so its argument is parsed strictly.
+    /// parens (<c>OPTIMIZE FOR (...)</c>, <c>USE PLAN N'...'</c>) are
+    /// consumed-and-discarded by <see cref="ConsumeOneOptionHint"/>. Two
+    /// entries carry more than a skip: <c>MAXRECURSION</c> overrides the
+    /// per-CTE recursion limit (argument parsed strictly), and
+    /// <c>USE HINT('name')</c> validates its string argument by name
+    /// (<see cref="ConsumeUseHint"/> — Msg 10715 on an unknown hint).
     /// </summary>
     private static readonly FrozenSet<string> OptionHintFirstWords = new HashSet<string>
     {
@@ -72,6 +74,56 @@ internal sealed partial class Selection
         "QUERYTRACEON",
         "TABLE", "PARAMETERIZATION",
         "ORDER", "CONCAT",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Valid <c>OPTION (USE HINT('name'))</c> hint names — the contents of
+    /// <c>sys.dm_exec_valid_use_hints</c> on SQL Server 2025 (probed
+    /// 2026-07-16). Case-insensitive (real accepts a lowercase argument). An
+    /// argument outside this set raises Msg 10715 (<see cref="ConsumeUseHint"/>);
+    /// every other OPTION hint discards without a name check, but real SQL
+    /// Server validates USE HINT against this catalog, so the simulator does
+    /// too. The list is version-specific and grows across releases — an app
+    /// targeting a hint added after 2025 would need a refresh here, the same
+    /// trust-region trade-off the table-hint accept-list carries.
+    /// </summary>
+    private static readonly FrozenSet<string> ValidUseHintNames = new HashSet<string>
+    {
+        "ABORT_QUERY_EXECUTION",
+        "ASSUME_FIXED_MAX_SELECTIVITY_FOR_REGEXP",
+        "ASSUME_FIXED_MIN_SELECTIVITY_FOR_REGEXP",
+        "ASSUME_FULL_INDEPENDENCE_FOR_FILTER_ESTIMATES",
+        "ASSUME_JOIN_PREDICATE_DEPENDS_ON_FILTERS",
+        "ASSUME_MIN_SELECTIVITY_FOR_FILTER_ESTIMATES",
+        "ASSUME_PARTIAL_CORRELATION_FOR_FILTER_ESTIMATES",
+        "DISABLE_BATCH_MODE_ADAPTIVE_JOINS",
+        "DISABLE_BATCH_MODE_MEMORY_GRANT_FEEDBACK",
+        "DISABLE_CE_FEEDBACK",
+        "DISABLE_DEFERRED_COMPILATION_TV",
+        "DISABLE_DOP_FEEDBACK",
+        "DISABLE_INTERLEAVED_EXECUTION_TVF",
+        "DISABLE_MEMORY_GRANT_FEEDBACK_PERSISTENCE",
+        "DISABLE_OPTIMIZED_NESTED_LOOP",
+        "DISABLE_OPTIMIZED_PLAN_FORCING",
+        "DISABLE_OPTIMIZER_ROWGOAL",
+        "DISABLE_PARAMETER_SNIFFING",
+        "DISABLE_RESULT_SET_CACHE",
+        "DISABLE_ROW_MODE_MEMORY_GRANT_FEEDBACK",
+        "DISABLE_TSQL_SCALAR_UDF_INLINING",
+        "DISALLOW_BATCH_MODE",
+        "ENABLE_HIST_AMENDMENT_FOR_ASC_KEYS",
+        "ENABLE_QUERY_OPTIMIZER_HOTFIXES",
+        "FORCE_DEFAULT_CARDINALITY_ESTIMATION",
+        "FORCE_LEGACY_CARDINALITY_ESTIMATION",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_100",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_110",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_120",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_130",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_140",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_150",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_160",
+        "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_170",
+        "QUERY_PLAN_PROFILE",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -508,6 +560,23 @@ internal sealed partial class Selection
             context.MoveNextRequired();
             return;
         }
+        // USE HINT is the one OPTION hint whose argument SQL Server validates
+        // by name (Msg 10715 on an unknown hint). Detect `USE HINT` specifically
+        // — `USE PLAN N'…'` and any other USE-prefixed hint fall through to the
+        // generic skip below — and hand off before the generic path consumes it.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Use })
+        {
+            var checkpoint = context.SaveCheckpoint();
+            context.MoveNextRequired();
+            var isUseHint = context.Token is Name useHintKeyword
+                && useHintKeyword.Source.Equals("HINT", StringComparison.OrdinalIgnoreCase);
+            context.RestoreCheckpoint(checkpoint);
+            if (isUseHint)
+            {
+                ConsumeUseHint(context);
+                return;
+            }
+        }
         if (context.Token is null || !OptionHintFirstWords.Contains(context.Token.ToString()))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
@@ -518,6 +587,40 @@ internal sealed partial class Selection
                 SkipBalancedParens(context);
             }
             context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
+    /// Consumes and validates a <c>USE HINT ( 'name' [, 'name'] … )</c> clause.
+    /// Cursor on entry: the <c>USE</c> keyword. Cursor on exit: the token after
+    /// the closing <c>)</c>. Each argument must be a non-null string literal
+    /// (probe-confirmed: an empty argument list or a non-string argument raises
+    /// the generic Msg 102, e.g. <c>USE HINT()</c> → <c>near ')'</c>,
+    /// <c>USE HINT(123)</c> → <c>near '123'</c>) whose value is in
+    /// <see cref="ValidUseHintNames"/> (case-insensitive) — an unknown name
+    /// raises Msg 10715. The hint itself is otherwise parse-and-discard.
+    /// </summary>
+    private static void ConsumeUseHint(ParserContext context)
+    {
+        context.MoveNextRequired();
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        while (true)
+        {
+            if (context.GetNextRequired() is not Literal { Value: { IsNull: false } value } || !SqlType.IsStringCategory(value.Type))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (!ValidUseHintNames.Contains(value.AsString))
+                throw SimulatedSqlException.InvalidUseHint(value.AsString);
+            switch (context.GetNextRequired())
+            {
+                case Operator { Character: ')' }:
+                    context.MoveNextRequired();
+                    return;
+                case Operator { Character: ',' }:
+                    continue;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
         }
     }
 

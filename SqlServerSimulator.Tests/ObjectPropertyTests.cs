@@ -51,4 +51,41 @@ public sealed class ObjectPropertyTests
     [TestMethod]
     public void IsMSShipped_OnUserTable_Returns0()
         => AreEqual(0, new Simulation().ExecuteScalar("create table t (id int); select objectproperty(object_id('t'), 'IsMSShipped')"));
+
+    /// <summary>
+    /// IsEncrypted is module-scoped: 0 for a module, NULL for a table
+    /// (probe-confirmed). DacFx's encrypted-procedure enumeration filters
+    /// `IsEncrypted = 1 OR IsEncrypted IS NULL`, so the NULL-for-unknown
+    /// fallback enrolled every procedure as encrypted and failed bacpac
+    /// export with SQL71564 on all 42 WWI procedures.
+    /// </summary>
+    [TestMethod]
+    public void IsEncrypted_ModuleReturns0_TableReturnsNull()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (id int)", "create procedure p as select 1", "create view v as select 1 x");
+        AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('p'), 'IsEncrypted')"));
+        AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('v'), 'IsEncrypted')"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select objectproperty(object_id('t'), 'IsEncrypted')"));
+    }
+
+    /// <summary>
+    /// The module SET-option snapshot pair returns 1 for modules (every
+    /// simulator module is created under QUOTED_IDENTIFIER / ANSI_NULLS ON)
+    /// and NULL for non-modules — probe-confirmed (view → 1/1, table → NULL).
+    /// DacFx's view reverse-engineering reads CONVERT(bit, ...) over both.
+    /// </summary>
+    [TestMethod]
+    public void ExecIsOptions_ModuleReturns1_TableReturnsNull()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (id int)", "create view v as select 1 x");
+        AreEqual(1, sim.ExecuteScalar("select objectproperty(object_id('v'), 'ExecIsQuotedIdentOn')"));
+        AreEqual(1, sim.ExecuteScalar("select objectproperty(object_id('v'), 'ExecIsAnsiNullsOn')"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select objectproperty(object_id('t'), 'ExecIsQuotedIdentOn')"));
+    }
+
+    [TestMethod]
+    public void IsSchemaBound_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar("create view v as select 1 x; select objectproperty(object_id('v'), 'IsSchemaBound')"));
 }

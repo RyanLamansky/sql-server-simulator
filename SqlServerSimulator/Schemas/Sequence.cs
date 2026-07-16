@@ -88,6 +88,25 @@ internal sealed class Sequence(
     public bool IsExhausted;
 
     /// <summary>
+    /// The most recent value emitted by <c>NEXT VALUE FOR</c> in this process,
+    /// or <c>null</c> if the sequence has never generated a value. Surfaces in
+    /// <c>sys.sequences.last_used_value</c> (sql_variant, NULL until first use;
+    /// probe-confirmed a bacpac-restored sequence reports NULL here even when
+    /// <see cref="CurrentValue"/> is advanced — last_used_value is per-instance
+    /// runtime state, not persisted). <c>ALTER SEQUENCE … RESTART</c> clears it.
+    /// </summary>
+    public long? LastUsedValue;
+
+    /// <summary>
+    /// <c>sys.sequences.last_used_value</c> as a sql_variant: NULL when the
+    /// sequence has never generated a value, else the last emitted value
+    /// wrapped in the sequence's declared scalar type.
+    /// </summary>
+    public SqlValue LastUsedValueAsVariant => this.LastUsedValue is { } value
+        ? SqlValue.FromVariant(this.WrapAsDeclaredType(value))
+        : SqlValue.Null(SqlType.SqlVariant);
+
+    /// <summary>
     /// Computes and reserves the next value for emission. Caller is
     /// responsible for the per-row cache check before calling — this method
     /// always advances. Raises Msg 11728 when no-cycle and already exhausted.
@@ -98,6 +117,7 @@ internal sealed class Sequence(
             throw SimulatedSqlException.SequenceExhausted(this.FullName);
 
         var emit = this.CurrentValue;
+        this.LastUsedValue = emit;
         var next = unchecked(this.CurrentValue + this.Increment);
         // Detect wrap-around: ascending sequence going past MaxValue, descending past MinValue.
         var ascending = this.Increment > 0;

@@ -17,7 +17,7 @@ namespace SqlServerSimulator.Storage;
 /// </para>
 /// </remarks>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null, string? computedDefinition = null)
 {
     public readonly string Name = name;
 
@@ -103,6 +103,18 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// expression here is guaranteed to bind only to stored columns.
     /// </summary>
     public readonly Expression? Computed = computedExpression;
+
+    /// <summary>
+    /// The parenthesized source text of the computed-column expression, as
+    /// written at <c>CREATE TABLE</c> / <c>ALTER TABLE ADD</c> (captured
+    /// verbatim between <c>AS</c> and the end of the expression, wrapped in a
+    /// single paren pair when not already fully parenthesized). Non-null only
+    /// for computed columns; surfaces through <c>sys.computed_columns.definition</c>
+    /// so DacFx / SMO can re-emit the <c>AS (…)</c> body. Captured text rather
+    /// than a re-serialized expression tree — re-parseable, though not
+    /// byte-identical to SQL Server's bracket-normalized form.
+    /// </summary>
+    public readonly string? ComputedDefinition = computedDefinition;
 
     /// <summary>
     /// True when a computed column was declared <c>PERSISTED</c>. Persisted

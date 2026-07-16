@@ -213,6 +213,68 @@ internal static partial class BuiltInResources
             new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
             new("is_system_named", SqlType.Bit, null, false),
         ], EnumerateSysDefaultConstraints);
+
+        // sys.edge_constraints / sys.edge_constraint_clauses: graph edge
+        // constraints (CONNECTION (...) on an edge table). Graph tables aren't
+        // modeled (sys.tables.is_edge is a constant 0), so both ship empty with
+        // the full probe-confirmed shape (SQL Server 2025, 2026-07-16).
+        Sys("edge_constraints",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("schema_id", SqlType.Int32, null, false),
+            new("parent_object_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, true),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+            new("is_not_trusted", SqlType.Bit, null, false),
+            new("is_system_named", SqlType.Bit, null, false),
+            new("delete_referential_action", SqlType.TinyInt, null, true),
+            new("delete_referential_action_desc", nvarchar60Catalog, 60, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("edge_constraint_clauses",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("clause_number", SqlType.Int32, null, false),
+            new("from_object_id", SqlType.Int32, null, false),
+            new("to_object_id", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.events: one row per event a trigger or event notification fires
+        // for — the broader superset of sys.trigger_events (which the simulator
+        // projects for DML triggers). WWI has zero triggers and its sys.events
+        // is empty (probe-confirmed 2026-07-16), so an always-empty view with
+        // the full shape matches real; DacFx references it. If DDL/event-
+        // notification event projection is added later, populate here.
+        Sys("events",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("type", SqlType.Int32, null, false),
+            new("type_desc", SqlType.NVarchar, 128, false),
+            new("is_trigger_event", SqlType.Bit, null, true),
+            new("event_group_type", SqlType.Int32, null, true),
+            new("event_group_type_desc", SqlType.NVarchar, 128, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.assembly_files: CLR assembly source files. SQLCLR isn't modeled
+        // (sys.assemblies is empty), so this ships empty with the full probe-
+        // confirmed shape (SQL Server 2025). Colocated with sys.assemblies /
+        // sys.assembly_modules.
+        Sys("assembly_files",
+        [
+            new("assembly_id", SqlType.Int32, null, false),
+            new("name", SqlType.NVarchar, 260, true),
+            new("file_id", SqlType.Int32, null, false),
+            new("content", VarbinarySqlType.MaxForm, null, true),
+            new("sha2_256", SqlType.Varbinary, 8000, true),
+            new("sha2_512", SqlType.Varbinary, 8000, true),
+        ], static (_, _) => EmptyCatalogRows);
     }
 
     /// <summary>
@@ -508,10 +570,24 @@ internal static partial class BuiltInResources
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in schema.HeapTables.Values)
             {
+                // unique_index_id must point each constraint at ITS backing
+                // index in sys.indexes (DacFx's UQ query joins on it) — resolve
+                // it through the shared index-id allocation authority rather
+                // than hardcoding 1.
+                var identities = table.IndexIdentities();
                 foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
                 {
                     var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
                     var createDate = SqlValue.FromDateTime(table.CreateDate);
+                    var uniqueIndexId = 1;
+                    foreach (var identity in identities)
+                    {
+                        if (ReferenceEquals(identity.Constraint, key))
+                        {
+                            uniqueIndexId = identity.IndexId;
+                            break;
+                        }
+                    }
                     // PK gets a system-named flag iff the name starts with
                     // "PK__"; UQ similarly. The simulator tracks is_system_named
                     // on FK / CHECK explicitly; for KeyConstraint we infer from
@@ -531,7 +607,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         falseBit,
                         falseBit,
-                        SqlValue.FromInt32(1),
+                        SqlValue.FromInt32(uniqueIndexId),
                         systemNamed ? trueBit : falseBit,
                         trueBit,
                     ];

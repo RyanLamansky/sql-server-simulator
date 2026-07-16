@@ -142,6 +142,40 @@ public sealed class XmlTests
         AreEqual("PROPERTY", sim.ExecuteScalar("select secondary_type_desc from sys.xml_indexes where name = 'sxml_property'"));
     }
 
+    /// <summary>
+    /// sys.xml_indexes carries the full 26-column shape DacFx's XML-index
+    /// reverse-engineering query reads. Primary indexes report xml_index_type 0
+    /// / 'PRIMARY_XML'; secondary indexes report 1 / 'SECONDARY_XML'. The shared
+    /// index-admin tail mirrors the fresh-index modeled defaults (is_hypothetical
+    /// false so DacFx's `is_hypothetical = 0` filter matches, allow_row_locks /
+    /// allow_page_locks true, fill_factor 0, has_filter false, path_id 0).
+    /// </summary>
+    [TestMethod]
+    public void SysXmlIndexes_WidenedColumns_PrimaryAndSecondary()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int not null primary key, body xml)");
+        _ = sim.ExecuteNonQuery("create primary xml index pxml_doc on dbo.doc(body)");
+        _ = sim.ExecuteNonQuery("create xml index sxml_value on dbo.doc(body) using xml index pxml_doc for value");
+
+        AreEqual((byte)0, sim.ExecuteScalar("select xml_index_type from sys.xml_indexes where name = 'pxml_doc'"));
+        AreEqual("PRIMARY_XML", sim.ExecuteScalar("select xml_index_type_description from sys.xml_indexes where name = 'pxml_doc'"));
+        AreEqual((byte)1, sim.ExecuteScalar("select xml_index_type from sys.xml_indexes where name = 'sxml_value'"));
+        AreEqual("SECONDARY_XML", sim.ExecuteScalar("select xml_index_type_description from sys.xml_indexes where name = 'sxml_value'"));
+
+        // The whole appended column tail resolves in one projection with the
+        // fresh-index default values (a missing column would fail Msg 207).
+        AreEqual(2, sim.ExecuteScalar<int>("""
+            select count(*) from sys.xml_indexes where is_hypothetical = 0
+                and allow_row_locks = 1 and allow_page_locks = 1
+                and fill_factor = 0 and is_padded = 0 and is_disabled = 0
+                and is_unique = 0 and is_unique_constraint = 0 and ignore_dup_key = 0
+                and is_ignored_in_optimization = 0 and has_filter = 0
+                and filter_definition is null and data_space_id = 1
+                and path_id = 0 and auto_created = 0
+            """));
+    }
+
     [TestMethod]
     public void SecondaryXmlIndex_UsingId_LinksToPrimary()
     {
@@ -267,5 +301,42 @@ public sealed class XmlTests
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
         _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r/>')");
         AreEqual("<r/>", sim.ExecuteScalar("select cast(body as nvarchar(max)) from dbo.doc"));
+    }
+
+    [TestMethod]
+    public void XmlSchemaNamespace_ReturnsCollectionXsdAsXml()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(@"create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=""http://www.w3.org/2001/XMLSchema""/>'");
+        AreEqual(
+            @"<xsd:schema xmlns:xsd=""http://www.w3.org/2001/XMLSchema""/>",
+            sim.ExecuteScalar("select cast(XML_SCHEMA_NAMESPACE(N'dbo', N'xsc1') as nvarchar(max))"));
+    }
+
+    [TestMethod]
+    public void XmlSchemaNamespace_DacFxCollectionScriptingQuery_Runs()
+    {
+        // The DacFx bacpac-export query shape over sys.xml_schema_collections;
+        // with no user collections the function must still parse and type.
+        var sim = new Simulation();
+        AreEqual(DBNull.Value, sim.ExecuteScalar(
+            "SELECT * FROM (SELECT XML_SCHEMA_NAMESPACE(SCHEMA_NAME([xsc].[schema_id]), [xsc].[name]) AS [Document] " +
+            "FROM [sys].[xml_schema_collections] [xsc] WITH (NOLOCK) WHERE xsc.name <> N'sys') AS [_results]") ?? DBNull.Value);
+    }
+
+    [TestMethod]
+    public void XmlSchemaNamespace_UnknownCollection_Raises6314()
+    {
+        // Probe-confirmed: real raises 6314 even for the built-in sys collection.
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("select XML_SCHEMA_NAMESPACE(N'dbo', N'nope')", 6314);
+        _ = sim.AssertSqlError("select XML_SCHEMA_NAMESPACE(N'sys', N'sys')", 6314);
+    }
+
+    [TestMethod]
+    public void XmlSchemaNamespace_NullArgument_Raises8116()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("select XML_SCHEMA_NAMESPACE(NULL, N'x')", 8116);
     }
 }

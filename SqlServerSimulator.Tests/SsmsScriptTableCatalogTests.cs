@@ -54,13 +54,13 @@ public sealed class SsmsScriptTableCatalogTests
     // === sys.computed_columns ===
 
     [TestMethod]
-    public void ComputedColumns_ProjectsComputedColumn_DefinitionNull()
+    public void ComputedColumns_ProjectsComputedColumn_CapturesDefinition()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (a int not null primary key, b as a + 1)");
         AreEqual(1, sim.ExecuteScalar<int>("select count(*) from sys.computed_columns where object_id = object_id('t')"));
         AreEqual(1, sim.ExecuteScalar<int>("select cast(is_computed as int) from sys.computed_columns where name = 'b'"));
-        AreEqual(1, sim.ExecuteScalar<int>("select case when definition is null then 1 else 0 end from sys.computed_columns where name = 'b'"));
+        AreEqual("(a + 1)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 'b'"));
     }
 
     [TestMethod]
