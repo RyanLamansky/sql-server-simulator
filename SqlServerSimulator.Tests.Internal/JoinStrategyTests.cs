@@ -165,4 +165,20 @@ public sealed class JoinStrategyTests
     public void SmallOuter_UnindexedInner_FallsBackToHash()
         => Contains("Inner:HashMatch(keys=1,residual=0)",
             CaptureStrategies("select a.id from a join b on a.id = b.a_id where a.id = 1"));
+
+    /// <summary>
+    /// A catalog view on the right of an equi-join must take the hash path, not
+    /// a nested loop. <c>sys.*</c> sources are deferred lateral plans, but the
+    /// uncorrelated ones are materialized once per query
+    /// (<c>MaterializeUncorrelatedDeferredSources</c>) into a re-enumerable row
+    /// list, which makes them eligible for <c>TryPlanEquiJoin</c>'s O(L+R) hash
+    /// build. Without materialization the lateral plan blocks the equi-plan and
+    /// the join re-generates the whole view per outer row — the SMO per-column
+    /// property-bag query's O(outer × Σ view-sizes) blowup this guard pins down.
+    /// </summary>
+    [TestMethod]
+    public void CatalogView_EquiJoin_TakesHashPath()
+        => Contains("Left:HashMatch(keys=1,residual=0)",
+            CaptureStrategies("create table t (id int)",
+                "select col.name from sys.all_columns col left join sys.types st on st.user_type_id = col.user_type_id"));
 }

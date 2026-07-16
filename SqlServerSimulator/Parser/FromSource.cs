@@ -37,7 +37,8 @@ internal sealed class FromSource(
     Selection? lateralPlan = null,
     HeapTable? backingTable = null,
     View? backingView = null,
-    DataLockPlan? heapPlan = null)
+    DataLockPlan? heapPlan = null,
+    bool materializeOnce = false)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -89,6 +90,35 @@ internal sealed class FromSource(
     /// whole-table scan's locking is load-bearing.
     /// </summary>
     public readonly DataLockPlan? HeapPlan = heapPlan;
+
+    /// <summary>
+    /// True when this source's <see cref="LateralPlan"/> is provably
+    /// uncorrelated — it never references an enclosing row — so its rows are
+    /// identical on every re-execution within one query. Set only for catalog
+    /// views (<c>sys.*</c>): their row generator takes only the
+    /// <see cref="BatchContext"/> and the owning database, never an
+    /// outer-row resolver, so it cannot correlate. The execution pass
+    /// <c>MaterializeUncorrelatedDeferredSources</c> reads this to run the plan
+    /// once per query and replace it with a re-enumerable
+    /// <see cref="Rows"/> list, collapsing the per-outer-row re-materialization
+    /// of a nested-loop join and making the source eligible for the equi-join
+    /// hash path. Correlated / lateral sources (derived tables, APPLY, VALUES,
+    /// TVFs, views) leave this false and keep their per-outer-row execution.
+    /// </summary>
+    public readonly bool MaterializeOnce = materializeOnce;
+
+    /// <summary>
+    /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
+    /// replaced by an already-materialized <paramref name="rows"/> list —
+    /// clearing <see cref="LateralPlan"/> and <see cref="MaterializeOnce"/> so
+    /// downstream join planning treats it as a plain re-enumerable row source.
+    /// Column metadata, qualifier, and storage layout are preserved unchanged.
+    /// </summary>
+    public FromSource WithMaterializedRows(IEnumerable<byte[]> rows) =>
+        new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
+            this.StorageOrdinals, this.LobStore, rows,
+            lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
+            heapPlan: this.HeapPlan, materializeOnce: false);
 }
 
 /// <summary>

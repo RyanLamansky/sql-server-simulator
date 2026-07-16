@@ -1392,7 +1392,8 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb));
+                        lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb),
+                        materializeOnce: true);
                 }
 
                 // View resolution: `FROM schema.view [alias]` or

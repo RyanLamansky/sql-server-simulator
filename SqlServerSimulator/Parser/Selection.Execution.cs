@@ -221,11 +221,17 @@ internal sealed partial class Selection
                 var topCount = ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch);
                 var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
                 var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
+                // Materialize provably-uncorrelated catalog-view sources once
+                // per execution (before the projection paths build their
+                // resolver closures over the array), so a nested-loop join
+                // stops re-generating them per outer row and the equi-join
+                // hash path can key them. Correlated sources are left untouched.
+                var execSources = MaterializeUncorrelatedDeferredSources(sources, batch);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(sources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
+                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
                     : windows.Count > 0
-                        ? ProjectWindowedRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
-                        : ProjectSqlRows(sources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
+                        ? ProjectWindowedRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                        : ProjectSqlRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
             },
             isAssignmentOnly,
             intoTarget,
@@ -273,6 +279,38 @@ internal sealed partial class Selection
             projections: [.. expressions],
             excluders: [.. fromClause.Excluders]);
         return (profile, ViewUpdatabilityRejection.None);
+    }
+
+    /// <summary>
+    /// Replaces every <see cref="FromSource.MaterializeOnce"/> source — a
+    /// provably-uncorrelated catalog view — with a copy whose rows are already
+    /// materialized into a re-enumerable list, executing each such plan exactly
+    /// once per query execution. Without this, a nested-loop join re-runs the
+    /// catalog view's row generator (regenerating every column of every table,
+    /// every type, etc.) for each outer row, so an <em>N</em>-column table's
+    /// per-column property-bag query costs O(outer × Σ joined-view sizes). After
+    /// materialization the source carries a plain <see cref="FromSource.Rows"/>
+    /// list, so <c>TryPlanEquiJoin</c> keys it into the O(L + R) hash path and
+    /// any residual nested loop re-scans the list instead of re-generating.
+    /// Correlated / lateral sources never set the flag, so APPLY, correlated
+    /// derived tables, VALUES, TVFs, and views keep their per-outer-row
+    /// execution untouched. Returns the input array unchanged (no copy) when no
+    /// source qualifies.
+    /// </summary>
+    private static FromSource[] MaterializeUncorrelatedDeferredSources(FromSource[] sources, BatchContext batch)
+    {
+        FromSource[]? rewritten = null;
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (sources[i] is not { MaterializeOnce: true, LateralPlan: { } plan })
+                continue;
+            // Uncorrelated by construction: the generator ignores the outer
+            // resolver, so a null resolver produces identical rows.
+            var materialized = new List<byte[]>(plan.Execute(batch, outerResolver: null).RowBytes);
+            rewritten ??= (FromSource[])sources.Clone();
+            rewritten[i] = sources[i].WithMaterializedRows(materialized);
+        }
+        return rewritten ?? sources;
     }
 
     private static IEnumerable<SqlValue[]> ProjectSqlRows(

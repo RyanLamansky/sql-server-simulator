@@ -34,6 +34,8 @@ The original equi-join win still stands — with ≥1 equi-key the inner is inde
 - Residual non-equi conjuncts are re-checked per probed candidate (a conjunct passes only when it evaluates to `true`, matching the streaming path's `== true` gate).
 - Falls back to the nested-loop operators below for non-equi ON predicates, lateral / derived-table right sides, CROSS / APPLY, and key-type pairs `SqlType.Promote` rejects (LOB, collation conflict, cross-category) — preserving their exact per-row error behavior.
 
+**Uncorrelated catalog views hash-join too.** `sys.*` catalog views are deferred `LateralPlan` sources, which `TryPlanEquiJoin` normally rejects (line "`sources[level].LateralPlan is not null`"). But a catalog view's generator can't correlate (it takes no outer resolver), so the execution-time `MaterializeUncorrelatedDeferredSources` pass replaces each `FromSource.MaterializeOnce` catalog source with a once-materialized `Rows` list *before* the join planner runs — so `TryPlanEquiJoin` sees a plain re-enumerable source and keys it into the O(L + R) hash build. This removes both the per-outer-row re-generation and the O(L × R) loop from catalog multi-joins (SMO's per-column property-bag query). Correlated / lateral sources never set the flag and keep their per-outer-row execution. See [`catalog-views.md`](catalog-views.md) for the correlation-safety contract and measured improvement.
+
 ### Nested-loop fallback
 
 INNER / CROSS / LEFT / CROSS APPLY / OUTER APPLY stream one upstream tuple at a time. RIGHT / FULL materialize `sources[level].Rows` into a list and track a `matched[]` bitmap across the entire upstream iteration so unmatched right rows can be emitted (with all prior slots NULL-filled) after upstream is exhausted.

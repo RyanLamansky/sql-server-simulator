@@ -709,4 +709,57 @@ public sealed class CatalogViewTests
             """);
         IsFalse(reader.Read());
     }
+
+    /// <summary>
+    /// SMO's per-column property-bag query: <c>sys.all_columns</c> LEFT JOINed
+    /// to <c>sys.types</c> (twice — user + base type), <c>sys.identity_columns</c>,
+    /// and <c>sys.computed_columns</c>, filtered to one table. The catalog views
+    /// are uncorrelated deferred sources, so each is materialized once per query
+    /// and rides the equi-join hash path instead of being re-generated per outer
+    /// row (the O(outer × Σ view-sizes) blowup that made this query ~300 ms).
+    /// This pins the rowset: one row per column, in <c>column_id</c> order, with
+    /// the type-name join resolving and the identity / computed LEFT JOINs
+    /// matching only their respective columns (NULL elsewhere).
+    /// </summary>
+    [TestMethod]
+    public void PerColumnBagQuery_MultiJoin_ReturnsOneRowPerColumnWithMatchedMetadata()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table dbo.Widget (
+                id int identity(1, 1) not null,
+                name nvarchar(50) not null,
+                total as (id * 2))
+            """);
+
+        using var reader = sim.ExecuteReader("""
+            select
+                col.name,
+                st.name as type_name,
+                idc.column_id as identity_col,
+                cmc.column_id as computed_col
+            from sys.all_columns col
+            left join sys.types st on st.user_type_id = col.user_type_id
+            left join sys.types bt on bt.user_type_id = col.system_type_id
+            left join sys.identity_columns idc on idc.object_id = col.object_id and idc.column_id = col.column_id
+            left join sys.computed_columns cmc on cmc.object_id = col.object_id and cmc.column_id = col.column_id
+            where col.object_id = object_id(N'dbo.Widget')
+            order by col.column_id
+            """);
+
+        var rows = new List<(string Name, string TypeName, bool IsIdentity, bool IsComputed)>();
+        while (reader.Read())
+        {
+            rows.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                !reader.IsDBNull(2),
+                !reader.IsDBNull(3)));
+        }
+
+        HasCount(3, rows);
+        AreEqual(("id", "int", true, false), rows[0]);
+        AreEqual(("name", "nvarchar", false, false), rows[1]);
+        AreEqual(("total", "int", false, true), rows[2]);
+    }
 }
