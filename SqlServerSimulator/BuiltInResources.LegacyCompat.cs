@@ -88,6 +88,94 @@ internal static partial class BuiltInResources
         RegisterSysobjects(views);
         RegisterSysusers(views);
         RegisterSystemObjects(views);
+        RegisterSptValues(views);
+    }
+
+    /// <summary>
+    /// Registers <c>master.dbo.spt_values</c> — the static SQL-Server compatibility
+    /// helper table (a <c>dbo</c>-schema table in <c>master</c>, not a catalog
+    /// view). SMO's Table space math reads it for the page size:
+    /// <c>select @PageSize = v.low / 1024.0 from master.dbo.spt_values v where
+    /// v.number = 1 and v.type = 'E'</c> (the <c>WINDOWS/NT</c> row, <c>low</c> =
+    /// 8192 → 8 KB). The table is registered under the <c>dbo.spt_values</c> key
+    /// (serving the 3-part <c>master.dbo.spt_values</c> and 2-part
+    /// <c>dbo.spt_values</c> forms) and the bare <c>spt_values</c> key (the
+    /// unqualified 1-part form), both marked <see cref="CatalogView.MasterScoped"/>
+    /// so they bind only when the reference lands in <c>master</c> —
+    /// <see cref="Parser.BatchContext.TryResolveCatalogView"/> enforces it.
+    /// <para>
+    /// Only the two type codes SMO / SSMS actually reference are modeled: type
+    /// <c>'E'</c> (the four environment rows, probe-confirmed — the load-bearing
+    /// page-size source) and type <c>'P'</c> (the 2048-row power-of-2 helper,
+    /// <c>number</c> 0..2047 with <c>low = number / 8 + 1</c>, <c>high =
+    /// 1 &lt;&lt; (number % 8)</c>, <c>name</c> NULL — the commonly-referenced
+    /// bitmask/numbers helper). The other ~27 type codes a live <c>master</c>
+    /// carries (A/B/D/D2/DBR/…) are deliberately omitted; no modeled tooling reads
+    /// them. Shape probe-confirmed (SQL Server 2025): <c>name nvarchar(35)</c>,
+    /// <c>number int</c>, <c>type nchar(3)</c>, <c>low</c>/<c>high</c>/<c>status
+    /// int</c>. Static data — the row generator ignores the database argument.
+    /// </para>
+    /// </summary>
+    private static void RegisterSptValues(Dictionary<string, CatalogView> views)
+    {
+        var nameType = NVarcharSqlType.Get(35, Collation.Baseline, Coercibility.Implicit);
+        var typeType = NCharSqlType.Get(3, Collation.Baseline, Coercibility.Implicit);
+        HeapColumn[] columns =
+        [
+            new("name", nameType, 35, true),
+            new("number", SqlType.Int32, null, false),
+            new("type", typeType, 3, false),
+            new("low", SqlType.Int32, null, true),
+            new("high", SqlType.Int32, null, true),
+            new("status", SqlType.Int32, null, true),
+        ];
+        var rows = BuildSptValuesRows(nameType, typeType);
+        var view = new CatalogView("spt_values", columns, (_, _) => rows, masterScoped: true);
+        views["dbo.spt_values"] = view;
+        views["spt_values"] = view;
+    }
+
+    /// <summary>
+    /// Materializes the <c>master.dbo.spt_values</c> rows once: the four
+    /// type <c>'E'</c> environment rows (probe-confirmed values) followed by the
+    /// 2048 type <c>'P'</c> power-of-2 rows (<c>number</c> 0..2047).
+    /// </summary>
+    private static SqlValue[][] BuildSptValuesRows(NVarcharSqlType nameType, NCharSqlType typeType)
+    {
+        var typeE = SqlValue.FromNChar(typeType, "E");
+        var typeP = SqlValue.FromNChar(typeType, "P");
+        var nullName = SqlValue.Null(nameType);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var status0 = SqlValue.FromInt32(0);
+
+        SqlValue[] ERow(int number, string name, int low) =>
+        [
+            SqlValue.FromNVarchar(nameType, name),
+            SqlValue.FromInt32(number),
+            typeE,
+            SqlValue.FromInt32(low),
+            nullInt,
+            status0,
+        ];
+
+        var rows = new SqlValue[4 + 2048][];
+        rows[0] = ERow(0, "SQLSERVER HOST TYPE", 0);
+        rows[1] = ERow(1, "WINDOWS/NT", 8192);
+        rows[2] = ERow(2, "int high bit", int.MinValue);
+        rows[3] = ERow(3, "int4 high byte", 1);
+        for (var number = 0; number < 2048; number++)
+        {
+            rows[4 + number] =
+            [
+                nullName,
+                SqlValue.FromInt32(number),
+                typeP,
+                SqlValue.FromInt32((number / 8) + 1),
+                SqlValue.FromInt32(1 << (number % 8)),
+                status0,
+            ];
+        }
+        return rows;
     }
 
     private static void RegisterSysobjects(Dictionary<string, CatalogView> views)

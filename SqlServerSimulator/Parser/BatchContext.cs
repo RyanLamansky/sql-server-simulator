@@ -1666,7 +1666,17 @@ internal sealed class BatchContext
         // view is keyed `sys.<name>` / `INFORMATION_SCHEMA.<name>`, so a bare
         // user-table name never collides.
         var key = name.Count == 1 ? name.Leaf : $"{name.ImmediateQualifier}.{name.Leaf}";
-        return Simulation.CatalogViews.TryGetValue(key, out view);
+        if (!Simulation.CatalogViews.TryGetValue(key, out view))
+            return false;
+        // master.dbo.spt_values (and its 1-/2-part forms) resolve only when the
+        // reference lands in master — the compatibility table exists nowhere else.
+        if (view.MasterScoped && !Collation.Baseline.Equals(targetDatabase.Name, Simulation.MasterDatabaseName))
+        {
+            view = null;
+            targetDatabase = null;
+            return false;
+        }
+        return true;
     }
 
     /// <summary>

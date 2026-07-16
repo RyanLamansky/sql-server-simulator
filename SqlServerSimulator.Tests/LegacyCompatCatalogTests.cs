@@ -127,4 +127,66 @@ public sealed class LegacyCompatCatalogTests
             left outer join #tmp_vardec as vardec on dtb.database_id = db_id(vardec.dbname)
             where dtb.name = db_name()
             """));
+
+    /// <summary>
+    /// master.dbo.spt_values type 'E' number 1 (the WINDOWS/NT row) carries
+    /// low = 8192 — SMO's Table space math reads it as the page size
+    /// (<c>@PageSize = v.low / 1024.0</c> → 8 KB).
+    /// </summary>
+    [TestMethod]
+    public void SptValues_TypeE_PageSizeRow()
+        => AreEqual(8192, new Simulation().ExecuteScalar<int>(
+            "select low from master.dbo.spt_values where type = 'E' and number = 1"));
+
+    /// <summary>
+    /// The type 'P' power-of-2 helper: 2048 rows (number 0..2047) with
+    /// low = number / 8 + 1, high = 1 &lt;&lt; (number % 8), name NULL.
+    /// </summary>
+    [TestMethod]
+    public void SptValues_TypeP_PowerOfTwoRows()
+    {
+        var sim = new Simulation();
+        AreEqual(2048, sim.ExecuteScalar<int>("select count(*) from master.dbo.spt_values where type = 'P'"));
+        // number 10 → low = 2, high = 4, name NULL.
+        using var reader = sim.ExecuteReader(
+            "select low, high, name from master.dbo.spt_values where type = 'P' and number = 10");
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        AreEqual(4, reader.GetInt32(1));
+        IsTrue(reader.IsDBNull(2));
+        // Formula holds across the whole range: no row violates low/high.
+        AreEqual(0, sim.ExecuteScalar<int>("""
+            select count(*) from master.dbo.spt_values
+            where type = 'P' and (low <> number / 8 + 1 or high <> power(2, number % 8))
+            """));
+    }
+
+    /// <summary>
+    /// Only the two type codes SMO / SSMS actually reference are modeled: 'E'
+    /// (4 rows) and 'P' (2048 rows), for 2052 total. The other ~27 codes a live
+    /// master carries are deliberately omitted.
+    /// </summary>
+    [TestMethod]
+    public void SptValues_ModelsOnlyReferencedTypeCodes()
+    {
+        var sim = new Simulation();
+        AreEqual(2052, sim.ExecuteScalar<int>("select count(*) from master.dbo.spt_values"));
+        AreEqual(2, sim.ExecuteScalar<int>("select count(distinct type) from master.dbo.spt_values"));
+        AreEqual(4, sim.ExecuteScalar<int>("select count(*) from master.dbo.spt_values where type = 'E'"));
+    }
+
+    /// <summary>
+    /// spt_values is a master.dbo compatibility table: the unqualified /
+    /// <c>dbo.</c>-qualified forms bind only when master is the current database.
+    /// From a user database the unqualified name raises Msg 208, while the
+    /// 3-part <c>master.dbo.spt_values</c> resolves from anywhere.
+    /// </summary>
+    [TestMethod]
+    public void SptValues_UnqualifiedResolvesOnlyInMaster()
+    {
+        // From the default user database, bare spt_values is invalid.
+        _ = new Simulation().AssertSqlError("select count(*) from spt_values", 208);
+        // Switching to master, the unqualified name resolves.
+        AreEqual(2052, new Simulation().ExecuteScalar<int>("use master; select count(*) from spt_values"));
+    }
 }

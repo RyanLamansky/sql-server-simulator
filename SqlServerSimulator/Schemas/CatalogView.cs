@@ -27,9 +27,20 @@ namespace SqlServerSimulator.Schemas;
 /// metadata without bookkeeping.
 /// </para>
 /// </remarks>
-internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchContext, Database, IEnumerable<SqlValue[]>> rowGenerator)
+internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchContext, Database, IEnumerable<SqlValue[]>> rowGenerator, bool masterScoped = false)
 {
     public readonly string Name = name;
+
+    /// <summary>
+    /// When true, this view resolves only when the reference lands in the
+    /// <c>master</c> database — the <c>master.dbo.spt_values</c> compatibility
+    /// table lives solely in <c>master</c>, so unqualified / <c>dbo.</c>-qualified
+    /// forms bind only while <c>master</c> is the current (or 3-part-qualified)
+    /// database. Enforced in <see cref="Parser.BatchContext.TryResolveCatalogView"/>.
+    /// Every <c>sys.*</c> / <c>INFORMATION_SCHEMA.*</c> view is server-wide, so
+    /// this defaults false.
+    /// </summary>
+    public readonly bool MasterScoped = masterScoped;
 
     /// <summary>
     /// Deterministic, process-stable <c>object_id</c> surfaced by

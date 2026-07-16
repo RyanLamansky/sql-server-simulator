@@ -426,6 +426,88 @@ public sealed class SsmsTablesNodeCatalogTests
     }
 
     /// <summary>
+    /// sys.dm_db_partition_stats emits one row per (object_id, index_id) that
+    /// sys.partitions reports, sharing the synthetic partition_id (the join key),
+    /// with partition_number = 1.
+    /// </summary>
+    [TestMethod]
+    public void DmDbPartitionStats_OneRowPerPartition_SharesPartitionId()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null, b int null)");
+        _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
+        _ = sim.ExecuteNonQuery("create unique index ux_b on t(b)");
+        // Three partitions (clustered PK + two indexes), each joining to its
+        // sys.partitions row on partition_id, all partition_number = 1.
+        AreEqual(3, sim.ExecuteScalar<int>("""
+            select count(*)
+            from sys.partitions p join sys.dm_db_partition_stats s
+                on p.partition_id = s.partition_id and p.object_id = s.object_id and p.index_id = s.index_id
+            where p.object_id = object_id('t')
+            """));
+        AreEqual(3, sim.ExecuteScalar<int>(
+            "select count(*) from sys.dm_db_partition_stats where object_id = object_id('t') and partition_number = 1"));
+    }
+
+    /// <summary>
+    /// row_count tracks the live heap row count and the page counts grow as rows
+    /// are inserted — the same live-projection contract sys.partitions.rows and
+    /// sys.allocation_units page counts follow.
+    /// </summary>
+    [TestMethod]
+    public void DmDbPartitionStats_RowCountAndPages_MoveAfterInsert()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, filler nvarchar(2000) null)");
+        _ = sim.ExecuteNonQuery("insert into t (id, filler) select value, replicate(N'x', 1000) from generate_series(1, 5)");
+        AreEqual(5L, sim.ExecuteScalar<long>(
+            "select row_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 1"));
+        var pagesBefore = sim.ExecuteScalar<long>(
+            "select in_row_used_page_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 1");
+        _ = sim.ExecuteNonQuery("insert into t (id, filler) select value, replicate(N'x', 1000) from generate_series(6, 200)");
+        AreEqual(200L, sim.ExecuteScalar<long>(
+            "select row_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 1"));
+        var pagesAfter = sim.ExecuteScalar<long>(
+            "select in_row_used_page_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 1");
+        IsGreaterThan(pagesBefore, pagesAfter);
+    }
+
+    /// <summary>
+    /// Cross-view consistency contract: a table's SUM(used_page_count) across its
+    /// dm_db_partition_stats rows equals the SUM of its allocation-unit total_pages
+    /// (both derive from the same live heap page counts), and used = reserved on
+    /// every row. This is the invariant SSMS's Table IndexSpaceUsed math relies on.
+    /// </summary>
+    [TestMethod]
+    public void DmDbPartitionStats_PageCounts_ConsistentWithAllocationUnits()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null, big nvarchar(max) null)");
+        _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
+        _ = sim.ExecuteNonQuery("insert into t (id, a, big) select value, value, replicate(cast(N'y' as nvarchar(max)), 10000) from generate_series(1, 40)");
+        var partitionStatsUsed = sim.ExecuteScalar<long>(
+            "select sum(used_page_count) from sys.dm_db_partition_stats where object_id = object_id('t')");
+        var allocationTotal = sim.ExecuteScalar<long>("""
+            select sum(a.total_pages)
+            from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
+            where p.object_id = object_id('t')
+            """);
+        AreEqual(allocationTotal, partitionStatsUsed);
+        // used = reserved on every row (no separate index/IAM overhead modeled).
+        AreEqual(0, sim.ExecuteScalar<int>("""
+            select count(*) from sys.dm_db_partition_stats
+            where object_id = object_id('t') and used_page_count <> reserved_page_count
+            """));
+        // The LOB pages land only on the base (clustered) partition, matching
+        // allocation_units' per-table LOB attachment; nonclustered partitions
+        // report lob_used_page_count = 0.
+        AreEqual(0L, sim.ExecuteScalar<long>(
+            "select lob_used_page_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 2"));
+        IsGreaterThan(0L, sim.ExecuteScalar<long>(
+            "select lob_used_page_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 1"));
+    }
+
+    /// <summary>
     /// sys.stats emits one row per index sys.indexes reports (excluding the
     /// heap), with stats_id = index_id and name = index name. Auto-created
     /// column statistics (_WA_Sys_*) aren't modeled, so no_recompute /

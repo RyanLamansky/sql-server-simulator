@@ -195,6 +195,60 @@ internal static partial class BuiltInResources
             new("data_pages", SqlType.BigInt, null, false),
         ], EnumerateSysAllocationUnits);
 
+        // sys.dm_db_partition_stats: probe-confirmed 14-column shape against SQL
+        // Server 2025 (2026-07-16). One row per (object_id, index_id) that
+        // sys.partitions / sys.allocation_units report — partition_number = 1,
+        // partition_id = the same synthetic id those views use (the join key).
+        // Page counts derive from the table's live heap page count, kept
+        // consistent with sys.allocation_units: in_row_* = Heap.Pages.Count on
+        // every partition; lob_* = Heap.LobPages.Count only on the base
+        // heap/clustered partition (index_id 0/1), matching allocation_units'
+        // per-table LOB attachment; row_overflow_* = 0 (the row encoder pushes
+        // oversize columns into the LOB chain, so no separate row-overflow
+        // allocation — same as allocation_units omitting type 3). used_page_count
+        // / reserved_page_count are the row-level sums (in_row + lob + overflow),
+        // so SUM(used_page_count) across a table's partitions equals its
+        // allocation_units total and never exceeds SumDataFilePages — the
+        // cross-view consistency contract SSMS's Table IndexSpaceUsed math relies
+        // on. row_count = live Heap.RowCount. SMO's DataSpaceUsed reads
+        // allocation_units; IndexSpaceUsed reads this view. See
+        // docs/claude/catalog-views.md.
+        Sys("dm_db_partition_stats",
+        [
+            new("partition_id", SqlType.BigInt, null, true),
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("partition_number", SqlType.Int32, null, false),
+            new("in_row_data_page_count", SqlType.BigInt, null, true),
+            new("in_row_used_page_count", SqlType.BigInt, null, true),
+            new("in_row_reserved_page_count", SqlType.BigInt, null, true),
+            new("lob_used_page_count", SqlType.BigInt, null, true),
+            new("lob_reserved_page_count", SqlType.BigInt, null, true),
+            new("row_overflow_used_page_count", SqlType.BigInt, null, true),
+            new("row_overflow_reserved_page_count", SqlType.BigInt, null, true),
+            new("used_page_count", SqlType.BigInt, null, true),
+            new("reserved_page_count", SqlType.BigInt, null, true),
+            new("row_count", SqlType.BigInt, null, true),
+        ], EnumerateSysDmDbPartitionStats);
+
+        // sys.dm_db_xtp_table_memory_stats: in-memory-OLTP per-table memory DMV.
+        // Memory-optimized tables aren't modeled, so this is an empty view (full
+        // probe-confirmed 5-column shape, SQL Server 2025, 2026-07-16). Load-
+        // bearing for parse binding, not data: SMO's Table DataSpaceUsed /
+        // IndexSpaceUsed queries branch on is_memory_optimized and reference this
+        // view in the (never-taken, but compile-time-bound) memory-optimized arm
+        // — without the view the whole statement failed Msg 208 and the property
+        // errored. The is_memory_optimized = 0 arm (every simulator table) reads
+        // allocation_units / dm_db_partition_stats instead.
+        Sys("dm_db_xtp_table_memory_stats",
+        [
+            new("object_id", SqlType.Int32, null, true),
+            new("memory_allocated_for_table_kb", SqlType.BigInt, null, true),
+            new("memory_used_by_table_kb", SqlType.BigInt, null, true),
+            new("memory_allocated_for_indexes_kb", SqlType.BigInt, null, true),
+            new("memory_used_by_indexes_kb", SqlType.BigInt, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+
         // sys.stats: one row per index sys.indexes reports, excluding the
         // heap (index_id = 0, which carries no statistics). stats_id =
         // index_id and name = index name, matching real SQL Server's
@@ -623,6 +677,54 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt64(totalPages),
                 SqlValue.FromInt64(usedPages),
                 SqlValue.FromInt64(dataPages),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.dm_db_partition_stats</c>: one per (object_id, index_id)
+    /// that <see cref="EnumerateSysPartitions"/> reports, partition_number = 1,
+    /// partition_id = the same synthetic id (the <c>sys.partitions</c> /
+    /// <c>sys.allocation_units</c> join key). Page counts derive from the live
+    /// <see cref="Storage.Heap"/> the same way <see cref="EnumerateAllocationUnitData"/>
+    /// does — in_row_* = Pages.Count on every partition, lob_* = LobPages.Count
+    /// only on the base heap/clustered partition (the first identity per table),
+    /// row_overflow_* = 0. used_page_count / reserved_page_count are the
+    /// in_row + lob + overflow row-level sums, so a table's SUM(used_page_count)
+    /// equals its allocation-unit total (the cross-view consistency contract).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDmDbPartitionStats(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var partitionNumber = SqlValue.FromInt32(1);
+        var zeroPages = SqlValue.FromInt64(0);
+        HeapTable? lastTable = null;
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        {
+            var isBase = !ReferenceEquals(table, lastTable);
+            lastTable = table;
+            var partitionId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
+            long inRow = table.Heap.Pages.Count;
+            long lob = isBase ? table.Heap.LobPages.Count : 0;
+            var inRowValue = SqlValue.FromInt64(inRow);
+            var lobValue = SqlValue.FromInt64(lob);
+            var usedReserved = SqlValue.FromInt64(inRow + lob);
+            yield return
+            [
+                SqlValue.FromInt64(partitionId),
+                SqlValue.FromInt32(table.ObjectId),
+                SqlValue.FromInt32(indexId),
+                partitionNumber,
+                inRowValue, // in_row_data_page_count
+                inRowValue, // in_row_used_page_count
+                inRowValue, // in_row_reserved_page_count
+                lobValue,   // lob_used_page_count
+                lobValue,   // lob_reserved_page_count
+                zeroPages,  // row_overflow_used_page_count
+                zeroPages,  // row_overflow_reserved_page_count
+                usedReserved, // used_page_count
+                usedReserved, // reserved_page_count
+                SqlValue.FromInt64(table.Heap.RowCount),
             ];
         }
     }
