@@ -323,6 +323,47 @@ public sealed class DacFxExportCatalogTests
     }
 
     /// <summary>
+    /// A table type's IDENTITY column surfaces through sys.identity_columns —
+    /// DacFx's table-type column populator LEFT JOINs it on the
+    /// type_table_object_id to read seed_value / increment_value. Without a row
+    /// the ISNULL(...,0) collapses both to 0, and DacFx exports
+    /// IdentitySeed=0 / IdentityIncrement=0 (increment 0 is invalid, so the
+    /// re-import rejects the type). Real SQL Server reports seed 1 / increment 1
+    /// and last_value NULL for a table type's identity column (no rows ever
+    /// materialize into the template).
+    /// </summary>
+    [TestMethod]
+    public void SysIdentityColumns_TableTypeIdentity_ReportsSeedAndIncrement()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.SeededList as table (id int identity(1, 1) primary key, v int)");
+        AreEqual(1, sim.ExecuteScalar(
+            "select count(*) from sys.identity_columns ic " +
+            "join sys.table_types tt on ic.object_id = tt.type_table_object_id " +
+            "where tt.name = 'SeededList'"));
+        // The DacFx populator shape: LEFT JOIN sys.identity_columns keyed off the
+        // table type's column, projecting ISNULL(seed/increment, 0) as decimal(38).
+        var row = sim.ExecuteScalar(
+            "select cast(isnull(ic.seed_value, 0) as decimal(38)) " +
+            "from sys.columns c " +
+            "inner join sys.table_types tt on c.object_id = tt.type_table_object_id " +
+            "left join sys.identity_columns ic on ic.object_id = c.object_id and ic.column_id = c.column_id " +
+            "where tt.name = 'SeededList' and c.name = 'id'");
+        AreEqual(1m, row);
+        AreEqual(1m, sim.ExecuteScalar(
+            "select cast(isnull(ic.increment_value, 0) as decimal(38)) " +
+            "from sys.columns c " +
+            "inner join sys.table_types tt on c.object_id = tt.type_table_object_id " +
+            "left join sys.identity_columns ic on ic.object_id = c.object_id and ic.column_id = c.column_id " +
+            "where tt.name = 'SeededList' and c.name = 'id'"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar(
+            "select ic.last_value from sys.identity_columns ic " +
+            "join sys.table_types tt on ic.object_id = tt.type_table_object_id " +
+            "where tt.name = 'SeededList'"));
+    }
+
+    /// <summary>
     /// DacFx's assembly-type scripting query joins sys.assembly_types.assembly_class;
     /// the three CLR system types carry their probe-confirmed class names but are
     /// is_user_defined = 0, so the query's filter returns zero rows.

@@ -223,6 +223,8 @@ internal sealed partial class Selection
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
             sources, joins, expressions, fromClause, distinct, aggregates, windows);
 
+        var columnNullability = ComputeColumnNullability(expressions, sources, joins);
+
         var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topExpression is not null || offsetExpression is not null || fetchExpression is not null,
@@ -256,7 +258,39 @@ internal sealed partial class Selection
         // meaningful when the shape is updatable (single base table).
         if (updatabilityProfile is not null)
             selection.CursorOrderBy = orderBy;
+        selection.ColumnNullability = columnNullability;
         return selection;
+    }
+
+    /// <summary>
+    /// Per-projection-column nullability for result-set metadata (the TDS
+    /// COLMETADATA fNullable flag). Computed only for the single-source
+    /// no-join shape, where <see cref="Expression.ResultIsNullable"/>'s
+    /// rules (direct refs preserve base-column nullability, expressions
+    /// nullable) match SQL Server's result metadata; joined shapes return
+    /// null and the wire falls back to claiming every column nullable —
+    /// outer joins NULL-fill the inner side, so base-column nullability
+    /// alone would over-claim NOT NULL there. Load-bearing for DacFx bacpac
+    /// export: its BCP data-file layout drops the per-value length prefix
+    /// on fixed-width columns whose wire metadata says NOT NULL, and the
+    /// bacpac loader reads the file per the model.xml declaration — the two
+    /// must agree.
+    /// </summary>
+    private static bool[]? ComputeColumnNullability(List<Expression> expressions, FromSource[] sources, JoinSpec[] joins)
+    {
+        if (sources.Length != 1 || joins.Length != 0)
+            return null;
+
+        bool ResolveNullable(MultiPartName name)
+        {
+            var (s, c) = FindSourceColumn(sources, name);
+            return s == -1 || sources[s].Columns[c].Nullable;
+        }
+
+        var nullability = new bool[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
+            nullability[i] = expressions[i].ResultIsNullable(ResolveNullable);
+        return nullability;
     }
 
     /// <summary>

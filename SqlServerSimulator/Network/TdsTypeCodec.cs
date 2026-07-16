@@ -34,7 +34,16 @@ internal static class TdsTypeCodec
         }
     }
 
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames)
+    /// <summary>
+    /// <paramref name="columnNullability"/> feeds each column's fNullable
+    /// flag (first flags byte 0x09 nullable / 0x08 not); null claims every
+    /// column nullable. NOT NULL flags are load-bearing for DacFx bacpac
+    /// export — its BCP data files drop the per-value length prefix on
+    /// fixed-width columns whose result metadata says NOT NULL, and the
+    /// bacpac loader decodes per the model.xml declaration, so a false
+    /// nullable claim here misaligns every exported row.
+    /// </summary>
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability)
     {
         writer.WriteByte(Tds.TokenColMetadata);
         writer.WriteUInt16(checked((ushort)schema.Length));
@@ -42,18 +51,108 @@ internal static class TdsTypeCodec
         {
             var type = schema[i];
             writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : 0u);
-            writer.WriteByte(0x09);
+            writer.WriteByte(columnNullability is null || columnNullability[i] ? (byte)0x09 : (byte)0x08);
             writer.WriteByte(0);
             WriteTypeInfo(writer, type);
             writer.WriteBVarchar(columnNames[i]);
         }
     }
 
-    public static void WriteRow(TdsTokenWriter writer, SqlType[] schema, RowCursor cursor)
+    public static void WriteRow(TdsTokenWriter writer, SqlType[] schema, RowCursor cursor, bool[]? columnNullability)
     {
         writer.WriteByte(Tds.TokenRow);
         for (var i = 0; i < schema.Length; i++)
-            WriteValue(writer, schema[i], cursor[i]);
+        {
+            if (columnNullability is not null && !columnNullability[i] && IsRawWhenNotNull(schema[i]))
+                WriteRawFixedValue(writer, schema[i], cursor[i]);
+            else
+                WriteValue(writer, schema[i], cursor[i]);
+        }
+    }
+
+    /// <summary>
+    /// The BYTELEN wire families whose ROW values drop the length prefix
+    /// once the column's COLMETADATA claims NOT NULL — SqlClient reads
+    /// INTN / BITN / FLTN / MONEYN / DATETIMN values raw at the declared
+    /// width for non-nullable columns (probe-confirmed against SqlClient
+    /// 6.1: a length-prefixed value there desyncs the stream). The other
+    /// BYTELEN families (date / time / datetime2 / datetimeoffset,
+    /// DECIMALN, GUIDN) and every USHORTLEN / PLP form keep their prefixes
+    /// regardless of the nullability flag. Must stay aligned with the
+    /// fNullable flag <see cref="WriteColMetadata"/> emits — both read the
+    /// same per-column nullability array.
+    /// </summary>
+    private static bool IsRawWhenNotNull(SqlType type) => type
+        is TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType
+        or BitSqlType or RealSqlType or FloatSqlType
+        or SmallMoneySqlType or MoneySqlType
+        or DateTimeSqlType or SmallDateTimeSqlType;
+
+    /// <summary>
+    /// Writes one cell of an <see cref="IsRawWhenNotNull"/> family as raw
+    /// payload bytes — no length prefix, no NULL form (the column's
+    /// metadata claims NOT NULL, so a NULL cell can't occur here).
+    /// </summary>
+    private static void WriteRawFixedValue(TdsTokenWriter writer, SqlType type, SqlValue value)
+    {
+        switch (type)
+        {
+            case TinyIntSqlType:
+                writer.WriteByte(value.AsByte);
+                break;
+            case SmallIntSqlType:
+                writer.WriteUInt16((ushort)value.AsInt16);
+                break;
+            case Int32SqlType:
+                writer.WriteInt32(value.AsInt32);
+                break;
+            case BigIntSqlType:
+                writer.WriteInt64(value.AsInt64);
+                break;
+            case BitSqlType:
+                writer.WriteByte(value.AsBoolean ? (byte)1 : (byte)0);
+                break;
+            case RealSqlType:
+                writer.WriteUInt32(BitConverter.SingleToUInt32Bits(value.AsSingle));
+                break;
+            case FloatSqlType:
+                writer.WriteUInt64(BitConverter.DoubleToUInt64Bits(value.AsDouble));
+                break;
+            case SmallMoneySqlType:
+                writer.WriteInt32((int)value.AsMoneyScaledUnits);
+                break;
+            case MoneySqlType:
+                var scaled = value.AsMoneyScaledUnits;
+                writer.WriteInt32((int)(scaled >> 32));
+                writer.WriteUInt32((uint)scaled);
+                break;
+            case SmallDateTimeSqlType:
+                {
+                    var dt = value.AsSmallDateTime;
+                    writer.WriteUInt16((ushort)(dt.Date - Epoch1900).Days);
+                    writer.WriteUInt16((ushort)((dt.Hour * 60) + dt.Minute));
+                    break;
+                }
+
+            case DateTimeSqlType:
+                {
+                    var dt = value.AsDateTime;
+                    var days = (dt.Date - Epoch1900).Days;
+                    var thirds = (uint)(((dt.TimeOfDay.Ticks * 3) + 50_000) / 100_000);
+                    if (thirds == 25_920_000)
+                    {
+                        days++;
+                        thirds = 0;
+                    }
+
+                    writer.WriteInt32(days);
+                    writer.WriteUInt32(thirds);
+                    break;
+                }
+
+            default:
+                throw new InvalidOperationException($"not an IsRawWhenNotNull type: {type}");
+        }
     }
 
     /// <summary>

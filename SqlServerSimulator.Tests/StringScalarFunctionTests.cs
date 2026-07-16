@@ -134,10 +134,8 @@ public sealed class StringScalarFunctionTests
 
     /// <summary>
     /// Probe-confirmed: <c>REPLICATE(varchar(MAX), N)</c> produces a result whose
-    /// length isn't capped at 8000. The DATALENGTH probe value is asserted via
-    /// the simulator's <c>int</c>-typed DATALENGTH return — real SQL Server
-    /// returns <c>bigint</c> for MAX inputs, a pre-existing simulator
-    /// divergence orthogonal to REPLICATE itself.
+    /// length isn't capped at 8000. DATALENGTH over the MAX-typed result
+    /// returns <c>bigint</c>, matching real — hence the <c>long</c> read.
     /// </summary>
     [TestMethod]
     public void Replicate_VarcharMax_NoTruncation()

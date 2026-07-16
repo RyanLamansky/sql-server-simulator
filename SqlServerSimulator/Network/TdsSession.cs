@@ -290,13 +290,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (outcome is SimulatedQueryResult query)
             {
                 TdsTypeCodec.ValidateSchema(query.Schema);
-                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames);
+                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability);
                 long rows = 0;
                 using (var cursor = query.CreateCursor())
                 {
                     while (cursor.MoveNext())
                     {
-                        TdsTypeCodec.WriteRow(writer, query.Schema, cursor);
+                        TdsTypeCodec.WriteRow(writer, query.Schema, cursor, query.ColumnNullability);
                         rows++;
                         await writer.FlushAsync(final: false, cancellationToken).ConfigureAwait(false);
                     }

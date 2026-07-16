@@ -83,6 +83,8 @@ Statement dispatch: `Spatial` added to `ContextualKeyword` enum; CREATE SPATIAL 
 
 Both are 2D-only: the decoder falls back to `SqlValue.Null` for unknown versions and Z/M variants (resilient — one bad row doesn't fail the BCP file); the encoder raises `NotSupportedException` for EMPTY / Z / M / unrecognized shapes (WWI has none).
 
+**`DATALENGTH` over a spatial value** measures this serialization (a 2D point = 22 bytes, probe-confirmed against WWI `Cities.Location`), not the stored WKT text — `DataLength.Run` special-cases `SpatialSqlType` through the encoder while the storage layer's `GetVariableByteCount` keeps sizing the WKT it actually stores. Load-bearing for DacFx bacpac export: the bulk reader's `DATALENGTH([geoCol])` companion becomes the BCP length prefix for the wire value bytes, and a WKT-text length there desyncs every geography-bearing table on re-import.
+
 ## Known gaps
 
 - **WKT/WKB parsing for validation** — currently any string is accepted as a "WKT" payload.

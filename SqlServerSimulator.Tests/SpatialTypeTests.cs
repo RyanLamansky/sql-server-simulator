@@ -292,4 +292,25 @@ public sealed class SpatialTypeTests
             "create table dbo.np (id int); create spatial index six on dbo.np(id)",
             12002,
             "The requested spatial index on column 'id' of table 'np' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.");
+
+    /// <summary>
+    /// DATALENGTH over a spatial value measures the CLR-UDT serialization
+    /// (what a real server stores), not the simulator's WKT text: a 2D
+    /// point is 22 bytes as <c>int</c> — probe-confirmed against WWI's
+    /// Application.Cities CityID 1 on the live reference (22,
+    /// base type int). DacFx bacpac export writes DATALENGTH([geoCol]) as
+    /// the BCP length prefix for the wire value bytes, so the two must
+    /// measure the same serialized form.
+    /// </summary>
+    [TestMethod]
+    public void DataLength_SpatialValues_MeasureClrSerialization()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table dbo.dl (id int, g geography, m geometry);
+            insert dbo.dl values (1, geography::Parse('POINT(-77.4533235 40.8997903)'), geometry::Parse('POINT(1 2)'))
+            """);
+        AreEqual(22, sim.ExecuteScalar("select datalength(g) from dbo.dl"));
+        AreEqual(22, sim.ExecuteScalar("select datalength(m) from dbo.dl"));
+    }
 }

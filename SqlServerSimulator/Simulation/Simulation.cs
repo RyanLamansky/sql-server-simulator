@@ -840,7 +840,7 @@ public sealed partial class Simulation
             connection.LastStatementRowCount = rows.Count;
             yield return selection.IsAssignmentOnly
                 ? new SimulatedNonQuery(rows.Count)
-                : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
+                : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability };
             WriteBackOutputParameters(batch);
         }
         finally
@@ -1405,7 +1405,7 @@ public sealed partial class Simulation
                     connection.LastStatementRowCount = rows.Count;
                     outcome = selection.IsAssignmentOnly
                         ? new SimulatedNonQuery(rows.Count)
-                        : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows);
+                        : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability };
 
                     // Plan-cache promotion inline before the yield. Gates:
                     // top-level (BlockDepth == 0 → not inside IF / WHILE /

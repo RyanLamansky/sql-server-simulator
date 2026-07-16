@@ -142,6 +142,18 @@ internal sealed partial class Selection
     /// </summary>
     internal List<OrderBySpec>? CursorOrderBy;
 
+    /// <summary>
+    /// Per-column nullability for result-set metadata, parallel to
+    /// <see cref="Schema"/>; true = nullable. Null when unknown (joined /
+    /// set-op / non-projection shapes), which consumers treat as
+    /// all-nullable. Set post-construction by <c>BuildSqlProjection</c> for
+    /// the single-source no-join shape — see
+    /// <c>ComputeColumnNullability</c> for the inference rules and why
+    /// DacFx bacpac export depends on this reaching the TDS COLMETADATA
+    /// fNullable flag.
+    /// </summary>
+    internal bool[]? ColumnNullability;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
 
     /// <summary>
@@ -255,8 +267,8 @@ internal sealed partial class Selection
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
         this.valueRowSource is { } values
-            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver))
-            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver));
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability }
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability };
 
     /// <summary>
     /// Creates a <see cref="Selection"/> from a series of tokens. Follows the

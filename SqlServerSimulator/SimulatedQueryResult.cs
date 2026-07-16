@@ -23,6 +23,16 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     /// </summary>
     public abstract SqlType[] Schema { get; }
 
+    /// <summary>
+    /// Per-column nullability parallel to <see cref="Schema"/>; true =
+    /// nullable. Null means unknown, which metadata consumers (the TDS
+    /// COLMETADATA fNullable flag) treat as all-nullable. Populated only by
+    /// the single-source no-join SELECT projection — see
+    /// <c>Selection.ColumnNullability</c> for the inference contract and
+    /// the DacFx bacpac-export dependency.
+    /// </summary>
+    public bool[]? ColumnNullability;
+
     /// <summary>Creates a fresh cursor that iterates this result's rows.</summary>
     public abstract RowCursor CreateCursor();
 }

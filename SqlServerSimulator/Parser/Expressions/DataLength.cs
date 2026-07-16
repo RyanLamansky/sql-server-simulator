@@ -1,4 +1,5 @@
 ﻿using SqlServerSimulator.Storage;
+using SqlServerSimulator.Storage.Bacpac;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -27,9 +28,17 @@ internal sealed class DataLength(ParserContext context) : Expression
         var value = source.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(this.returnsBigInt ? SqlType.BigInt : SqlType.Int32);
-        var byteCount = value.Type.IsFixedLength
-            ? value.Type.FixedLength
-            : value.Type.GetVariableByteCount(value);
+        // Spatial values report the CLR-UDT serialization length (what a
+        // real server stores and sends), not the byte count of the WKT text
+        // the simulator stores — GetVariableByteCount serves the storage
+        // layer's sizing of that text. DacFx's bacpac export writes
+        // DATALENGTH([geoCol]) as the BCP length prefix for the value bytes
+        // it reads off the wire, so the two must measure the same form.
+        var byteCount = value.Type is SpatialSqlType spatial
+            ? SpatialWkbEncoder.Encode(value.AsString, spatial is GeographySqlType, spatial is GeographySqlType ? 4326 : 0).Length
+            : value.Type.IsFixedLength
+                ? value.Type.FixedLength
+                : value.Type.GetVariableByteCount(value);
         return this.returnsBigInt ? SqlValue.FromInt64(byteCount) : SqlValue.FromInt32(byteCount);
     }
 

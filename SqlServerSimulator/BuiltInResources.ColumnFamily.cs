@@ -391,6 +391,32 @@ internal static partial class BuiltInResources
                     ];
                 }
             }
+            // Table types surface their IDENTITY columns here too, keyed by
+            // type_table_object_id (parity with sys.columns, which sets
+            // is_identity=true for them). The template is never inserted into,
+            // so last_value is always NULL — matching real SQL Server, which
+            // reports seed/increment but a NULL high-water mark for a table
+            // type's identity column. DacFx's table-type column populator LEFT
+            // JOINs this view to read seed_value / increment_value.
+            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            {
+                var objectId = SqlValue.FromInt32(tt.ObjectId);
+                for (var i = 0; i < tt.Columns.Length; i++)
+                {
+                    var col = tt.Columns[i];
+                    if (col.Identity is not { } identity)
+                        continue;
+                    yield return [
+                        objectId,
+                        SqlValue.FromSystemName(col.Name),
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromInt64(identity.Seed),
+                        SqlValue.FromInt64(identity.Increment),
+                        nullLast,
+                        falseBit,
+                    ];
+                }
+            }
         }
     }
 
