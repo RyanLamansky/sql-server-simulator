@@ -97,7 +97,7 @@ internal static partial class BuiltInResources
         // precision / scale / is_output / is_nullable. Probe-confirmed
         // ordering: return type emits first (parameter_id=0, empty name),
         // declared params follow in source order.
-        Sys("parameters",
+        HeapColumn[] parameterColumns =
         [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
@@ -108,9 +108,28 @@ internal static partial class BuiltInResources
             new("precision", SqlType.TinyInt, null, false),
             new("scale", SqlType.TinyInt, null, false),
             new("is_output", SqlType.Bit, null, false),
-            new("is_nullable", SqlType.Bit, null, false),
+            new("is_cursor_ref", SqlType.Bit, null, false),
+            new("has_default_value", SqlType.Bit, null, false),
+            new("is_xml_document", SqlType.Bit, null, false),
+            // default_value is sql_variant in real SQL Server; surfaced here as
+            // nvarchar (always NULL — the simulator doesn't track parameter
+            // default values).
+            new("default_value", SqlType.NVarchar, 4000, true),
+            new("xml_collection_id", SqlType.Int32, null, false),
             new("is_readonly", SqlType.Bit, null, false),
-        ], EnumerateParameters);
+            new("is_nullable", SqlType.Bit, null, false),
+        ];
+        Sys("parameters", parameterColumns, EnumerateParameters);
+
+        // sys.all_parameters: identical shape to sys.parameters in real SQL
+        // Server (parameters of user objects + system objects). The simulator
+        // enumerates only user-object parameters, so it shares sys.parameters'
+        // rows verbatim. SMO's UserDefinedFunction / StoredProcedure scripting
+        // reads the return/parameter metadata through sys.all_parameters
+        // (LEFT JOIN … ret_param.object_id = udf.object_id AND
+        // ret_param.is_output = 1); without the view every such property errors
+        // Msg 208.
+        Sys("all_parameters", parameterColumns, EnumerateParameters);
 
         // sys.views: per-view rows. Load-bearing subset of real SQL Server's
         // sys.views shape — object_id / name / schema_id / with_check_option /
@@ -288,14 +307,22 @@ internal static partial class BuiltInResources
             new("scale", SqlType.TinyInt, null, false),
         ], EnumerateSysTypes);
 
-        // sys.table_types: per-database list of user-defined table types
-        // only. Probe-confirmed shipped subset: name / type_table_object_id /
-        // is_user_defined / schema_id / user_type_id / is_memory_optimized.
-        // is_memory_optimized is a constant 0 — memory-optimized table types
-        // aren't modeled, and SMO's SSMS Object-Explorer index/key/FK
-        // sub-node queries read it via
-        // (SELECT tt.is_memory_optimized FROM sys.table_types tt WHERE
-        //  tt.type_table_object_id = i.object_id).
+        // sys.table_types: per-database list of user-defined table types only.
+        // sys.table_types derives from sys.types, so it carries the full
+        // sys.types column set plus the table-type-specific
+        // type_table_object_id / is_memory_optimized. The sys.types-inherited
+        // columns are constant for every table type (probe-confirmed against
+        // SQL Server 2025): system_type_id 243, max_length -1, precision 0,
+        // scale 0, collation_name NULL, is_nullable 0, is_assembly_type 0,
+        // is_table_type 1, principal_id NULL. is_memory_optimized is a constant
+        // 0 (memory-optimized table types aren't modeled). SMO's UDTT
+        // property-bag / Script query reads tt.max_length / is_nullable /
+        // collation_name / principal_id, and its SSMS index/key/FK sub-node
+        // queries read is_memory_optimized via (SELECT tt.is_memory_optimized
+        // FROM sys.table_types tt WHERE tt.type_table_object_id = i.object_id).
+        // The sys.types-inherited columns are appended (not reordered into the
+        // real sys.table_types position) so existing positional consumers of
+        // the original six columns keep working; SMO reads every column by name.
         Sys("table_types",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -304,6 +331,15 @@ internal static partial class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("user_type_id", SqlType.Int32, null, false),
             new("is_memory_optimized", SqlType.Bit, null, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
+            new("collation_name", SqlType.SystemName, 128, true),
+            new("is_nullable", SqlType.Bit, null, true),
+            new("is_assembly_type", SqlType.Bit, null, false),
+            new("is_table_type", SqlType.Bit, null, false),
         ], EnumerateSysTableTypes);
 
         // sys.sequences: per-database list of user-defined sequence objects.
@@ -369,6 +405,19 @@ internal static partial class BuiltInResources
             new("scope_batch", SqlType.NVarchar, 4000, true),
             new("parameters", SqlType.NVarchar, 4000, true),
             new("hints", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.numbered_procedures: numbered stored procedures are a removed
+        // legacy feature, so the view is always empty. SMO's StoredProcedure
+        // scripting LEFT JOINs it (and reads its definition) to detect the
+        // deprecated numbered-proc form; an empty result scripts the ordinary
+        // single-body procedure. Probe-confirmed 3-column shape (SQL Server
+        // 2025).
+        Sys("numbered_procedures",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("procedure_number", SqlType.SmallInt, null, false),
+            new("definition", SqlType.NVarchar, 4000, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.assembly_types: the three CLR-backed system types shipped by
@@ -540,6 +589,11 @@ internal static partial class BuiltInResources
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
+        var tableTypeSystemTypeId = SqlValue.FromByte(243);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var negOneLength = SqlValue.FromInt16(-1);
+        var zeroByte = SqlValue.FromByte(0);
+        var nullCollation = SqlValue.Null(SqlType.SystemName);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -552,6 +606,15 @@ internal static partial class BuiltInResources
                     schemaId,
                     SqlValue.FromInt32(tt.UserTypeId),
                     falseBit,
+                    tableTypeSystemTypeId,
+                    nullPrincipal,
+                    negOneLength,
+                    zeroByte,
+                    zeroByte,
+                    nullCollation,
+                    falseBit,
+                    falseBit,
+                    trueBit,
                 ];
             }
         }
@@ -728,6 +791,8 @@ internal static partial class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
+        var zeroInt = SqlValue.FromInt32(0);
+        var nullDefault = SqlValue.Null(SqlType.NVarchar);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -751,8 +816,13 @@ internal static partial class BuiltInResources
                         zeroByte,
                         zeroByte,
                         SqlValue.FromBoolean(param.IsOutput),
-                        trueBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        nullDefault,
+                        zeroInt,
                         SqlValue.FromBoolean(isTvp),
+                        trueBit,
                     ];
                 }
             }
@@ -775,8 +845,13 @@ internal static partial class BuiltInResources
                         zeroByte,
                         zeroByte,
                         trueBit,
-                        trueBit,
                         falseBit,
+                        falseBit,
+                        falseBit,
+                        nullDefault,
+                        zeroInt,
+                        falseBit,
+                        trueBit,
                     ];
                 }
                 for (var i = 0; i < fn.Parameters.Length; i++)
@@ -792,8 +867,13 @@ internal static partial class BuiltInResources
                         zeroByte,
                         zeroByte,
                         falseBit,
-                        trueBit,
                         falseBit,
+                        falseBit,
+                        falseBit,
+                        nullDefault,
+                        zeroInt,
+                        falseBit,
+                        trueBit,
                     ];
                 }
             }

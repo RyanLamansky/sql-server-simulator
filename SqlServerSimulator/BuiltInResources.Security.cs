@@ -120,6 +120,11 @@ internal static partial class BuiltInResources
             new("is_fixed_role", SqlType.Bit, null, false),
             new("authentication_type", SqlType.TinyInt, null, true),
             new("authentication_type_desc", nvarchar60Catalog, 60, true),
+            // default_language_name / default_language_lcid aren't tracked
+            // (always NULL). SMO's User property-bag reads both via
+            // ISNULL(u.default_language_lcid, -1) / ISNULL(u.default_language_name, N'').
+            new("default_language_name", SqlType.SystemName, 128, true),
+            new("default_language_lcid", SqlType.Int32, null, true),
         ], EnumerateSysDatabasePrincipals);
 
         // sys.database_permissions: probe-confirmed 8-col shipped subset.
@@ -195,6 +200,101 @@ internal static partial class BuiltInResources
             new("is_expiration_checked", SqlType.Bit, null, true),
             new("password_hash", SqlType.Varbinary, 256, true),
         ], EnumerateSysSqlLogins);
+
+        // sys.server_permissions: server-scope permission grants. The
+        // simulator has no server-permission model, so the view is always
+        // empty. SMO's Login property-bag LEFT JOINs it
+        // (sp.grantee_principal_id = log.principal_id AND sp.type = N'COSQ')
+        // to resolve HasAccess / DenyWindowsLogin; an empty result means no
+        // explicit CONNECT-SQL deny (the common case). Shape mirrors
+        // sys.database_permissions.
+        Sys("server_permissions",
+        [
+            new("class", SqlType.TinyInt, null, false),
+            new("class_desc", nvarchar60Catalog, 60, true),
+            new("major_id", SqlType.Int32, null, false),
+            new("minor_id", SqlType.Int32, null, false),
+            new("grantee_principal_id", SqlType.Int32, null, false),
+            new("grantor_principal_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("permission_name", nvarchar128Catalog, 128, true),
+            new("state", charOne, 1, false),
+            new("state_desc", nvarchar60Catalog, 60, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.server_role_members: server-role membership. No server-role
+        // membership is modeled, so the view is always empty. SMO's Login
+        // scripting INNER JOINs it (server_principals → server_role_members)
+        // to enumerate a login's fixed-server-role memberships; an empty result
+        // scripts no ALTER SERVER ROLE … ADD MEMBER statements.
+        Sys("server_role_members",
+        [
+            new("role_principal_id", SqlType.Int32, null, false),
+            new("member_principal_id", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+
+        // sys.asymmetric_keys / sys.certificates / sys.credentials: encryption
+        // key objects aren't modeled, so all three are always empty. The full
+        // probe-confirmed shapes (SQL Server 2025) ship so a direct SELECT sees
+        // an authentic (empty) result, and — more load-bearing — SMO's Login
+        // and User property-bag queries LEFT JOIN sys.certificates /
+        // sys.asymmetric_keys ON sid, and its Login bag LEFT JOINs
+        // sys.credentials ON credential_id (also reached as
+        // master.sys.certificates / master.sys.asymmetric_keys). Without the
+        // views those bag queries fail Msg 208 and every Login / User property
+        // errors. cryptographic_provider_algid is sql_variant in real SQL
+        // Server; surfaced here as nvarchar since the view is always empty.
+        Sys("asymmetric_keys",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("asymmetric_key_id", SqlType.Int32, null, false),
+            new("pvt_key_encryption_type", charTwo, 2, false),
+            new("pvt_key_encryption_type_desc", nvarchar60Catalog, 60, true),
+            new("thumbprint", SqlType.Varbinary, 32, true),
+            new("algorithm", charTwo, 2, false),
+            new("algorithm_desc", nvarchar60Catalog, 60, true),
+            new("key_length", SqlType.Int32, null, false),
+            new("sid", SqlType.Varbinary, 85, true),
+            new("string_sid", SqlType.NVarchar, 128, true),
+            new("public_key", VarbinarySqlType.MaxForm, null, true),
+            new("attested_by", SqlType.NVarchar, 260, true),
+            new("provider_type", SqlType.NVarchar, 120, true),
+            new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
+            new("cryptographic_provider_algid", SqlType.NVarchar, 4000, true),
+        ], static (_, _) => EmptyCatalogRows);
+
+        Sys("certificates",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("certificate_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("pvt_key_encryption_type", charTwo, 2, false),
+            new("pvt_key_encryption_type_desc", nvarchar60Catalog, 60, true),
+            new("is_active_for_begin_dialog", SqlType.Bit, null, false),
+            new("issuer_name", SqlType.NVarchar, 442, true),
+            new("cert_serial_number", SqlType.NVarchar, 64, true),
+            new("sid", SqlType.Varbinary, 85, true),
+            new("string_sid", SqlType.NVarchar, 128, true),
+            new("subject", SqlType.NVarchar, 4000, true),
+            new("expiry_date", SqlType.DateTime, null, false),
+            new("start_date", SqlType.DateTime, null, false),
+            new("thumbprint", SqlType.Varbinary, 32, true),
+            new("attested_by", SqlType.NVarchar, 260, true),
+            new("pvt_key_last_backup_date", SqlType.DateTime, null, true),
+            new("key_length", SqlType.Int32, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+
+        Sys("credentials",
+        [
+            new("credential_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("credential_identity", SqlType.NVarchar, 4000, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("target_type", SqlType.NVarchar, 100, true),
+            new("target_id", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
     }
 
     /// <summary>
@@ -242,6 +342,8 @@ internal static partial class BuiltInResources
         var nullSid = SqlValue.Null(SqlType.Varbinary);
         var nullAuthType = SqlValue.Null(SqlType.TinyInt);
         var nullAuthDesc = SqlValue.Null(SqlType.NVarchar);
+        var nullLanguageName = SqlValue.Null(SqlType.SystemName);
+        var nullLanguageLcid = SqlValue.Null(SqlType.Int32);
         // 4-letter padding to fit char(2) — the type column is 2 bytes in
         // real SQL Server's catalog. SqlValue.FromChar pads to declared length.
         var charTwo = SqlType.GetChar(2);
@@ -261,6 +363,8 @@ internal static partial class BuiltInResources
                 p.IsFixedRole ? trueBit : falseBit,
                 nullAuthType,
                 nullAuthDesc,
+                nullLanguageName,
+                nullLanguageLcid,
             ];
         }
     }

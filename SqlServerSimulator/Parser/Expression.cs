@@ -299,9 +299,11 @@ internal abstract class Expression
                         // function used in scalar position as "missing scalar
                         // UDF or ambiguous" rather than a distinct error.
                         expression = reference.ReferencedName.Count >= 2
-                            ? context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn
-                                ? UserFunctionCall.ParseCall(scalarFn, context)
-                                : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName)
+                            ? VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction
+                                ? systemFunction
+                                : context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn
+                                    ? UserFunctionCall.ParseCall(scalarFn, context)
+                                    : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName)
                             : ResolveBuiltIn(reference.Name, context);
                         // ResolveBuiltIn / ParseCall leave context.Token at the
                         // closing ). The next loop iteration's GetNextOptional

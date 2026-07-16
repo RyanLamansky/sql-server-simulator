@@ -160,6 +160,20 @@ Five integer scalars sharing one dispatch file (`Parser/Expressions/BitManipulat
 
 **`LOGINPROPERTY(login_name, property_name)`** (`Parser/Expressions/LoginProperty.cs`) — resolves the single fixed login (`dbo`, the placeholder `SUSER_NAME` reports) plus any login registered via `CREATE LOGIN` (see [`permissions.md`](permissions.md)); any other name behaves like a nonexistent login and returns **NULL** for every property (probe-confirmed: nonexistent login → NULL across the board). NULL login / NULL property / unrecognized property → NULL. Property names case-insensitive. Values are plausible constants matching the live probe's shape: `PasswordLastSetTime` → the login's actual password-set stamp for a registered login, a fixed seed date `2020-01-01 00:00:00.000` for `dbo`; `BadPasswordTime` / `LockoutTime` → the `1900-01-01` "never" sentinel; `BadPasswordCount` / `HistoryLength` / `IsExpired` / `IsLocked` / `IsMustChange` → `0`; `DaysUntilExpiration` / `PasswordHash` / `PasswordHashAlgorithm` → NULL (a low-privilege login sees NULL for the hash on the live server too, matching what the simulator exposes); `DefaultDatabase` → the session's current database; `DefaultLanguage` → `us_english`. **Divergence**: real SQL Server projects each property as `sql_variant` with a per-property base type (`datetime` / `int` / `nvarchar` / `varbinary`); the simulator doesn't model `sql_variant`, so — following `SERVERPROPERTY` — every value surfaces as `nvarchar`, reached through implicit conversion when a caller casts.
 
+## Varbinary-to-hex system functions: `sys.fn_varbintohexsubstring` / `sys.fn_varbintohexstr`
+
+**`sys.fn_varbintohexsubstring(@fFullLength bit, @value varbinary(max), @start int, @length int)`** and **`sys.fn_varbintohexstr(@value varbinary(max))`** (`Parser/Expressions/VarbinaryToHex.cs`) format a `varbinary` as a lowercase hex string → `nvarchar(max)`. SMO scripts login SIDs and binary defaults through them (`SidHexString`, `fn_replp2pversiontotranid`). These are **sys-schema-qualified system functions**, not unqualified built-ins: they resolve only as `sys.fn_…` (any database's sys schema, 2- or 3-part) — plus `master.dbo.fn_varbintohexstr` — and are wired into the multi-part call branch in `Expression.cs` (before user-function resolution), *not* into `ResolveBuiltIn`. An unqualified `fn_varbintohexstr(…)` raises **Msg 195** (not a recognized built-in) and the current database's `dbo.fn_varbintohexstr` raises **Msg 4121** — both probe-confirmed, both preserved.
+
+Probe-confirmed semantics (SQL Server 2025):
+- Any NULL argument → NULL.
+- `@fFullLength` non-zero prefixes the result with `0x`; zero omits the prefix (`sys.fn_varbintohexsubstring(1, 0x0123ABCDEF, 1, 0)` → `0x0123abcdef`; `@fFullLength = 0` → `0123abcdef`).
+- `@start` is a 1-based **byte** offset; `@start < 1` or `@start >` the byte count → NULL (so start 1 on an empty `0x` → NULL).
+- `@length <= 0` means "to the end"; a positive length clamps to the bytes remaining from `@start` (`(…, 2, 3)` → `0x23abcd`; `(…, 2, 99)` → `0x23abcdef`).
+- Hex digits are lowercase (via `Convert.ToHexStringLower`).
+- `fn_varbintohexstr(@value)` ≡ `fn_varbintohexsubstring(1, @value, 1, 0)`.
+
+**Divergence**: the result carries the baseline collation (`SqlType.NVarcharMax`) rather than the database collation real SQL Server stamps — immaterial for the ASCII-only hex output and its standalone-projection use sites.
+
 ## Session / connection placeholders
 
 Constants whose values don't carry real session/server identity in the simulator — they exist for SQL emitted by tooling that reads them (DACFx / EF Core / migration scripts) to receive a sensible non-NULL response.

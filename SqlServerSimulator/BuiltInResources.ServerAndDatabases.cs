@@ -324,6 +324,27 @@ internal static partial class BuiltInResources
             new("mirroring_replication_lsn", lsnNumeric, null, true),
         ], EnumerateSysDatabaseMirroring);
 
+        // sys.endpoints: server-scope endpoint catalog. The simulator's TDS
+        // listener isn't surfaced as a configured endpoint object, so the view
+        // is always empty — SMO's Server.Endpoints enumeration does
+        // `SELECT e.name FROM sys.endpoints AS e ORDER BY [Name]`, which must
+        // resolve and return zero rows (the real server's built-in system
+        // endpoints aren't modeled). Probe-confirmed column shape (SQL Server
+        // 2025).
+        Sys("endpoints",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("endpoint_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("protocol", SqlType.TinyInt, null, false),
+            new("protocol_desc", nvarchar60Catalog, 60, true),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("state", SqlType.TinyInt, null, false),
+            new("state_desc", nvarchar60Catalog, 60, true),
+            new("is_admin_endpoint", SqlType.Bit, null, false),
+        ], static (_, _) => EmptyCatalogRows);
+
         // sys.availability_replicas: server-scope AlwaysOn Availability-Group
         // catalog. No AGs are configured in the simulator, so the view is
         // always empty — SSMS's enumeration does
