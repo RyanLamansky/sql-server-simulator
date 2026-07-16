@@ -848,6 +848,19 @@ internal abstract partial class SqlType
     };
 
     /// <summary>
+    /// Returns the <c>(MAX)</c> variant of a variable-length string / binary
+    /// type, preserving collation / coercibility; non-var types pass through
+    /// unchanged. Used when a column carries its MAX-ness in
+    /// <see cref="HeapColumn.MaxLength"/> (the <see cref="MaxLengthSentinel"/>)
+    /// while its <see cref="SqlType"/> stayed a length-0 "value-width"
+    /// variant — folding it back in ensures an expression that references the
+    /// column (<c>ISNULL</c> / <c>COALESCE</c> / <c>CASE</c>) types as MAX and
+    /// streams as PLP over the wire instead of overflowing the bounded 2-byte
+    /// length prefix.
+    /// </summary>
+    internal static SqlType AsMaxVariant(SqlType type) => ResolveVarFamilyForLength(type, MaxLengthSentinel);
+
+    /// <summary>
     /// Resolves a parameterized fixed-length string/binary type
     /// (<c>char(N)</c>, <c>nchar(N)</c>, <c>binary(N)</c>) to its singleton
     /// instance. Defaults match SQL Server's two-context rule: declared length

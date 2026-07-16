@@ -166,6 +166,55 @@ public sealed class LargeValueTests
         AreEqual(9829, exception.Number);
     }
 
+    [DataRow("isnull-user", "select isnull(big, N'') from t")]
+    [DataRow("coalesce-user", "select coalesce(big, N'') from t")]
+    [DataRow("case-user", "select case when id = 1 then big else N'' end from t")]
+    [TestMethod]
+    public async Task MaxColumn_WrappedInExpression_RoundTripsOverWire(string label, string query)
+    {
+        // A HeapColumn can carry its MAX-ness in MaxLength while its .Type is a
+        // length-0 "value-width" variant (catalog columns like
+        // sys.sql_modules.definition are declared this way, but the projection
+        // resolver applies to every source). Wrapping such a column in an
+        // expression must still type nvarchar(max) — before the resolver folded
+        // MaxLength back in, ISNULL/COALESCE/CASE over a large value lost MAX
+        // and overflowed the bounded wire prefix, silently killing the session
+        // (SMO reads proc bodies as ISNULL(sql_modules.definition, …) — the SMO
+        // API sweep's residual transport crash).
+        var value = new string('x', 40000);
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (id int, big nvarchar(max))");
+        Wire.ExecInProcParam(simulation, "insert t values (1, @v)", "@v", value);
+
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(query, connection);
+        var result = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
+
+        IsNotNull(result, label);
+        IsGreaterThan(32767, result!.Length, label);
+    }
+
+    [TestMethod]
+    public async Task CatalogModuleDefinition_WrappedInIsNull_RoundTripsOverWire()
+    {
+        // SMO's exact proc-body shape: ISNULL(sql_modules.definition, …) over a
+        // >32,767-char module definition, which must stream as PLP.
+        var simulation = new Simulation();
+        var padding = new string('x', 40000);
+        Wire.ExecInProc(simulation, $"create procedure dbo.big_proc as /* {padding} */ select 1");
+
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select isnull(m.definition, N'') from sys.sql_modules m where m.object_id = object_id('dbo.big_proc')",
+            connection);
+        var definition = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
+
+        IsNotNull(definition);
+        IsGreaterThan(40000, definition!.Length);
+    }
+
     [TestMethod]
     public async Task TenThousandRows_StreamOverWire()
     {

@@ -79,11 +79,25 @@ internal sealed partial class Selection
     private static SqlType ResolveColumnTypeAcrossSources(FromSource[] sources, MultiPartName name, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var (s, c) = FindSourceColumn(sources, name);
-        return s != -1
-            ? sources[s].Columns[c].Type
-            : outerTypeResolver is not null
-                ? outerTypeResolver(name)
-                : throw SimulatedSqlException.InvalidColumnName(name);
+        if (s != -1)
+        {
+            // A HeapColumn can carry its MAX-ness in MaxLength while its .Type
+            // stays a length-0 "value-width" variant (catalog-view columns
+            // like sys.sql_modules.definition are declared this way). Fold that
+            // back in so an expression referencing the column (ISNULL /
+            // COALESCE / CASE — SMO reads proc bodies as
+            // ISNULL(sql_modules.definition, …)) types as MAX and streams as
+            // PLP over the wire, rather than losing MAX to the bounded 2-byte
+            // length prefix and overflowing on a large value.
+            var column = sources[s].Columns[c];
+            return column.MaxLength == SqlType.MaxLengthSentinel
+                ? SqlType.AsMaxVariant(column.Type)
+                : column.Type;
+        }
+
+        return outerTypeResolver is not null
+            ? outerTypeResolver(name)
+            : throw SimulatedSqlException.InvalidColumnName(name);
     }
 
     /// <summary>
