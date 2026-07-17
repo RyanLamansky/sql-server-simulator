@@ -38,7 +38,8 @@ internal sealed class FromSource(
     HeapTable? backingTable = null,
     View? backingView = null,
     DataLockPlan? heapPlan = null,
-    bool materializeOnce = false)
+    bool materializeOnce = false,
+    bool isPlaceholder = false)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -106,6 +107,46 @@ internal sealed class FromSource(
     /// TVFs, views) leave this false and keep their per-outer-row execution.
     /// </summary>
     public readonly bool MaterializeOnce = materializeOnce;
+
+    /// <summary>
+    /// True when this source stands in for an unresolvable table referenced by
+    /// a statement being parsed in skip mode (an un-taken <c>IF</c> / <c>WHILE</c>
+    /// branch, or a block skipped after <c>BREAK</c> / <c>CONTINUE</c> /
+    /// <c>RETURN</c>). Real SQL Server binds object names lazily, so a skipped
+    /// statement referencing a missing table compiles cleanly and is discarded;
+    /// the simulator resolves inline with parsing, so it substitutes this
+    /// placeholder to let the statement parse to completion instead of throwing
+    /// mid-parse. A placeholder source carries one synthetic nullable column so
+    /// <c>SELECT *</c> expands to a non-empty projection, and its presence in a
+    /// source set makes unresolved column references across those sources bind
+    /// leniently (see <c>Selection.ResolveColumnTypeAcrossSources</c>) — matching
+    /// SQL Server's rule that any missing object defers the whole statement's
+    /// binding. Only ever set in skip mode; the statement is discarded before
+    /// execution, so the placeholder's rows never surface.
+    /// </summary>
+    public readonly bool IsPlaceholder = isPlaceholder;
+
+    /// <summary>
+    /// Builds a placeholder source for a table that failed to resolve while a
+    /// statement was being parsed in skip mode. See <see cref="IsPlaceholder"/>.
+    /// The single synthetic column keeps <c>SELECT *</c> from expanding to an
+    /// empty projection; its type is irrelevant since the statement never
+    /// executes.
+    /// </summary>
+    public static FromSource DeferredPlaceholder(string? qualifier)
+    {
+        var synthetic = new HeapColumn("placeholder", SqlType.Int32, maxLength: null, nullable: true);
+        HeapColumn[] columns = [synthetic];
+        return new FromSource(
+            qualifier: qualifier,
+            columnNames: [synthetic.Name],
+            columns: columns,
+            storedSchema: columns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: [],
+            isPlaceholder: true);
+    }
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>

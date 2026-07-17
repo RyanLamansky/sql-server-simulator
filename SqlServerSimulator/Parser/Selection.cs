@@ -1497,7 +1497,29 @@ internal sealed partial class Selection
                 }
 
                 if (!context.Batch.TryResolveTable(objectName, out var heapTable))
+                {
+                    // Skip mode: real SQL Server defers name binding, so a table
+                    // referenced by an un-taken branch compiles and is discarded.
+                    // Substitute a placeholder source so the rest of the
+                    // statement (including any trailing ELSE / END the recovery
+                    // scan would otherwise orphan) parses to completion. Consume
+                    // an optional TVF-style argument group, alias, and hints so
+                    // the cursor lands past the source. The statement never
+                    // executes, so the placeholder's shape is immaterial.
+                    if (context.Batch.IsSkipping)
+                    {
+                        var probe = context.SaveCheckpoint();
+                        context.MoveNextOptional();
+                        if (context.Token is Operator { Character: '(' })
+                            SkipBalancedParens(context);
+                        else
+                            context.RestoreCheckpoint(probe);
+                        var placeholderAlias = ConsumeOptionalAlias(context);
+                        _ = ParseOptionalTableHints(context);
+                        return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
+                    }
                     throw SimulatedSqlException.InvalidObjectName(objectName);
+                }
 
                 var heapColumnNames = new string[heapTable.Columns.Length];
                 for (var ci = 0; ci < heapColumnNames.Length; ci++)

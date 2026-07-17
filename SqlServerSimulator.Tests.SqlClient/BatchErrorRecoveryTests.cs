@@ -93,6 +93,42 @@ public sealed class BatchErrorRecoveryTests
         AreEqual(208, errors[0]);
     }
 
+    /// <summary>
+    /// The SSMS Query Store shape over the wire: a missing table behind an
+    /// EXISTS inside an un-taken outer IF, whose inner IF carries an ELSE.
+    /// Before skip-mode placeholder parse-continuation, the missing table threw
+    /// mid-parse and the recovery scan orphaned the inner ELSE into a bare
+    /// statement — the continue-on-error wire path turned that into a runaway
+    /// error stream (the SSMS Query Store probe crash of 2026-07-15). The
+    /// statement now parses to completion and is discarded, so the batch streams
+    /// only the trailing SELECT with no error token.
+    /// </summary>
+    [TestMethod]
+    public async Task SkippedBranch_ExistsMissingTableWithInnerElse_StreamsCleanly()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+
+        var errors = new List<int>();
+        await using var connection = new SqlConnection(Wire.ConnectionString(listener));
+        connection.FireInfoMessageEventOnUserErrors = true;
+        connection.InfoMessage += (_, e) =>
+        {
+            foreach (SqlError error in e.Errors)
+                errors.Add(error.Number);
+        };
+        await connection.OpenAsync(TestContext.CancellationToken);
+
+        await using var command = new SqlCommand(
+            "if 1 = 0 begin if exists(select * from missing) select 1 as r else select 2 as r end "
+            + "select 'after' as r", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("after", reader.GetString(0));
+        IsFalse(await reader.NextResultAsync(TestContext.CancellationToken));
+        IsEmpty(errors);
+    }
+
     [TestMethod]
     public async Task UseHintUnknownName_SurfacesMsg10715()
     {

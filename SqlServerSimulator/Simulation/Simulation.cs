@@ -1317,15 +1317,30 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// True for the parse-time errors real SQL Server defers to bind time —
-    /// Msg 208 (invalid object name) and Msg 207 (invalid column name). These
-    /// are the only errors swallowed for a statement dispatched in skip mode
-    /// (un-taken IF / WHILE branch, or a block skipped after BREAK / CONTINUE
-    /// / RETURN), matching real SQL Server's deferred name resolution. Syntax
-    /// and structural errors carry other numbers and still propagate.
+    /// True for the parse-time error real SQL Server defers to bind time —
+    /// Msg 208 (invalid object name) — when it surfaces from a statement
+    /// dispatched in skip mode (un-taken IF / WHILE branch, or a block skipped
+    /// after BREAK / CONTINUE / RETURN). Real SQL Server binds object names
+    /// lazily, so a skipped statement referencing a missing table / sequence /
+    /// XML collection compiles cleanly and is discarded; this swallow drops it
+    /// rather than surfacing an error.
     /// </summary>
+    /// <remarks>
+    /// The common orphan-prone shapes — a missing table in a FROM clause (incl.
+    /// an <c>EXISTS</c> / scalar subquery inside an <c>IF</c> condition) and a
+    /// missing schema-qualified function call — no longer reach here: the FROM
+    /// parser and the function-call parser substitute placeholder metadata in
+    /// skip mode (<see cref="FromSource.IsPlaceholder"/>, <c>Expression</c>'s
+    /// deferred-call fallback), so those statements parse to completion and are
+    /// discarded whole. This swallow remains for the residual object-name sites
+    /// that still resolve inline (DML target tables, <c>NEXT VALUE FOR</c>
+    /// sequences, XML schema collections). Msg 207 (invalid column on a
+    /// resolvable table) is deliberately excluded — probe-confirmed that real
+    /// SQL Server errors on it at compile time even in an un-taken branch, so it
+    /// falls through to the batch-aborting path (<see cref="IsBatchAbortingNameResolution"/>).
+    /// </remarks>
     private static bool IsDeferrableNameResolutionError(SimulatedSqlException ex)
-        => ex.Number is 207 or 208;
+        => ex.Number is 208;
 
     /// <summary>
     /// True when <paramref name="ex"/> is a statement-terminating error that

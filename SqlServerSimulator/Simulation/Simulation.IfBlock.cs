@@ -383,7 +383,11 @@ partial class Simulation
 
         // RETURN inside the block exits early without reaching END — abandon
         // the block; outer DispatchStatementsUntil also stops on ReturnSignaled.
-        if (batch.ReturnSignaled)
+        // A batch-aborting error (e.g. a Msg 207 on a resolvable table inside a
+        // skipped block) likewise leaves the cursor mid-statement with no
+        // recovery scan, so short-circuit the "expect END" check to let the one
+        // error surface instead of a spurious Msg 102 near the abandoned token.
+        if (batch.ReturnSignaled || batch.BatchAborted)
             yield break;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
@@ -453,7 +457,7 @@ partial class Simulation
         foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
             yield return o;
 
-        if (batch.ReturnSignaled)
+        if (batch.ReturnSignaled || batch.BatchAborted)
             yield break;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })

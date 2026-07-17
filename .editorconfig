@@ -16,6 +16,7 @@ dotnet_diagnostic.IDE0022.severity = none # Use block body for method
 dotnet_diagnostic.IDE0023.severity = none # Use block body for conversion operator
 dotnet_diagnostic.IDE0024.severity = none # Use block body for operator
 dotnet_diagnostic.IDE0040.severity = none # Add accessibility modifiers
+dotnet_diagnostic.IDE0045.severity = none # Forced ternary operators can be too unreadable.
 dotnet_diagnostic.IDE0061.severity = none # Use block body for local function
 dotnet_diagnostic.IDE0072.severity = none # Add missing cases
 

@@ -65,8 +65,12 @@ internal sealed partial class Selection
                 }
             }
         }
+        // Ambiguity across real sources is a compile error — unless a
+        // placeholder source is in scope, in which case real SQL Server defers
+        // the whole statement's binding (the missing object could own the name),
+        // so bind to the first match and let the discarded statement carry on.
         return matches > 1
-            ? throw SimulatedSqlException.AmbiguousColumnName(name.Leaf)
+            ? AnyPlaceholderSource(sources) ? (foundSource, foundColumn) : throw SimulatedSqlException.AmbiguousColumnName(name.Leaf)
             : matches == 1 ? (foundSource, foundColumn) : (-1, -1);
     }
 
@@ -95,9 +99,32 @@ internal sealed partial class Selection
                 : column.Type;
         }
 
-        return outerTypeResolver is not null
-            ? outerTypeResolver(name)
-            : throw SimulatedSqlException.InvalidColumnName(name);
+        // A placeholder source (skip-mode stand-in for an unresolvable table)
+        // means real SQL Server would defer this whole statement's binding, so
+        // an unresolved column can't be a compile error — it just belongs to
+        // the missing object. Return a placeholder type; the statement is
+        // discarded before execution. Without a placeholder in scope, a genuine
+        // missing column on a resolvable table stays a Msg 207 even in skip mode
+        // (probe-confirmed: real SQL Server errors at compile time here).
+        return AnyPlaceholderSource(sources)
+            ? SqlType.Int32
+            : outerTypeResolver is not null
+                ? outerTypeResolver(name)
+                : throw SimulatedSqlException.InvalidColumnName(name);
+    }
+
+    /// <summary>
+    /// True when any source in the set is a skip-mode placeholder (a stand-in
+    /// for an unresolvable table). See <see cref="FromSource.IsPlaceholder"/>.
+    /// </summary>
+    internal static bool AnyPlaceholderSource(FromSource[] sources)
+    {
+        foreach (var source in sources)
+        {
+            if (source.IsPlaceholder)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

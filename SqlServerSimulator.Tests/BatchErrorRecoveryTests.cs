@@ -96,13 +96,27 @@ public sealed class BatchErrorRecoveryTests
             select 7
             """));
 
+    /// <summary>
+    /// A missing column on a <em>resolvable</em> table aborts the batch even
+    /// from an un-taken IF branch. Probe-confirmed (SQL Server 2025,
+    /// 2026-07-17): real SQL Server binds the columns of an existing table at
+    /// compile time and raises Msg 207 regardless of the branch being dead, so
+    /// the statement after the IF never runs. Deferred name resolution applies
+    /// only when the base object is itself missing (see
+    /// <see cref="SkipModeBranch_ToleratesMissingObject_Unchanged"/>) — a
+    /// resolvable table's columns bind eagerly.
+    /// </summary>
     [TestMethod]
-    public void SkipModeBranch_ToleratesMissingColumn_Unchanged()
-        => AreEqual(7, new Simulation().ExecuteScalar("""
-            create table t (id int);
-            if 1 = 0 select no_such_col from t;
-            select 7
-            """));
+    public void SkipModeBranch_MissingColumnOnResolvableTable_AbortsBatch()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (id int); create table marker (n int)").ExecuteNonQuery();
+        using var failing = connection.CreateCommand(
+            "insert marker values (1); if 1 = 0 select no_such_col from t; insert marker values (2)");
+        var ex = Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery());
+        AreEqual(207, ex.Number);
+        AreEqual(1, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
+    }
 
     [TestMethod]
     public void ContinuableError_DoesNotAbort_FollowingRuns()

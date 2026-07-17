@@ -298,13 +298,38 @@ internal abstract class Expression
                         // probe-confirmed real SQL Server treats a table-valued
                         // function used in scalar position as "missing scalar
                         // UDF or ambiguous" rather than a distinct error.
-                        expression = reference.ReferencedName.Count >= 2
-                            ? VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction
-                                ? systemFunction
-                                : context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn
-                                    ? UserFunctionCall.ParseCall(scalarFn, context)
-                                    : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName)
-                            : ResolveBuiltIn(reference.Name, context);
+                        if (reference.ReferencedName.Count >= 2)
+                        {
+                            if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
+                            {
+                                expression = systemFunction;
+                            }
+                            else if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn)
+                            {
+                                expression = UserFunctionCall.ParseCall(scalarFn, context);
+                            }
+                            else if (context.Batch.IsSkipping)
+                            {
+                                // Skip mode: real SQL Server defers user-function
+                                // binding, so an un-taken branch calling a missing
+                                // schema-qualified function compiles and is
+                                // discarded. Parse-and-discard the argument list so
+                                // the statement (and any trailing ELSE / END) parses
+                                // to completion instead of throwing Msg 4121 mid-
+                                // expression. A bare 1-part unrecognized function
+                                // still raises Msg 195 below — real SQL Server errors
+                                // on that at compile time even in a dead branch.
+                                expression = ParseDeferredCallAndDiscard(context);
+                            }
+                            else
+                            {
+                                throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName);
+                            }
+                        }
+                        else
+                        {
+                            expression = ResolveBuiltIn(reference.Name, context);
+                        }
                         // ResolveBuiltIn / ParseCall leave context.Token at the
                         // closing ). The next loop iteration's GetNextOptional
                         // advances past it; advancing here would skip an extra token.
@@ -360,6 +385,33 @@ internal abstract class Expression
 
             return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;
         }
+    }
+
+    /// <summary>
+    /// Skip-mode fallback for a schema-qualified function call whose name
+    /// doesn't resolve. Parses and discards the comma-separated argument list
+    /// so the cursor advances past the call, then returns a placeholder NULL
+    /// expression. On entry the cursor is on the token after the opening
+    /// <c>(</c>; on return it sits on the closing <c>)</c>, matching
+    /// <see cref="UserFunctionCall.ParseFunctionArguments"/>'s post-condition so
+    /// the outer parse loop resumes cleanly. Never runs outside skip mode — the
+    /// discarded statement is conceptually never bound.
+    /// </summary>
+    private static Value ParseDeferredCallAndDiscard(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: ')' })
+        {
+            while (true)
+            {
+                _ = Parse(context);
+                if (context.Token is Operator { Character: ')' })
+                    break;
+                if (context.Token is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+            }
+        }
+        return new Value();
     }
 
     /// <summary>
