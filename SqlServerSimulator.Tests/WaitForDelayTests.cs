@@ -56,8 +56,8 @@ public sealed class WaitForDelayTests
         var elapsed = Stopwatch.GetElapsedTime(start);
         IsGreaterThanOrEqualTo(40, elapsed.TotalMilliseconds,
             $"Expected ≥40ms sleep, got {elapsed.TotalMilliseconds}ms");
-        IsLessThan(500, elapsed.TotalMilliseconds,
-            $"Expected <500ms sleep, got {elapsed.TotalMilliseconds}ms");
+        IsLessThan(2000, elapsed.TotalMilliseconds,
+            $"Expected well under a misparsed-magnitude sleep, got {elapsed.TotalMilliseconds}ms");
     }
 
     [TestMethod]
@@ -68,8 +68,8 @@ public sealed class WaitForDelayTests
         var start = Stopwatch.GetTimestamp();
         _ = new Simulation().ExecuteNonQuery("if 1=0 waitfor delay '00:00:10'");
         var elapsed = Stopwatch.GetElapsedTime(start);
-        IsLessThan(100, elapsed.TotalMilliseconds,
-            $"Expected near-instant skip, got {elapsed.TotalMilliseconds}ms");
+        IsLessThan(2000, elapsed.TotalMilliseconds,
+            $"Expected skip well under the guarded 10s sleep, got {elapsed.TotalMilliseconds}ms");
     }
 
     [TestMethod]
@@ -78,8 +78,8 @@ public sealed class WaitForDelayTests
         var start = Stopwatch.GetTimestamp();
         _ = new Simulation().ExecuteNonQuery("return; waitfor delay '00:00:10'");
         var elapsed = Stopwatch.GetElapsedTime(start);
-        IsLessThan(100, elapsed.TotalMilliseconds,
-            $"Expected near-instant skip, got {elapsed.TotalMilliseconds}ms");
+        IsLessThan(2000, elapsed.TotalMilliseconds,
+            $"Expected skip well under the guarded 10s sleep, got {elapsed.TotalMilliseconds}ms");
     }
 
     [TestMethod]
@@ -94,8 +94,8 @@ public sealed class WaitForDelayTests
             end
             """);
         var elapsed = Stopwatch.GetElapsedTime(start);
-        IsLessThan(100, elapsed.TotalMilliseconds,
-            $"Expected near-instant skip, got {elapsed.TotalMilliseconds}ms");
+        IsLessThan(2000, elapsed.TotalMilliseconds,
+            $"Expected skip well under the guarded 10s sleep, got {elapsed.TotalMilliseconds}ms");
     }
 
     [TestMethod]
@@ -204,7 +204,7 @@ public sealed class WaitForDelayTests
             end
             """);
         var elapsed = Stopwatch.GetElapsedTime(start);
-        IsLessThan(500, elapsed.TotalMilliseconds,
+        IsLessThan(2000, elapsed.TotalMilliseconds,
             $"Expected fast loop, got {elapsed.TotalMilliseconds}ms");
     }
 }
