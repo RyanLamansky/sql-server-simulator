@@ -11,11 +11,13 @@ namespace SqlServerSimulator;
 /// statement-terminating one (unlike Msg 3701 / 8134 / a severity-16 RAISERROR,
 /// which let the batch continue). Missing column (Msg 207), ambiguous column
 /// (Msg 209), and unbindable multi-part identifiers (Msg 4104) abort the same
-/// way. The in-process ADO surface reaches the same end state through its
-/// fail-fast contract (first error throws, later statements never run — see
-/// <see cref="BatchErrorContinuationInProcTests"/>); the wire-path contrast
-/// (results before the error still arrive, exactly one error token, no
-/// abandoned-mid-parse Msg 319 / 102 cascade) lives in
+/// way. The in-process ADO surface now shares the wire's continue-on-error
+/// engine: it drains the batch and surfaces the aggregated error(s) at
+/// completion, so a batch-aborting miss still stops the following statements
+/// (the dispatch loop breaks) while a statement-terminating error lets them
+/// run — see <see cref="BatchErrorContinuationInProcTests"/>. The wire-path
+/// contrast (results before the error still arrive, exactly one error token,
+/// no abandoned-mid-parse Msg 319 / 102 cascade) lives in
 /// <c>BatchErrorRecoveryTests</c> in <c>SqlServerSimulator.Tests.SqlClient</c>.
 /// </summary>
 [TestClass]
@@ -64,18 +66,22 @@ public sealed class BatchErrorRecoveryTests
     }
 
     [TestMethod]
-    public void SyntaxErrorMidBatch_AbortsBatch_FollowingDoesNotRun()
+    public void SyntaxErrorMidBatch_Continues_FollowingRuns()
     {
-        // A true syntax error aborts the batch on real SQL Server (probe:
-        // `SELECT 1; SELECT FROM; SELECT 2` returns only Msg 156, no SELECT 2).
-        // The in-process path reaches the same end state fail-fast.
+        // Accepted divergence: a true syntax error aborts the batch on real SQL
+        // Server (it fails at compile), but the simulator interleaves parse and
+        // execution and can't tell a parse-origin error (Msg 156, class 15)
+        // from a runtime one — so a mid-batch syntax error is statement-
+        // terminating and the batch continues. This is the same parse-vs-runtime
+        // divergence documented for the wire path; unifying the engine extends
+        // it to the in-process surface. The insert after the syntax error runs.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table marker (n int)").ExecuteNonQuery();
 
         using var failing = connection.CreateCommand(
             "insert marker values (1); select from; insert marker values (2)");
         _ = Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery());
-        AreEqual(1, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
+        AreEqual(2, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
     }
 
     /// <summary>
@@ -99,18 +105,19 @@ public sealed class BatchErrorRecoveryTests
             """));
 
     [TestMethod]
-    public void ContinuableError_DoesNotAbort_InProcStillFailsFast()
+    public void ContinuableError_DoesNotAbort_FollowingRuns()
     {
         // Msg 3701 (drop missing) is statement-terminating, not batch-aborting:
-        // the wire continues past it. The in-process path still fails fast — this
-        // pins that the batch-abort carve-out didn't change the in-process
-        // first-error-throws contract for a continuable error.
+        // the batch continues past it on both front doors. In-process,
+        // ExecuteNonQuery drains the whole batch — both inserts land — and
+        // surfaces the 3701 at completion. Contrast the batch-aborting bind
+        // errors above, where the following insert never runs.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table marker (n int)").ExecuteNonQuery();
         using var failing = connection.CreateCommand(
             "insert marker values (1); drop table #nope; insert marker values (2)");
         var ex = Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery());
         AreEqual(3701, ex.Number);
-        AreEqual(1, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
+        AreEqual(2, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
     }
 }

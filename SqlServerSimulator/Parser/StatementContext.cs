@@ -83,4 +83,21 @@ internal sealed class StatementContext
     /// start of each statement iteration by the dispatch loop.
     /// </summary>
     public bool SuppressErrorReset;
+
+    /// <summary>
+    /// Whether this statement's leading keyword makes it row-returning — a
+    /// <c>SELECT</c> (bare, CTE-prefixed, or parenthesized) or <c>VALUES</c>.
+    /// Set at dispatch entry from the leading token. When such a statement
+    /// fails under continue-on-error, real SQL Server has already sent the
+    /// result-set metadata (COLMETADATA) before the error, so the in-process
+    /// reader surfaces it positionally (the first <c>Read</c> throws, the
+    /// reader survives to the next result set). A non-row-returning statement
+    /// (INSERT / UPDATE / DELETE / DDL) has no such envelope, so its error
+    /// surfaces eagerly when the reader advances onto it (at
+    /// <c>ExecuteReader</c> or <c>NextResult</c>) — matching SqlClient and the
+    /// way EF Core's no-OUTPUT modification batches, which never call
+    /// <c>Read</c>, still observe the failure. Carried onto the emitted
+    /// <c>SimulatedErrorOutcome</c>.
+    /// </summary>
+    public bool LeadingKeywordReturnsRows;
 }

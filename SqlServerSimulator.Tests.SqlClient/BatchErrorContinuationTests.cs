@@ -88,6 +88,22 @@ public sealed class BatchErrorContinuationTests
     }
 
     [TestMethod]
+    public async Task ExecuteScalar_TrailingError_DrainsBatch_Throws()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        // ExecuteScalar drains the whole batch: the value of the first result
+        // set is produced, but a trailing statement-terminating error surfaces
+        // as a throw rather than the value being returned (oracle probe 5).
+        await using var command = new SqlCommand("select 42; select 1/0", connection);
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+            _ = await command.ExecuteScalarAsync(TestContext.CancellationToken));
+        AreEqual(8134, ex.Number);
+    }
+
+    [TestMethod]
     public async Task BatchAbortingError_AbortsBatch_LaterStatementDoesNotRun()
     {
         var simulation = new Simulation();

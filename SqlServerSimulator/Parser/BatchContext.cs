@@ -266,15 +266,19 @@ internal sealed class BatchContext
     public bool HasDispatchedStatement;
 
     /// <summary>
-    /// When <see langword="true"/>, a statement-terminating error outside any
-    /// TRY frame is emitted as a <see cref="SimulatedErrorOutcome"/> and the
-    /// batch continues to the next statement, matching real SQL Server's
-    /// default (non-XACT_ABORT) severity model. Set only by the wire path
-    /// (<c>Simulation.CreateResultSetsForCommand</c>'s <c>continueOnError</c>
-    /// argument); the in-process ADO surface leaves it <see langword="false"/>
-    /// so it keeps failing fast on the first error. Not propagated into
-    /// child batches (proc / trigger / UDF / dynamic-SQL bodies), which stay
-    /// fail-fast so their errors surface at the invoking statement.
+    /// Marks the outermost (top-level) batch. When <see langword="true"/>, a
+    /// statement-terminating error outside any TRY frame is emitted as a
+    /// <see cref="SimulatedErrorOutcome"/> and the batch continues to the next
+    /// statement, matching real SQL Server's default (non-XACT_ABORT) severity
+    /// model. Both front doors — the in-process ADO surface and the TDS wire —
+    /// set it (via <c>Simulation.CreateResultSetsForCommand</c>'s
+    /// <c>continueOnError</c> argument, which defaults to
+    /// <see langword="true"/>) and render the resulting shared outcome stream:
+    /// the wire writes error tokens, the ADO reader converts outcomes to
+    /// SqlClient-shaped exceptions. Not propagated into child batches (proc /
+    /// trigger / UDF / dynamic-SQL bodies), which leave it
+    /// <see langword="false"/> so their errors throw and surface at the
+    /// invoking statement.
     /// </summary>
     public bool ContinueOnError;
 

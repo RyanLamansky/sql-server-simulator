@@ -259,7 +259,7 @@ partial class SimulatedSqlException
     /// or supplying the (number, message, state) parameter form.
     /// </summary>
     internal static SimulatedSqlException ThrowMustBeInsideCatch() =>
-        new("To rethrow an error, a THROW statement must be used inside a CATCH block. Insert the THROW statement inside a CATCH block, or add error parameters to the THROW statement.", 10704, 15, 1);
+        new("To rethrow an error, a THROW statement must be used inside a CATCH block. Insert the THROW statement inside a CATCH block, or add error parameters to the THROW statement.", 10704, 15, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Constructs a <c>THROW &lt;number&gt;, &lt;message&gt;, &lt;state&gt;</c>-raised
@@ -272,7 +272,7 @@ partial class SimulatedSqlException
     /// message / state.
     /// </summary>
     internal static SimulatedSqlException ThrowRaised(int number, string message, byte state) =>
-        new(message, number, 16, state);
+        new(message, number, 16, state) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 2787: a <c>RAISERROR</c> format string contains

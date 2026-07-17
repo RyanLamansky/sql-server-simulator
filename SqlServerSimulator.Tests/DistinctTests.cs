@@ -179,7 +179,7 @@ public class DistinctTests
         // SQL Server requires DISTINCT before TOP. Reversed order is a parse
         // failure (Msg 156 with "near 'distinct'").
         var ex = Throws<DbException>(() =>
-            connection.CreateCommand("select top 2 distinct v from t").ExecuteReader());
+            connection.CreateCommand("select top 2 distinct v from t").ExecuteReader().Read());
         AreEqual("Incorrect syntax near the keyword 'distinct'.", ex.Message);
     }
 

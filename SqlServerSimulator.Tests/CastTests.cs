@@ -339,17 +339,19 @@ public sealed class CastTests
     [TestMethod]
     public void Cast_InvalidScale_InLaterStatementOfBatch_FiresWhenReaderReachesIt()
     {
-        // Multi-statement batches parse lazily one statement at a time; statement 3's error doesn't fire until NextResult reaches it.
+        // Multi-statement batches parse lazily one statement at a time and
+        // continue past a statement error. Statement 3 is a (row-returning)
+        // SELECT, so the reader advances onto it — NextResult returns true —
+        // and its error surfaces positionally on the first Read, matching how
+        // real SQL Server frames a failed SELECT (COLMETADATA precedes the
+        // error over the wire).
         using var connection = new Simulation().CreateOpenConnection();
         using var command = connection.CreateCommand("select 1;\nselect 2;\nselect cast('x' as datetime2(8))");
         using var reader = command.ExecuteReader();
 
         IsTrue(reader.NextResult());
-        var ex = Throws<System.Data.Common.DbException>(() =>
-        {
-            _ = reader.NextResult();
-            _ = reader.NextResult();
-        });
+        IsTrue(reader.NextResult());
+        var ex = Throws<System.Data.Common.DbException>(() => reader.Read());
         AreEqual("Line 3: Specified scale 8 is invalid.", ex.Message);
     }
 

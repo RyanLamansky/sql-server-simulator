@@ -106,6 +106,29 @@ public sealed partial class SimulatedSqlException : DbException
     /// <summary>Collection of one or more <see cref="SimulatedError"/> entries. Mirrors <c>SqlException.Errors</c>.</summary>
     public SimulatedErrorCollection Errors { get; }
 
+    /// <summary>
+    /// When <see langword="true"/>, this error terminates the whole batch
+    /// rather than merely its own statement — the statement-continuation
+    /// engine emits it, then stops (real SQL Server's <c>THROW</c> semantics:
+    /// an uncaught <c>THROW</c> ends the batch, unlike a severity-16
+    /// <c>RAISERROR</c> which lets the batch proceed). Set by the
+    /// <c>THROW</c> factories; every other factory leaves it
+    /// <see langword="false"/>. Internal — never part of the public
+    /// <c>SqlException</c>-shaped surface.
+    /// </summary>
+    internal bool TerminatesBatch { get; private init; }
+
+    /// <summary>
+    /// Aggregates the errors gathered while draining a batch to completion
+    /// into a single exception, mirroring how real SqlClient surfaces every
+    /// statement-terminating error of a batch through one
+    /// <c>SqlException.Errors</c> collection (in batch order). The first
+    /// entry supplies the top-level <see cref="Number"/> / <see cref="Class"/>
+    /// / <see cref="State"/> / <c>Message</c>, matching SqlClient.
+    /// </summary>
+    internal static SimulatedSqlException FromErrors(List<SimulatedError> errors)
+        => new(errors[0].Message, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(errors));
+
     /// <summary>1-based line number of the first error. Shortcut for <c>Errors[0].LineNumber</c>; mirrors <c>SqlException.LineNumber</c>.</summary>
     public int LineNumber => this.Errors[0].LineNumber;
 

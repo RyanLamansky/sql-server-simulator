@@ -109,20 +109,103 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     public override void Cancel() { }
 
-    /// <inheritdoc/>
-    public override int ExecuteNonQuery() => simulation
-        .CreateResultSetsForCommand(this)
-        .OfType<SimulatedNonQuery>()
-        .Where(result => result.RecordsAffected != -1)
-        .Select(result => result.RecordsAffected)
-        .DefaultIfEmpty(-1)
-        .Sum();
+    /// <summary>
+    /// Drains the whole batch (all statements execute, all side effects
+    /// persist), summing the rows-affected of each non-query statement, then
+    /// throws if any statement raised a continued error — mirroring real
+    /// SqlClient, which runs a batch to completion and surfaces every
+    /// statement-terminating error through one aggregated
+    /// <see cref="SimulatedSqlException.Errors"/> collection. Returns
+    /// <c>-1</c> when no statement contributed a row count (row-returning
+    /// SELECTs and DDL don't).
+    /// </summary>
+    public override int ExecuteNonQuery()
+    {
+        List<SimulatedSqlException>? errors = null;
+        var affected = 0;
+        var counted = false;
+        foreach (var outcome in simulation.CreateResultSetsForCommand(this))
+        {
+            switch (outcome)
+            {
+                case SimulatedErrorOutcome error:
+                    (errors ??= []).Add(error.Exception);
+                    break;
+                case SimulatedNonQuery nonQuery when nonQuery.RecordsAffected != -1:
+                    affected += nonQuery.RecordsAffected;
+                    counted = true;
+                    break;
+            }
+        }
 
-    /// <inheritdoc/>
+        return errors is not null
+            ? throw AggregateErrors(errors)
+            : counted ? affected : -1;
+    }
+
+    /// <summary>
+    /// Returns the first column of the first row of the first result set,
+    /// matching real SqlClient — but like <see cref="ExecuteNonQuery"/> it
+    /// drains the whole batch, so a trailing statement-terminating error
+    /// throws instead of the value being returned (probe-confirmed:
+    /// <c>SELECT 42; SELECT 1/0</c> throws Msg 8134 rather than returning
+    /// 42). An empty first result set yields <see langword="null"/> without
+    /// consulting later result sets.
+    /// </summary>
     public override object? ExecuteScalar()
     {
-        using var reader = ExecuteDbDataReader();
-        return !reader.Read() ? null : reader[0];
+        List<SimulatedSqlException>? errors = null;
+        object? scalar = null;
+        var haveScalar = false;
+        foreach (var outcome in simulation.CreateResultSetsForCommand(this))
+        {
+            switch (outcome)
+            {
+                case SimulatedErrorOutcome error:
+                    (errors ??= []).Add(error.Exception);
+                    break;
+                case SimulatedQueryResult query when !haveScalar:
+                    using (var cursor = query.CreateCursor())
+                    {
+                        if (cursor.MoveNext())
+                        {
+                            var value = cursor[0];
+                            // A present-but-NULL first column surfaces as
+                            // DBNull.Value (matching SqlClient and the reader's
+                            // GetValue); only an empty first result set leaves
+                            // the C# null that signals "no value".
+                            scalar = value.IsNull ? DBNull.Value : value.ToObject();
+                        }
+                    }
+
+                    haveScalar = true;
+                    break;
+            }
+        }
+
+        return errors is not null ? throw AggregateErrors(errors) : scalar;
+    }
+
+    /// <summary>
+    /// Collapses the statement-terminating errors gathered while draining a
+    /// batch into a single exception. A lone error is rethrown as-is (its
+    /// <see cref="SimulatedSqlException.Errors"/> already carries its own
+    /// entries); multiple errors flatten into one exception whose
+    /// <c>Errors</c> collection holds every entry in batch order.
+    /// </summary>
+    private static SimulatedSqlException AggregateErrors(List<SimulatedSqlException> errors)
+    {
+        if (errors.Count == 1)
+            return errors[0];
+
+        var entries = new List<SimulatedError>(errors.Count);
+        foreach (var error in errors)
+        {
+            foreach (var entry in error.Errors)
+                entries.Add(entry);
+        }
+
+        return SimulatedSqlException.FromErrors(entries);
     }
 
     /// <summary>
@@ -137,7 +220,7 @@ public sealed class SimulatedDbCommand : DbCommand
 
     /// <inheritdoc/>
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior = default)
-        => new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this).OfType<SimulatedQueryResult>());
+        => new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this));
 
     /// <summary>Strongly-typed shadow over <see cref="DbCommand.CreateParameter"/>.</summary>
     public new SimulatedDbParameter CreateParameter() => (SimulatedDbParameter)base.CreateParameter();

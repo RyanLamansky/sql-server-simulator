@@ -656,17 +656,19 @@ public sealed partial class Simulation
     /// </remarks>
     /// <param name="command">The command whose <see cref="DbCommand.CommandText"/> is dispatched.</param>
     /// <param name="continueOnError">
-    /// When <see langword="true"/>, a statement-terminating error outside any
-    /// TRY frame is emitted as a <see cref="SimulatedErrorOutcome"/> and the
-    /// batch continues to the next statement (real SQL Server's default
-    /// severity model). Only the TDS wire path passes <see langword="true"/>;
-    /// the in-process ADO surface keeps its long-standing fail-fast contract
-    /// (first error throws), and its reader filters outcomes on
-    /// <see cref="SimulatedQueryResult"/> so it never sees the error outcome
-    /// anyway. Batch-aborting errors (deadlock class 13, class ≥ 17) still
-    /// propagate regardless of this flag.
+    /// Marks a top-level batch. When <see langword="true"/> (the default —
+    /// both the in-process ADO surface and the TDS wire pass it), a
+    /// statement-terminating error outside any TRY frame is emitted as a
+    /// <see cref="SimulatedErrorOutcome"/> and the batch continues to the next
+    /// statement (real SQL Server's default severity model), so both front
+    /// doors render one shared outcome stream. Child batches (proc / trigger /
+    /// UDF / dynamic-SQL bodies) construct their own <see cref="BatchContext"/>
+    /// and leave this <see langword="false"/>, so their errors throw and
+    /// surface at the invoking statement. Batch-aborting errors (deadlock
+    /// class 13, class ≥ 17, an uncaught THROW, a bind-class name-resolution
+    /// miss) end the batch regardless.
     /// </param>
-    internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command, bool continueOnError = false)
+    internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command, bool continueOnError = true)
     {
         // CommandType.StoredProcedure: CommandText is the procedure name and
         // Parameters maps by name to the proc's declared parameters. Bypass
@@ -1113,6 +1115,19 @@ public sealed partial class Simulation
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
         batch.CurrentStatement.SuppressErrorReset = false;
+        // Classify the statement as row-returning from its leading token so a
+        // failure under continue-on-error surfaces the way real SQL Server
+        // frames it: a SELECT (bare / CTE-prefixed / parenthesized) or VALUES
+        // has already sent COLMETADATA before erroring, so the in-process
+        // reader surfaces it positionally (Read throws); anything else (DML /
+        // DDL) has no result-set envelope, so the reader throws eagerly on the
+        // advance onto it. See StatementContext.LeadingKeywordReturnsRows.
+        batch.CurrentStatement.LeadingKeywordReturnsRows = batch.Parser.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Select or Keyword.With or Keyword.Values } => true,
+            Operator { Character: '(' } => true,
+            _ => false,
+        };
         // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
         // clearing here ensures the next statement allocates a new Xid on its
         // first user-table read.
@@ -1182,15 +1197,19 @@ public sealed partial class Simulation
                 {
                     caught = ex;
                 }
-                else if (batch.ContinueOnError && IsBatchAbortingNameResolution(ex))
+                else if (batch.ContinueOnError && (IsBatchAbortingNameResolution(ex) || ex.TerminatesBatch))
                 {
-                    // Bind-class name-resolution failure (missing object /
-                    // column / ambiguous / could-not-be-bound). Real SQL Server
-                    // aborts the remaining batch rather than continuing to the
-                    // next statement. Emit the one error, then set the flag the
-                    // dispatch loop breaks on — no cursor recovery scan, so the
-                    // OPTION (USE HINT(...)) tail's `USE` token is never
-                    // mis-dispatched as a `USE <database>` statement.
+                    // Batch-aborting error: either a bind-class name-resolution
+                    // failure (missing object / column / ambiguous / could-not-
+                    // be-bound) or an uncaught THROW (ex.TerminatesBatch). Real
+                    // SQL Server ends the batch rather than continuing to the
+                    // next statement — probe-confirmed that a mid-batch THROW
+                    // leaves the following statement unrun (contrast a
+                    // severity-16 RAISERROR, which continues). Emit the one
+                    // error, then set the flag the dispatch loop breaks on — no
+                    // cursor recovery scan, so the OPTION (USE HINT(...)) tail's
+                    // `USE` token is never mis-dispatched as a `USE <database>`
+                    // statement.
                     continuedError = ex;
                     batch.BatchAborted = true;
                 }
@@ -1225,15 +1244,17 @@ public sealed partial class Simulation
 
         if (continuedError is not null)
         {
-            // Wire-only statement-terminating continuation: the statement
+            // Top-level statement-terminating continuation: the statement
             // failed but the batch proceeds to the next one (real SQL Server's
             // default, non-XACT_ABORT severity model). Set @@ERROR so a
             // following statement observes it, but do NOT touch InFlightError /
             // ErrorSignaled — those are TRY/CATCH-only state, and this error is
             // bound for the client, not a CATCH block. Same cursor-recovery
             // scan the deferred-name and TRY-caught paths use, then emit the
-            // error into the outcome stream so the wire writes its token(s) and
-            // continues; the outer dispatch loop resumes at the next statement.
+            // error into the shared outcome stream so both front doors render
+            // it (the wire writes error token(s); the in-process reader
+            // converts it to a throw); the outer dispatch loop resumes at the
+            // next statement.
             connection.LastErrorNumber = continuedError.Number;
             // A batch-aborting error skips the cursor-recovery scan: the outer
             // dispatch loop breaks on BatchAborted, so the cursor position no
@@ -1245,7 +1266,7 @@ public sealed partial class Simulation
                 while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                     parser.MoveNextOptional();
             }
-            yield return new SimulatedErrorOutcome(continuedError);
+            yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
             yield break;
         }
 
@@ -1311,7 +1332,7 @@ public sealed partial class Simulation
     /// 11..16 are statement-terminating; severity ≤ 10 are informational (not
     /// raised as errors) and ≥ 17 are batch/connection-terminating. Deadlock
     /// (Msg 1205, class 13) is the one in-range exception — it aborts the batch
-    /// — so it is excluded. Consulted only on the wire path
+    /// — so it is excluded. Consulted on every top-level batch
     /// (<see cref="BatchContext.ContinueOnError"/>).
     /// </summary>
     /// <remarks>
@@ -1339,8 +1360,9 @@ public sealed partial class Simulation
     /// column / function). Contrast the statement-terminating errors that DO
     /// let the batch continue: Msg 3701 (drop missing), Msg 8134 (divide by
     /// zero), Msg 2812 (EXEC missing proc), a severity-16 RAISERROR. Consulted
-    /// only on the wire path (<see cref="BatchContext.ContinueOnError"/>); the
-    /// in-process path aborts by throwing on the first error regardless.
+    /// on every top-level batch (<see cref="BatchContext.ContinueOnError"/>);
+    /// both front doors surface the abort (the wire stops writing tokens, the
+    /// in-process reader throws the emitted error).
     /// Divergence: real fails Msg 207 / 209 / 4104 at compile time so even the
     /// statements *before* the failure don't run, whereas the simulator
     /// interleaves parse and execution and has already streamed them — the same

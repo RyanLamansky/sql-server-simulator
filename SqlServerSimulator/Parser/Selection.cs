@@ -1390,6 +1390,28 @@ internal sealed partial class Selection
                     var catalogColumnNames = new string[catalogView.Columns.Length];
                     for (var ci = 0; ci < catalogColumnNames.Length; ci++)
                         catalogColumnNames[ci] = catalogView.Columns[ci].Name;
+                    // A system table-valued function is registered as a catalog
+                    // view but carries an empty argument list at the call site
+                    // (e.g. `sys.fn_helpcollations()`). Consume the `()` so the
+                    // cursor lands on the closing `)` for ConsumeOptionalAlias,
+                    // mirroring the user-TVF branch below; without it the `)` is
+                    // stranded and a draining dispatch loop re-parses it into a
+                    // spurious "Incorrect syntax near ')'". A non-empty leading
+                    // `(` is an old-style table hint (e.g. `(NOLOCK)`) — left for
+                    // ParseOptionalTableHints, and a plain catalog view
+                    // (`sys.tables`) has no parens at all.
+                    var afterCatalogName = context.SaveCheckpoint();
+                    context.MoveNextOptional();
+                    if (context.Token is Operator { Character: '(' }
+                        && context.GetNextOptional() is Operator { Character: ')' })
+                    {
+                        // Cursor now rests on the closing `)`.
+                    }
+                    else
+                    {
+                        context.RestoreCheckpoint(afterCatalogName);
+                    }
+
                     var catalogAlias = ConsumeOptionalAlias(context);
                     // Catalog views are read-only metadata so the hints have no
                     // semantic effect, but the name-validation gate must still
@@ -1488,7 +1510,18 @@ internal sealed partial class Selection
                 // since the simulator doesn't carry the exact message).
                 var temporalRowSource = ParseOptionalForSystemTime(context, heapTable);
 
-                var heapAlias = ConsumeOptionalAlias(context);
+                // FOR SYSTEM_TIME leaves the cursor at the post-clause lookahead
+                // token (its ALL / AS-OF-expr parse already advanced past the
+                // clause), whereas the no-clause path leaves it on the table
+                // name leaf. ConsumeOptionalAlias advances before checking, so
+                // after a temporal clause the current token is already the alias
+                // candidate — consume it in place; otherwise use the advancing
+                // form. Without this the token after a trailing WHERE / alias is
+                // stranded and a draining consumer re-parses it into a spurious
+                // syntax error.
+                var heapAlias = temporalRowSource is null
+                    ? ConsumeOptionalAlias(context)
+                    : ConsumeOptionalAliasAtCurrent(context);
                 var heapHints = ParseOptionalTableHints(context);
                 ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
@@ -1886,6 +1919,30 @@ internal sealed partial class Selection
         // Bare-Name alias form (without the AS keyword): "FROM t a JOIN ..."
         // SQL Server accepts this as an alias.
         if (nextToken is Name aliasName)
+        {
+            context.MoveNextOptional();
+            return aliasName.Value;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Variant of <see cref="ConsumeOptionalAlias"/> for callers whose FROM
+    /// source has already advanced the cursor to the post-source lookahead
+    /// token (e.g. after a FOR SYSTEM_TIME clause): the current token is the
+    /// alias candidate, so this checks it in place rather than advancing first.
+    /// Leaves the cursor at the next un-consumed lookahead position, matching
+    /// <see cref="ConsumeOptionalAlias"/>'s post-condition.
+    /// </summary>
+    internal static string? ConsumeOptionalAliasAtCurrent(ParserContext context)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+        {
+            var alias = context.GetNextRequired<Name>().Value;
+            context.MoveNextOptional();
+            return alias;
+        }
+        if (context.Token is Name aliasName)
         {
             context.MoveNextOptional();
             return aliasName.Value;

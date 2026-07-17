@@ -16,15 +16,66 @@ namespace SqlServerSimulator;
 [SuppressMessage("Design", "CA1010:Generic interface should also be implemented", Justification = "Row enumeration is base-class-driven (DbDataReader → IEnumerable), not naturally generic — matches Microsoft.Data.SqlClient.SqlDataReader.")]
 public sealed class SimulatedDbDataReader : DbDataReader
 {
-    private readonly IEnumerator<SimulatedQueryResult> results;
-    private RowCursor cursor;
+    private readonly IEnumerator<SimulatedStatementOutcome> outcomes;
+    private SimulatedQueryResult? currentResult;
+    private RowCursor cursor = EmptyCursor.Instance;
     private int recordsAffected;
     private bool closed;
 
-    internal SimulatedDbDataReader(IEnumerable<SimulatedQueryResult> results)
+    internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes)
     {
-        this.results = results.GetEnumerator();
-        this.cursor = this.results.MoveNext() ? this.results.Current.CreateCursor() : EmptyCursor.Instance;
+        this.outcomes = outcomes.GetEnumerator();
+        _ = this.AdvanceToNextResult();
+    }
+
+    /// <summary>
+    /// Advances the outcome stream to the next thing the reader treats as a
+    /// result set: a tabular <see cref="SimulatedQueryResult"/> or a
+    /// <see cref="SimulatedErrorOutcome"/> (a failed statement, surfaced
+    /// positionally — the error throws on the first <see cref="Read"/>). Pure
+    /// <see cref="SimulatedNonQuery"/> outcomes (INSERT / UPDATE / DDL without
+    /// a result set) are skipped, matching how SqlClient's reader only stops
+    /// on result-set boundaries. Executing statements as the enumerator
+    /// advances is what persists their side effects.
+    /// </summary>
+    private bool AdvanceToNextResult()
+    {
+        while (this.outcomes.MoveNext())
+        {
+            switch (this.outcomes.Current)
+            {
+                case SimulatedQueryResult query:
+                    this.currentResult = query;
+                    this.cursor = query.CreateCursor();
+                    return true;
+                case SimulatedErrorOutcome { RowReturning: true } error:
+                    // A row-returning statement (SELECT / VALUES) that failed
+                    // after real SQL Server would have sent its COLMETADATA:
+                    // surface positionally. The reader advances onto the failed
+                    // statement (this advance returns true) and the first Read
+                    // throws — the ErrorCursor carries the throw, and the reader
+                    // survives to the next result set.
+                    this.currentResult = null;
+                    this.cursor = new ErrorCursor(error.Exception);
+                    return true;
+                case SimulatedErrorOutcome error:
+                    // A non-row-returning statement (INSERT / UPDATE / DELETE /
+                    // DDL) that failed: real SQL Server sent no result-set
+                    // envelope, so SqlClient surfaces the error on the advance
+                    // itself — ExecuteReader (the constructor's advance) or
+                    // NextResult throws, not a later Read. This is what lets EF
+                    // Core's no-OUTPUT modification batches, which never call
+                    // Read, still observe the failure. Park at end first so a
+                    // caller that catches and probes the reader sees it closed.
+                    this.currentResult = null;
+                    this.cursor = EmptyCursor.Instance;
+                    throw error.Exception;
+            }
+        }
+
+        this.currentResult = null;
+        this.cursor = EmptyCursor.Instance;
+        return false;
     }
 
     /// <inheritdoc/>
@@ -230,7 +281,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             throw new IndexOutOfRangeException();
 #pragma warning restore
 
-        return this.results.Current.ColumnNames[ordinal];
+        return this.CurrentQuery.ColumnNames[ordinal];
     }
 
     /// <summary>
@@ -243,7 +294,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
     public override int GetOrdinal(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
-        var names = this.results.Current.ColumnNames;
+        var names = this.currentResult?.ColumnNames ?? [];
         for (var i = 0; i < names.Length; i++)
         {
             if (string.Equals(names[i], name, StringComparison.Ordinal))
@@ -313,13 +364,11 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override bool NextResult()
     {
-        var hasNext = this.results.MoveNext();
+        this.cursor.Dispose();
+        var hasNext = this.AdvanceToNextResult();
 
         if (hasNext)
             this.recordsAffected = 0;
-
-        this.cursor.Dispose();
-        this.cursor = hasNext ? this.results.Current.CreateCursor() : EmptyCursor.Instance;
 
         return hasNext;
     }
@@ -335,17 +384,56 @@ public sealed class SimulatedDbDataReader : DbDataReader
         return hasNext;
     }
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Closes the reader. Real SqlClient closes a reader by running the
+    /// batch's remaining statements to completion (so their side effects
+    /// persist) and discarding any results and errors — a disposed reader
+    /// never throws. This drains the outcome stream at statement granularity:
+    /// each remaining statement executes, and a continued error (already an
+    /// outcome, not a throw) is simply enumerated past. Row-level pull inside
+    /// the statement the reader was parked on stays abandoned — the documented
+    /// non-draining-reader divergence is unchanged.
+    /// </summary>
     protected override void Dispose(bool disposing)
     {
-        this.closed = true;
-        base.Dispose(disposing);
+        if (!this.closed)
+        {
+            this.closed = true;
+            this.cursor.Dispose();
+            try
+            {
+                while (this.outcomes.MoveNext())
+                {
+                }
+            }
+            catch (SimulatedSqlException)
+            {
+                // A batch-aborting error (e.g. deadlock) thrown out of the
+                // stream during the drain — swallowed; dispose never surfaces
+                // batch errors.
+            }
+            catch (NotSupportedException)
+            {
+                // An unmodeled feature (e.g. BEGIN DISTRIBUTED TRANSACTION)
+                // reached during the drain — likewise swallowed.
+            }
 
-        this.results.Dispose();
-        this.cursor.Dispose();
+            this.outcomes.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
-    private SqlType[] CurrentSchema => this.results.Current.Schema;
+    private SqlType[] CurrentSchema => this.currentResult?.Schema ?? [];
+
+    /// <summary>
+    /// The query result the reader is parked on. Metadata accessors reach it
+    /// only after a <see cref="FieldCount"/> guard, so a position on a failed
+    /// statement (where <see cref="currentResult"/> is null and
+    /// <see cref="FieldCount"/> is 0) never dereferences it.
+    /// </summary>
+    private SimulatedQueryResult CurrentQuery =>
+        this.currentResult ?? throw new InvalidOperationException("The reader is not positioned on a result set.");
 
     /// <summary>Stand-in cursor used before any result-set is opened or after the last is exhausted.</summary>
     private sealed class EmptyCursor : RowCursor
@@ -357,6 +445,32 @@ public sealed class SimulatedDbDataReader : DbDataReader
         public override bool HasRows => false;
 
         public override bool MoveNext() => false;
+
+        public override SqlValue this[int ordinal] => throw new InvalidOperationException("No current row.");
+    }
+
+    /// <summary>
+    /// Cursor for a <see cref="SimulatedErrorOutcome"/> position: the reader
+    /// advanced onto a statement that failed, so the first <see cref="Read"/>
+    /// (its first <see cref="MoveNext"/>) throws the carried error — real
+    /// SqlClient's positional error surfacing. After the throw it reports no
+    /// rows, matching "the failed statement yields no further rows."
+    /// </summary>
+    private sealed class ErrorCursor(SimulatedSqlException exception) : RowCursor
+    {
+        private bool thrown;
+
+        public override int FieldCount => 0;
+
+        public override bool HasRows => false;
+
+        public override bool MoveNext()
+        {
+            if (this.thrown)
+                return false;
+            this.thrown = true;
+            throw exception;
+        }
 
         public override SqlValue this[int ordinal] => throw new InvalidOperationException("No current row.");
     }
