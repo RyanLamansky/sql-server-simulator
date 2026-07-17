@@ -924,6 +924,118 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void ComputedColumn_MidTable_LandsAtModelOrdinal()
+    {
+        // A computed column declared between simple columns must keep its
+        // model ordinal after import — the loader emits it inline in CREATE
+        // TABLE at its position rather than appending it at the end, so
+        // sys.columns.column_id matches the source database (the property
+        // DacFx orders model.xml export by, and the invariant temporal
+        // base/history pairs depend on — see the temporal-pair test below).
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "People", t => t
+                .Column("PersonID", "int")
+                .Column("FullName", "nvarchar(50)")
+                .Column("PreferredName", "nvarchar(50)")
+                .ComputedColumn("SearchName", "(concat([PreferredName],N' ',[FullName]))")
+                .Column("IsPermittedToLogon", "bit")
+                .Column("PhoneNumber", "nvarchar(20)"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+        AreEqual(4, sim.ExecuteScalar("SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID('dbo.People') AND name = 'SearchName';"));
+        IsTrue((bool)sim.ExecuteScalar("SELECT is_computed FROM sys.columns WHERE object_id = OBJECT_ID('dbo.People') AND name = 'SearchName';")!);
+        // The columns after the computed one keep their downstream ordinals.
+        AreEqual(5, sim.ExecuteScalar("SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID('dbo.People') AND name = 'IsPermittedToLogon';"));
+        AreEqual(6, sim.ExecuteScalar("SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID('dbo.People') AND name = 'PhoneNumber';"));
+    }
+
+    [TestMethod]
+    public void ComputedColumn_ForwardUdfRef_DefersToPhaseEight_LandsAtEnd()
+    {
+        // A computed expression that forward-references a user function
+        // (which only exists after phase 7) can't resolve in the CREATE
+        // TABLE column list, so the table is re-created with the computed
+        // column stripped and the column is appended in phase 8 — landing
+        // at the end of sys.columns for that one table. This is the
+        // documented tradeoff (matches AW's Sales.Customer.AccountNumber,
+        // which references dbo.ufnLeadingZeros).
+        using var bacpac = BacpacBuilder.Create()
+            .ScalarFunction("dbo", "AddOne", "CREATE FUNCTION dbo.AddOne(@n int) RETURNS int AS BEGIN RETURN @n + 1 END")
+            .Table("dbo", "Widget", t => t
+                .Column("Id", "int")
+                .ComputedColumn("Bumped", "([dbo].[AddOne]([Id]))")
+                .Column("Label", "nvarchar(20)"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+        // Bumped lands last (3) rather than at its model ordinal (2); Label
+        // keeps ordinal 2 because the computed column was stripped first.
+        IsTrue((bool)sim.ExecuteScalar("SELECT is_computed FROM sys.columns WHERE object_id = OBJECT_ID('dbo.Widget') AND name = 'Bumped';")!);
+        AreEqual(3, sim.ExecuteScalar("SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID('dbo.Widget') AND name = 'Bumped';"));
+        AreEqual(2, sim.ExecuteScalar("SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID('dbo.Widget') AND name = 'Label';"));
+    }
+
+    [TestMethod]
+    public void TemporalPair_MidTableComputedColumn_BaseAndHistoryOrdinalsAlign()
+    {
+        // The bug this fixes: WWI's Application.People has a mid-table
+        // computed column, and its People_Archive history sibling (all
+        // simple columns, true order) must share identical column ordinals
+        // — else SQL Server rejects the re-exported bacpac with Msg 13524.
+        // Emitting the computed column inline at its model ordinal keeps
+        // base and history column_id sequences byte-identical.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Person", t => t
+                .Column("PersonID", "int")
+                .Column("FullName", "nvarchar(50)")
+                .ComputedColumn("SearchName", "(concat([FullName],N'!'))")
+                .Column("Note", "nvarchar(50)", nullable: true)
+                .Column("ValidFrom", "datetime2(7)", periodKind: PeriodColumnKind.Start)
+                .Column("ValidTo", "datetime2(7)", periodKind: PeriodColumnKind.End)
+                .PrimaryKey("PK_Person", "PersonID")
+                .SystemVersioned("dbo", "Person_Archive"))
+            .Table("dbo", "Person_Archive", t => t
+                .Column("PersonID", "int")
+                .Column("FullName", "nvarchar(50)")
+                .ComputedColumn("SearchName", "(concat([FullName],N'!'))")
+                .Column("Note", "nvarchar(50)", nullable: true)
+                .Column("ValidFrom", "datetime2(7)")
+                .Column("ValidTo", "datetime2(7)"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+
+        var baseSeq = ColumnSequence(sim, "dbo.Person");
+        var histSeq = ColumnSequence(sim, "dbo.Person_Archive");
+        AreEqual(baseSeq, histSeq);
+        // SearchName sits at its true mid-table ordinal on both sides.
+        AreEqual("1:PersonID|2:FullName|3:SearchName|4:Note|5:ValidFrom|6:ValidTo", baseSeq);
+    }
+
+    private static string ColumnSequence(Simulation sim, string table)
+    {
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT column_id, name FROM sys.columns WHERE object_id = OBJECT_ID('{table}') ORDER BY column_id;";
+        var parts = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            parts.Add($"{reader.GetValue(0)}:{reader.GetValue(1)}");
+        return string.Join("|", parts);
+    }
+
+    [TestMethod]
     public void ExtendedProperties_LandIn_sys_extended_properties_AcrossHostKinds()
     {
         // Six host kinds exercised: column / table / schema / database /

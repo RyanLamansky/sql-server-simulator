@@ -20,6 +20,11 @@ public sealed class TableBuilder
     internal readonly List<IndexDef> Indexes = [];
     private readonly List<ComputedColumnDef> _computedColumns = [];
     internal IReadOnlyList<ComputedColumnDef> ComputedColumns => _computedColumns;
+    // Declaration order of every column (simple + computed), so a computed
+    // column added between two simple columns emits at its true model ordinal
+    // — the ordinal the loader must preserve so sys.columns.column_id matches
+    // the source database (and system-versioned base/history pairs align).
+    private readonly List<(bool Computed, int Index)> _order = [];
     internal string? HistorySchemaName;
     internal string? HistoryTableName;
 
@@ -44,6 +49,7 @@ public sealed class TableBuilder
     public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null, bool rowGuidCol = false)
     {
         _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol));
+        _order.Add((Computed: false, _columns.Count - 1));
         return this;
     }
 
@@ -74,6 +80,7 @@ public sealed class TableBuilder
     public TableBuilder ComputedColumn(string name, string expression, bool persisted = false)
     {
         _computedColumns.Add(new ComputedColumnDef(name, expression, persisted));
+        _order.Add((Computed: true, _computedColumns.Count - 1));
         return this;
     }
 
@@ -180,13 +187,11 @@ public sealed class TableBuilder
     {
         var columnsRelationship = new XElement(ns + "Relationship",
             new XAttribute("Name", "Columns"));
-        foreach (var column in _columns)
+        foreach (var (computed, index) in _order)
         {
-            columnsRelationship.Add(new XElement(ns + "Entry", ColumnElement(ns, column)));
-        }
-        foreach (var computed in _computedColumns)
-        {
-            columnsRelationship.Add(new XElement(ns + "Entry", ComputedColumnElement(ns, computed)));
+            columnsRelationship.Add(computed
+                ? new XElement(ns + "Entry", ComputedColumnElement(ns, _computedColumns[index]))
+                : new XElement(ns + "Entry", ColumnElement(ns, _columns[index])));
         }
 
         var tableElement = new XElement(ns + "Element",

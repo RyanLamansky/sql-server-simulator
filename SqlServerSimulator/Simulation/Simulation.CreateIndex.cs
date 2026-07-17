@@ -161,13 +161,15 @@ partial class Simulation
         for (var i = 0; i < keyColumns.Count; i++)
         {
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, keyColumns[i].Name);
-            resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], keyColumns[i].IsDescending);
+            resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, keyColumns[i].IsDescending);
         }
         var resolvedIncludeColumns = new int[includeColumnNames.Count];
+        var resolvedIncludeOrdinals = new int[includeColumnNames.Count];
         for (var i = 0; i < includeColumnNames.Count; i++)
         {
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, includeColumnNames[i]);
             resolvedIncludeColumns[i] = table.StorageOrdinals[fullOrdinal];
+            resolvedIncludeOrdinals[i] = fullOrdinal;
         }
 
         var index = new StoredIndex(
@@ -177,6 +179,7 @@ partial class Simulation
             isClustered,
             resolvedKeyColumns,
             resolvedIncludeColumns,
+            resolvedIncludeOrdinals,
             filter,
             filterDefinition);
 

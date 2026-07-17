@@ -457,13 +457,22 @@ partial class Simulation
         }
         foreach (var ix in table.Indexes)
         {
+            // Non-persisted computed columns carry storage ordinal -1
+            // (no row-storage slot) — pass those through unmapped.
             for (var i = 0; i < ix.KeyColumns.Length; i++)
             {
                 var keyCol = ix.KeyColumns[i];
-                ix.KeyColumns[i] = new IndexKeyColumn(oldStorageToNew[keyCol.StorageOrdinal], keyCol.IsDescending);
+                ix.KeyColumns[i] = new IndexKeyColumn(
+                    keyCol.StorageOrdinal < 0 ? keyCol.StorageOrdinal : oldStorageToNew[keyCol.StorageOrdinal],
+                    oldFullToNew[keyCol.ColumnOrdinal],
+                    keyCol.IsDescending);
             }
             for (var i = 0; i < ix.IncludedColumns.Length; i++)
-                ix.IncludedColumns[i] = oldStorageToNew[ix.IncludedColumns[i]];
+            {
+                if (ix.IncludedColumns[i] >= 0)
+                    ix.IncludedColumns[i] = oldStorageToNew[ix.IncludedColumns[i]];
+                ix.IncludedColumnOrdinals[i] = oldFullToNew[ix.IncludedColumnOrdinals[i]];
+            }
         }
         foreach (var fk in table.OutgoingForeignKeys)
         {

@@ -10,17 +10,13 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The byte form on disk and via <c>CAST AS varbinary</c> is the simulator's
-/// own representation rather than SQL Server's documented variable-bit ordinal
-/// encoding. Round-trip via <c>CAST hierarchyid -&gt; varbinary -&gt; hierarchyid</c>
-/// works inside the simulator; cross-engine byte transfer (BCP, SqlClient UDT
-/// wire format) is deferred until the BACPAC loader bundle, at which point
-/// the encoder/decoder will be replaced with the documented format.
-/// </para>
-/// <para>
-/// Internal format: 2-byte little-endian segment count, then per segment a
-/// 2-byte little-endian label count followed by each label as a 4-byte
-/// little-endian int32. The root (<c>/</c>) is 2 bytes (segment count 0).
+/// The in-memory, on-disk, <c>CAST AS varbinary</c>, TDS-UDT-wire, and
+/// <c>DATALENGTH</c> byte form are all one and the same: SQL Server's canonical
+/// OrdPath encoding (see <see cref="HierarchyIdOrdPath"/>). The page codec here
+/// is therefore a verbatim byte copy — the value already holds the OrdPath bytes
+/// — so a stored value re-serializes with zero re-encoding and byte-matches a
+/// real server. The segment-array form is a transient decode used only by
+/// <c>ToString()</c> and the instance methods.
 /// </para>
 /// </remarks>
 internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
@@ -29,62 +25,23 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
 
     public override bool IsFixedLength => false;
 
-    /// <summary>
-    /// Bytes a non-NULL value contributes to a row's variable-length area:
-    /// 2 (segment count) + sum over segments of 2 + 4 * label-count.
-    /// </summary>
-    public override int GetVariableByteCount(SqlValue value)
-    {
-        var path = value.AsHierarchyId;
-        var bytes = 2;
-        foreach (var segment in path)
-            bytes += 2 + (segment.Length * 4);
-        return bytes;
-    }
+    /// <summary>Bytes a non-NULL value contributes to a row's variable-length area — its OrdPath byte length, which is also its <c>DATALENGTH</c>.</summary>
+    public override int GetVariableByteCount(SqlValue value) => value.AsHierarchyIdBytes.Length;
 
     public override int Encode(SqlValue value, Span<byte> destination)
     {
-        var path = value.AsHierarchyId;
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(destination, (ushort)path.Length);
-        var offset = 2;
-        foreach (var segment in path)
-        {
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(destination[offset..], (ushort)segment.Length);
-            offset += 2;
-            foreach (var label in segment)
-            {
-                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(destination[offset..], label);
-                offset += 4;
-            }
-        }
-        return offset;
+        var bytes = value.AsHierarchyIdBytes;
+        bytes.CopyTo(destination);
+        return bytes.Length;
     }
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source)
-    {
-        if (source.Length == 0)
-            return SqlValue.FromHierarchyId([]);
-        var segmentCount = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(source);
-        var path = new int[segmentCount][];
-        var offset = 2;
-        for (var i = 0; i < segmentCount; i++)
-        {
-            var labelCount = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(source[offset..]);
-            offset += 2;
-            var segment = new int[labelCount];
-            for (var j = 0; j < labelCount; j++)
-            {
-                segment[j] = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(source[offset..]);
-                offset += 4;
-            }
-            path[i] = segment;
-        }
-        return SqlValue.FromHierarchyId(path);
-    }
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromHierarchyIdBytes(source.ToArray());
 
     public override SqlValue ConvertParameter(object raw) => raw switch
     {
-        byte[] bytes => this.Decode(bytes),
+        // A byte[] parameter is raw OrdPath bytes — stored verbatim, matching
+        // how SqlClient binds a SqlHierarchyId's serialized form.
+        byte[] bytes => SqlValue.FromHierarchyIdBytes(bytes),
         string s => SqlValue.FromHierarchyId(ParsePath(s)),
         _ => throw new NotSupportedException($"No conversion from {raw.GetType()} to hierarchyid."),
     };
@@ -163,35 +120,5 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
             _ = sb.Append('/');
         }
         return sb.ToString();
-    }
-
-    /// <summary>
-    /// Lexicographic comparison on two paths: compares segment by segment,
-    /// each segment lexicographically on its label tuple. A shorter
-    /// prefix sorts before its extensions (e.g. <c>/1/</c> &lt; <c>/1/2/</c>;
-    /// <c>/1/2/</c> &lt; <c>/1/2.1/</c>).
-    /// </summary>
-    public static int ComparePaths(int[][] left, int[][] right)
-    {
-        var common = Math.Min(left.Length, right.Length);
-        for (var i = 0; i < common; i++)
-        {
-            var cmp = CompareSegment(left[i], right[i]);
-            if (cmp != 0)
-                return cmp;
-        }
-        return left.Length.CompareTo(right.Length);
-    }
-
-    private static int CompareSegment(int[] left, int[] right)
-    {
-        var common = Math.Min(left.Length, right.Length);
-        for (var i = 0; i < common; i++)
-        {
-            var cmp = left[i].CompareTo(right[i]);
-            if (cmp != 0)
-                return cmp;
-        }
-        return left.Length.CompareTo(right.Length);
     }
 }

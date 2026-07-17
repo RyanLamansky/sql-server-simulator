@@ -534,7 +534,7 @@ internal static class TdsTypeCodec
                 if (value.IsNull)
                     writer.WriteUInt64(ulong.MaxValue);
                 else
-                    WritePlpChunks(writer, HierarchyIdWireEncoder.Encode(value.AsHierarchyId));
+                    WritePlpChunks(writer, value.AsHierarchyIdBytes);
                 break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");

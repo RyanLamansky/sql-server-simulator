@@ -112,26 +112,35 @@ internal static class ModelXmlReader
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // Ordered passes: phase 1 = schemas + UDDTs + sequences + roles +
-        // table types + db options (no deps); phase 2 = tables with simple
-        // columns only (depend on phase 1; computed columns deferred);
+        // table types + db options (no deps); phase 2 = tables, with computed
+        // columns inline at their model ordinal (depend on phase 1) — a
+        // computed expression that forward-references a not-yet-created UDF
+        // makes CREATE TABLE throw, so that one table re-creates with computed
+        // columns stripped and they defer to phase 8;
         // phase 3 = PK/UQ/CHECK/DEFAULT constraints (depend on tables);
         // phase 4 = FK constraints (depend on PK/UQ on referenced tables);
         // phase 5 = unused (was indexes; moved to phase 8 so filtered-index
         // predicates referencing computed columns resolve); phase 6 = views
         // (body is deferred-parsed so cross-references inside the same phase
         // work); phase 7 = functions + procedures + DML triggers (bodies
-        // also deferred-parsed); phase 8 = deferred computed columns
-        // (ALTER TABLE ADD col AS expr — depend on functions landing in
-        // phase 7) + indexes (depend on tables AND computed columns; within
-        // phase 8 document order puts SqlTable's deferred-computed-column
+        // also deferred-parsed); phase 8 = deferred computed columns for the
+        // tables phase 2 fell back on (ALTER TABLE ADD col AS expr — depend on
+        // functions landing in phase 7; these append at the end rather than
+        // the model ordinal) + indexes (depend on tables AND computed columns;
+        // within phase 8 document order puts SqlTable's deferred-computed-column
         // ALTERs ahead of SqlIndex emissions); phase 9 = extended properties
         // (depend on every covered host type, including the computed
         // columns and indexes just landed in phase 8). Skipped-element
         // recording happens on the last phase so each unhandled type is
         // reported once.
+        // Tables whose inline computed-column emission failed in phase 2 (a
+        // forward UDF reference) and so were re-created with computed columns
+        // stripped; phase 8 appends those columns once the functions exist.
+        var deferredComputedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         const int LastPhase = 9;
         for (var phase = 1; phase <= LastPhase; phase++)
-            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, isLastPhase: phase == LastPhase);
+            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, deferredComputedTables, isLastPhase: phase == LastPhase);
     }
 
     /// <summary>
@@ -142,7 +151,7 @@ internal static class ModelXmlReader
     /// </summary>
     private static string BracketName(string name) => $"[{name.Replace("]", "]]", StringComparison.Ordinal)}]";
 
-    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, bool isLastPhase)
+    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, HashSet<string> deferredComputedTables, bool isLastPhase)
     {
         foreach (var element in elements)
         {
@@ -159,7 +168,7 @@ internal static class ModelXmlReader
                     ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
                     ("SqlRole", 1) => Run(() => EmitRole(element, name, connection)),
                     ("SqlTableType", 1) => Run(() => EmitTableType(element, name, connection, result)),
-                    ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result)),
+                    ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result, deferredComputedTables)),
                     ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
                     ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
                     ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
@@ -179,7 +188,7 @@ internal static class ModelXmlReader
                     ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
                     ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
                     ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
-                    ("SqlTable", 8) => Run(() => EmitDeferredComputedColumns(element, connection, result)),
+                    ("SqlTable", 8) => Run(() => EmitDeferredComputedColumns(element, connection, result, deferredComputedTables)),
                     // Indexes run AFTER computed columns so filtered-index
                     // predicates / INCLUDE lists referencing those columns
                     // resolve correctly. Element-order within phase 8: all
@@ -626,16 +635,23 @@ internal static class ModelXmlReader
     }
 
     /// <summary>
-    /// Emits <c>CREATE TABLE [schema].[name] (col1 TYPE [IDENTITY] [ROWGUIDCOL] [NULL|NOT NULL], …)</c>
-    /// for a <c>SqlTable</c> element. Only <c>SqlSimpleColumn</c> entries are
-    /// translated in this phase; <c>SqlComputedColumn</c> entries land on
-    /// <see cref="BacpacImportResult.Skipped"/> (a follow-up phase ties them
-    /// into the same CREATE TABLE via the simulator's <c>AS &lt;expr&gt; [PERSISTED]</c>
-    /// computed-column grammar). Constraints (PK / UQ / FK / CHECK / DEFAULT)
+    /// Emits <c>CREATE TABLE [schema].[name] (col1 TYPE …, colN AS (expr), …)</c>
+    /// for a <c>SqlTable</c> element. Both <c>SqlSimpleColumn</c> and
+    /// <c>SqlComputedColumn</c> entries are translated inline at their model
+    /// ordinal so <c>sys.columns.column_id</c> matches the source database —
+    /// critical for system-versioned pairs, whose base and history tables must
+    /// share identical column ordinals (else SQL Server rejects the exported
+    /// bacpac with Msg 13524). Computed expressions that forward-reference a
+    /// user function (which only lands in phase 7) can't resolve inside the
+    /// CREATE TABLE column-list parser; when the inline attempt throws, the
+    /// table is re-created with computed columns stripped and those columns are
+    /// registered in <paramref name="deferredComputedTables"/> for phase 8 to
+    /// append via <c>ALTER TABLE … ADD col AS (expr)</c> (ordinals then land at
+    /// the end for that one table). Constraints (PK / UQ / FK / CHECK / DEFAULT)
     /// arrive as separate top-level Elements; they layer onto the table later
     /// via <c>ALTER TABLE … ADD CONSTRAINT</c>.
     /// </summary>
-    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacImportResult result)
+    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacImportResult result, HashSet<string> deferredComputedTables)
     {
         if (string.IsNullOrEmpty(qualifiedName))
             throw new InvalidDataException("bacpac: SqlTable element missing Name attribute.");
@@ -644,8 +660,11 @@ internal static class ModelXmlReader
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "Columns")
             ?? throw new InvalidDataException($"bacpac: SqlTable '{qualifiedName}' has no Columns relationship.");
 
-        var columnDdls = new List<string>();
-        var perColumnIsAlias = new List<bool>();
+        // One entry per real column in model order (computed included), so the
+        // alias side-map can be built index-aligned to whichever HeapTable
+        // column order the table lands in — inline (model order) or, on
+        // fallback, simple-columns-then-computed-appended order.
+        var columns = new List<(string Ddl, bool Computed, bool Alias)>();
         string? rowStartLeaf = null;
         string? rowEndLeaf = null;
         foreach (var columnElement in columnsRelationship.Elements(Ns + "Entry").Elements(Ns + "Element"))
@@ -658,8 +677,7 @@ internal static class ModelXmlReader
             switch (columnType)
             {
                 case "SqlSimpleColumn":
-                    columnDdls.Add(TranslateSimpleColumn(columnElement, columnName, result));
-                    perColumnIsAlias.Add(IsAliasTypedColumn(columnElement));
+                    columns.Add((TranslateSimpleColumn(columnElement, columnName, result), Computed: false, IsAliasTypedColumn(columnElement)));
                     // Capture the row-start / row-end column leaves so the
                     // table-level PERIOD FOR SYSTEM_TIME clause can name them.
                     // GeneratedAlwaysType only appears on the base side of a
@@ -675,11 +693,12 @@ internal static class ModelXmlReader
                     }
                     break;
                 case "SqlComputedColumn":
-                    // Deferred until phase 8 (post-functions) — some computed
-                    // expressions invoke UDFs that have to exist first, and
-                    // CREATE TABLE's column-list parser can't tolerate forward
-                    // function refs. Phase 8 walks SqlTable elements a second
-                    // time and emits ALTER TABLE … ADD col AS (expr).
+                    // Emitted inline at model ordinal; a computed column is never
+                    // UDDT-aliased (its type is derived, not declared) and carries
+                    // no BCP wire bytes, so its alias slot is always false.
+                    var computedDdl = TranslateComputedColumn(columnElement, columnName, result);
+                    if (computedDdl is not null)
+                        columns.Add((computedDdl, Computed: true, Alias: false));
                     break;
                 default:
                     result.AddSkipped(new BacpacSkipped(
@@ -691,27 +710,58 @@ internal static class ModelXmlReader
 #pragma warning restore SSS005
         }
 
-        if (columnDdls.Count == 0)
+        if (columns.Count == 0)
             throw new InvalidDataException($"bacpac: SqlTable '{qualifiedName}' has no recognized columns.");
 
         // Append the table-level PERIOD clause when both row-start and row-end
         // markers are present on this table's columns. The simulator's CREATE
         // TABLE validates the columns exist + match generated-always kinds and
-        // raises matching errors when they don't.
-        if (rowStartLeaf is not null && rowEndLeaf is not null)
-            columnDdls.Add($"PERIOD FOR SYSTEM_TIME ({rowStartLeaf}, {rowEndLeaf})");
+        // raises matching errors when they don't. Not a real column — excluded
+        // from the alias side-map.
+        var periodClause = rowStartLeaf is not null && rowEndLeaf is not null
+            ? $"PERIOD FOR SYSTEM_TIME ({rowStartLeaf}, {rowEndLeaf})"
+            : null;
 
-        var sql = $"CREATE TABLE {qualifiedName} ({string.Join(", ", columnDdls)});";
+        var hasComputed = columns.Exists(c => c.Computed);
+        var inlineDdls = new List<string>(columns.Select(c => c.Ddl));
+        if (periodClause is not null)
+            inlineDdls.Add(periodClause);
+
+        try
+        {
+            ExecuteCreateTable(qualifiedName, inlineDdls, connection);
+            // Inline succeeded: HeapTable.Columns is in model order, so the
+            // alias side-map keeps a slot per model column (computed slots are
+            // false and never read — BCP filters computed columns out before
+            // the alias lookup).
+            result.TableColumnIsAlias[qualifiedName] = [.. columns.Select(c => c.Alias)];
+        }
+        catch (Exception ex) when (hasComputed && ex is not OutOfMemoryException and not StackOverflowException)
+        {
+            // A computed expression forward-referenced a not-yet-created UDF (or
+            // otherwise couldn't parse in the column list). Re-create with
+            // computed columns stripped and defer them to phase 8, which runs
+            // after functions land. A second failure here is a genuine table
+            // error and propagates to the resilient-loader "Load failed" path.
+            var strippedDdls = new List<string>(columns.Where(c => !c.Computed).Select(c => c.Ddl));
+            if (periodClause is not null)
+                strippedDdls.Add(periodClause);
+            ExecuteCreateTable(qualifiedName, strippedDdls, connection);
+            _ = deferredComputedTables.Add(qualifiedName);
+            // Computed columns land at the end of HeapTable.Columns in phase 8,
+            // so the alias side-map is simple-columns-only, index-aligned to the
+            // simple-column prefix of HeapTable.Columns.
+            result.TableColumnIsAlias[qualifiedName] = [.. columns.Where(c => !c.Computed).Select(c => c.Alias)];
+        }
+    }
+
+    private static void ExecuteCreateTable(string qualifiedName, List<string> columnDdls, DbConnection connection)
+    {
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = sql;
+        command.CommandText = $"CREATE TABLE {qualifiedName} ({string.Join(", ", columnDdls)});";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
-
-        // Side map: which columns (in HeapTable.Columns order, after computed
-        // columns are filtered out) are UDDT-aliased. The BCP decoder needs
-        // this to apply the alias-specific 1-byte-prefix wire format.
-        result.TableColumnIsAlias[qualifiedName] = [.. perColumnIsAlias];
     }
 
     /// <summary>
@@ -1055,6 +1105,30 @@ internal static class ModelXmlReader
     }
 
     /// <summary>
+    /// Builds the inline computed-column DDL fragment <c>[col] AS (expr)</c>
+    /// for a <c>SqlComputedColumn</c> element. The <c>ExpressionScript</c> body
+    /// arrives parenthesized already (DACFx emits e.g.
+    /// <c>(concat([X],N' ',[Y]))</c>), so it's used verbatim. PERSISTED is
+    /// dropped intentionally — see <see cref="EmitDeferredComputedColumns"/>
+    /// for the rationale (BCP carries no bytes for computed columns, so the
+    /// simulator recomputes on every read). Returns null (recording a skip)
+    /// when the expression is absent.
+    /// </summary>
+    private static string? TranslateComputedColumn(XElement columnElement, string? columnName, BacpacImportResult result)
+    {
+        if (string.IsNullOrEmpty(columnName))
+            throw new InvalidDataException("bacpac: SqlComputedColumn missing Name attribute.");
+        var columnLeaf = columnName[(columnName.LastIndexOf('.') + 1)..];
+        var expression = ReadScriptProperty(columnElement, "ExpressionScript");
+        if (string.IsNullOrEmpty(expression))
+        {
+            result.AddSkipped(new BacpacSkipped("SqlComputedColumn", columnName, "Missing ExpressionScript property."));
+            return null;
+        }
+        return $"{columnLeaf} AS {expression}";
+    }
+
+    /// <summary>
     /// Phase 8 walker: re-visits each <c>SqlTable</c> element and emits
     /// <c>ALTER TABLE [schema].[table] ADD [col] AS (expr) [PERSISTED]</c>
     /// for every <c>SqlComputedColumn</c> entry the original table-creation
@@ -1096,10 +1170,15 @@ internal static class ModelXmlReader
         _ = command.ExecuteNonQuery();
     }
 
-    private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacImportResult result)
+    private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacImportResult result, HashSet<string> deferredComputedTables)
     {
         var tableName = tableElement.Attribute("Name")?.Value;
         if (string.IsNullOrEmpty(tableName))
+            return;
+        // Only tables whose inline computed-column emission failed in phase 2
+        // (a forward UDF reference) land here — every other table already
+        // carries its computed columns at their true model ordinal.
+        if (!deferredComputedTables.Contains(tableName))
             return;
         var columnsRel = tableElement.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "Columns");

@@ -12,9 +12,10 @@ namespace SqlServerSimulator;
 /// invalid input.
 /// </summary>
 /// <remarks>
-/// The CAST-to-varbinary byte form is simulator-native rather than SQL Server's
-/// documented variable-bit ordinal encoding (deferred to the BACPAC loader
-/// bundle). All other surfaces probe-match real SQL Server 2025 on 2026-05-14.
+/// hierarchyid is stored in its canonical OrdPath byte form, so
+/// <c>CAST(node AS varbinary)</c> is byte-identical to a real server and
+/// <c>ORDER BY</c> is an unsigned <c>memcmp</c>. All surfaces probe-match real
+/// SQL Server 2025 (encoding/order re-anchored 2026-07-17).
 /// </remarks>
 [TestClass]
 public sealed class HierarchyIdTests
@@ -143,6 +144,75 @@ public sealed class HierarchyIdTests
         var expected = new[] { "/", "/-1/", "/1/", "/1/1/", "/1/1/1/", "/1/2/", "/2/" };
         AreEqual(string.Join(",", expected), string.Join(",", actual));
     }
+
+    // CAST(node AS varbinary) is a zero-copy read of the canonical OrdPath
+    // bytes — byte-identical to SQL Server 2025 (probe 2026-07-17).
+    [TestMethod]
+    [DataRow("/", "")]
+    [DataRow("/1/", "58")]
+    [DataRow("/79/", "DBF0")]
+    [DataRow("/100/", "E02640")]
+    [DataRow("/-200/", "1BE044")]
+    [DataRow("/1/2.5/3/", "5BA378")]
+    [DataRow("/6/1/10/", "957540")]
+    public void Cast_HierarchyId_ToVarbinary_IsByteIdentical(string path, string expectedHex)
+        => AreEqual(expectedHex, ToHex(ExecuteScalar($"select cast(hierarchyid::Parse('{path}') as varbinary(892))")));
+
+    // The reverse CAST accepts a canonical OrdPath byte string and round-trips.
+    [TestMethod]
+    [DataRow("0x58", "/1/")]
+    [DataRow("0x5BA378", "/1/2.5/3/")]
+    [DataRow("0xE02640", "/100/")]
+    [DataRow("0x1BE044", "/-200/")]
+    public void Cast_Varbinary_ToHierarchyId_RoundTrips(string literal, string expectedPath)
+        => AreEqual(expectedPath, ExecuteScalar($"select cast({literal} as hierarchyid).ToString()"));
+
+    // A non-canonical byte string is rejected exactly as SQL Server rejects it
+    // (probe 2026-07-17: the .NET-UDR error surfaces as Msg 6522).
+    [TestMethod]
+    [DataRow("0x59")]
+    [DataRow("0x00")]
+    [DataRow("0xFFFF")]
+    public void Cast_Varbinary_NonCanonical_RaisesMsg6522(string literal)
+        => new Simulation().AssertSqlError($"select cast({literal} as hierarchyid).ToString()", 6522);
+
+    // Depth-first order across every modeled dimension: root, negatives,
+    // siblings, deep paths, a dotted continuation, and multi-tier ordinals.
+    // Expected order probed from SQL Server 2025 (2026-07-17).
+    [TestMethod]
+    public void OrderBy_SpansTiersAndDottedOrdinals()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (h hierarchyid not null);
+            insert t values
+                (hierarchyid::Parse('/100/')),
+                (hierarchyid::Parse('/1/2.5/')),
+                (hierarchyid::Parse('/-1/')),
+                (hierarchyid::Parse('/1/3/')),
+                (hierarchyid::Parse('/')),
+                (hierarchyid::Parse('/1104/')),
+                (hierarchyid::Parse('/1/1/1/')),
+                (hierarchyid::Parse('/2/')),
+                (hierarchyid::Parse('/1/2/')),
+                (hierarchyid::Parse('/80/')),
+                (hierarchyid::Parse('/-200/')),
+                (hierarchyid::Parse('/1/1/')),
+                (hierarchyid::Parse('/1/'))
+            """);
+        using var conn = sim.CreateOpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "select h.ToString() from t order by h";
+        using var reader = cmd.ExecuteReader();
+        var actual = new List<string>();
+        while (reader.Read())
+            actual.Add(reader.GetString(0));
+        var expected = new[] { "/", "/-200/", "/-1/", "/1/", "/1/1/", "/1/1/1/", "/1/2/", "/1/2.5/", "/1/3/", "/2/", "/80/", "/100/", "/1104/" };
+        AreEqual(string.Join(",", expected), string.Join(",", actual));
+    }
+
+    private static string ToHex(object? scalar)
+        => scalar is byte[] b ? Convert.ToHexString(b) : throw new AssertFailedException($"expected byte[], got {scalar?.GetType().Name ?? "null"}");
 
     [TestMethod]
     public void Storage_RoundTripsThroughHeap()

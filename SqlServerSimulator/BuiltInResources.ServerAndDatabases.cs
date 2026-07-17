@@ -1250,11 +1250,18 @@ internal static partial class BuiltInResources
     /// Rows for <c>sys.database_query_store_options</c> — one OFF row per user
     /// database, zero rows for a system database (master/tempdb/model/msdb per
     /// <see cref="Simulation.SystemDatabaseNames"/>). The simulator never
-    /// enables Query Store, so the single row is the fixed "disabled" shape a
-    /// live SQL Server 2025 returns for a Query-Store-off user database
-    /// (desired/actual OFF, query_capture_mode CUSTOM). The join key is the
-    /// database context (<paramref name="database"/>), so a three-part
-    /// <c>master.sys.database_query_store_options</c> read returns nothing.
+    /// enables Query Store, so the single row is a fixed "disabled" shape:
+    /// desired/actual OFF with <c>query_capture_mode</c> AUTO and NULL
+    /// capture-policy columns, the shape live pre-CUSTOM databases report
+    /// (probe-confirmed against the reference AW/WWI). A fresh SQL Server
+    /// 2025 database defaults to CUSTOM (4) with policy defaults, but DacFx's
+    /// bacpac model schema reads only <c>query_capture_mode</c> and cannot
+    /// express CUSTOM — exporting 4 produces a model.xml that real DacFx
+    /// rejects at import ("The option 4 for querystore query_capture_mode is
+    /// not supported"), so AUTO is the round-trippable choice. The join key
+    /// is the database context (<paramref name="database"/>), so a
+    /// three-part <c>master.sys.database_query_store_options</c> read
+    /// returns nothing.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabaseQueryStoreOptions(Parser.BatchContext batch, Database database)
     {
@@ -1275,12 +1282,12 @@ internal static partial class BuiltInResources
             SqlValue.FromInt64(1000),               // max_storage_size_mb
             SqlValue.FromInt64(30),                 // stale_query_threshold_days
             SqlValue.FromInt64(200),                // max_plans_per_query
-            SqlValue.FromInt16(4),                  // query_capture_mode
-            SqlValue.FromNVarchar("CUSTOM"),        // query_capture_mode_desc
-            SqlValue.FromInt32(30),                 // capture_policy_execution_count
-            SqlValue.FromInt64(1000),               // capture_policy_total_compile_cpu_time_ms
-            SqlValue.FromInt64(100),                // capture_policy_total_execution_cpu_time_ms
-            SqlValue.FromInt32(24),                 // capture_policy_stale_threshold_hours
+            SqlValue.FromInt16(2),                  // query_capture_mode
+            SqlValue.FromNVarchar("AUTO"),          // query_capture_mode_desc
+            SqlValue.Null(SqlType.Int32),           // capture_policy_execution_count
+            SqlValue.Null(SqlType.BigInt),          // capture_policy_total_compile_cpu_time_ms
+            SqlValue.Null(SqlType.BigInt),          // capture_policy_total_execution_cpu_time_ms
+            SqlValue.Null(SqlType.Int32),           // capture_policy_stale_threshold_hours
             SqlValue.FromInt16(0),                  // size_based_cleanup_mode
             off,                                    // size_based_cleanup_mode_desc
             SqlValue.FromInt16(0),                  // wait_stats_capture_mode

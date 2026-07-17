@@ -58,7 +58,11 @@ public sealed class QueryStoreCatalogViewTests
         IsTrue(reader.Read());
         AreEqual(0, Convert.ToInt32(reader.GetValue(0)));
         AreEqual("OFF", reader.GetString(1));
-        AreEqual("CUSTOM", reader.GetString(2));
+        // AUTO, not 2025's fresh-database CUSTOM default: DacFx's bacpac
+        // model schema can't express CUSTOM (its import rejects capture
+        // mode 4), so the OFF row reports the round-trippable pre-CUSTOM
+        // shape the reference AW/WWI databases show.
+        AreEqual("AUTO", reader.GetString(2));
         IsFalse(reader.Read());
     }
 

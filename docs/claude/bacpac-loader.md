@@ -28,7 +28,7 @@ public void ImportBacpac(Stream stream, out BacpacImportResult result, BacpacImp
 
 ## Resilient-loader contract
 
-Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and the load continues; the entire load doesn't abort because one constraint / view / proc fails. Computed-column failures use a `"Deferred: …"` prefix instead, so the `Load_AW_No_Per_Element_Failures` guard test stays meaningful — it would otherwise spuriously fire on known unmodeled-function gaps.
+Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and the load continues; the entire load doesn't abort because one constraint / view / proc fails. Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) use a `"Deferred: …"` prefix instead, so the `Load_AW_No_Per_Element_Failures` guard test stays meaningful — it would otherwise spuriously fire on known unmodeled-function gaps.
 
 ## Code layout — `SqlServerSimulator/Storage/Bacpac/`
 
@@ -45,13 +45,13 @@ Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and 
 | Phase | Elements |
 |---|---|
 | 1 | DB options + schemas + UDDTs + sequences + roles + table types + filegroups (silent skip) + partition function/scheme/columnstore (silent skip) |
-| 2 | Tables (columns only, defaults inline, computed columns deferred to phase 8) |
+| 2 | Tables (columns + computed columns inline at model ordinal, defaults inline; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
 | 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) |
 | 6 | Views |
 | 7 | Programmable objects (procs, scalar / multi-stmt TVFs, DML + DDL triggers, GRANT statements) |
-| 8 | Deferred computed columns + indexes (order matters: computed cols before filtered indexes that reference them) |
+| 8 | Deferred computed columns (only for tables phase 2 fell back on — a forward UDF reference; these append at the end, so their `sys.columns.column_id` lands after the simple columns rather than at the model ordinal) + indexes (order matters: computed cols before filtered indexes that reference them) |
 | 9 | Extended properties |
 
 After all 9 phases: BCP data load (parallel per-table with LPT scheduling — see `BacpacReader.cs`).
@@ -83,6 +83,14 @@ Per-table data lives in `Data/<schema>.<table>/TableData-NNN-NNNNN.BCP`. Type ma
 ## BCP-filters-computed-columns contract
 
 `BacpacReader.LoadRowsFromBcp` strips columns with `HeapColumn.Computed != null` before passing to `BcpRowReader` / `RowEncoder` — DACFx-emitted BCP files exclude computed columns from the wire layout regardless of PERSISTED. The loader emits computed columns *without* the PERSISTED qualifier so the simulator recomputes on every read; recomputing on every read gives identical query semantics with the only cost being a per-read evaluation. A persisted-computed column would have no stored bytes for existing rows, since BCP doesn't carry data for them.
+
+## Computed-column ordinal preservation
+
+`EmitTable` emits computed columns **inline in CREATE TABLE at their model ordinal** (`col AS (expr)`), so `sys.columns.column_id` matches the source database. This matters for system-versioned pairs: DacFx re-export orders `model.xml` columns by `column_id`, and re-import into real SQL Server fails with **Msg 13524** if the base table and its history sibling disagree on ordinals. WWI's `Application.People` (computed `SearchName` at 4, `OtherLanguages` at 18) and its `People_Archive` sibling (all simple columns, true order) now share identical ordinals; all 17 WWI temporal pairs align.
+
+A computed expression that forward-references a user function can't resolve in the CREATE TABLE column-list parser (the UDF only lands in phase 7). `EmitTable` runs a **two-attempt** strategy per table: build the full DDL with computed columns inline and try it; on any failure *when the table has computed columns*, re-create with computed columns stripped and register the table in a `deferredComputedTables` set that phase 8 consumes (it processes only those tables). The stripped-then-appended path leaves those computed columns at the **end** of `sys.columns` for that one table — the accepted tradeoff. AW's `Sales.Customer.AccountNumber` (`isnull('AW'+[dbo].[ufnLeadingZeros]([CustomerID]),'')`) is the only such column across AW + WWI; it lands at ordinal 7 rather than its true 5. No temporal table in either reference has a UDF-referencing computed column, so no history pair is affected.
+
+The alias side-map (`TableColumnIsAlias`, consumed by the BCP decoder) is built index-aligned to the resulting `HeapTable.Columns` order: full model order (computed slots `false`, never read since BCP filters computed columns out) on the inline path, simple-columns-only on the fallback path (computed appended last).
 
 ## Reference sample coverage
 

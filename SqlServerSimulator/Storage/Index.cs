@@ -42,6 +42,7 @@ internal sealed class Index(
     bool isClustered,
     IndexKeyColumn[] keyColumns,
     int[] includedColumns,
+    int[] includedColumnOrdinals,
     BooleanExpression? filter,
     string? filterDefinition)
 {
@@ -63,10 +64,24 @@ internal sealed class Index(
 
     /// <summary>
     /// INCLUDE-clause column storage ordinals, in declaration order. Empty
-    /// when no INCLUDE was specified. The simulator stores them for
-    /// <c>sys.index_columns</c> visibility; they have no runtime effect.
+    /// when no INCLUDE was specified. A non-persisted computed column has
+    /// no storage slot, so its entry is <c>-1</c> — ambiguous across
+    /// computed columns, which is why the catalog reads
+    /// <see cref="IncludedColumnOrdinals"/> instead.
     /// </summary>
     public readonly int[] IncludedColumns = includedColumns;
+
+    /// <summary>
+    /// INCLUDE-clause full column ordinals (0-based positions in
+    /// <c>HeapTable.Columns</c>), parallel to <see cref="IncludedColumns"/>.
+    /// The source for <c>sys.index_columns.column_id</c> — unambiguous even
+    /// for non-persisted computed columns, whose shared <c>-1</c> storage
+    /// ordinal collapsed the catalog mapping onto the wrong column (WWI's
+    /// <c>IX_Sales_Invoices_ConfirmedDeliveryTime</c> scripted
+    /// <c>INCLUDE</c> of its own key column, which real SQL Server rejects
+    /// at import with Msg 1909).
+    /// </summary>
+    public readonly int[] IncludedColumnOrdinals = includedColumnOrdinals;
 
     /// <summary>
     /// Optional WHERE filter — only honored on UNIQUE indexes (a row is
@@ -84,14 +99,20 @@ internal sealed class Index(
 }
 
 /// <summary>
-/// One key column inside an <see cref="Index"/>: a storage ordinal plus
-/// the ASC / DESC flag captured at CREATE INDEX time. The DESC flag has
-/// no runtime effect (no real index order) but surfaces in
+/// One key column inside an <see cref="Index"/>: a storage ordinal (for
+/// the enforcement / seek paths that decode row bytes), the full column
+/// ordinal (for the catalog — a non-persisted computed key column's
+/// storage ordinal is the ambiguous <c>-1</c>), plus the ASC / DESC flag
+/// captured at CREATE INDEX time. The DESC flag has no runtime effect (no
+/// real index order) but surfaces in
 /// <c>sys.index_columns.is_descending_key</c>.
 /// </summary>
-internal readonly struct IndexKeyColumn(int storageOrdinal, bool isDescending)
+internal readonly struct IndexKeyColumn(int storageOrdinal, int columnOrdinal, bool isDescending)
 {
     public readonly int StorageOrdinal = storageOrdinal;
+
+    /// <summary>0-based position in <c>HeapTable.Columns</c>; the source for <c>sys.index_columns.column_id</c>.</summary>
+    public readonly int ColumnOrdinal = columnOrdinal;
 
     public readonly bool IsDescending = isDescending;
 }

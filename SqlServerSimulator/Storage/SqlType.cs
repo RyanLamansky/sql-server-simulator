@@ -497,11 +497,11 @@ internal abstract partial class SqlType
     public static readonly RowVersionSqlType RowVersion = new();
 
     /// <remarks>
-    /// SQL Server's <c>hierarchyid</c>: variable-length CLR UDT for tree
-    /// paths. Internal byte form is simulator-specific; CAST round-trips
-    /// inside the simulator are byte-stable, cross-engine transport (BCP /
-    /// SqlClient UDT wire) is deferred. See <see cref="HierarchyIdSqlType"/>
-    /// for the segment-array internal representation and string-form rules.
+    /// SQL Server's <c>hierarchyid</c>: variable-length CLR UDT for tree paths,
+    /// stored in its canonical OrdPath byte form (byte-identical to a real
+    /// server for storage, <c>CAST AS varbinary</c>, the TDS UDT wire, and
+    /// <c>DATALENGTH</c>). See <see cref="HierarchyIdSqlType"/> and
+    /// <see cref="HierarchyIdOrdPath"/> for the encoding and string-form rules.
     /// </remarks>
     public static readonly HierarchyIdSqlType HierarchyId = new();
 

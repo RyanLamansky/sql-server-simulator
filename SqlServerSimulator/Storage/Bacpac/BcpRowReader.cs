@@ -159,13 +159,10 @@ internal static class BcpRowReader
         /// </summary>
         Geometry,
         /// <summary>
-        /// Hierarchyid: read the length + N bytes, decode the OrdPath
-        /// binary form via <see cref="HierarchyIdWireDecoder.Decode"/>, and
-        /// return a hierarchyid <see cref="SqlValue"/>. The decoder covers
-        /// the [0..79] ordinal range and raises
-        /// <see cref="NotSupportedException"/> for the negative range +
-        /// ordinals &gt;= 80; both bubble up to the per-file try/catch in
-        /// <see cref="BacpacReader"/> so the whole file lands on Skipped.
+        /// Hierarchyid: read the length + N bytes and store them verbatim as
+        /// the value's canonical OrdPath form (no decode). Any tier round-trips
+        /// through storage/export opaquely, even ones the ordinal codec can't
+        /// yet stringify.
         /// </summary>
         HierarchyId,
     }
@@ -202,7 +199,7 @@ internal static class BcpRowReader
             EightBytePayload.Geometry => SpatialWkbDecoder.TryDecode(data, isGeography: false) is { } mwkt
                 ? SqlValue.FromGeometry(mwkt)
                 : SqlValue.Null(type),
-            EightBytePayload.HierarchyId => SqlValue.FromHierarchyId(HierarchyIdWireDecoder.Decode(data)),
+            EightBytePayload.HierarchyId => SqlValue.FromHierarchyIdBytes(data),
             _ => throw new InvalidOperationException($"unknown EightBytePayload {kind}"),
         };
     }

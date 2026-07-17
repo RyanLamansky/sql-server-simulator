@@ -287,4 +287,43 @@ public sealed class IndexIntrospectionTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
             "create table t (id int); " +  // no PK = heap, index_id 0 is HEAP
             "select stats_date(object_id('t'), 1)"));
+
+    /// <summary>
+    /// An index keying one non-persisted computed column and INCLUDE-ing
+    /// another must report each column's own <c>column_id</c>. Both share
+    /// storage ordinal -1 (no row-storage slot), which used to collapse the
+    /// catalog mapping onto the first computed column — WWI's
+    /// <c>IX_Sales_Invoices_ConfirmedDeliveryTime</c> exported
+    /// <c>INCLUDE</c> of its own key column, and real SQL Server rejects
+    /// that script at bacpac import with Msg 1909 (duplicate column names
+    /// in index). Mirrors the Sales.Invoices shape.
+    /// </summary>
+    [TestMethod]
+    public void IndexColumns_ComputedKeyAndInclude_ReportDistinctColumnIds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (
+                id int not null primary key,
+                payload nvarchar(max),
+                c1 as (json_value(payload, '$.a')),
+                c2 as (json_value(payload, '$.b')));
+            create index ix_c1 on t (c1) include (c2)
+            """);
+        using var reader = sim.ExecuteReader("""
+            select c.name, ic.is_included_column
+            from sys.index_columns ic
+            join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
+            join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id
+            where i.name = 'ix_c1'
+            order by ic.index_column_id
+            """);
+        IsTrue(reader.Read());
+        AreEqual("c1", reader.GetString(0));
+        IsFalse(reader.GetBoolean(1));
+        IsTrue(reader.Read());
+        AreEqual("c2", reader.GetString(0));
+        IsTrue(reader.GetBoolean(1));
+        IsFalse(reader.Read());
+    }
 }

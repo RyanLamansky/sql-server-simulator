@@ -911,32 +911,37 @@ internal static partial class BuiltInResources
                 {
                     if (identity.IsHeap)
                         continue;
-                    var ordinals = identity.Constraint is { } key ? key.StorageOrdinals : IndexKeyStorageOrdinals(identity.Index!);
-                    foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), ordinals, table))
+                    var columnIds = identity.Constraint is { } key
+                        ? ResolveConstraintColumnIds(key, table)
+                        : IndexKeyColumnIds(identity.Index!);
+                    foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), columnIds))
                         yield return row;
                 }
             }
         }
 
-        static int[] IndexKeyStorageOrdinals(Storage.Index index) =>
-            [.. index.KeyColumns.Select(static c => c.StorageOrdinal)];
+        static int[] ResolveConstraintColumnIds(KeyConstraint key, HeapTable table) =>
+            [.. key.StorageOrdinals.Select(o => StorageOrdinalToColumnId(table, o))];
+
+        static int[] IndexKeyColumnIds(Storage.Index index) =>
+            [.. index.KeyColumns.Select(static c => c.ColumnOrdinal + 1)];
     }
 
     /// <summary>
-    /// Materializes one <c>sys.stats_columns</c> row per key-column storage
-    /// ordinal of an index-backed statistic: stats_column_id = the 1-based
-    /// key ordinal, column_id = the resolved <c>sys.columns</c> id.
+    /// Materializes one <c>sys.stats_columns</c> row per key column of an
+    /// index-backed statistic: stats_column_id = the 1-based key ordinal,
+    /// column_id = the resolved <c>sys.columns</c> id.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EmitStatsColumns(SqlValue tableObjectId, SqlValue statsIdValue, int[] storageOrdinals, HeapTable table)
+    private static IEnumerable<SqlValue[]> EmitStatsColumns(SqlValue tableObjectId, SqlValue statsIdValue, int[] columnIds)
     {
-        for (var i = 0; i < storageOrdinals.Length; i++)
+        for (var i = 0; i < columnIds.Length; i++)
         {
             yield return
             [
                 tableObjectId,
                 statsIdValue,
                 SqlValue.FromInt32(i + 1),
-                SqlValue.FromInt32(StorageOrdinalToColumnId(table, storageOrdinals[i])),
+                SqlValue.FromInt32(columnIds[i]),
             ];
         }
     }
@@ -980,7 +985,7 @@ internal static partial class BuiltInResources
                                 tableObjectId,
                                 indexIdValue,
                                 SqlValue.FromInt32(i + 1),
-                                SqlValue.FromInt32(StorageOrdinalToColumnId(table, keyCol.StorageOrdinal)),
+                                SqlValue.FromInt32(keyCol.ColumnOrdinal + 1),
                                 SqlValue.FromByte((byte)(i + 1)),
                                 zeroByte,
                                 keyCol.IsDescending ? trueBit : falseBit,
@@ -989,13 +994,13 @@ internal static partial class BuiltInResources
                                 nullByte,
                             ];
                         }
-                        for (var i = 0; i < index.IncludedColumns.Length; i++)
+                        for (var i = 0; i < index.IncludedColumnOrdinals.Length; i++)
                         {
                             yield return [
                                 tableObjectId,
                                 indexIdValue,
                                 SqlValue.FromInt32(index.KeyColumns.Length + i + 1),
-                                SqlValue.FromInt32(StorageOrdinalToColumnId(table, index.IncludedColumns[i])),
+                                SqlValue.FromInt32(index.IncludedColumnOrdinals[i] + 1),
                                 zeroByte,
                                 zeroByte,
                                 falseBit,

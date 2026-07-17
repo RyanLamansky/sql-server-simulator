@@ -467,16 +467,33 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public static SqlValue FromGuid(Guid value) => new(SqlType.UniqueIdentifier, 0, value, isNull: false);
 
     /// <summary>
-    /// Non-NULL SQL <c>hierarchyid</c> value. The segment-array path lives
-    /// in the reference slot; equality and ordering compare path lexicographically
-    /// via <see cref="HierarchyIdSqlType.ComparePaths"/>. The caller transfers
-    /// ownership of the array (and its inner arrays) at construction; mutation
-    /// after construction breaks identity.
+    /// Non-NULL SQL <c>hierarchyid</c> value built from the segment-array path
+    /// form. The path is encoded into its canonical OrdPath byte form (the
+    /// simulator's in-memory representation for <c>hierarchyid</c>, matching what
+    /// a real server stores / compares / sends) and stored in the reference slot;
+    /// equality and ordering are unsigned bytewise, which equals depth-first tree
+    /// order. Raises <see cref="NotSupportedException"/> if a label falls outside
+    /// the modeled OrdPath tier range.
     /// </summary>
     public static SqlValue FromHierarchyId(int[][] path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        return new(SqlType.HierarchyId, 0, path, isNull: false);
+        return new(SqlType.HierarchyId, 0, HierarchyIdOrdPath.Encode(path), isNull: false);
+    }
+
+    /// <summary>
+    /// Non-NULL SQL <c>hierarchyid</c> value from raw OrdPath bytes, stored
+    /// verbatim (no validation or re-encoding) — the passthrough path for BACPAC
+    /// import, the ADO.NET byte-parameter path, and <c>CAST(varbinary AS
+    /// hierarchyid)</c> (after that path validates canonicality). Lets a value in
+    /// an unmodeled tier still round-trip through storage even though
+    /// <see cref="AsHierarchyId"/> / <c>ToString()</c> can't decode it. The caller
+    /// transfers ownership of the array.
+    /// </summary>
+    public static SqlValue FromHierarchyIdBytes(byte[] ordPathBytes)
+    {
+        ArgumentNullException.ThrowIfNull(ordPathBytes);
+        return new(SqlType.HierarchyId, 0, ordPathBytes, isNull: false);
     }
 
     /// <summary>
@@ -600,16 +617,6 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return bytes;
     }
 
-    private static byte[] HierarchyIdToBytes(int[][] path)
-    {
-        var len = 2;
-        foreach (var segment in path)
-            len += 2 + (segment.Length * 4);
-        var bytes = new byte[len];
-        _ = SqlType.HierarchyId.Encode(FromHierarchyId(path), bytes);
-        return bytes;
-    }
-
     /// <summary>Returns the value as <see cref="DateOnly"/>. Throws if NULL or wrong type.</summary>
     public DateOnly AsDate => this.As(SqlType.Date, p => DateOnly.FromDayNumber((int)p));
 
@@ -647,12 +654,19 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not sql_variant.")
             : (SqlValue)this.reference!;
 
-    /// <summary>Returns the value as the segment-array hierarchyid path. Throws if NULL or not a hierarchyid value.</summary>
+    /// <summary>Returns the hierarchyid path decoded to segment-array form. Throws if NULL or not a hierarchyid value; <see cref="NotSupportedException"/> if the stored bytes use an unmodeled OrdPath tier.</summary>
     public int[][] AsHierarchyId => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type != SqlType.HierarchyId
             ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")
-            : (int[][])this.reference!;
+            : HierarchyIdOrdPath.Decode((byte[])this.reference!);
+
+    /// <summary>Returns the raw canonical OrdPath bytes backing a hierarchyid value (zero-copy). Throws if NULL or not a hierarchyid value.</summary>
+    public byte[] AsHierarchyIdBytes => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type != SqlType.HierarchyId
+            ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")
+            : (byte[])this.reference!;
 
     /// <summary>Returns the value as <see cref="decimal"/>. Throws if NULL or not a decimal-typed value.</summary>
     public decimal AsDecimal => this.IsNull
@@ -714,12 +728,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         TimeSqlType => this.AsTime,
         DateTimeOffsetSqlType => this.AsDateTimeOffset,
         var t when t == SqlType.UniqueIdentifier => this.AsGuid,
-        // hierarchyid surfaces as varbinary bytes via untyped accessors —
-        // SqlClient's UDT-wire-format handling isn't modeled here, so the
-        // simulator hands back its internal byte encoding (a deferred
-        // gap from the byte-identical-CAST limitation documented on the
-        // SqlType.HierarchyId remarks).
-        var t when t == SqlType.HierarchyId => HierarchyIdToBytes(this.AsHierarchyId),
+        // hierarchyid surfaces as its raw OrdPath bytes via untyped accessors —
+        // the same buffer a real server stores and sends over the UDT wire.
+        var t when t == SqlType.HierarchyId => this.AsHierarchyIdBytes,
         DecimalSqlType => this.AsDecimal,
         var t when t == SqlType.Float => this.AsDouble,
         var t when t == SqlType.Real => this.AsSingle,
@@ -747,7 +758,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                         : this.Type is DecimalSqlType
                             ? (decimal)this.reference! == (decimal)other.reference!
                             : this.Type == SqlType.HierarchyId
-                                ? HierarchyIdSqlType.ComparePaths((int[][])this.reference!, (int[][])other.reference!) == 0
+                                ? ((byte[])this.reference!).AsSpan().SequenceEqual((byte[])other.reference!)
                                 : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
 
     /// <summary>
@@ -819,7 +830,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                 {
                     VarbinarySqlType or BinarySqlType or ImageSqlType => this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes),
                     RowVersionSqlType => this.primitive.CompareTo(other.primitive),
-                    HierarchyIdSqlType => HierarchyIdSqlType.ComparePaths(this.AsHierarchyId, other.AsHierarchyId),
+                    // OrdPath's defining property: unsigned bytewise order equals
+                    // depth-first tree order, so hierarchyid comparison is a memcmp.
+                    HierarchyIdSqlType => this.AsHierarchyIdBytes.AsSpan().SequenceCompareTo(other.AsHierarchyIdBytes),
                     // sql_variant ordering compares the inner values; differing
                     // inner base types fall to the inner CompareTo's own
                     // cross-type rejection (SQL Server's full sql_variant sort
@@ -867,9 +880,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         }
         else if (this.Type == SqlType.HierarchyId)
         {
-            // Hash on the canonical string form so equal paths (regardless
-            // of array identity) hash identically.
-            hash.Add(HierarchyIdSqlType.PathToString((int[][])this.reference!));
+            // Equal paths encode to identical OrdPath bytes, so hashing the
+            // bytes agrees with the bytewise equality above.
+            hash.AddBytes((byte[])this.reference!);
         }
         else if (this.reference is byte[] bytes)
         {
