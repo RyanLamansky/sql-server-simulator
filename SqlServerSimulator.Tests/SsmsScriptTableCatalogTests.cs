@@ -159,6 +159,18 @@ public sealed class SsmsScriptTableCatalogTests
         IsFalse(reader.Read());
     }
 
+    // === sys.fulltext_languages (populated language registry) ===
+
+    [TestMethod]
+    public void FullTextLanguages_ProjectsEnglishLcid()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select name from sys.fulltext_languages where lcid = 1033");
+        IsTrue(reader.Read());
+        AreEqual("English", reader.GetString(0));
+        IsFalse(reader.Read());
+    }
+
     // === sys.syslanguages (us_english default) ===
 
     [TestMethod]
@@ -185,7 +197,6 @@ public sealed class SsmsScriptTableCatalogTests
     [DataRow("sys.sensitivity_classifications", 10)]
     [DataRow("sys.fulltext_stoplists", 5)]
     [DataRow("sys.registered_search_property_lists", 5)]
-    [DataRow("sys.fulltext_languages", 2)]
     [DataRow("sys.assembly_modules", 6)]
     [DataRow("sys.database_recovery_status", 7)]
     [DataRow("sys.change_tracking_databases", 6)]

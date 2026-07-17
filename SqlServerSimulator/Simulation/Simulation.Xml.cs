@@ -281,13 +281,20 @@ partial class Simulation
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(indexName);
         }
 
+        // A primary XML index owns an internal "node table" (sys.objects type
+        // IT). Secondary indexes share their primary's node table. DacFx's
+        // XML-index reverse-engineering joins through this internal table + its
+        // per-index statistics, so a primary allocates an object id for it here
+        // (0 for secondaries — they resolve their primary's at enumeration).
+        var internalTableObjectId = isPrimary ? context.CurrentDatabase.AllocateObjectId() : 0;
         var index = new XmlIndex(
             indexName,
             ordinal,
             isPrimary,
             usingPrimaryName,
             secondaryType,
-            context.CurrentDatabase.AllocateObjectId());
+            context.CurrentDatabase.AllocateObjectId(),
+            internalTableObjectId);
         table.XmlIndexes.Add(index);
         return true;
     }
@@ -329,9 +336,16 @@ internal sealed class XmlIndex(
     bool isPrimary,
     string? usingPrimaryIndexName,
     XmlSecondaryIndexType? secondaryType,
-    int objectId)
+    int objectId,
+    int internalTableObjectId)
 {
     public readonly string Name = name;
+
+    /// <summary>Object id of the internal "node table" (sys.objects type IT)
+    /// a primary XML index owns; 0 for secondary indexes (which share their
+    /// primary's node table). DacFx's XML-index export joins through this
+    /// internal table and its per-index statistics.</summary>
+    public readonly int InternalTableObjectId = internalTableObjectId;
 
     /// <summary>0-based column ordinal that the index targets. Translated
     /// to 1-based <c>column_id</c> on the catalog-view surface.</summary>

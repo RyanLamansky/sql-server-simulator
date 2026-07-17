@@ -65,18 +65,8 @@ internal static partial class BuiltInResources
             new("is_system", SqlType.Bit, null, true),
         ], (batch, database) =>
         {
-            _ = (batch, database);
-            return
-            [
-                [
-                    SqlValue.FromSystemName("PRIMARY"),
-                    SqlValue.FromInt32(1),
-                    filegroupType,
-                    filegroupTypeDesc,
-                    SqlValue.FromBoolean(true),
-                    SqlValue.FromBoolean(false),
-                ],
-            ];
+            _ = batch;
+            return EnumerateFilegroupRows(database, filegroupType, filegroupTypeDesc);
         });
 
         // sys.filegroups: the row-filegroup subset of sys.data_spaces — the
@@ -99,22 +89,12 @@ internal static partial class BuiltInResources
             new("is_autogrow_all_files", SqlType.Bit, null, true),
         ], (batch, database) =>
         {
-            _ = (batch, database);
-            return
-            [
-                [
-                    SqlValue.FromSystemName("PRIMARY"),
-                    SqlValue.FromInt32(1),
-                    filegroupType,
-                    filegroupTypeDesc,
-                    SqlValue.FromBoolean(true),
-                    SqlValue.FromBoolean(false),
-                    SqlValue.Null(SqlType.UniqueIdentifier),
-                    SqlValue.Null(SqlType.Int32),
-                    SqlValue.FromBoolean(false),
-                    SqlValue.FromBoolean(false),
-                ],
-            ];
+            _ = batch;
+            var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
+            var nullLogId = SqlValue.Null(SqlType.Int32);
+            var falseBit = SqlValue.FromBoolean(false);
+            return EnumerateFilegroupRows(database, filegroupType, filegroupTypeDesc)
+                .Select(row => new[] { row[0], row[1], row[2], row[3], row[4], row[5], nullGuid, nullLogId, falseBit, falseBit });
         });
 
         // sys.index_columns: probe-confirmed 10-column shape. One row per
@@ -532,6 +512,33 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Shared row producer for <c>sys.data_spaces</c> + <c>sys.filegroups</c>
+    /// (the latter widens each row with four filegroup-only trailing columns).
+    /// One row per <see cref="Database.Filegroups"/> entry ordered by
+    /// <c>data_space_id</c>: <c>PRIMARY</c> (id 1) reports
+    /// <c>is_default = 1</c>, every registered filegroup <c>is_default = 0</c>;
+    /// <c>is_system</c> is always 0. Partition schemes ('PS') aren't modeled, so
+    /// every row is a 'FG' ROWS_FILEGROUP.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateFilegroupRows(Database database, SqlValue filegroupType, SqlValue filegroupTypeDesc)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var (name, id) in database.Filegroups.OrderBy(kvp => kvp.Value))
+        {
+            yield return
+            [
+                SqlValue.FromSystemName(name),
+                SqlValue.FromInt32(id),
+                filegroupType,
+                filegroupTypeDesc,
+                id == Database.PrimaryFilegroupId ? trueBit : falseBit,
+                falseBit,
+            ];
+        }
+    }
+
+    /// <summary>
     /// Rows for <c>sys.indexes</c>: one row per identity yielded by
     /// <see cref="HeapTable.IndexIdentities"/> — the single index-id
     /// allocation authority. The clustered entry (clustered PK / UNIQUE
@@ -887,6 +894,71 @@ internal static partial class BuiltInResources
                 nullName, // replica_name
             ];
         }
+        // XML-index statistics live on the owning primary's internal node
+        // table (sys.objects type IT), one per index, stats_id sequential
+        // within that node table (probe-confirmed). DacFx's XML-index export
+        // joins sys.stats to the node table by (object_id, name = index name).
+        foreach (var (internalTableObjectId, statsId, indexName) in EnumerateXmlIndexStats(database))
+        {
+            yield return
+            [
+                SqlValue.FromInt32(internalTableObjectId),
+                SqlValue.FromSystemName(indexName),
+                SqlValue.FromInt32(statsId),
+                falseBit, // auto_created
+                falseBit, // user_created
+                falseBit, // no_recompute
+                falseBit, // has_filter
+                nullFilter,
+                falseBit, // is_temporary
+                falseBit, // is_incremental
+                falseBit, // has_persisted_sample
+                zeroInt,  // stats_generation_method
+                methodDesc,
+                falseBit, // auto_drop
+                nullRole,
+                nullRoleDesc,
+                nullName, // replica_name
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Walks every table's XML indexes, resolving each index to the
+    /// <c>object_id</c> of the internal node table it belongs to (a primary
+    /// owns one; a secondary shares its primary's) and assigning a
+    /// per-node-table sequential <c>stats_id</c>. Used by
+    /// <see cref="EnumerateSysStats"/> and the internal-table + stats surface
+    /// DacFx's XML-index reverse-engineering joins through.
+    /// </summary>
+    private static IEnumerable<(int InternalTableObjectId, int StatsId, string IndexName)> EnumerateXmlIndexStats(Database database)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.XmlIndexes.Count == 0)
+                    continue;
+                var primaryNodeTable = new Dictionary<string, int>(database.Collation);
+                foreach (var ix in table.XmlIndexes)
+                {
+                    if (ix.IsPrimary)
+                        primaryNodeTable[ix.Name] = ix.InternalTableObjectId;
+                }
+                var nextStatsId = new Dictionary<int, int>();
+                foreach (var ix in table.XmlIndexes)
+                {
+                    var nodeTableId = ix.IsPrimary
+                        ? ix.InternalTableObjectId
+                        : ix.UsingPrimaryIndexName is { } u && primaryNodeTable.TryGetValue(u, out var v) ? v : 0;
+                    if (nodeTableId == 0)
+                        continue;
+                    var statsId = nextStatsId.TryGetValue(nodeTableId, out var cur) ? cur + 1 : 1;
+                    nextStatsId[nodeTableId] = statsId;
+                    yield return (nodeTableId, statsId, ix.Name);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -1010,6 +1082,25 @@ internal static partial class BuiltInResources
                             ];
                         }
                     }
+                }
+                // XML indexes: one index_column row per index (the indexed xml
+                // column), key_ordinal 0 / index_column_id 1 (probe-confirmed
+                // against SQL Server 2025). DacFx's XML-index export INNER JOINs
+                // sys.index_columns on the xml index's index_id.
+                foreach (var xmlIndex in table.XmlIndexes)
+                {
+                    yield return [
+                        tableObjectId,
+                        SqlValue.FromInt32(xmlIndex.ObjectId),
+                        SqlValue.FromInt32(1),
+                        SqlValue.FromInt32(xmlIndex.ColumnOrdinal + 1),
+                        zeroByte,
+                        zeroByte,
+                        falseBit,
+                        falseBit,
+                        nullByte,
+                        nullByte,
+                    ];
                 }
             }
         }

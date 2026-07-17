@@ -1197,14 +1197,14 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
-    public void Filegroup_IsSilentlySkipped()
+    public void Filegroup_RegistersInCatalogViews()
     {
-        // SqlFilegroup is loader-recognized + emitted as a no-op (same
-        // pattern as partition/columnstore). The simulator has a single
-        // in-process heap; filegroup metadata has no semantic effect.
+        // A non-PRIMARY SqlFilegroup registers on the database so
+        // sys.filegroups / sys.data_spaces surface it (data_space_id from 2;
+        // PRIMARY keeps 1 / is_default). No physical file model — heaps all
+        // live on PRIMARY. DacFx re-emits the standalone element on export.
         using var bacpac = BacpacBuilder.Create()
             .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
-            .Filegroup("PRIMARY")
             .Filegroup("FG_Indexes")
             .Build();
 
@@ -1212,6 +1212,117 @@ public class BacpacLoaderTests
         sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
+        AreEqual(2, sim.ExecuteScalar("SELECT data_space_id FROM sys.filegroups WHERE name = 'FG_Indexes';"));
+        AreEqual(0, sim.ExecuteScalar("SELECT CAST(is_default AS int) FROM sys.filegroups WHERE name = 'FG_Indexes';"));
+        AreEqual(1, sim.ExecuteScalar("SELECT data_space_id FROM sys.data_spaces WHERE name = 'PRIMARY' AND is_default = 1;"));
+    }
+
+    [TestMethod]
+    public void XmlIndex_PrimaryAndSecondary_LandIn_sys_xml_indexes()
+    {
+        // A primary XML index + a secondary (FOR PATH) using it. The loader
+        // dispatches CREATE [PRIMARY] XML INDEX; both surface through
+        // sys.xml_indexes, sys.index_columns, and the internal node-table +
+        // per-index statistics DacFx's export joins through.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Doc", t => t
+                .Column("Id", "int")
+                .Column("Data", "xml", nullable: true)
+                .PrimaryKey("PK_Doc", "Id"))
+            .PrimaryXmlIndex("dbo", "Doc", "PXML_Doc", "Data")
+            .SecondaryXmlIndex("dbo", "Doc", "XMLPATH_Doc", "Data", "PXML_Doc", usage: 1)
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.xml_indexes WHERE object_id = OBJECT_ID('dbo.Doc');"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.xml_indexes WHERE object_id = OBJECT_ID('dbo.Doc') AND xml_index_type = 0;"));
+        // Secondary resolves its primary + FOR PATH secondary_type ('P').
+        AreEqual("P", sim.ExecuteScalar("SELECT secondary_type FROM sys.xml_indexes WHERE name = 'XMLPATH_Doc';"));
+        // The primary's internal node table (type IT) surfaces in sys.objects
+        // with one statistics row per XML index (named per index).
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.objects WHERE type = 'IT' AND parent_object_id = OBJECT_ID('dbo.Doc');"));
+        AreEqual(2, sim.ExecuteScalar("""
+            SELECT COUNT(*) FROM sys.stats s
+            JOIN sys.objects o ON s.object_id = o.object_id
+            WHERE o.type = 'IT' AND o.parent_object_id = OBJECT_ID('dbo.Doc');
+            """));
+    }
+
+    [TestMethod]
+    public void FullTextCatalogAndIndex_LandIn_CatalogViews()
+    {
+        // CREATE FULLTEXT CATALOG + a multi-column index (one plain, one with
+        // TYPE COLUMN) → sys.fulltext_catalogs / fulltext_indexes /
+        // fulltext_index_columns. data_space_id + stoplist_id must be non-NULL
+        // so DacFx's export re-emits the elements (probe-derived requirement).
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Doc", t => t
+                .Column("Id", "int")
+                .Column("Summary", "nvarchar(200)", nullable: true)
+                .Column("Body", "varbinary(max)", nullable: true)
+                .Column("Ext", "nvarchar(8)", nullable: true)
+                .PrimaryKey("PK_Doc", "Id"))
+            .FullTextCatalog("MyCatalog")
+            .FullTextIndex("dbo", "Doc", "MyCatalog", "PK_Doc",
+                ("Summary", 1033, null),
+                ("Body", 1033, "Ext"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.fulltext_catalogs WHERE name = 'MyCatalog' AND is_default = 1;"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.fulltext_indexes WHERE object_id = OBJECT_ID('dbo.Doc');"));
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.fulltext_index_columns WHERE object_id = OBJECT_ID('dbo.Doc');"));
+        // data_space_id (PRIMARY) + stoplist_id (system) both non-NULL.
+        AreEqual(1, sim.ExecuteScalar("SELECT data_space_id FROM sys.fulltext_indexes WHERE object_id = OBJECT_ID('dbo.Doc');"));
+        AreEqual(0, sim.ExecuteScalar("SELECT stoplist_id FROM sys.fulltext_indexes WHERE object_id = OBJECT_ID('dbo.Doc');"));
+    }
+
+    [TestMethod]
+    public void ExtendedProperty_OnDdlTriggerHost_LandsWithClassObjectOrColumn()
+    {
+        // sp_addextendedproperty @level0type=N'TRIGGER' against a database DDL
+        // trigger → class 1 (OBJECT_OR_COLUMN), major_id = trigger object_id.
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseDdlTrigger("trgAudit", """
+                CREATE TRIGGER trgAudit ON DATABASE FOR CREATE_TABLE
+                AS BEGIN PRINT 'x'; END
+                """)
+            .DdlTriggerExtendedProperty("trgAudit", "MS_Description", "audit trigger")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("""
+            SELECT COUNT(*) FROM sys.extended_properties ep
+            JOIN sys.triggers tr ON ep.major_id = tr.object_id
+            WHERE ep.class = 1 AND ep.name = 'MS_Description'
+              AND tr.parent_class = 0 AND tr.name = 'trgAudit';
+            """));
+    }
+
+    [TestMethod]
+    public void ExtendedProperty_OnFilegroupHost_LandsWithClassDataspace()
+    {
+        // sp_addextendedproperty @level0type=N'FILEGROUP' → class 20
+        // (DATASPACE), major_id = data_space_id. PRIMARY is built-in (id 1).
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
+            .FilegroupExtendedProperty("PRIMARY", "MS_Description", "primary filegroup")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("""
+            SELECT COUNT(*) FROM sys.extended_properties
+            WHERE class = 20 AND class_desc = 'DATASPACE' AND major_id = 1
+              AND minor_id = 0 AND name = 'MS_Description';
+            """));
     }
 
     [TestMethod]
@@ -1355,16 +1466,18 @@ public class BacpacLoaderTests
     [TestMethod]
     public void ExtendedProperty_OnUnmodeledHostKind_LandsOnSkippedWithReason()
     {
-        // SqlFilegroup / SqlDatabaseDdlTrigger / any unrecognized host kind
-        // lands on Skipped with "Host kind '…' not modeled" — exercises the
-        // default arm of the extended-property host-kind switch.
+        // An extended-property host kind the loader doesn't model (here a
+        // Service Broker service) lands on Skipped with "Host kind '…' not
+        // modeled" — exercises the default arm of the host-kind switch.
+        // (SqlFilegroup / SqlDatabaseDdlTrigger are now modeled — covered by
+        // their own dedicated tests.)
         using var bacpac = BacpacBuilder.Create()
-            .UnknownHostExtendedProperty("SqlFilegroup", "PRIMARY", "MS_Description", "filegroup note")
+            .UnknownHostExtendedProperty("SqlServiceBrokerService", "AuditService", "MS_Description", "service note")
             .Build();
 
         new Simulation().ImportBacpac(bacpac, out var diag);
         HasCount(1, diag.Skipped.Where(s => s.ElementType == "SqlExtendedProperty").ToList());
-        Contains("Host kind 'SqlFilegroup'", diag.Skipped[0].Reason);
+        Contains("Host kind 'SqlServiceBrokerService'", diag.Skipped[0].Reason);
     }
 
     [TestMethod]

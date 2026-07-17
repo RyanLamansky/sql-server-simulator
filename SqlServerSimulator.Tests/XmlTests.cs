@@ -206,6 +206,43 @@ public sealed class XmlTests
         AreEqual(primaryId, secondaryUsingId);
     }
 
+    /// <summary>
+    /// Each primary XML index owns an internal node table (sys.objects type
+    /// 'IT') whose object_id carries one sys.stats row per XML index (named per
+    /// index); every XML index also gets a sys.index_columns row. DacFx's
+    /// XML-index export INNER JOINs all three, so their absence orphans the
+    /// index elements (client-side NRE).
+    /// </summary>
+    [TestMethod]
+    public void XmlIndex_InternalNodeTable_And_Stats_And_IndexColumns_Surface()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int not null primary key, body xml)");
+        _ = sim.ExecuteNonQuery("create primary xml index pxml_doc on dbo.doc(body)");
+        _ = sim.ExecuteNonQuery("create xml index sxml_path on dbo.doc(body) using xml index pxml_doc for path");
+
+        // One INTERNAL_TABLE per primary, parented to the base table, ms-shipped.
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(*) from sys.objects
+            where type = 'IT' and type_desc = 'INTERNAL_TABLE'
+              and parent_object_id = object_id('dbo.doc') and is_ms_shipped = 1
+            """));
+        // One stats row per XML index on the node table, named per index.
+        AreEqual(2, sim.ExecuteScalar("""
+            select count(*) from sys.stats s
+            join sys.objects o on s.object_id = o.object_id
+            where o.type = 'IT' and o.parent_object_id = object_id('dbo.doc')
+              and s.name in ('pxml_doc', 'sxml_path')
+            """));
+        // One index_columns row per XML index, on the base table's object_id,
+        // targeting the xml column (column_id 2), key_ordinal 0.
+        AreEqual(2, sim.ExecuteScalar("""
+            select count(*) from sys.index_columns ic
+            join sys.xml_indexes xi on ic.object_id = xi.object_id and ic.index_id = xi.index_id
+            where ic.object_id = object_id('dbo.doc') and ic.column_id = 2 and ic.key_ordinal = 0
+            """));
+    }
+
     [TestMethod]
     public void CreateXmlIndex_DuplicateName_Raises2714()
     {

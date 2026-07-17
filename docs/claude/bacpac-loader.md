@@ -44,15 +44,15 @@ Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and 
 
 | Phase | Elements |
 |---|---|
-| 1 | DB options + schemas + UDDTs + sequences + roles + table types + XML schema collections + filegroups (silent skip) + partition function/scheme/columnstore (silent skip) |
+| 1 | DB options + schemas + UDDTs + sequences + roles + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them — no physical file model) + partition function/scheme/columnstore (silent skip) |
 | 2 | Tables (columns + computed columns inline at model ordinal, defaults inline; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
 | 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) |
 | 6 | Views |
 | 7 | Programmable objects (procs, scalar / multi-stmt TVFs, DML + DDL triggers, GRANT statements) |
-| 8 | Deferred computed columns (only for tables phase 2 fell back on — a forward UDF reference; these append at the end, so their `sys.columns.column_id` lands after the simple columns rather than at the model ordinal) + indexes (order matters: computed cols before filtered indexes that reference them) |
-| 9 | Extended properties |
+| 8 | Deferred computed columns (only for tables phase 2 fell back on — a forward UDF reference; these append at the end, so their `sys.columns.column_id` lands after the simple columns rather than at the model ordinal) + indexes (order matters: computed cols before filtered indexes that reference them) + **XML indexes** (`CREATE [PRIMARY] XML INDEX`; primaries precede secondaries in DACFx's name-sorted document order, so a secondary's `USING XML INDEX` reference resolves) + **full-text indexes** (`CREATE FULLTEXT INDEX … KEY INDEX … ON catalog`; needs the table's clustered PK / unique KEY INDEX from phase 3 + the catalog from phase 1) |
+| 9 | Extended properties (incl. the database-DDL-trigger + filegroup host kinds — `@level0type=N'TRIGGER'` / `N'FILEGROUP'`) |
 
 After all 9 phases: BCP data load (parallel per-table with LPT scheduling — see `BacpacReader.cs`).
 
@@ -104,13 +104,25 @@ The alias side-map (`TableColumnIsAlias`, consumed by the BCP decoder) is built 
 
 Typed-xml columns arrive as `SqlXmlTypeSpecifier` (vs `SqlTypeSpecifier` for every other type) carrying an `XmlSchemaCollection` relationship whose `References` names the bound `[schema].[collection]`. `TranslateTypeSpecifier` detects the relationship and emits `xml([schema].[collection])` instead of bare `xml`, so `HeapColumn.XmlSchemaCollection` binds and `sys.columns.xml_collection_id` reports the collection's id (0 when untyped). Only the default CONTENT facet is handled — AW carries no `XmlStyle`/DOCUMENT property (probe: zero occurrences across the model), so a DOCUMENT facet would need a separate property read.
 
-This closes the round-trip that made AW's re-exported bacpac lose typed xml: `Person.vAdditionalContactInfo`'s `.value()` XQuery needs typed xml for singleton inference, and untyped columns raise Msg 2389 at real-server re-import. On the export side, `sys.columns.xml_collection_id` populates from the binding so DacFx re-serializes the `SqlXmlTypeSpecifier` shape. `SqlXmlIndex` (AW's 8 XML indexes) is a separate element type still on the loader-wiring backlog — the engine models `CREATE [PRIMARY] XML INDEX`, but `ModelXmlReader` doesn't dispatch the element yet.
+This closes the round-trip that made AW's re-exported bacpac lose typed xml: `Person.vAdditionalContactInfo`'s `.value()` XQuery needs typed xml for singleton inference, and untyped columns raise Msg 2389 at real-server re-import. On the export side, `sys.columns.xml_collection_id` populates from the binding so DacFx re-serializes the `SqlXmlTypeSpecifier` shape.
+
+## XML indexes, full-text, filegroups, DDL-trigger + filegroup extended properties
+
+`ModelXmlReader` dispatches four more element families (AW's 16-element export gap → 2, the remaining two being indexed views — [`indexes.md`](indexes.md) fidelity gaps):
+
+- **`SqlXmlIndex`** (phase 8) → `CREATE [PRIMARY] XML INDEX`. Primary form carries `IsPrimary=True` + the indexed `Column` + `IndexedObject`; secondary form carries `PrimaryXmlIndexUsage` (1=PATH / 2=PROPERTY / 3=VALUE) + a `UsingPrimaryXmlIndex` reference. The loader-wiring was cheap; the **export** side needed new catalog surface — DacFx's XML-index reverse-engineering query INNER JOINs `sys.index_columns` (one row per XML index) *and* an internal "node table" (`sys.objects` type `IT` / `INTERNAL_TABLE`, one per primary index, parent = base table) joined to `sys.stats` (one row per XML index, named after the index, on the node table's object_id). A primary XML index allocates the node-table object id at CREATE; see [`xml.md`](xml.md).
+- **`SqlFullTextCatalog`** (phase 1) → `CREATE FULLTEXT CATALOG … WITH ACCENT_SENSITIVITY = {ON|OFF} [AS DEFAULT] AUTHORIZATION owner`.
+- **`SqlFullTextIndex`** (phase 8) → `CREATE FULLTEXT INDEX ON t (col [TYPE COLUMN c] LANGUAGE n, …) KEY INDEX key ON catalog`. Export needed `sys.fulltext_languages` populated (DacFx INNER JOINs it by `language_id` to name the column's language — an empty view NREs the column-specifier populator) and `sys.fulltext_indexes.data_space_id` = 1 (PRIMARY) + `stoplist_id` = 0 (system stoplist), both previously NULL — DacFx INNER JOINs `sys.data_spaces` on the former (NULL drops the parent index element, orphaning its column specifiers → NRE) and reads the latter to decide `DoUseSystemStopList` vs `IsStopListOff`. See [`full-text.md`](full-text.md).
+- **`SqlFilegroup`** (phase 1) → registers the (non-PRIMARY) filegroup on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface it and DacFx re-emits the standalone element. No physical file / placement model — every heap lives on PRIMARY, so no table/index `Filegroup` relationships are emitted (the model-diff ignores relationships anyway). WWI's `[USERDATA]` closes its 1-element gap. See [`database-options.md`](database-options.md).
+- **`SqlExtendedProperty`** on a **database DDL trigger** (`@level0type=N'TRIGGER'` → class 1, major_id = trigger object_id) or a **filegroup** (`@level0type=N'FILEGROUP'` → class 20 DATASPACE, major_id = data_space_id). See [`extended-properties.md`](extended-properties.md).
+
+Both AW + WWI exports re-import cleanly into a real SQL Server 2025 (CU7, full-text installed) with all these elements present; the USERDATA filegroup imports with a DacFx-created default file.
 
 ## Reference sample coverage
 
 Reference bacpacs live in `.vs/<probe>/` as gitignored cross-check probes (`aw-crosscheck`, `wwi-crosscheck`). The retired `*.Tests.Internal/Storage/BacpacLoaderTests.cs` suite has been replaced by synthetic in-memory bacpacs built via `SqlServerSimulator.Bacpac.BacpacBuilder` + `TableBuilder` in `SqlServerSimulator.Tests/Bacpac/`. CI runs against synthetic builders in seconds.
 
-**AdventureWorks2025** — 100% row coverage (760,167 / 760,167 rows, zero BCP-file failures). 5/5 schemas, 71/71 tables, 90/90 FKs, 89/89 CHECKs, 152/152 DEFAULTs, 89/95 indexes, 11/20 views, 10/10 procs, 11/11 functions, 10/10 DML triggers, 1/1 DDL trigger, 527/538 extended properties.
+**AdventureWorks2025** — 100% row coverage (760,167 / 760,167 rows, zero BCP-file failures). 5/5 schemas, 71/71 tables, 90/90 FKs, 89/89 CHECKs, 152/152 DEFAULTs, 89/95 indexes, 11/20 views, 10/10 procs, 11/11 functions, 10/10 DML triggers, 1/1 DDL trigger, 538/538 extended properties, 8/8 XML indexes, 1/1 full-text catalog, 3/3 full-text indexes. **Import skips are down to 2** — both `SqlIndex`-on-a-view (indexed views), which need SCHEMABINDING machinery the simulator doesn't model. The DacFx-export element gap vs the Microsoft original is likewise 2 (those indexed views); property diffs are 0. One pre-existing divergence surfaces as an "extra" element: AW's system-named UNIQUE constraint on `Production.Document.rowguid` is scripted anonymously (name in an annotation) by DacFx normally, but *named* once the table has a full-text index — and the simulator's auto-generated constraint name (FNV-based) differs from real's object-id-derived one (a documented quirk), so the named form doesn't byte-match. Doesn't block real import.
 
 **WideWorldImporters-Standard** — end-to-end clean. 48/48 tables, 26/26 sequences, 9/9 roles, 4/4 table types, 8/8 computed columns, 7/7 CHECK constraints, 42/42 procedures, 94/94 indexes, 3/3 views, 1/1 scalar function, 2/2 encryption-key GRANTs, 414/414 extended properties, 4.7M rows. **Zero remaining Skipped categories.**
 

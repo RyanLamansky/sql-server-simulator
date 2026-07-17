@@ -59,11 +59,13 @@ Statement dispatch: `Fulltext` is added to the `ContextualKeyword` enum; CREATE 
 
 **`sys.fulltext_catalogs`** (9-col): `fulltext_catalog_id` / `name` / `path` (NULL — no on-disk storage) / `is_default` / `is_accent_sensitivity_on` / `data_space_id` (NULL) / `file_id` (NULL) / `principal_id` / `is_importing` (always false).
 
-**`sys.fulltext_indexes`** (14-col): `object_id` / `unique_index_id` / `fulltext_catalog_id` / `is_enabled` (true) / `change_tracking_state` (`A`) / `change_tracking_state_desc` (`AUTO`) / `has_crawl_completed` (true) / `crawl_type` (`F`) / `crawl_type_desc` (`FULL`) / `crawl_start_date` (NULL) / `crawl_end_date` (NULL) / `stoplist_id` (NULL) / `data_space_id` (NULL) / `property_list_id` (NULL).
+**`sys.fulltext_indexes`** (14-col): `object_id` / `unique_index_id` / `fulltext_catalog_id` / `is_enabled` (true) / `change_tracking_state` (`A`) / `change_tracking_state_desc` (`AUTO`) / `has_crawl_completed` (true) / `crawl_type` (`F`) / `crawl_type_desc` (`FULL`) / `crawl_start_date` (NULL) / `crawl_end_date` (NULL) / `stoplist_id` (**0** = system stoplist) / `data_space_id` (**1** = PRIMARY) / `property_list_id` (NULL). `stoplist_id` and `data_space_id` are **non-NULL by design** (probe-confirmed against the reference's AW database): DacFx's `SqlFullTextIndex` reverse-engineering INNER JOINs `sys.data_spaces` on `data_space_id` (a NULL drops the parent index element, orphaning its column specifiers → client-side NRE in `SqlFullTextIndexColumnSpecifierPopulator`) and reads `stoplist_id` to choose `DoUseSystemStopList` (0 = system) vs `IsStopListOff` (NULL = disabled) — a NULL there scripts the wrong stoplist mode.
 
 **`sys.fulltext_index_columns`** (5-col, full row): `object_id` / `column_id` / `type_column_id` / `language_id` / `statistical_semantics` (always false).
 
-Column shapes are from Microsoft Learn (`learn.microsoft.com/sql/relational-databases/system-catalog-views/`); the reference SQL Server 2025 instance doesn't have Full-Text installed, so probe-confirmation isn't available.
+**`sys.fulltext_languages`** (2-col): `lcid` / `name` — the 59 languages a stock SQL Server 2025 instance ships (probed from the reference; static reference data). DacFx's full-text-index-column populator INNER JOINs it by `language_id`, so an empty view NREs the column-specifier build; AW's indexes use LCID 1033 (English).
+
+Column shapes are probe-confirmed against the local SQL Server 2025 (CU7) reference, which has Full-Text installed.
 
 ## `FULLTEXTSERVICEPROPERTY('property_name')`
 
@@ -76,4 +78,8 @@ The simulator reports Full-Text as installed (`SERVERPROPERTY('IsFullTextInstall
 - **Query-time text search** — tokenizer / stemmer / inverted-index pipeline. Out of scope.
 - **`ALTER FULLTEXT CATALOG` / `INDEX`** (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column) — `NotSupportedException` at parse.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
-- **`sys.fulltext_languages` / `sys.fulltext_document_types` / `sys.fulltext_stoplists`** — not shipped. Apps that introspect the language enum hit a missing-view error.
+- **`sys.fulltext_document_types` / `sys.fulltext_stoplists`** — shipped empty (the stoplist registry is inert since only the system stoplist is modeled). (`sys.fulltext_languages` now ships populated — see above.)
+
+## BACPAC round-trip
+
+`ModelXmlReader` dispatches `SqlFullTextCatalog` (phase 1) → `CREATE FULLTEXT CATALOG name WITH ACCENT_SENSITIVITY = {ON|OFF} [AS DEFAULT] AUTHORIZATION owner` and `SqlFullTextIndex` (phase 8) → `CREATE FULLTEXT INDEX ON t (col [TYPE COLUMN c] LANGUAGE n, …) KEY INDEX key ON catalog`. AW's catalog + 3 indexes (incl. `Production.Document`'s multi-column `TYPE COLUMN` pairing) load skip-free and re-export/re-import cleanly against a real full-text-enabled SQL Server. See [`bacpac-loader.md`](bacpac-loader.md).

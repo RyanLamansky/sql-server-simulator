@@ -54,6 +54,7 @@ internal sealed class Database
         this.DdlTriggers = new(collation);
         this.Principals = new(collation);
         this.FullTextCatalogs = new(collation);
+        this.Filegroups = new(collation) { ["PRIMARY"] = PrimaryFilegroupId };
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId);
         this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId);
@@ -341,6 +342,35 @@ internal sealed class Database
     /// allocation returns 5.
     /// </summary>
     public int AllocateFullTextCatalogId() => Interlocked.Increment(ref this.nextFullTextCatalogId) + 4;
+
+    /// <summary>The built-in <c>PRIMARY</c> filegroup's <c>data_space_id</c> (1).</summary>
+    public const int PrimaryFilegroupId = 1;
+
+    /// <summary>
+    /// Per-database filegroups keyed by name (case-insensitive), value =
+    /// <c>data_space_id</c>. Seeded with <c>PRIMARY = 1</c> (the built-in
+    /// default filegroup every database carries). Additional filegroups
+    /// register through the bacpac loader's <c>SqlFilegroup</c> dispatch and
+    /// receive sequential ids from 2 in registration order. Surfaced by
+    /// <c>sys.filegroups</c> / <c>sys.data_spaces</c> and consumed by
+    /// FILEGROUP-scoped extended properties (class 20 = DATASPACE, whose
+    /// <c>major_id</c> is the <c>data_space_id</c>). There is no physical file
+    /// model — the registry exists for catalog-view visibility + bacpac
+    /// round-trip (DacFx re-emits a <c>SqlFilegroup</c> element per non-PRIMARY
+    /// row) only; table / index placement isn't tracked (every heap lives on
+    /// PRIMARY).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, int> Filegroups;
+
+    private int nextFilegroupId = PrimaryFilegroupId;
+
+    /// <summary>
+    /// Registers a filegroup by name (idempotent), returning its
+    /// <c>data_space_id</c>. A name already present keeps its id; a new name
+    /// gets the next sequential id from 2 (PRIMARY holds 1).
+    /// </summary>
+    public int RegisterFilegroup(string name) =>
+        this.Filegroups.GetOrAdd(name, _ => Interlocked.Increment(ref this.nextFilegroupId));
 
     private int nextXmlCollectionId = 65535;
 

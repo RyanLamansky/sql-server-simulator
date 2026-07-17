@@ -489,6 +489,7 @@ internal static partial class BuiltInResources
                 1 => "OBJECT_OR_COLUMN",
                 3 => "SCHEMA",
                 7 => "INDEX",
+                20 => "DATASPACE",
                 _ => key.Class.ToString(CultureInfo.InvariantCulture),
             };
             yield return [

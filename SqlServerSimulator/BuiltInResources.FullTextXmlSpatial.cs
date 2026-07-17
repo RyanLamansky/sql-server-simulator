@@ -5,6 +5,30 @@ namespace SqlServerSimulator;
 
 internal static partial class BuiltInResources
 {
+    /// <summary>
+    /// The 59 full-text languages a stock SQL Server 2025 instance ships in
+    /// <c>sys.fulltext_languages</c> (probe-confirmed against the reference).
+    /// Static reference data — the same registry every database exposes.
+    /// </summary>
+    private static readonly (int Lcid, string Name)[] FullTextLanguages =
+    [
+        (0, "Neutral"), (1025, "Arabic"), (1026, "Bulgarian"), (1027, "Catalan"),
+        (1028, "Traditional Chinese"), (1029, "Czech"), (1030, "Danish"), (1031, "German"),
+        (1032, "Greek"), (1033, "English"), (1035, "Finnish"), (1036, "French"),
+        (1037, "Hebrew"), (1038, "Hungarian"), (1039, "Icelandic"), (1040, "Italian"),
+        (1041, "Japanese"), (1042, "Korean"), (1043, "Dutch"), (1044, "Bokmål"),
+        (1045, "Polish"), (1046, "Brazilian"), (1048, "Romanian"), (1049, "Russian"),
+        (1050, "Croatian"), (1051, "Slovak"), (1053, "Swedish"), (1054, "Thai"),
+        (1055, "Turkish"), (1056, "Urdu"), (1057, "Indonesian"), (1058, "Ukrainian"),
+        (1060, "Slovenian"), (1061, "Estonian"), (1062, "Latvian"), (1063, "Lithuanian"),
+        (1066, "Vietnamese"), (1081, "Hindi"), (1086, "Malay - Malaysia"), (1093, "Bengali (India)"),
+        (1094, "Punjabi"), (1095, "Gujarati"), (1097, "Tamil"), (1098, "Telugu"),
+        (1099, "Kannada"), (1100, "Malayalam"), (1102, "Marathi"), (2052, "Simplified Chinese"),
+        (2057, "British English"), (2068, "Norwegian"), (2070, "Portuguese"), (2074, "Serbian (Latin)"),
+        (2117, "Bangla"), (3076, "Chinese (Hong Kong SAR, PRC)"), (3082, "Spanish"), (3098, "Serbian (Cyrillic)"),
+        (4100, "Chinese (Singapore)"), (5124, "Chinese (Macao SAR)"), (9242, "Serbian (Sr-Latin)"),
+    ];
+
     private static void RegisterFullTextXmlSpatial(Dictionary<string, CatalogView> views)
     {
         void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
@@ -96,15 +120,26 @@ internal static partial class BuiltInResources
             new("property_description", SqlType.NVarchar, 512, true),
         ], static (_, _) => EmptyCatalogRows);
 
-        // sys.fulltext_languages: the per-LCID full-text language registry.
-        // Empty here — SMO's full-text-index-column query INNER JOINs it by
-        // language_id, and a table with no full-text index (the only kind the
-        // simulator models) yields no rows to join, so the empty view is inert.
+        // sys.fulltext_languages: the per-LCID full-text language registry
+        // (the 59 languages a stock SQL Server 2025 instance ships, probed
+        // from the reference). DacFx's full-text-index-column reverse-
+        // engineering INNER JOINs this view by language_id to resolve the
+        // column's language name; an empty view drops the join row and DacFx
+        // NREs building the SqlFullTextIndexColumnSpecifier. AW's indexes use
+        // LanguageId 1033 (English).
         Sys("fulltext_languages",
         [
             new("lcid", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-        ], static (batch, database) => []);
+        ], static (batch, database) =>
+        {
+            _ = (batch, database);
+            return FullTextLanguages.Select(static lang => new[]
+            {
+                SqlValue.FromInt32(lang.Lcid),
+                SqlValue.FromSystemName(lang.Name),
+            });
+        });
 
         // sys.syslanguages: legacy per-language compatibility view. The
         // simulator models only the default us_english language (langid 0 /
@@ -312,6 +347,19 @@ internal static partial class BuiltInResources
         var fullDesc = SqlValue.FromNVarchar("FULL");
         var nullDate = SqlValue.Null(SqlType.DateTime);
         var nullInt = SqlValue.Null(SqlType.Int32);
+        // data_space_id points at the filegroup the FT index lives on — always
+        // PRIMARY (1) in the simulator's single-filegroup storage model. It
+        // must be non-NULL: DacFx's SqlFullTextIndex reverse-engineering query
+        // INNER JOINs sys.data_spaces on it, and a NULL drops the parent index
+        // element (orphaning its column specifiers → NRE in DacFx).
+        var primaryDataSpaceId = SqlValue.FromInt32(Database.PrimaryFilegroupId);
+        // stoplist_id = 0 → the built-in SYSTEM stoplist (the default when
+        // CREATE FULLTEXT INDEX omits WITH STOPLIST). Probe-confirmed against
+        // the reference AW database's sys.fulltext_indexes. A NULL here would
+        // make DacFx script IsStopListOff=True (stoplist disabled), diverging
+        // from the source which uses the system stoplist (DoUseSystemStopList
+        // default).
+        var systemStoplistId = SqlValue.FromInt32(0);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
@@ -330,8 +378,8 @@ internal static partial class BuiltInResources
                     fullDesc,
                     nullDate,
                     nullDate,
-                    nullInt,
-                    nullInt,
+                    systemStoplistId,
+                    primaryDataSpaceId,
                     nullInt,
                 ];
             }

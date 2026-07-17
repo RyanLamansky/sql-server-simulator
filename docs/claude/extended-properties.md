@@ -18,7 +18,9 @@ Named-arg parsing handles 8 args: `@name`, `@value`, `@level0type` / `@level0nam
 
 ### Recognized level types
 
-`SCHEMA` / `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `TYPE` / `COLUMN`. The level-2 resolver also handles `CONSTRAINT` (reuses class=1 OBJECT_OR_COLUMN with the constraint's own object_id as major_id; walks `HeapTable.KeyConstraints` / `CheckConstraints` / `OutgoingForeignKeys` / `Columns[].DefaultConstraint`) and `INDEX` (class=7, `(major_id=table.object_id, minor_id=index_id)` via `ComputeIndexId` mirroring `sys.indexes`'s enumeration: PK=1, others sequential in ObjectId order).
+**Level 0 (schema-container or database-scoped host):** `SCHEMA`, plus the two terminal database-scoped hosts `TRIGGER` (a database DDL trigger → class 1 OBJECT_OR_COLUMN, major_id = trigger object_id resolved through `Database.DdlTriggers`) and `FILEGROUP` (→ **class 20 DATASPACE**, major_id = `data_space_id` resolved through `Database.Filegroups`). Both are terminal — later levels don't apply — and probe-confirmed against SQL Server 2025 (`sp_addextendedproperty @name=…, @value=…, @level0type=N'TRIGGER'|N'FILEGROUP', @level0name=…`). `class_desc` for 20 is `DATASPACE`. These two land through the BACPAC loader (AW's `[SqlDatabaseDdlTrigger].[ddlDatabaseTriggerLog].[MS_Description]` + `[SqlFilegroup].[PRIMARY].[MS_Description]`); a filegroup EP is only reachable from public SQL after a bacpac registers a filegroup (no `CREATE FILEGROUP`), while a DDL-trigger EP is reachable directly (`CREATE TRIGGER … ON DATABASE` + the sproc).
+
+**Level 1:** `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `TYPE`. **Level 2:** `COLUMN`. The level-2 resolver also handles `CONSTRAINT` (reuses class=1 OBJECT_OR_COLUMN with the constraint's own object_id as major_id; walks `HeapTable.KeyConstraints` / `CheckConstraints` / `OutgoingForeignKeys` / `Columns[].DefaultConstraint`) and `INDEX` (class=7, `(major_id=table.object_id, minor_id=index_id)` via `ComputeIndexId` mirroring `sys.indexes`'s enumeration: PK=1, others sequential in ObjectId order).
 
 ## Errors enforced verbatim
 
@@ -43,8 +45,8 @@ Probe-confirmed against SQL Server 2025.
 
 | Column | Notes |
 |---|---|
-| `class` (tinyint) | 0=DB, 1=OBJECT_OR_COLUMN, 3=SCHEMA, 7=INDEX |
-| `class_desc` (sysname) | `DATABASE` / `OBJECT_OR_COLUMN` / `SCHEMA` / `INDEX` |
+| `class` (tinyint) | 0=DB, 1=OBJECT_OR_COLUMN, 3=SCHEMA, 7=INDEX, 20=DATASPACE |
+| `class_desc` (sysname) | `DATABASE` / `OBJECT_OR_COLUMN` / `SCHEMA` / `INDEX` / `DATASPACE` |
 | `major_id` (int) | DB=0, schema=schema_id, object=object_id |
 | `minor_id` (int) | 0 for tables/views/procs/funcs; 1-based column ordinal for columns; index_id for INDEX class |
 | `name` (sysname) | Property name |
@@ -70,5 +72,5 @@ The `'default'` wildcard at any level-name slot fans out across every object of 
 
 ## Known gaps
 
-- **PARAMETER / TRIGGER level types** — not modeled (raise Msg 15600 or `NotSupportedException`). AW doesn't exercise them in extended-property declarations, and the bacpac-loader baseline doesn't need them.
+- **PARAMETER level type** — not modeled (raises Msg 15600). AW doesn't exercise it. (`TRIGGER` / `FILEGROUP` level-0 hosts now ship — see [Recognized level types](#recognized-level-types).)
 - **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity). `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy. DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.

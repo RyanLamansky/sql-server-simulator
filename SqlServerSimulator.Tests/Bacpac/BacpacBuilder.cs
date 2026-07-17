@@ -42,6 +42,9 @@ public sealed partial class BacpacBuilder
     private readonly List<ViewIndexDef> _viewIndexes = [];
     private readonly List<UserDefinedDataTypeDef> _uddts = [];
     private readonly List<XmlSchemaCollectionDef> _xmlSchemaCollections = [];
+    private readonly List<XmlIndexDef> _xmlIndexes = [];
+    private readonly List<FullTextCatalogDef> _fullTextCatalogs = [];
+    private readonly List<FullTextIndexDef> _fullTextIndexes = [];
     private readonly List<(string ElementType, string Name)> _silentlySkipped = [];
     private readonly List<(string ElementType, string Name)> _unknownElements = [];
     private string? _dspName;
@@ -155,6 +158,30 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
+    /// Adds an extended property bound to a database DDL trigger host
+    /// (<c>SqlDatabaseDdlTrigger</c>, addressed via <c>@level0type=N'TRIGGER'</c>).
+    /// The <paramref name="triggerName"/> must match a
+    /// <see cref="DatabaseDdlTrigger"/> emitted in the same model.
+    /// </summary>
+    public BacpacBuilder DdlTriggerExtendedProperty(string triggerName, string propertyName, string value)
+    {
+        _extendedProperties.Add(new ExtendedPropertyDef(triggerName, null, null, propertyName, value, ExtendedPropertyHost.DdlTrigger));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds an extended property bound to a filegroup host
+    /// (<c>SqlFilegroup</c>, addressed via <c>@level0type=N'FILEGROUP'</c>).
+    /// The <paramref name="filegroupName"/> must match a <see cref="Filegroup"/>
+    /// registered in the same model (or the built-in <c>PRIMARY</c>).
+    /// </summary>
+    public BacpacBuilder FilegroupExtendedProperty(string filegroupName, string propertyName, string value)
+    {
+        _extendedProperties.Add(new ExtendedPropertyDef(filegroupName, null, null, propertyName, value, ExtendedPropertyHost.Filegroup));
+        return this;
+    }
+
+    /// <summary>
     /// Adds an extended property whose host kind is one the loader doesn't
     /// model (e.g. <c>SqlFilegroup</c> / <c>SqlDatabaseDdlTrigger</c>). Lands
     /// on <c>Skipped</c> with a "Host kind … not modeled" reason; exercises
@@ -261,6 +288,53 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
+    /// Emits a primary <c>SqlXmlIndex</c> element
+    /// (<c>CREATE PRIMARY XML INDEX name ON table(col)</c>). The table must
+    /// carry a clustered PK and an xml <paramref name="column"/>.
+    /// </summary>
+    public BacpacBuilder PrimaryXmlIndex(string schemaName, string tableName, string indexName, string column)
+    {
+        _xmlIndexes.Add(new XmlIndexDef(schemaName, tableName, indexName, column, IsPrimary: true, null, null));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a secondary <c>SqlXmlIndex</c> element
+    /// (<c>CREATE XML INDEX name ON table(col) USING XML INDEX primary FOR
+    /// PATH|PROPERTY|VALUE</c>). <paramref name="usage"/> is DACFx's enum:
+    /// 1 = PATH, 2 = PROPERTY, 3 = VALUE.
+    /// </summary>
+    public BacpacBuilder SecondaryXmlIndex(string schemaName, string tableName, string indexName, string column, string usingPrimaryIndexName, int usage)
+    {
+        _xmlIndexes.Add(new XmlIndexDef(schemaName, tableName, indexName, column, IsPrimary: false, usingPrimaryIndexName, usage));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlFullTextCatalog</c> element
+    /// (<c>CREATE FULLTEXT CATALOG name WITH ACCENT_SENSITIVITY = … [AS DEFAULT]
+    /// AUTHORIZATION owner</c>).
+    /// </summary>
+    public BacpacBuilder FullTextCatalog(string name, bool accentSensitive = true, bool isDefault = true, string owner = "dbo")
+    {
+        _fullTextCatalogs.Add(new FullTextCatalogDef(name, accentSensitive, isDefault, owner));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlFullTextIndex</c> element
+    /// (<c>CREATE FULLTEXT INDEX ON table (col [TYPE COLUMN t] LANGUAGE n, …)
+    /// KEY INDEX keyName ON catalog</c>). Each column is
+    /// <c>(column, languageId, typeColumn?)</c>.
+    /// </summary>
+    public BacpacBuilder FullTextIndex(string schemaName, string tableName, string catalogName, string keyIndexName, params (string Column, int LanguageId, string? TypeColumn)[] columns)
+    {
+        var cols = columns.Select(c => new FullTextIndexColumnDef(c.Column, c.LanguageId, c.TypeColumn)).ToArray();
+        _fullTextIndexes.Add(new FullTextIndexDef(schemaName, tableName, catalogName, keyIndexName, cols));
+        return this;
+    }
+
+    /// <summary>
     /// Emits a <c>SqlPartitionFunction</c> element. The loader treats this
     /// as a silent no-op (filegroup-mapping metadata with no semantic effect
     /// on the simulator's row-store-only storage); the test surface for
@@ -307,9 +381,10 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
-    /// Emits a <c>SqlFilegroup</c> element. Silent no-op in the loader
-    /// (matches partition/columnstore — physical-storage decoration with
-    /// no semantic effect on row-store query results).
+    /// Emits a <c>SqlFilegroup</c> element. The loader registers the filegroup
+    /// on the target database (no Skipped entry) so
+    /// <c>sys.filegroups</c> / <c>sys.data_spaces</c> surface it; there's no
+    /// physical file model, so table / index placement is unaffected.
     /// </summary>
     public BacpacBuilder Filegroup(string name)
     {
@@ -434,6 +509,19 @@ public sealed partial class BacpacBuilder
 
         foreach (var xsc in _xmlSchemaCollections)
             model.Add(BuildXmlSchemaCollectionElement(ns, xsc));
+
+        foreach (var cat in _fullTextCatalogs)
+            model.Add(BuildFullTextCatalogElement(ns, cat));
+
+        foreach (var fti in _fullTextIndexes)
+            model.Add(BuildFullTextIndexElement(ns, fti));
+
+        // Primary XML indexes before secondary ones (a secondary references
+        // its primary), mirroring DACFx's name-sorted document order.
+        foreach (var xi in _xmlIndexes.Where(x => x.IsPrimary))
+            model.Add(BuildXmlIndexElement(ns, xi));
+        foreach (var xi in _xmlIndexes.Where(x => !x.IsPrimary))
+            model.Add(BuildXmlIndexElement(ns, xi));
 
         foreach (var seq in _sequences)
             model.Add(BuildSequenceElement(ns, seq));
@@ -1080,7 +1168,7 @@ internal sealed record ProgrammableObjectDef(
     bool FunctionBodyHost,
     string? ParentTable = null);
 
-internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint, Unknown }
+internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint, Unknown, DdlTrigger, Filegroup }
 
 internal sealed record ExtendedPropertyDef(string? SchemaName, string? TableName, string? ColumnName, string PropertyName, string Value, ExtendedPropertyHost Host = ExtendedPropertyHost.AutoDetect)
 {
@@ -1094,6 +1182,14 @@ internal sealed record TableTypeDef(string SchemaName, string TypeName, TableBui
 internal sealed record PermissionDef(string Action, string Permission, string Grantee);
 
 internal sealed record ViewIndexDef(string ViewSchema, string ViewName, string IndexName, string[] KeyColumns);
+
+internal sealed record XmlIndexDef(string SchemaName, string TableName, string IndexName, string Column, bool IsPrimary, string? UsingPrimaryIndexName, int? PrimaryXmlIndexUsage);
+
+internal sealed record FullTextCatalogDef(string Name, bool AccentSensitive, bool IsDefault, string Owner);
+
+internal sealed record FullTextIndexColumnDef(string Column, int LanguageId, string? TypeColumn);
+
+internal sealed record FullTextIndexDef(string SchemaName, string TableName, string CatalogName, string KeyIndexName, FullTextIndexColumnDef[] Columns);
 
 internal sealed record UserDefinedDataTypeDef(string SchemaName, string TypeName, string BaseType, bool Nullable);
 
@@ -1283,6 +1379,83 @@ sealed partial class BacpacBuilder
         return element;
     }
 
+    private static XElement Relationship(XNamespace ns, string name, string reference) =>
+        new(ns + "Relationship",
+            new XAttribute("Name", name),
+            new XElement(ns + "Entry",
+                new XElement(ns + "References",
+                    new XAttribute("Name", reference))));
+
+    private static XElement BuildXmlIndexElement(XNamespace ns, XmlIndexDef xi)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlXmlIndex"),
+            new XAttribute("Name", $"[{xi.SchemaName}].[{xi.TableName}].[{xi.IndexName}]"));
+        if (xi.IsPrimary)
+        {
+            element.Add(new XElement(ns + "Property",
+                new XAttribute("Name", "IsPrimary"), new XAttribute("Value", "True")));
+        }
+        else
+        {
+            element.Add(new XElement(ns + "Property",
+                new XAttribute("Name", "PrimaryXmlIndexUsage"),
+                new XAttribute("Value", xi.PrimaryXmlIndexUsage!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        }
+        element.Add(Relationship(ns, "Column", $"[{xi.SchemaName}].[{xi.TableName}].[{xi.Column}]"));
+        element.Add(Relationship(ns, "IndexedObject", $"[{xi.SchemaName}].[{xi.TableName}]"));
+        if (!xi.IsPrimary)
+            element.Add(Relationship(ns, "UsingPrimaryXmlIndex", $"[{xi.SchemaName}].[{xi.TableName}].[{xi.UsingPrimaryIndexName}]"));
+        return element;
+    }
+
+    private static XElement BuildFullTextCatalogElement(XNamespace ns, FullTextCatalogDef cat)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlFullTextCatalog"),
+            new XAttribute("Name", $"[{cat.Name}]"),
+            new XElement(ns + "Property",
+                new XAttribute("Name", "IsAccentSensitive"), new XAttribute("Value", cat.AccentSensitive ? "True" : "False")));
+        if (cat.IsDefault)
+        {
+            element.Add(new XElement(ns + "Property",
+                new XAttribute("Name", "IsDefault"), new XAttribute("Value", "True")));
+        }
+        element.Add(new XElement(ns + "Relationship",
+            new XAttribute("Name", "Authorizer"),
+            new XElement(ns + "Entry",
+                new XElement(ns + "References",
+                    new XAttribute("ExternalSource", "BuiltIns"),
+                    new XAttribute("Name", $"[{cat.Owner}]")))));
+        return element;
+    }
+
+    private static XElement BuildFullTextIndexElement(XNamespace ns, FullTextIndexDef fti)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlFullTextIndex"),
+            new XAttribute("Name", $"[{fti.SchemaName}].[{fti.TableName}]"));
+        element.Add(Relationship(ns, "Catalog", $"[{fti.CatalogName}]"));
+
+        var columns = new XElement(ns + "Relationship", new XAttribute("Name", "Columns"));
+        foreach (var col in fti.Columns)
+        {
+            var spec = new XElement(ns + "Element",
+                new XAttribute("Type", "SqlFullTextIndexColumnSpecifier"),
+                new XElement(ns + "Property",
+                    new XAttribute("Name", "LanguageId"),
+                    new XAttribute("Value", col.LanguageId.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+                Relationship(ns, "Column", $"[{fti.SchemaName}].[{fti.TableName}].[{col.Column}]"));
+            if (col.TypeColumn is not null)
+                spec.Add(Relationship(ns, "TypeColumn", $"[{fti.SchemaName}].[{fti.TableName}].[{col.TypeColumn}]"));
+            columns.Add(new XElement(ns + "Entry", spec));
+        }
+        element.Add(columns);
+        element.Add(Relationship(ns, "IndexedObject", $"[{fti.SchemaName}].[{fti.TableName}]"));
+        element.Add(Relationship(ns, "KeyName", $"[{fti.SchemaName}].[{fti.KeyIndexName}]"));
+        return element;
+    }
+
     private static XElement BuildPermissionElement(XNamespace ns, PermissionDef perm)
     {
         // Name shape: `[Action.PermissionCamelCase.Database].[grantee].[grantor]`.
@@ -1314,6 +1487,14 @@ sealed partial class BacpacBuilder
                 ("SqlConstraint",
                  $"[SqlConstraint].[{ep.SchemaName}].[{ep.TableName}].[{ep.PropertyName}]",
                  $"[{ep.SchemaName}].[{ep.TableName}]"),
+            ExtendedPropertyHost.DdlTrigger =>
+                ("SqlDatabaseDdlTrigger",
+                 $"[SqlDatabaseDdlTrigger].[{ep.SchemaName}].[{ep.PropertyName}]",
+                 $"[{ep.SchemaName}]"),
+            ExtendedPropertyHost.Filegroup =>
+                ("SqlFilegroup",
+                 $"[SqlFilegroup].[{ep.SchemaName}].[{ep.PropertyName}]",
+                 $"[{ep.SchemaName}]"),
             ExtendedPropertyHost.Unknown =>
                 (ep.UnknownHostKind ?? "Unknown",
                  $"[{ep.UnknownHostKind}].[{ep.SchemaName}].[{ep.PropertyName}]",

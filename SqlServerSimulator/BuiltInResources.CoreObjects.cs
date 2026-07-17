@@ -770,6 +770,33 @@ internal static partial class BuiltInResources
                         notPublished,
                     ];
                 }
+                // Each primary XML index owns an internal "node table"
+                // (type 'IT' / INTERNAL_TABLE), named
+                // xml_index_nodes_<tableObjectId>_<primaryIndexObjectId>, homed
+                // in the sys schema with is_ms_shipped = 1 (probe-confirmed
+                // against SQL Server 2025). DacFx's XML-index reverse-
+                // engineering joins sys.objects (this row) → sys.stats (the
+                // per-index statistics on this object) to build each index's
+                // parent, and NREs client-side when the node table is absent.
+                foreach (var xmlIndex in t.XmlIndexes)
+                {
+                    if (!xmlIndex.IsPrimary)
+                        continue;
+                    yield return [
+                        SqlValue.FromInt32(xmlIndex.InternalTableObjectId),
+                        SqlValue.FromSystemName($"xml_index_nodes_{t.ObjectId}_{xmlIndex.ObjectId}"),
+                        sysSchemaIdValue,
+                        tableObjectId,
+                        nullPrincipal,
+                        SqlValue.FromChar(charTwo, "IT"),
+                        SqlValue.FromNVarchar("INTERNAL_TABLE"),
+                        createDate,
+                        modifyDate,
+                        msShipped,
+                        notPublished,
+                        notPublished,
+                    ];
+                }
             }
         }
     }

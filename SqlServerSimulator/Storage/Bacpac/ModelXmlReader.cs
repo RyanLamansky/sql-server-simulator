@@ -169,6 +169,11 @@ internal static class ModelXmlReader
                     ("SqlRole", 1) => Run(() => EmitRole(element, name, connection)),
                     ("SqlTableType", 1) => Run(() => EmitTableType(element, name, connection, result)),
                     ("SqlXmlSchemaCollection", 1) => Run(() => EmitXmlSchemaCollection(element, name, connection)),
+                    // Full-text catalog: no table dependencies (its AUTHORIZATION
+                    // owner is a pre-seeded principal), so phase 1 alongside the
+                    // other no-dep objects. Its indexes land in phase 8 (they
+                    // need the KEY INDEX + catalog).
+                    ("SqlFullTextCatalog", 1) => Run(() => EmitFullTextCatalog(element, name, connection)),
                     ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result, deferredComputedTables)),
                     ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
                     ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
@@ -198,17 +203,32 @@ internal static class ModelXmlReader
                     // so the per-SqlTable computed-column pass completes
                     // before the first SqlIndex emission runs.
                     ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
-                    // Filegroups + partitioning + columnstore are storage-layout
-                    // concerns; the simulator has a single in-process heap so
-                    // all four are parse-and-skip. PartitionFunction /
-                    // PartitionScheme define filegroup-mapping boundaries that
-                    // tables / indexes reference for physical placement (no
-                    // semantic effect when filegroups themselves are skipped).
-                    // ColumnStoreIndex is a read-optimization shape over the
-                    // same row data; the simulator's linear-scan secondary
-                    // indexes don't model column-major vs row-major storage.
-                    // Phase 1 placement is fine — no dependencies either way.
-                    ("SqlFilegroup", 1) => Run(static () => { }),
+                    // XML indexes + full-text indexes land in phase 8: both need
+                    // the table (phase 2) and its clustered PK / unique KEY INDEX
+                    // (phase 3). A secondary XML index additionally needs its
+                    // primary — DacFx emits SqlXmlIndex elements name-sorted, so
+                    // every `PXML_*` primary precedes the `XML{PATH,PROPERTY,
+                    // VALUE}_*` secondaries in document order.
+                    ("SqlXmlIndex", 8) => Run(() => EmitXmlIndex(element, name, connection)),
+                    ("SqlFullTextIndex", 8) => Run(() => EmitFullTextIndex(element, name, connection)),
+                    // A non-PRIMARY filegroup (PRIMARY is built-in, never emitted
+                    // as an element) registers on the target database so
+                    // sys.filegroups / sys.data_spaces surface it and DacFx
+                    // re-emits the standalone SqlFilegroup element on export. No
+                    // physical file / placement model — table + index heaps all
+                    // live on PRIMARY regardless. Phase 1: no dependencies, and
+                    // FILEGROUP-scoped extended properties (phase 9) resolve the
+                    // registered data_space_id.
+                    ("SqlFilegroup", 1) => Run(() => EmitFilegroup(name, connection)),
+                    // Partitioning + columnstore are storage-layout concerns; the
+                    // simulator has a single in-process heap so all three are
+                    // parse-and-skip. PartitionFunction / PartitionScheme define
+                    // filegroup-mapping boundaries that tables / indexes reference
+                    // for physical placement (no semantic effect when placement
+                    // isn't tracked). ColumnStoreIndex is a read-optimization
+                    // shape over the same row data; the simulator's linear-scan
+                    // secondary indexes don't model column-major vs row-major
+                    // storage. Phase 1 placement is fine — no dependencies.
                     ("SqlPartitionFunction", 1) => Run(static () => { }),
                     ("SqlPartitionScheme", 1) => Run(static () => { }),
                     ("SqlColumnStoreIndex", 1) => Run(static () => { }),
@@ -253,13 +273,14 @@ internal static class ModelXmlReader
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
         or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlXmlSchemaCollection"
+        or "SqlFullTextCatalog"
         or "SqlFilegroup"
         or "SqlPartitionFunction" or "SqlPartitionScheme" or "SqlColumnStoreIndex"
         or "SqlTable"
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
         or "SqlCheckConstraint" or "SqlDefaultConstraint"
         or "SqlForeignKeyConstraint"
-        or "SqlIndex"
+        or "SqlIndex" or "SqlXmlIndex" or "SqlFullTextIndex"
         or "SqlView"
         or "SqlScalarFunction" or "SqlMultiStatementTableValuedFunction"
         or "SqlProcedure" or "SqlDmlTrigger" or "SqlDatabaseDdlTrigger"
@@ -1399,7 +1420,29 @@ internal static class ModelXmlReader
                 l2name = ckConstraintName;
                 break;
             case "SqlDatabaseDdlTrigger":
+                // Database-scoped DDL trigger. Host is a 1-part [triggerName];
+                // sp_addextendedproperty addresses it via @level0type=N'TRIGGER'
+                // (no schema container). Engine maps to class 1, major_id =
+                // trigger object_id, minor_id = 0.
+                if (hostRef is null)
+                {
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, "SqlDatabaseDdlTrigger host missing reference."));
+                    return;
+                }
+                l0type = "TRIGGER";
+                l0name = Unbracket(hostRef);
+                break;
             case "SqlFilegroup":
+                // Filegroup host, 1-part [name]. @level0type=N'FILEGROUP' maps
+                // to class 20 (DATASPACE), major_id = data_space_id.
+                if (hostRef is null)
+                {
+                    result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, "SqlFilegroup host missing reference."));
+                    return;
+                }
+                l0type = "FILEGROUP";
+                l0name = Unbracket(hostRef);
+                break;
             default:
                 result.AddSkipped(new BacpacSkipped("SqlExtendedProperty", elementName, $"Host kind '{hostKind}' not modeled for sp_addextendedproperty."));
                 return;
@@ -1640,6 +1683,140 @@ internal static class ModelXmlReader
             result.AddSkipped(new BacpacSkipped("SqlIndex", indexName,
                 $"CREATE INDEX on '{indexedObject}' failed: {ex.Message}"));
         }
+    }
+
+    /// <summary>
+    /// Registers a user filegroup from a <c>SqlFilegroup</c> element so
+    /// <c>sys.filegroups</c> / <c>sys.data_spaces</c> surface it and DacFx
+    /// re-emits the standalone element on export. The element Name is the
+    /// 1-part bracketed filegroup name (e.g. <c>[USERDATA]</c>); <c>PRIMARY</c>
+    /// is built-in and never arrives here. No physical file / placement model
+    /// — every heap lives on PRIMARY regardless.
+    /// </summary>
+    private static void EmitFilegroup(string? elementName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(elementName))
+            throw new InvalidDataException("bacpac: SqlFilegroup element missing Name attribute.");
+        _ = ((SimulatedDbConnection)connection).CurrentDatabase.RegisterFilegroup(Unbracket(elementName));
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE [PRIMARY] XML INDEX name ON table(col) [USING XML INDEX
+    /// primary FOR {PATH | PROPERTY | VALUE}]</c> for a <c>SqlXmlIndex</c>
+    /// element. A primary index (<c>IsPrimary=True</c>) carries just the
+    /// indexed <c>Column</c> + <c>IndexedObject</c>; a secondary carries a
+    /// <c>UsingPrimaryXmlIndex</c> reference plus a <c>PrimaryXmlIndexUsage</c>
+    /// property (1 = PATH, 2 = PROPERTY, 3 = VALUE — DacFx's enum). The engine
+    /// models both forms (see <c>docs/claude/xml.md</c>); the index surfaces
+    /// through <c>sys.xml_indexes</c> for the export round-trip.
+    /// </summary>
+    private static void EmitXmlIndex(XElement element, string? indexName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(indexName))
+            throw new InvalidDataException("bacpac: SqlXmlIndex element missing Name attribute.");
+        var indexedObject = ReadSingleReference(element, "IndexedObject")
+            ?? throw new InvalidDataException($"bacpac: SqlXmlIndex '{indexName}' missing IndexedObject.");
+        var column = ReadSingleReference(element, "Column")
+            ?? throw new InvalidDataException($"bacpac: SqlXmlIndex '{indexName}' missing Column.");
+
+        string sql;
+        if (ReadBoolProperty(element, "IsPrimary", defaultValue: false))
+        {
+            sql = $"CREATE PRIMARY XML INDEX {Leaf(indexName)} ON {indexedObject} ({Leaf(column)});";
+        }
+        else
+        {
+            var primaryRef = ReadSingleReference(element, "UsingPrimaryXmlIndex")
+                ?? throw new InvalidDataException($"bacpac: secondary SqlXmlIndex '{indexName}' missing UsingPrimaryXmlIndex.");
+            var forClause = ReadStringProperty(element, "PrimaryXmlIndexUsage") switch
+            {
+                "1" => "PATH",
+                "2" => "PROPERTY",
+                "3" => "VALUE",
+                var usage => throw new InvalidDataException($"bacpac: SqlXmlIndex '{indexName}' has unrecognized PrimaryXmlIndexUsage '{usage}'."),
+            };
+            sql = $"CREATE XML INDEX {Leaf(indexName)} ON {indexedObject} ({Leaf(column)}) USING XML INDEX {Leaf(primaryRef)} FOR {forClause};";
+        }
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = sql;
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE FULLTEXT CATALOG name WITH ACCENT_SENSITIVITY = {ON|OFF}
+    /// [AS DEFAULT] [AUTHORIZATION owner]</c> for a <c>SqlFullTextCatalog</c>
+    /// element. The catalog name is 1-part; the <c>Authorizer</c> relationship
+    /// names the owning principal (default <c>dbo</c>). Emitted in phase 1 so
+    /// the full-text indexes (phase 8) that reference it resolve.
+    /// </summary>
+    private static void EmitFullTextCatalog(XElement element, string? catalogName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(catalogName))
+            throw new InvalidDataException("bacpac: SqlFullTextCatalog element missing Name attribute.");
+
+        var accentClause = ReadBoolProperty(element, "IsAccentSensitive", defaultValue: true) ? "ON" : "OFF";
+        var defaultClause = ReadBoolProperty(element, "IsDefault", defaultValue: false) ? " AS DEFAULT" : "";
+        var authorizer = ReadSingleReference(element, "Authorizer");
+        var authClause = string.IsNullOrEmpty(authorizer) ? "" : $" AUTHORIZATION {authorizer}";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE FULLTEXT CATALOG {catalogName} WITH ACCENT_SENSITIVITY = {accentClause}{defaultClause}{authClause};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE FULLTEXT INDEX ON table (col [TYPE COLUMN typeCol]
+    /// [LANGUAGE n], …) KEY INDEX keyName ON catalog</c> for a
+    /// <c>SqlFullTextIndex</c> element. Each <c>SqlFullTextIndexColumnSpecifier</c>
+    /// under the <c>Columns</c> relationship carries the indexed <c>Column</c>,
+    /// an optional <c>TypeColumn</c> (AW's <c>Production.Document</c> varbinary +
+    /// extension-column pairing), and a <c>LanguageId</c> LCID. <c>Catalog</c> /
+    /// <c>IndexedObject</c> / <c>KeyName</c> relationships supply the ON /
+    /// target / KEY INDEX clauses. The engine models the DDL + catalog surface
+    /// (see <c>docs/claude/full-text.md</c>); query-time predicates stay
+    /// skip-with-diagnostic.
+    /// </summary>
+    private static void EmitFullTextIndex(XElement element, string? elementName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(elementName))
+            throw new InvalidDataException("bacpac: SqlFullTextIndex element missing Name attribute.");
+
+        var indexedObject = ReadSingleReference(element, "IndexedObject")
+            ?? throw new InvalidDataException($"bacpac: SqlFullTextIndex '{elementName}' missing IndexedObject.");
+        var catalog = ReadSingleReference(element, "Catalog")
+            ?? throw new InvalidDataException($"bacpac: SqlFullTextIndex '{elementName}' missing Catalog.");
+        var keyName = ReadSingleReference(element, "KeyName")
+            ?? throw new InvalidDataException($"bacpac: SqlFullTextIndex '{elementName}' missing KeyName.");
+        var columnsRel = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Columns")
+            ?? throw new InvalidDataException($"bacpac: SqlFullTextIndex '{elementName}' missing Columns relationship.");
+
+        var columnClauses = new List<string>();
+        foreach (var spec in columnsRel.Elements(Ns + "Entry").Elements(Ns + "Element"))
+        {
+            if (spec.Attribute("Type")?.Value != "SqlFullTextIndexColumnSpecifier")
+                continue;
+            var column = ReadSingleReference(spec, "Column")
+                ?? throw new InvalidDataException($"bacpac: SqlFullTextIndex '{elementName}' column specifier missing Column.");
+            var typeColumn = ReadSingleReference(spec, "TypeColumn");
+            var languageId = ReadStringProperty(spec, "LanguageId");
+            var typeClause = typeColumn is null ? "" : $" TYPE COLUMN {Leaf(typeColumn)}";
+            var languageClause = languageId is null ? "" : $" LANGUAGE {languageId}";
+            columnClauses.Add($"{Leaf(column)}{typeClause}{languageClause}");
+        }
+        if (columnClauses.Count == 0)
+            throw new InvalidDataException($"bacpac: SqlFullTextIndex '{elementName}' has no column specifiers.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE FULLTEXT INDEX ON {indexedObject} ({string.Join(", ", columnClauses)}) KEY INDEX {Leaf(keyName)} ON {catalog};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
     }
 
     /// <summary>

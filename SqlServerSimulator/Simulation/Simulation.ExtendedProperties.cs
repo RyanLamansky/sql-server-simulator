@@ -140,9 +140,11 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// Closed accept-list for level types (probe-confirmed against AW's
-    /// <c>SqlExtendedProperty</c> Host relationships): level0 = <c>SCHEMA</c>;
-    /// level1 = <c>TABLE</c> / <c>VIEW</c> / <c>PROCEDURE</c> / <c>FUNCTION</c>
-    /// / <c>TYPE</c>; level2 = <c>COLUMN</c>. Anything outside this set →
+    /// <c>SqlExtendedProperty</c> Host relationships): level0 = <c>SCHEMA</c>
+    /// (schema-container hosts) or the terminal database-scoped hosts
+    /// <c>TRIGGER</c> (a DDL trigger) / <c>FILEGROUP</c>; level1 = <c>TABLE</c>
+    /// / <c>VIEW</c> / <c>PROCEDURE</c> / <c>FUNCTION</c> / <c>TYPE</c>; level2
+    /// = <c>COLUMN</c>. Anything outside this set →
     /// Msg 15600 "invalid parameter". Missing target object → Msg 15135
     /// "Extended properties are not permitted on '…'".
     /// </remarks>
@@ -161,6 +163,29 @@ partial class Simulation
             // call with all 6 level args absent).
             return (new ExtendedPropertyKey(0, 0, 0, propertyName), "object specified");
         }
+        // Database-scoped hosts addressed directly at level0 (no schema
+        // container): a DDL trigger via @level0type=N'TRIGGER' and a filegroup
+        // via @level0type=N'FILEGROUP'. Both are terminal — later levels don't
+        // apply — and are probe-confirmed against SQL Server 2025 (a DDL
+        // trigger EP lands class 1 / major_id = trigger object_id; a filegroup
+        // EP lands class 20 = DATASPACE / major_id = data_space_id).
+        if (BuiltInToken.Equals(level0Type, "TRIGGER"))
+        {
+            return level0Name is not null && batch.CurrentDatabase.DdlTriggers.TryGetValue(level0Name, out var ddlTrigger)
+                ? (new ExtendedPropertyKey(1, ddlTrigger.ObjectId, 0, propertyName), level0Name)
+                : throw (level0Name is null
+                    ? SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel)
+                    : SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name));
+        }
+        if (BuiltInToken.Equals(level0Type, "FILEGROUP"))
+        {
+            return level0Name is not null && batch.CurrentDatabase.Filegroups.TryGetValue(level0Name, out var dataSpaceId)
+                ? (new ExtendedPropertyKey(20, dataSpaceId, 0, propertyName), level0Name)
+                : throw (level0Name is null
+                    ? SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel)
+                    : SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name));
+        }
+
         if (!BuiltInToken.Equals(level0Type, "SCHEMA"))
             throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
         if (level0Name is null)
