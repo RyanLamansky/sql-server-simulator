@@ -33,7 +33,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
 
 ## DDL triggers — `CREATE TRIGGER … ON DATABASE`
 
-Parse-and-store-but-no-fire surface for database-scope DDL triggers. AW's `[ddlDatabaseTriggerLog]` (`FOR DDL_DATABASE_LEVEL_EVENTS`) loads end-to-end and surfaces in `sys.triggers` with the probe-confirmed shape: `parent_class=0`, `parent_class_desc='DATABASE'`, `parent_id=0`, `type_desc='SQL_TRIGGER'`, `is_instead_of_trigger=0`. Body source is captured verbatim for the eventual `sys.sql_modules` row (not yet shipped).
+Parse-and-store-but-no-fire surface for database-scope DDL triggers. AW's `[ddlDatabaseTriggerLog]` (`FOR DDL_DATABASE_LEVEL_EVENTS`) loads end-to-end and surfaces in `sys.triggers` with the probe-confirmed shape: `parent_class=0`, `parent_class_desc='DATABASE'`, `parent_id=0`, `type_desc='SQL_TRIGGER'`, `is_ms_shipped=0`, `is_instead_of_trigger=0`. The full `CREATE TRIGGER` text lands in `sys.sql_modules.definition` via `SchemaObject.DefinitionText` — DacFx reverse-engineers a scripted DDL trigger from that definition (its `sys.trigger_events` queries only serve definition-less triggers), which is what lets a bacpac export carry the trigger through; `is_ms_shipped`'s absence was the one gate (Msg 207 aborted the whole DDL-trigger populator).
 
 **Storage**: `DdlTrigger` class (`SqlServerSimulator/DdlTrigger.cs`) carries name + object_id + event-type list + body source + `is_disabled` flag. `Database.DdlTriggers` is the per-database `ConcurrentDictionary<string, DdlTrigger>` (case-insensitive keys); not per-schema because DDL triggers belong to the database itself. The class extends `SchemaObject` for the object-id + create-date pattern but doesn't participate in any schema's shared namespace except for name collision detection at CREATE time (probe-confirmed: a DDL trigger named `foo` collides with a same-named DML trigger / table / view / proc in the same schema).
 
@@ -43,7 +43,7 @@ Parse-and-store-but-no-fire surface for database-scope DDL triggers. AW's `[ddlD
 
 **Deferred**:
 - Trigger firing — the simulator doesn't dispatch DDL events to any trigger loop. Accepted as a documented behavior gap; AW's trigger body is an audit-log writer, not a load-bearing dependency.
-- `sys.sql_modules` to surface the body — not modeled.
+- `sys.trigger_events` rows for DDL triggers — real expands an event group to one row per member event (probed: `DDL_DATABASE_LEVEL_EVENTS` → 158 rows, each with `event_group_type=10016`); the simulator emits none. DacFx doesn't need them for scripted triggers (it reads the module definition), so bacpac round-trip works without.
 - `DISABLE` / `ENABLE TRIGGER … ON DATABASE` — the per-schema disable/enable path doesn't extend to the per-database dict.
 
 ## Not modeled

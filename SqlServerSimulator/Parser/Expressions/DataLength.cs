@@ -34,11 +34,17 @@ internal sealed class DataLength(ParserContext context) : Expression
         // layer's sizing of that text. DacFx's bacpac export writes
         // DATALENGTH([geoCol]) as the BCP length prefix for the value bytes
         // it reads off the wire, so the two must measure the same form.
-        var byteCount = value.Type is SpatialSqlType spatial
-            ? SpatialWkbEncoder.Encode(value.AsString, spatial is GeographySqlType, spatial is GeographySqlType ? 4326 : 0).Length
-            : value.Type.IsFixedLength
-                ? value.Type.FixedLength
-                : value.Type.GetVariableByteCount(value);
+        // hierarchyid reports its OrdPath wire-serialization length (what a real
+        // server stores and DATALENGTHs), not the simulator-native segment-array
+        // byte form GetVariableByteCount sizes — mirroring the spatial case so
+        // DacFx's DATALENGTH([col]) BCP length prefix matches the value bytes.
+        var byteCount = value.Type switch
+        {
+            SpatialSqlType spatial => SpatialWkbEncoder.Encode(value.AsString, spatial is GeographySqlType, spatial is GeographySqlType ? 4326 : 0).Length,
+            HierarchyIdSqlType => HierarchyIdWireEncoder.Encode(value.AsHierarchyId).Length,
+            { IsFixedLength: true } => value.Type.FixedLength,
+            _ => value.Type.GetVariableByteCount(value),
+        };
         return this.returnsBigInt ? SqlValue.FromInt64(byteCount) : SqlValue.FromInt32(byteCount);
     }
 

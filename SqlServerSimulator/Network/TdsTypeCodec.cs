@@ -28,7 +28,7 @@ internal static class TdsTypeCodec
         {
             switch (type)
             {
-                case TextSqlType or NTextSqlType or ImageSqlType or HierarchyIdSqlType:
+                case TextSqlType or NTextSqlType or ImageSqlType:
                     throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
             }
         }
@@ -313,6 +313,20 @@ internal static class TdsTypeCodec
                 writer.WriteBVarchar(spatial.SqlServerName);
                 writer.WriteUsVarchar(SpatialAssemblyQualifiedName(spatial));
                 break;
+            case HierarchyIdSqlType:
+                // UDTTYPE (MS-TDS 2.2.5.5.2), the same shape as the spatial arm
+                // above but with hierarchyid's fixed 892-byte max size (not the
+                // 0xFFFF max sentinel) and the SqlHierarchyId assembly-qualified
+                // name. Probe-confirmed against SQL Server 2025 (2026-07-16:
+                // GetSchemaTable ColumnSize = 892, UdtAssemblyQualifiedName as
+                // below). The db name goes empty for the same static-codec reason.
+                writer.WriteByte(0xF0);
+                writer.WriteUInt16(892);
+                writer.WriteBVarchar(string.Empty);
+                writer.WriteBVarchar("sys");
+                writer.WriteBVarchar("hierarchyid");
+                writer.WriteUsVarchar(HierarchyIdAssemblyQualifiedName);
+                break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
         }
@@ -515,6 +529,12 @@ internal static class TdsTypeCodec
                     WritePlpChunks(writer, SpatialWkbEncoder.Encode(value.AsString, isGeography, isGeography ? 4326 : 0));
                 }
 
+                break;
+            case HierarchyIdSqlType:
+                if (value.IsNull)
+                    writer.WriteUInt64(ulong.MaxValue);
+                else
+                    WritePlpChunks(writer, HierarchyIdWireEncoder.Encode(value.AsHierarchyId));
                 break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
@@ -973,4 +993,15 @@ internal static class TdsTypeCodec
             ? "Microsoft.SqlServer.Types.SqlGeography" + tail
             : "Microsoft.SqlServer.Types.SqlGeometry" + tail;
     }
+
+    /// <summary>
+    /// The assembly-qualified CLR type name a hierarchyid UDT COLMETADATA
+    /// advertises — the string SqlClient exposes as
+    /// <c>UdtAssemblyQualifiedName</c>. With <c>Microsoft.SqlServer.Types</c>
+    /// absent (the DacFx case) SqlClient hands back the raw OrdPath bytes via
+    /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token probe-matched to SQL
+    /// Server 2025 (2026-07-16).
+    /// </summary>
+    private const string HierarchyIdAssemblyQualifiedName =
+        "Microsoft.SqlServer.Types.SqlHierarchyId, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
 }

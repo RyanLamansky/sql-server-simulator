@@ -124,6 +124,12 @@ internal sealed class ObjectProperty : Expression
             13 => upper switch
             {
                 "ISSCHEMABOUND" => 0,
+                // 0 for every resolvable object — probe-confirmed even for
+                // catalog views (real's legacy system-table sense never
+                // applies to modeled objects). DacFx's default-constraint
+                // populator filters on `= 0`, so a NULL here silently drops
+                // every DEFAULT constraint from a bacpac export.
+                "ISSYSTEMTABLE" => 0,
                 _ => null,
             },
             15 => upper switch

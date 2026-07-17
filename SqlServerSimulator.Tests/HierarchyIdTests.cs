@@ -189,4 +189,18 @@ public sealed class HierarchyIdTests
         AreEqual(240, sim.ExecuteScalar("select cast(system_type_id as int) from sys.types where name = 'hierarchyid'"));
         AreEqual(128, sim.ExecuteScalar("select user_type_id from sys.types where name = 'hierarchyid'"));
     }
+
+    // DATALENGTH measures the OrdPath wire serialization (what a real server
+    // stores and DacFx's BCP length prefix records), not the simulator-native
+    // segment-array byte form. Probe-confirmed against SQL Server 2025
+    // (2026-07-16): DATALENGTH(CAST('/N/' AS hierarchyid)).
+    [TestMethod]
+    [DataRow("/", 0)]
+    [DataRow("/0/", 1)]
+    [DataRow("/79/", 2)]
+    [DataRow("/1/2/", 2)]
+    [DataRow("/1/2.3/", 2)]
+    [DataRow("/3/4/7/8/15/16/79/", 7)]
+    public void DataLength_HierarchyId_MeasuresOrdPathSerialization(string path, int expected)
+        => AreEqual(expected, ExecuteScalar($"select datalength(hierarchyid::Parse('{path}'))"));
 }

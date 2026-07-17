@@ -32,6 +32,7 @@ internal static partial class BuiltInResources
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
             new("is_disabled", SqlType.Bit, null, false),
             new("is_instead_of_trigger", SqlType.Bit, null, false),
             new("is_not_for_replication", SqlType.Bit, null, false),
@@ -279,12 +280,13 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.triggers</c>: one row per <see cref="Trigger"/> in
-    /// every schema. <c>parent_class</c> is always 1 (DML triggers attached
-    /// to tables — DDL/server triggers aren't modeled);
+    /// every schema (<c>parent_class</c> 1) plus one per database DDL
+    /// trigger (<c>parent_class</c> 0, parent_id 0);
     /// <c>is_not_for_replication</c> is always 0 (the simulator
-    /// parse-and-ignores the WITH clause). Probe-confirmed columns; modify
-    /// date mirrors create date because <c>ALTER TRIGGER</c> replaces the
-    /// instance wholesale.
+    /// parse-and-ignores the WITH clause) and <c>is_ms_shipped</c> always 0
+    /// (DacFx's DDL-trigger reverse-engineering filters on it). Probe-
+    /// confirmed columns; modify date mirrors create date because
+    /// <c>ALTER TRIGGER</c> replaces the instance wholesale.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysTriggers(
         Parser.BatchContext batch,
@@ -319,6 +321,7 @@ internal static partial class BuiltInResources
                     triggerTypeDesc,
                     createDate,
                     createDate,
+                    falseBit,
                     trigger.IsDisabled ? trueBit : falseBit,
                     trigger.Timing == TriggerTiming.InsteadOf ? trueBit : falseBit,
                     falseBit,
@@ -342,6 +345,7 @@ internal static partial class BuiltInResources
                 triggerTypeDesc,
                 createDate,
                 createDate,
+                falseBit,
                 ddl.IsDisabled ? trueBit : falseBit,
                 falseBit,
                 falseBit,

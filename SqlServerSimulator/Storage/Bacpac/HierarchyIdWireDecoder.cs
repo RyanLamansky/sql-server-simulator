@@ -52,10 +52,11 @@ namespace SqlServerSimulator.Storage.Bacpac;
 /// a hierarchical index does <i>not</i> require this wire format — a
 /// DFS-pre-order comparer on <see cref="HierarchyIdSqlType"/>'s
 /// <c>int[][]</c> form (lexicographic compare with shorter-less) suffices,
-/// since the simulator stores the decoded segment-array. This wire format
-/// matters only for the separate, currently-deferred symmetric
-/// <i>encoder</i> that would make <c>CAST(node AS varbinary)</c>
-/// byte-identical with SQL Server. Keep the two pieces of work separate.</para>
+/// since the simulator stores the decoded segment-array. The symmetric
+/// <i>encoder</i> (<see cref="HierarchyIdWireEncoder"/>) ships and feeds the
+/// TDS UDT wire form + <c>DATALENGTH</c>; wiring it into
+/// <c>CAST(node AS varbinary)</c> for byte-identity remains a separate,
+/// deferred piece of work. Keep the two separate.</para>
 ///
 /// <para>Encoding table for positive ordinals (derived empirically from the
 /// SQL Server 2025 reference on 2026-05-15, ground-truth via

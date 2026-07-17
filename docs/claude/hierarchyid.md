@@ -45,24 +45,28 @@ Known gap from the closed-list approach: a column literally named `GetLevel` (et
 
 `.GetReparentedValue` / `.Read` / `.Write` raise `NotSupportedException` if encountered — AW doesn't reference them.
 
-## BCP wire decoder
+## OrdPath binary wire form
 
-The bacpac loader's `HierarchyIdWireDecoder` covers AW's `[0..79]` positive-ordinal envelope via a 4-prefix order-preserving prefix code:
+`HierarchyIdWireDecoder` (bytes → `int[][]`) and `HierarchyIdWireEncoder` (`int[][]` → bytes), both in `Storage/Bacpac/`, are an inverse pair over SQL Server's OrdPath encoding — the byte form DacFx reads/writes over the wire. The decoder feeds the BACPAC loader; the encoder feeds the **TDS UDT wire form** (`TdsTypeCodec`, 0xF0, max byte size 892) and **`DATALENGTH`** (`DataLength.Run` special-cases hierarchyid through the encoder, exactly as it does spatial), so DacFx's `DATALENGTH([node])` BCP length prefix matches the value bytes it exports. Byte-parity probe-anchored against SQL Server 2025 (2026-07-16); this unblocked DacFx bacpac export of AW's `HumanResources.Employee.OrganizationNode` / `Production.Document.DocumentNode`.
 
-| Prefix | Tier | Range |
-|---|---|---|
-| `01 VV 1` | P0 | 0..3 |
-| `100 VV 1` | P1 | 4..7 |
-| `101 VVV 1` | P2 | 8..15 |
-| `110 VV 0 V 1 VVV 1` | P3 | 16..79 |
+Both cover AW's `[0..79]` positive-ordinal envelope via a 4-tier order-preserving prefix code (each ordinal = prefix + value bits + a terminator bit; ordinals concatenate; the stream zero-pads to a byte boundary):
 
-Negative ordinals, ordinals ≥ 80, and dotted sub-ordinals raise `NotSupportedException` for a follow-up bundle to extend cleanly.
+| Template (V = value bit, MSB→LSB; final bit = terminator) | Tier | Range | value |
+|---|---|---|---|
+| `01 VV 1` | P0 | 0..3 | N |
+| `100 VV 1` | P1 | 4..7 | N − 4 |
+| `101 VVV 1` | P2 | 8..15 | N − 8 |
+| `110 VV 0 V 1 VVV 1` | P3 | 16..79 | N − 16 (split 2+1+3) |
 
-## CAST byte form — deferred
+**Dotted sub-ordinals** (a multi-label segment, `/1/2.3/` = `[[1],[2,3]]`) the *encoder* handles byte-identically: within a segment every label but the last encodes `ordinal + 1` with terminator `0`, the last encodes normally with terminator `1` — the order-preserving trick that sorts a dotted continuation after the plain node and before its next sibling (probe-confirmed 2026-07-16 across the tier boundary: `/3.1/` = `0x8160`, the non-final `3` taking the `4` template). The **decoder cannot read dotted forms back** — it treats every label as its own single-label segment and discards terminator bits — so a dotted path does not round-trip through the decoder; the pair are exact inverses only over single-label-segment paths (the decoder's full domain, and all AW uses).
 
-`CAST(@h AS varbinary)` produces simulator-native bytes (segment-count + per-segment label-count + each label as int32 LE), **not** SQL Server's documented variable-bit OrdPath encoding. CAST round-trips within the simulator work; cross-engine byte transfer (BCP files round-trip via the wire decoder, but emitting bytes that real SQL Server would accept as `CAST(0x… AS hierarchyid)`) is intentionally deferred.
+Negative ordinals and ordinals ≥ 80 (a separate `0`-prefixed / `1110`-prefixed tier set) raise `NotSupportedException` in both directions for a follow-up bundle to extend cleanly.
 
-Probing on 2026-05-14 confirmed the SQL Server encoding has a recursive Stern-Brocot-tree structure with embedded sub-tier markers. Research notes below carry the cracked tiers + remaining unknowns so the byte-identical work can resume cold.
+## CAST byte form — still simulator-native
+
+`CAST(@h AS varbinary)` still produces simulator-native bytes (segment-count + per-segment label-count + each label as int32 LE), **not** the OrdPath encoding — the same split the spatial types have (their `CAST … AS varbinary` also emits the stored WKT text bytes via `EncodeStringForBinary`, only the wire form + `DATALENGTH` route through `SpatialWkbEncoder`). Wiring the OrdPath encoder into the `hierarchyid → varbinary` `CoerceTo` branch is a separate, deferred follow-up; the wire form + `DATALENGTH` are what DacFx export needs and those ship. CAST round-trips within the simulator work.
+
+Probing on 2026-05-14 confirmed the SQL Server encoding has a recursive Stern-Brocot-tree structure with embedded sub-tier markers. Research notes below carry the cracked tiers + remaining unknowns (the negative-N mirror and ordinals ≥ 80) so the extension work can resume cold.
 
 ---
 
@@ -194,7 +198,7 @@ In each template, `V` marks a value-bit position (MSB → LSB), `1` and `0` mark
 
 **Negative-N tiers**: probe data shows negatives DON'T simply invert the positive bit pattern. `/-1/` = `0x3F80` ≠ bitwise-not(/1/ = `0x58`). `/-72/` = `0x2088` (2 bytes, mirrors tier-P3's 2-byte range 16..79). Hypothesis: negatives use a parallel set of tier prefixes starting with `0` instead of `1`, with value bits possibly XOR'd against a tier-specific mask. Needs an XOR analysis pass like the one done for positives. `/-1/` through `/-72/` map to 2-byte labels; `/-73/` jumps to 3-byte = N5 territory in mirror.
 
-**Decimal sub-ordinals**: probe shows `/0.1/` and `/0.2/` differ from `/0/` only in the lower bits AFTER the label-1 terminator. `/0/` = `0x48` = `01001000` (label `01001` + 3 pad). `/0.1/` = `0x52C0` = `01010010 11000000`. Diff: bits 4..9 in `/0.1/` = `010011`. Hypothesis: sub-ordinals extend the segment with a continuation marker bit somewhere, then add more label bits encoding the sub-ordinal's value with the same tier system. Needs decimal-only probes like `/1.0/` (does this normalize to `/1/`?), `/1.0.0/`, `/1.1.1/`, `/1.4/`, `/1.16/`, `/1.80/` to derive the rule.
+**Decimal sub-ordinals** (CRACKED — implemented in `HierarchyIdWireEncoder`): within a segment every label but the last encodes `ordinal + 1` with terminator bit `0`; the last encodes `ordinal` normally with terminator `1`. Verified 2026-07-16 across the tier boundary (`/3.1/` = `0x8160`: non-final `3` → the `4` template with terminator `0`, then final `1`). The `+ 1` shift is what keeps a dotted continuation sorting after the plain node and before its next sibling. `HierarchyIdWireDecoder` still can't read these back (it discards terminators and splits every label into its own segment), so the encoder covers a strictly broader domain than the decoder here.
 
 ### Implementation plan when resumed
 
