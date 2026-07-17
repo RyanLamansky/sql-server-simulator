@@ -116,7 +116,7 @@ partial class Simulation
     /// for encoding, non-persisted slots feed any <c>OUTPUT INSERTED.&lt;col&gt;</c>
     /// projection.
     /// </summary>
-    private static void EvaluateComputedColumns(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch)
+    internal static void EvaluateComputedColumns(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch)
     {
         for (var i = 0; i < destinationTable.Columns.Length; i++)
         {
@@ -146,7 +146,7 @@ partial class Simulation
     /// <see cref="HeapTable.StoredColumns"/>. Non-persisted computed columns
     /// have no storage slot and are dropped here.
     /// </summary>
-    private static SqlValue[] ProjectStoredValues(HeapTable destinationTable, SqlValue[] rowValues)
+    internal static SqlValue[] ProjectStoredValues(HeapTable destinationTable, SqlValue[] rowValues)
     {
         if (destinationTable.StoredColumns.Length == destinationTable.Columns.Length)
             return rowValues;

@@ -506,6 +506,13 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var nullSchemaName = SqlValue.Null(SqlType.SystemName);
         var nullOwningId = SqlValue.Null(SqlType.Int32);
+        // Database roles are owned by dbo (principal_id 1) — probe-confirmed on
+        // the reference (every WWI custom role: owning_principal_id = 1). This
+        // must be non-NULL: DacFx's role reverse-engineering filters
+        // `USER_NAME(owning_principal_id) != N'cdc'`, and a NULL owner makes
+        // that predicate UNKNOWN, silently dropping every SqlRole from the
+        // export. dbo is seeded at the fixed id 1 (see Database ctor).
+        var dboOwningId = SqlValue.FromInt32(1);
         var nullSid = SqlValue.Null(SqlType.Varbinary);
         var nullAuthType = SqlValue.Null(SqlType.TinyInt);
         var nullAuthDesc = SqlValue.Null(SqlType.NVarchar);
@@ -525,7 +532,7 @@ internal static partial class BuiltInResources
                 nullSchemaName,
                 createDate,
                 createDate,
-                nullOwningId,
+                p.TypeCode == "R" ? dboOwningId : nullOwningId,
                 nullSid,
                 p.IsFixedRole ? trueBit : falseBit,
                 nullAuthType,

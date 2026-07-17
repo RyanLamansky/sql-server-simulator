@@ -104,4 +104,97 @@ public sealed class DdlTriggerTests
         AreEqual("SQL_TRIGGER", sim.ExecuteScalar(
             "select type_desc from sys.triggers where name = 'trg_ddl'"));
     }
+
+    [TestMethod]
+    public void TriggerEvents_DdlDatabaseLevelEvents_ExpandsTo158LeafRows()
+    {
+        // A DDL trigger created FOR DDL_DATABASE_LEVEL_EVENTS surfaces one
+        // sys.trigger_events row per leaf event in the group's transitive
+        // closure — 158 rows, each tagged with the group id (10016) and desc,
+        // probe-confirmed against SQL Server 2025's AdventureWorks2025.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(CreateAwTrigger);
+        AreEqual(158, sim.ExecuteScalar("""
+            select count(*) from sys.trigger_events e
+            join sys.triggers t on t.object_id = e.object_id
+            where t.parent_class = 0
+            """));
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(distinct event_group_type) from sys.trigger_events e
+            join sys.triggers t on t.object_id = e.object_id
+            where t.parent_class = 0
+            """));
+        AreEqual(10016, sim.ExecuteScalar("""
+            select top 1 event_group_type from sys.trigger_events e
+            join sys.triggers t on t.object_id = e.object_id
+            where t.parent_class = 0
+            """));
+        AreEqual("DDL_DATABASE_LEVEL_EVENTS", sim.ExecuteScalar("""
+            select top 1 event_group_type_desc from sys.trigger_events e
+            join sys.triggers t on t.object_id = e.object_id
+            where t.parent_class = 0
+            """));
+    }
+
+    [TestMethod]
+    public void TriggerEvents_DdlDatabaseLevelEvents_LeafRowShape()
+    {
+        // Sample leaf rows probe-confirmed on the reference: RENAME (241),
+        // CREATE_COLUMN_MASTER_KEY (315), ALTER_DATABASE_SCOPED_CONFIGURATION
+        // (320). is_first / is_last are 0, is_trigger_event is 1.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(CreateAwTrigger);
+        AreEqual("RENAME", sim.ExecuteScalar(
+            "select e.type_desc from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.parent_class = 0 and e.type = 241"));
+        AreEqual("CREATE_COLUMN_MASTER_KEY", sim.ExecuteScalar(
+            "select e.type_desc from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.parent_class = 0 and e.type = 315"));
+        AreEqual("ALTER_DATABASE_SCOPED_CONFIGURATION", sim.ExecuteScalar(
+            "select e.type_desc from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.parent_class = 0 and e.type = 320"));
+        IsFalse((bool)sim.ExecuteScalar(
+            "select is_first from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.parent_class = 0 and e.type = 241")!);
+        IsFalse((bool)sim.ExecuteScalar(
+            "select is_last from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.parent_class = 0 and e.type = 241")!);
+        IsTrue((bool)sim.ExecuteScalar(
+            "select is_trigger_event from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.parent_class = 0 and e.type = 241")!);
+    }
+
+    [TestMethod]
+    public void TriggerEvents_IndividualEvent_HasNullGroup()
+    {
+        // A DDL trigger created FOR a single event (not a group) surfaces one
+        // row with a NULL event_group_type.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create trigger [oneEvent]
+            on database
+            for create_table as
+            begin set nocount on; end
+            """);
+        AreEqual(1, sim.ExecuteScalar(
+            "select count(*) from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.name = 'oneEvent'"));
+        AreEqual(21, sim.ExecuteScalar(
+            "select e.type from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.name = 'oneEvent'"));
+        AreEqual("CREATE_TABLE", sim.ExecuteScalar(
+            "select e.type_desc from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.name = 'oneEvent'"));
+        AreEqual(0, sim.ExecuteScalar(
+            "select count(event_group_type) from sys.trigger_events e join sys.triggers t on t.object_id = e.object_id where t.name = 'oneEvent'"));
+    }
+
+    [TestMethod]
+    public void SysTriggerEventTypes_ExposesStaticCatalog()
+    {
+        // The static sys.trigger_event_types catalog (312 rows, probe-confirmed
+        // shape). DDL_DATABASE_LEVEL_EVENTS (10016) parents to DDL_EVENTS
+        // (10001); CREATE_TABLE (21) parents to DDL_TABLE_EVENTS (10018).
+        var sim = new Simulation();
+        AreEqual(312, sim.ExecuteScalar("select count(*) from sys.trigger_event_types"));
+        AreEqual("DDL_DATABASE_LEVEL_EVENTS", sim.ExecuteScalar(
+            "select type_name from sys.trigger_event_types where type = 10016"));
+        AreEqual(10001, sim.ExecuteScalar(
+            "select parent_type from sys.trigger_event_types where type = 10016"));
+        AreEqual(10018, sim.ExecuteScalar(
+            "select parent_type from sys.trigger_event_types where type = 21"));
+        AreEqual(0, sim.ExecuteScalar(
+            "select count(parent_type) from sys.trigger_event_types where type = 10001"));
+    }
 }

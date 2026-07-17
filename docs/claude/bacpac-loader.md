@@ -82,7 +82,11 @@ Per-table data lives in `Data/<schema>.<table>/TableData-NNN-NNNNN.BCP`. Type ma
 
 ## BCP-filters-computed-columns contract
 
-`BacpacReader.LoadRowsFromBcp` strips columns with `HeapColumn.Computed != null` before passing to `BcpRowReader` / `RowEncoder` — DACFx-emitted BCP files exclude computed columns from the wire layout regardless of PERSISTED. The loader emits computed columns *without* the PERSISTED qualifier so the simulator recomputes on every read; recomputing on every read gives identical query semantics with the only cost being a per-read evaluation. A persisted-computed column would have no stored bytes for existing rows, since BCP doesn't carry data for them.
+DACFx-emitted BCP files exclude computed columns from the wire layout regardless of PERSISTED — neither real `bcp.exe` nor DACFx export them. `BacpacReader.LoadRowsFromBcp` reads only the non-computed (wire) columns.
+
+**PERSISTED survives to the catalog.** `ModelXmlReader` reads the `SqlComputedColumn` element's `IsPersisted` property (and `IsPersistedNullable`) and appends a `PERSISTED` / `PERSISTED NOT NULL` marker to the `AS (expr)` fragment (`ComputedPersistedSuffix`) — without it, `sys.computed_columns.is_persisted` reads 0 and DacFx's re-export drops `IsPersisted=True` (WWI's `Application.People.SearchName` and the two `*Transactions.IsFinalized` columns lost the flag). The explicit `NOT NULL` is required because the simulator's parser defaults a bare `PERSISTED` computed column to nullable (it doesn't infer nullability from the expression), so `IsPersistedNullable=False` must map to `PERSISTED NOT NULL` for `sys.computed_columns.is_nullable` to match the source.
+
+**Persisted computed columns are computed at load.** A `PERSISTED` marker makes the column `IsStored` — it has a physical storage slot but no BCP wire bytes. `LoadRowsFromBcp` detects any `IsStored` computed column and switches from the fast wire-encode path to a compute path: read the wire values into their full-table ordinals, evaluate every computed column against its siblings via the shared `Simulation.EvaluateComputedColumns` (using a throwaway `BatchContext` bound to the target database), then `ProjectStoredValues` down to the stored layout and encode. This mirrors what real SQL Server does on bacpac import (recompute-and-store, since BCP carries no bytes). Tables *without* a persisted computed column keep the untouched fast path — non-persisted computed columns aren't stored, so their wire layout already equals the stored layout.
 
 ## Computed-column ordinal preservation
 

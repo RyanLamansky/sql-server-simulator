@@ -69,6 +69,32 @@ public sealed class DacFxExportCatalogTests
     }
 
     /// <summary>
+    /// Database roles must carry a non-NULL <c>owning_principal_id</c> (dbo,
+    /// principal_id 1 — probe-confirmed on WWI's custom roles). DacFx's role
+    /// reverse-engineering filters <c>USER_NAME(owning_principal_id) != N'cdc'</c>;
+    /// a NULL owner makes that predicate UNKNOWN and silently drops every
+    /// SqlRole from the bacpac export. This reproduces the exact populator
+    /// query and asserts the role survives.
+    /// </summary>
+    [TestMethod]
+    public void DatabaseRole_OwnedByDbo_SurvivesDacFxRoleFilter()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create role [External Sales]");
+        AreEqual(1, sim.ExecuteScalar(
+            "select owning_principal_id from sys.database_principals where name = 'External Sales'"));
+        AreEqual("dbo", sim.ExecuteScalar(
+            "select USER_NAME(owning_principal_id) from sys.database_principals where name = 'External Sales'"));
+        // The DacFx SqlRole populator query, verbatim in shape.
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(*) from sys.database_principals dp
+            where dp.type = N'R'
+              and dp.name = N'External Sales'
+              and USER_NAME(dp.owning_principal_id) != N'cdc'
+            """));
+    }
+
+    /// <summary>
     /// A representative column-shape check: selecting specific columns from the
     /// empty views resolves (no Msg 207) and returns an empty set — including
     /// the sql_variant-substituted (partition_range_values.value,

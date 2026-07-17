@@ -1108,11 +1108,13 @@ internal static class ModelXmlReader
     /// Builds the inline computed-column DDL fragment <c>[col] AS (expr)</c>
     /// for a <c>SqlComputedColumn</c> element. The <c>ExpressionScript</c> body
     /// arrives parenthesized already (DACFx emits e.g.
-    /// <c>(concat([X],N' ',[Y]))</c>), so it's used verbatim. PERSISTED is
-    /// dropped intentionally — see <see cref="EmitDeferredComputedColumns"/>
-    /// for the rationale (BCP carries no bytes for computed columns, so the
-    /// simulator recomputes on every read). Returns null (recording a skip)
-    /// when the expression is absent.
+    /// <c>(concat([X],N' ',[Y]))</c>), so it's used verbatim. A
+    /// <c>PERSISTED</c> (or <c>PERSISTED NOT NULL</c>) suffix is appended when
+    /// the model's <c>IsPersisted</c> property is set — otherwise DacFx's
+    /// re-export loses the flag (<c>sys.computed_columns.is_persisted</c> would
+    /// read 0 and the re-emitted <c>SqlComputedColumn</c> drops
+    /// <c>IsPersisted=True</c>). Returns null (recording a skip) when the
+    /// expression is absent.
     /// </summary>
     private static string? TranslateComputedColumn(XElement columnElement, string? columnName, BacpacImportResult result)
     {
@@ -1125,8 +1127,23 @@ internal static class ModelXmlReader
             result.AddSkipped(new BacpacSkipped("SqlComputedColumn", columnName, "Missing ExpressionScript property."));
             return null;
         }
-        return $"{columnLeaf} AS {expression}";
+        return $"{columnLeaf} AS {expression}{ComputedPersistedSuffix(columnElement)}";
     }
+
+    /// <summary>
+    /// Returns the DDL suffix for a computed column's persistence:
+    /// <c>" PERSISTED NOT NULL"</c> when the model marks it persisted and
+    /// non-nullable (<c>IsPersisted=True</c>, <c>IsPersistedNullable=False</c>),
+    /// <c>" PERSISTED"</c> when persisted and nullable, or empty otherwise. The
+    /// simulator's parser defaults a bare <c>PERSISTED</c> computed column to
+    /// nullable (it doesn't infer nullability from the expression), so the
+    /// explicit <c>NOT NULL</c> is required to make
+    /// <c>sys.computed_columns.is_nullable</c> match the source model.
+    /// </summary>
+    private static string ComputedPersistedSuffix(XElement columnElement) =>
+        !ReadBoolProperty(columnElement, "IsPersisted", false) ? string.Empty
+        : ReadBoolProperty(columnElement, "IsPersistedNullable", true) ? " PERSISTED"
+        : " PERSISTED NOT NULL";
 
     /// <summary>
     /// Phase 8 walker: re-visits each <c>SqlTable</c> element and emits
@@ -1198,20 +1215,18 @@ internal static class ModelXmlReader
                 result.AddSkipped(new BacpacSkipped("SqlComputedColumn", columnName, "Missing ExpressionScript property."));
                 continue;
             }
-            // PERSISTED dropped intentionally: the simulator's read path for
-            // a PERSISTED computed column reads bytes from storage rather than
-            // recomputing, but BCP files don't carry data for computed columns
-            // (real bcp.exe / DACFx exclude them), so a persisted-computed
-            // column would have no stored bytes for existing rows. Emitting
-            // without PERSISTED makes the simulator recompute on every read —
-            // identical query semantics, just no caching. The bacpac's
-            // IsPersisted hint is read for the loader's records but not
-            // propagated to the simulator.
+            // PERSISTED survives to the catalog so DacFx re-export carries
+            // IsPersisted. This deferred path only fires for tables whose
+            // computed column forward-references a UDF (AW's
+            // Sales.Customer.AccountNumber — non-persisted); the persisted WWI
+            // columns land on the inline path. The BCP loader computes any
+            // persisted computed column's value on load (it's not in the BCP
+            // wire), so a PERSISTED marker here still yields correct storage.
             try
             {
                 using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-                command.CommandText = $"ALTER TABLE {tableName} ADD {columnLeaf} AS {expression};";
+                command.CommandText = $"ALTER TABLE {tableName} ADD {columnLeaf} AS {expression}{ComputedPersistedSuffix(col)};";
 #pragma warning restore CA2100
                 _ = command.ExecuteNonQuery();
             }

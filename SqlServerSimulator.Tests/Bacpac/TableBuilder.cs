@@ -70,16 +70,18 @@ public sealed class TableBuilder
     }
 
     /// <summary>
-    /// Adds a computed column. The loader emits the column in phase 8
-    /// (after UDFs have landed) via <c>ALTER TABLE … ADD col AS (expr)</c>.
-    /// PERSISTED is intentionally dropped by the loader regardless of the
-    /// builder's hint — BCP files don't carry data for computed columns,
-    /// so persisted-computed columns would have no stored bytes; the
-    /// simulator recomputes on every read instead.
+    /// Adds a computed column. The loader emits it inline in CREATE TABLE at
+    /// its model ordinal (or in phase 8 via <c>ALTER TABLE … ADD col AS (expr)</c>
+    /// when the expression forward-references a not-yet-created UDF). When
+    /// <paramref name="persisted"/> is set the model carries
+    /// <c>IsPersisted=True</c> (and <c>IsPersistedNullable</c>), which the loader
+    /// translates to a <c>PERSISTED</c> / <c>PERSISTED NOT NULL</c> marker — the
+    /// column then has a storage slot and its value is computed at BCP-load
+    /// time (the BCP wire carries no bytes for computed columns).
     /// </summary>
-    public TableBuilder ComputedColumn(string name, string expression, bool persisted = false)
+    public TableBuilder ComputedColumn(string name, string expression, bool persisted = false, bool persistedNullable = true)
     {
-        _computedColumns.Add(new ComputedColumnDef(name, expression, persisted));
+        _computedColumns.Add(new ComputedColumnDef(name, expression, persisted, persistedNullable));
         _order.Add((Computed: true, _computedColumns.Count - 1));
         return this;
     }
@@ -224,6 +226,9 @@ public sealed class TableBuilder
             element.Add(new XElement(ns + "Property",
                 new XAttribute("Name", "IsPersisted"),
                 new XAttribute("Value", "True")));
+            element.Add(new XElement(ns + "Property",
+                new XAttribute("Name", "IsPersistedNullable"),
+                new XAttribute("Value", computed.PersistedNullable ? "True" : "False")));
         }
         return element;
     }
@@ -567,4 +572,4 @@ internal sealed record ForeignKeyDef(
 internal readonly record struct IndexDef(string Name, string[] KeyColumns, string[] IncludedColumns, bool Unique, bool Clustered);
 
 /// <summary>Computed column declaration accumulated via <see cref="TableBuilder.ComputedColumn"/>.</summary>
-internal readonly record struct ComputedColumnDef(string Name, string Expression, bool Persisted);
+internal readonly record struct ComputedColumnDef(string Name, string Expression, bool Persisted, bool PersistedNullable);

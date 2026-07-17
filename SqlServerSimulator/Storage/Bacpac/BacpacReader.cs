@@ -78,7 +78,7 @@ internal static class BacpacReader
                 using var workerStream = new MemoryStream(buffer, writable: false);
                 using var workerArchive = new ZipArchive(workerStream, ZipArchiveMode.Read, leaveOpen: false);
                 while (queue.TryDequeue(out var work))
-                    ProcessTable(workerArchive, work, result, resultLock);
+                    ProcessTable(workerArchive, work, simulation, database, result, resultLock);
             });
         }
         Task.WaitAll(tasks);
@@ -179,7 +179,7 @@ internal static class BacpacReader
     /// counter once at the end (one lock acquire per table instead of per
     /// entry).
     /// </summary>
-    private static void ProcessTable(ZipArchive archive, TableWorkItem work, BacpacImportResult result, object resultLock)
+    private static void ProcessTable(ZipArchive archive, TableWorkItem work, Simulation simulation, Database database, BacpacImportResult result, object resultLock)
     {
         var tableRowCount = 0;
         foreach (var entryName in work.EntryNames)
@@ -192,7 +192,7 @@ internal static class BacpacReader
             {
                 using var rawStream = entry.Open();
                 using var bcpStream = new BufferedStream(rawStream, 64 * 1024);
-                tableRowCount += LoadRowsFromBcp(bcpStream, work.Table, work.SchemaName, work.TableName, result);
+                tableRowCount += LoadRowsFromBcp(bcpStream, work.Table, work.SchemaName, work.TableName, simulation, database, result);
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException
                 or EndOfStreamException or ArgumentOutOfRangeException
@@ -225,7 +225,7 @@ internal static class BacpacReader
     /// inserted; the caller aggregates per-table to update the
     /// <c>_DataRows</c> counter under the result lock.
     /// </summary>
-    private static int LoadRowsFromBcp(BufferedStream bcpStream, HeapTable table, string schemaName, string tableName, BacpacImportResult result)
+    private static int LoadRowsFromBcp(BufferedStream bcpStream, HeapTable table, string schemaName, string tableName, Simulation simulation, Database database, BacpacImportResult result)
     {
         var qualifiedKey = $"[{schemaName}].[{tableName}]";
         var columnIsAlias = result.TableColumnIsAlias.TryGetValue(qualifiedKey, out var flags)
@@ -234,30 +234,80 @@ internal static class BacpacReader
 
         // BCP files don't carry data for computed columns — neither real bcp.exe
         // nor DACFx export them. Filter computed columns out of the per-row
-        // wire layout (read N stored values, encode an N-column row); the
-        // simulator's row-storage and read paths already treat computed
-        // columns as metadata-only (recomputed on read), so an encoded row
-        // missing the computed-column slot is the same shape any INSERT
-        // through normal DML would produce.
-        var storedColumns = new List<HeapColumn>(table.Columns.Length);
-        var storedIsAlias = new List<bool>(table.Columns.Length);
+        // wire layout (read N wire values); each wire column's full-table
+        // ordinal is tracked so a persisted computed column (which IS part of
+        // the physical row) can be computed from its sibling values below.
+        var wireColumns = new List<HeapColumn>(table.Columns.Length);
+        var wireIsAlias = new List<bool>(table.Columns.Length);
+        var wireToFullOrdinal = new List<int>(table.Columns.Length);
+        var hasPersistedComputed = false;
         for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (table.Columns[i].Computed is not null)
+            var column = table.Columns[i];
+            if (column.Computed is not null)
+            {
+                // A persisted computed column has a storage slot (IsStored) but
+                // no BCP wire bytes — it must be recomputed at load time.
+                hasPersistedComputed |= column.IsStored;
                 continue;
-            storedColumns.Add(table.Columns[i]);
-            storedIsAlias.Add(i < columnIsAlias.Length && columnIsAlias[i]);
+            }
+            wireColumns.Add(column);
+            wireIsAlias.Add(i < columnIsAlias.Length && columnIsAlias[i]);
+            wireToFullOrdinal.Add(i);
         }
-        var storedCols = storedColumns.ToArray();
-        var storedAlias = storedIsAlias.ToArray();
+        var wireCols = wireColumns.ToArray();
+        var wireAlias = wireIsAlias.ToArray();
+
+        // Fast path: no persisted computed column, so the wire layout IS the
+        // stored layout (non-persisted computed columns aren't stored) — encode
+        // the N wire values directly, matching any DML-produced row shape.
+        if (!hasPersistedComputed)
+            return LoadWireRows(bcpStream, table, wireCols, wireAlias);
+
+        // Compute path: a persisted computed column participates in storage but
+        // isn't on the wire. Read the wire values into their full-table
+        // ordinals, evaluate every computed column against its siblings (as a
+        // normal INSERT would), then project down to the stored layout.
+        var wireOrdinals = wireToFullOrdinal.ToArray();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        connection.CurrentDatabase = database;
+        using var command = connection.CreateCommand();
+        // BatchContext's ParserContext requires a non-empty CommandText; the
+        // batch is used only as an evaluation context for the pre-parsed
+        // computed-column expression trees, never re-parsed, so a whitespace
+        // batch text suffices.
+        command.CommandText = " ";
+        var batch = new Parser.BatchContext(command);
 
         var rowCount = 0;
         while (true)
         {
-            var values = BcpRowReader.TryReadRow(bcpStream, storedCols, storedAlias);
+            var wireValues = BcpRowReader.TryReadRow(bcpStream, wireCols, wireAlias);
+            if (wireValues is null)
+                break;
+            var full = new SqlValue[table.Columns.Length];
+            for (var w = 0; w < wireValues.Length; w++)
+                full[wireOrdinals[w]] = wireValues[w];
+            Simulation.EvaluateComputedColumns(table, full, batch);
+            var stored = Simulation.ProjectStoredValues(table, full);
+            var rowBytes = RowEncoder.EncodeRow(table.StoredColumns, stored, table.Heap);
+            _ = table.Heap.Insert(rowBytes);
+            rowCount++;
+        }
+
+        return rowCount;
+    }
+
+    private static int LoadWireRows(BufferedStream bcpStream, HeapTable table, HeapColumn[] wireCols, bool[] wireAlias)
+    {
+        var rowCount = 0;
+        while (true)
+        {
+            var values = BcpRowReader.TryReadRow(bcpStream, wireCols, wireAlias);
             if (values is null)
                 break;
-            var rowBytes = RowEncoder.EncodeRow(storedCols, values, table.Heap);
+            var rowBytes = RowEncoder.EncodeRow(wireCols, values, table.Heap);
             _ = table.Heap.Insert(rowBytes);
             rowCount++;
         }

@@ -924,6 +924,58 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void ComputedColumn_Persisted_LandsAs_is_persisted_AndComputesOnLoad()
+    {
+        // A PERSISTED computed column round-trips its IsPersisted flag to
+        // sys.computed_columns (so DacFx re-export carries it), and its value
+        // is computed at BCP-load time — the column has a storage slot but the
+        // BCP wire carries no bytes for it. IsPersistedNullable=False maps to
+        // PERSISTED NOT NULL so is_nullable also matches the source model.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "People", t => t
+                .Column("PersonID", "int")
+                .Column("FullName", "nvarchar(50)")
+                .Column("PreferredName", "nvarchar(50)")
+                .ComputedColumn("SearchName", "(concat([PreferredName],N' ',[FullName]))", persisted: true, persistedNullable: false)
+                .Row(1, "Kayla Woodcock", "Kayla")
+                .Row(2, "Hudson Onslow", "Hudson"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+        IsTrue((bool)sim.ExecuteScalar("SELECT is_persisted FROM sys.computed_columns WHERE object_id = OBJECT_ID('dbo.People') AND name = 'SearchName';")!);
+        IsFalse((bool)sim.ExecuteScalar("SELECT is_nullable FROM sys.computed_columns WHERE object_id = OBJECT_ID('dbo.People') AND name = 'SearchName';")!);
+        AreEqual("Kayla Kayla Woodcock", sim.ExecuteScalar("SELECT SearchName FROM dbo.People WHERE PersonID = 1;"));
+        AreEqual("Hudson Hudson Onslow", sim.ExecuteScalar("SELECT SearchName FROM dbo.People WHERE PersonID = 2;"));
+    }
+
+    [TestMethod]
+    public void ComputedColumn_PersistedNullable_LandsAs_is_persisted_Nullable()
+    {
+        // A nullable PERSISTED computed column (IsPersistedNullable=True) maps
+        // to a bare PERSISTED marker — is_persisted = 1, is_nullable = 1.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Txn", t => t
+                .Column("Id", "int")
+                .Column("FinalizedOn", "date", nullable: true)
+                .ComputedColumn("IsFinalized", "(case when [FinalizedOn] is null then CONVERT([bit],(0)) else CONVERT([bit],(1)) end)", persisted: true)
+                .Row(1, null)
+                .Row(2, new DateOnly(2025, 1, 1)))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+        IsTrue((bool)sim.ExecuteScalar("SELECT is_persisted FROM sys.computed_columns WHERE object_id = OBJECT_ID('dbo.Txn') AND name = 'IsFinalized';")!);
+        IsTrue((bool)sim.ExecuteScalar("SELECT is_nullable FROM sys.computed_columns WHERE object_id = OBJECT_ID('dbo.Txn') AND name = 'IsFinalized';")!);
+        IsFalse((bool)sim.ExecuteScalar("SELECT IsFinalized FROM dbo.Txn WHERE Id = 1;")!);
+        IsTrue((bool)sim.ExecuteScalar("SELECT IsFinalized FROM dbo.Txn WHERE Id = 2;")!);
+    }
+
+    [TestMethod]
     public void ComputedColumn_MidTable_LandsAtModelOrdinal()
     {
         // A computed column declared between simple columns must keep its

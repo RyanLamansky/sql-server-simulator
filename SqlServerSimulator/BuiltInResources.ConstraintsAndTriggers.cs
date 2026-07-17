@@ -57,6 +57,20 @@ internal static partial class BuiltInResources
             new("is_trigger_event", SqlType.Bit, null, true),
         ], EnumerateSysTriggerEvents);
 
+        // sys.trigger_event_types: SQL Server's static event-type catalog
+        // (probe-confirmed 3-column shape, SQL Server 2025). Version-stable
+        // reference data backing the DDL-trigger expansion in
+        // sys.trigger_events; surfaced as a queryable view for parity. type is
+        // NOT NULL; type_name is nvarchar(64); parent_type is NULL for the two
+        // roots (DDL_EVENTS, ALTER_SERVER_CONFIGURATION).
+        var eventTypeNameCol = NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit);
+        Sys("trigger_event_types",
+        [
+            new("type", SqlType.Int32, null, false),
+            new("type_name", eventTypeNameCol, 64, true),
+            new("parent_type", SqlType.Int32, null, true),
+        ], (batch, database) => EnumerateSysTriggerEventTypes(eventTypeNameCol));
+
         // sys.assembly_modules: CLR (SQLCLR) modules aren't modeled, so this is
         // an empty view with the documented SQL Server 2025 shape. SMO's
         // CREATE-scripting trigger query LEFT JOINs it to detect a CLR trigger.
@@ -354,11 +368,19 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.trigger_events</c>: one row per (DML trigger, event).
-    /// The internal <see cref="TriggerActions"/> bit flags (INSERT=1, UPDATE=2,
-    /// DELETE=4) map to real SQL Server's dense event type codes (INSERT=1,
-    /// UPDATE=2, DELETE=3). DDL triggers aren't surfaced (their events are DDL
-    /// event types, which SMO's per-table trigger query never reads).
+    /// Rows for <c>sys.trigger_events</c>: one row per (trigger, event). For
+    /// DML triggers the internal <see cref="TriggerActions"/> bit flags
+    /// (INSERT=1, UPDATE=2, DELETE=4) map to real SQL Server's dense event type
+    /// codes (INSERT=1, UPDATE=2, DELETE=3) with a NULL <c>event_group_type</c>.
+    /// For DDL triggers each stored event-type name expands via
+    /// <see cref="TriggerEventTypes"/>: a group name
+    /// (<c>DDL_DATABASE_LEVEL_EVENTS</c>) yields one row per <em>leaf</em> event
+    /// in the group's transitive closure — each carrying the group's id/desc in
+    /// <c>event_group_type(_desc)</c> — while an individual event name yields a
+    /// single row with a NULL group. <c>is_first</c> / <c>is_last</c> default 0
+    /// (no <c>sp_settriggerorder</c> modeled); <c>is_trigger_event</c> is 1.
+    /// DacFx's SqlDatabaseDdlTrigger reverse-engineering builds the element's
+    /// EventType relationship from these rows.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysTriggerEvents(Parser.BatchContext batch, Database database)
     {
@@ -366,8 +388,8 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        var nullDesc = SqlValue.Null(NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit));
         var eventTypeName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        var nullDesc = SqlValue.Null(eventTypeName);
         (int Type, string Desc)[] events =
         [
             (1, "INSERT"),
@@ -396,6 +418,74 @@ internal static partial class BuiltInResources
                     ];
                 }
             }
+        }
+
+        // DDL triggers: each stored event-type name is either an event group
+        // (expand to the leaf events in its transitive closure, tagging each
+        // with the group's id/desc) or an individual event (one row, NULL
+        // group). Duplicate leaves across overlapping group names are
+        // de-duplicated so a trigger declared FOR two overlapping groups
+        // doesn't double-emit a shared event.
+        foreach (var ddl in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+        {
+            var objectId = SqlValue.FromInt32(ddl.ObjectId);
+            var emitted = new HashSet<int>();
+            foreach (var eventName in ddl.EventTypes)
+            {
+                if (!TriggerEventTypes.TryResolve(eventName, out var entry))
+                    continue;
+                if (TriggerEventTypes.IsGroup(entry))
+                {
+                    var groupType = SqlValue.FromInt32(entry.Type);
+                    var groupDesc = SqlValue.FromString(eventTypeName, entry.TypeName);
+                    foreach (var leaf in TriggerEventTypes.LeafClosure(entry.Type))
+                    {
+                        if (!emitted.Add(leaf.Type))
+                            continue;
+                        yield return [
+                            objectId,
+                            SqlValue.FromInt32(leaf.Type),
+                            SqlValue.FromString(eventTypeName, leaf.TypeName),
+                            falseBit,
+                            falseBit,
+                            groupType,
+                            groupDesc,
+                            trueBit,
+                        ];
+                    }
+                }
+                else if (emitted.Add(entry.Type))
+                {
+                    yield return [
+                        objectId,
+                        SqlValue.FromInt32(entry.Type),
+                        SqlValue.FromString(eventTypeName, entry.TypeName),
+                        falseBit,
+                        falseBit,
+                        nullInt,
+                        nullDesc,
+                        trueBit,
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.trigger_event_types</c>: the static event-type catalog
+    /// (<see cref="TriggerEventTypes.All"/>). Server-scoped — identical across
+    /// every database.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysTriggerEventTypes(NVarcharSqlType typeName)
+    {
+        var nullParent = SqlValue.Null(SqlType.Int32);
+        foreach (var entry in TriggerEventTypes.All)
+        {
+            yield return [
+                SqlValue.FromInt32(entry.Type),
+                SqlValue.FromString(typeName, entry.TypeName),
+                entry.ParentType is int parent ? SqlValue.FromInt32(parent) : nullParent,
+            ];
         }
     }
 
