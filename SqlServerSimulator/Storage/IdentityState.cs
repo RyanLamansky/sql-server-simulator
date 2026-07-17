@@ -16,11 +16,21 @@ namespace SqlServerSimulator.Storage;
 /// when no value has yet been generated.
 /// </para>
 /// </remarks>
-internal sealed class IdentityState(long seed, long increment)
+internal sealed class IdentityState(long seed, long increment, bool notForReplication = false)
 {
     public readonly long Seed = seed;
 
     public readonly long Increment = increment;
+
+    /// <summary>
+    /// True when the column was declared <c>IDENTITY(seed, increment) NOT FOR
+    /// REPLICATION</c>. Replication isn't modeled, so this carries no runtime
+    /// effect (real SQL Server skips identity reseeding under replication
+    /// agents) — it exists purely to round-trip through
+    /// <c>sys.identity_columns.is_not_for_replication</c> /
+    /// <c>COLUMNPROPERTY(…, 'IsIdNotForRepl')</c> and the BACPAC model.
+    /// </summary>
+    public readonly bool NotForReplication = notForReplication;
 
     private long? highWaterMark;
 

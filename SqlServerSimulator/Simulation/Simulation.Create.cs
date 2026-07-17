@@ -720,6 +720,7 @@ partial class Simulation
         string? defaultDefinition = null;
         var generatedAs = GeneratedAlwaysAsRow.None;
         var isHidden = false;
+        var isRowGuidCol = false;
         string? columnCollation = null;
         var inlineKeyKind = (KeyConstraintKind?)null;
         var inlineKeyClustered = (bool?)null;
@@ -776,10 +777,36 @@ partial class Simulation
                         context.MoveNextRequired();
                     }
                     continue;
-                case ReservedKeyword { Keyword: Keyword.Not } when !nullable.HasValue:
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    nullable = false;
+                case ReservedKeyword { Keyword: Keyword.Not }:
+                    // NOT introduces either the NOT NULL nullability marker or
+                    // the IDENTITY column's NOT FOR REPLICATION clause. There's
+                    // no lookahead, so the token after NOT disambiguates.
+                    switch (context.GetNextRequired())
+                    {
+                        case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
+                            nullable = false;
+                            break;
+                        case ReservedKeyword { Keyword: Keyword.For } when identity is { NotForReplication: false }:
+                            // IDENTITY(s, i) NOT FOR REPLICATION — replication
+                            // isn't modeled, so the clause round-trips as
+                            // metadata only. REPLICATION classifies as either a
+                            // reserved or contextual keyword; accept both.
+                            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Replication }
+                                and not UnquotedString { ContextualKeyword: ContextualKeyword.Replication })
+                            {
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                            }
+                            identity = new IdentityState(identity.Seed, identity.Increment, notForReplication: true);
+                            break;
+                        default:
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                    context.MoveNextOptional();
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.RowGuidCol } when !isRowGuidCol:
+                    // ROWGUIDCOL: uniqueidentifier-only metadata marker. Type and
+                    // duplicate validation run after the type resolves below.
+                    isRowGuidCol = true;
                     context.MoveNextOptional();
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
@@ -866,6 +893,19 @@ partial class Simulation
                 throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
         }
 
+        if (isRowGuidCol)
+        {
+            // ROWGUIDCOL is uniqueidentifier-only (Msg 2761) and unique per
+            // table (Msg 8196) — both probe-confirmed compile-time errors.
+            if (resolvedType != SqlType.UniqueIdentifier)
+                throw SimulatedSqlException.RowGuidColRequiresUniqueIdentifier();
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { IsRowGuidCol: true })
+                    throw SimulatedSqlException.MultipleRowGuidColumns();
+            }
+        }
+
         if (resolvedType == SqlType.RowVersion)
         {
             // SQL Server allows at most one rowversion / timestamp column per
@@ -896,7 +936,7 @@ partial class Simulation
             resolvedType = resolvedType.WithCollation(resolvedCollation, Coercibility.Implicit);
         }
 
-        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation);
+        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol);
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         if (defaultExpression is not null)

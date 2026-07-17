@@ -140,6 +140,34 @@ public class ExtendedPropertyTests
     }
 
     [TestMethod]
+    public void Value_NvarcharInput_SurvivesAsNvarcharBaseType()
+    {
+        // DacFx reads sys.extended_properties.value as sql_variant and scripts
+        // the value with an N-prefix iff its base type is nvarchar. An N'…'
+        // input must round-trip as nvarchar (probe-confirmed on SQL Server 2025:
+        // @value=N'…' stores base type nvarchar).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "EXEC sp_addextendedproperty @name=N'X', @value=N'ünïcode', @level0type=N'SCHEMA', @level0name=N'dbo'");
+        AreEqual("nvarchar", sim.ExecuteScalar(
+            "SELECT SQL_VARIANT_PROPERTY(value, 'BaseType') FROM sys.extended_properties WHERE name = 'X'"));
+        AreEqual("ünïcode", sim.ExecuteScalar(
+            "SELECT CAST(value AS nvarchar(MAX)) FROM sys.extended_properties WHERE name = 'X'"));
+    }
+
+    /// <summary>
+    /// A plain (non-N) literal stores varchar base type — probe-confirmed on
+    /// SQL Server 2025 (@value='plain' → varchar). The value column keeps
+    /// per-cell base types like the real sql_variant.
+    /// </summary>
+    [TestMethod]
+    public void Value_VarcharInput_SurvivesAsVarcharBaseType()
+        => AreEqual("varchar", new Simulation().ExecuteScalar("""
+            EXEC sp_addextendedproperty @name=N'X', @value='plain', @level0type=N'SCHEMA', @level0name=N'dbo';
+            SELECT SQL_VARIANT_PROPERTY(value, 'BaseType') FROM sys.extended_properties WHERE name = 'X'
+            """));
+
+    [TestMethod]
     public void Update_OnMissing_RaisesMsg15217()
     {
         var ex = new Simulation().AssertSqlError(

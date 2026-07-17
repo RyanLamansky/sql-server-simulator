@@ -17,7 +17,7 @@ namespace SqlServerSimulator.Storage;
 /// </para>
 /// </remarks>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null, string? computedDefinition = null)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null, string? computedDefinition = null, bool isRowGuidCol = false)
 {
     public readonly string Name = name;
 
@@ -58,6 +58,18 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// matching SQL Server's <c>is_hidden</c> column metadata.
     /// </summary>
     public readonly bool IsHidden = isHidden;
+
+    /// <summary>
+    /// True when the column was declared <c>ROWGUIDCOL</c> — the
+    /// metadata marker that flags which <c>uniqueidentifier</c> column the
+    /// <c>$ROWGUID</c> pseudo-column resolves to. The simulator doesn't model
+    /// the pseudo-column reference; the flag is stored purely to round-trip
+    /// through <c>sys.columns.is_rowguidcol</c> /
+    /// <c>COLUMNPROPERTY(…, 'IsRowGuidCol')</c> and the BACPAC model. Only one
+    /// column per table may carry it (Msg 8196), and only a
+    /// <c>uniqueidentifier</c> column (Msg 2761).
+    /// </summary>
+    public readonly bool IsRowGuidCol = isRowGuidCol;
 
     /// <summary>
     /// True for columns whose values flow through LOB-chain storage rather

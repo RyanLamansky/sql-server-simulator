@@ -828,8 +828,9 @@ internal static class ModelXmlReader
     /// <summary>
     /// Builds the per-column DDL fragment for a single <c>SqlSimpleColumn</c>
     /// element. Output shape:
-    /// <c>[col] type[(args)] [IDENTITY(seed, increment)] [ROWGUIDCOL] [NULL|NOT NULL]</c>.
-    /// IDENTITY defaults to (1,1); ROWGUIDCOL only emits when
+    /// <c>[col] type[(args)] [IDENTITY(seed, increment) [NOT FOR REPLICATION]] [ROWGUIDCOL] [NULL|NOT NULL]</c>.
+    /// IDENTITY defaults to (1,1) and appends NOT FOR REPLICATION when
+    /// <c>IdentityIsNotForReplication=True</c>; ROWGUIDCOL only emits when
     /// <c>IsRowGuidColumn=True</c>; the explicit NULL/NOT NULL marker comes
     /// from <c>IsNullable</c> (default True per probe).
     /// </summary>
@@ -855,6 +856,7 @@ internal static class ModelXmlReader
         var isNullable = ReadBoolProperty(columnElement, "IsNullable", defaultValue: true);
         var isIdentity = ReadBoolProperty(columnElement, "IsIdentity", defaultValue: false);
         var isRowGuid = ReadBoolProperty(columnElement, "IsRowGuidColumn", defaultValue: false);
+        var identityNotForReplication = ReadBoolProperty(columnElement, "IdentityIsNotForReplication", defaultValue: false);
         var identitySeed = ReadStringProperty(columnElement, "IdentitySeed");
         var identityIncrement = ReadStringProperty(columnElement, "IdentityIncrement");
 
@@ -867,7 +869,7 @@ internal static class ModelXmlReader
         var typeDdl = TranslateTypeSpecifier(typeSpec);
 
         var identityClause = isIdentity
-            ? $" IDENTITY({identitySeed ?? "1"}, {identityIncrement ?? "1"})"
+            ? $" IDENTITY({identitySeed ?? "1"}, {identityIncrement ?? "1"}){(identityNotForReplication ? " NOT FOR REPLICATION" : "")}"
             : "";
 
         // GENERATED ALWAYS AS ROW START / END marker: temporal period columns
@@ -882,17 +884,11 @@ internal static class ModelXmlReader
             "2" => " GENERATED ALWAYS AS ROW END",
             _ => "",
         };
-        if (isRowGuid)
-        {
-            // ROWGUIDCOL is metadata-only — it tells SQL Server which
-            // uniqueidentifier column NEWID()/NEWSEQUENTIALID() defaults to
-            // for $rowguid pseudo-column references. The simulator's CREATE
-            // TABLE parser doesn't accept the clause; storage shape and DML
-            // are unaffected by its absence (DEFAULT NEWID() arrives as a
-            // separate SqlDefaultConstraint element). Record a Warning once
-            // so the diagnostics report names the deferred surface.
-            result.AddWarning($"ROWGUIDCOL clause on column '{qualifiedColumnName}' dropped — the simulator doesn't model this metadata annotation; storage behavior is unaffected.");
-        }
+        // ROWGUIDCOL is metadata-only — it flags which uniqueidentifier column
+        // the $ROWGUID pseudo-column resolves to. The simulator round-trips it
+        // through sys.columns.is_rowguidcol; emit the clause so a re-export
+        // re-emits IsRowGuidColumn=True.
+        var rowGuidClause = isRowGuid ? " ROWGUIDCOL" : "";
         // Per-column COLLATE override — emitted only when on the whitelist.
         // An unrecognized name lands on Warnings; the simulator's parser
         // would reject it otherwise (the loader's best-effort contract
@@ -907,7 +903,7 @@ internal static class ModelXmlReader
                 result.AddWarning($"Column '{qualifiedColumnName}' declares COLLATE '{columnCollation}' which isn't recognized — clause dropped, column inherits the database default.");
         }
         var nullability = isNullableExplicit ? (isNullable ? " NULL" : " NOT NULL") : "";
-        return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{generatedClause}{nullability}";
+        return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{rowGuidClause}{generatedClause}{nullability}";
     }
 
     /// <summary>

@@ -46,9 +46,9 @@ public sealed class TableBuilder
     /// IsNullable=True default, but for test setup NOT NULL is more
     /// useful so explicit assertions on NULL-handling become opt-in.
     /// </summary>
-    public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null, bool rowGuidCol = false, string? xmlSchemaCollection = null)
+    public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null, bool rowGuidCol = false, string? xmlSchemaCollection = null, bool identityNotForReplication = false)
     {
-        _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol, xmlSchemaCollection));
+        _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol, xmlSchemaCollection, identityNotForReplication));
         _order.Add((Computed: false, _columns.Count - 1));
         return this;
     }
@@ -452,6 +452,8 @@ public sealed class TableBuilder
             element.Add(PropertyElement(ns, "IsIdentity", "True"));
             element.Add(PropertyElement(ns, "IdentitySeed", column.IdentitySeed.ToString(System.Globalization.CultureInfo.InvariantCulture)));
             element.Add(PropertyElement(ns, "IdentityIncrement", column.IdentityIncrement.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            if (column.IdentityNotForReplication)
+                element.Add(PropertyElement(ns, "IdentityIsNotForReplication", "True"));
         }
         if (column.PeriodKind == PeriodColumnKind.Start)
             element.Add(PropertyElement(ns, "GeneratedAlwaysType", "1"));
@@ -574,7 +576,7 @@ public enum PeriodColumnKind
 }
 
 /// <summary>Column metadata captured by <see cref="TableBuilder.Column"/>.</summary>
-internal readonly record struct ColumnDef(string Name, string SqlType, bool Nullable, bool Identity = false, int IdentitySeed = 1, int IdentityIncrement = 1, PeriodColumnKind PeriodKind = PeriodColumnKind.None, string? Collation = null, bool RowGuidCol = false, string? XmlSchemaCollectionRef = null);
+internal readonly record struct ColumnDef(string Name, string SqlType, bool Nullable, bool Identity = false, int IdentitySeed = 1, int IdentityIncrement = 1, PeriodColumnKind PeriodKind = PeriodColumnKind.None, string? Collation = null, bool RowGuidCol = false, string? XmlSchemaCollectionRef = null, bool IdentityNotForReplication = false);
 
 /// <summary>Base for constraint declarations accumulated on a table.</summary>
 internal abstract record ConstraintDef(string Name);

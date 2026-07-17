@@ -1314,10 +1314,11 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
-    public void RowGuidColColumn_AddsWarningAndLoadsWithoutClause()
+    public void RowGuidColColumn_LoadsWithClause_SetsIsRowGuidCol()
     {
-        // ROWGUIDCOL is metadata-only — the loader drops the clause and
-        // records a Warning. Exercises the ROWGUIDCOL warning emission path.
+        // ROWGUIDCOL round-trips: the loader emits the clause so
+        // sys.columns.is_rowguidcol reports it (DacFx re-emits
+        // IsRowGuidColumn=True on export). No Skipped, no Warning.
         using var bacpac = BacpacBuilder.Create()
             .Table("dbo", "Tagged", t => t
                 .Column("Id", "int")
@@ -1327,9 +1328,28 @@ public class BacpacLoaderTests
         var sim = new Simulation();
         sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
-        IsNotEmpty(diag.Warnings.Where(w => w.Contains("ROWGUIDCOL", StringComparison.Ordinal)).ToList());
-        // Column still loads, just without the metadata annotation.
-        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.columns WHERE name = 'RowId';"));
+        IsEmpty(diag.Warnings.Where(w => w.Contains("ROWGUIDCOL", StringComparison.Ordinal)).ToList());
+        IsTrue((bool)sim.ExecuteScalar(
+            "SELECT is_rowguidcol FROM sys.columns WHERE object_id = object_id('dbo.Tagged') AND name = 'RowId';")!);
+    }
+
+    [TestMethod]
+    public void IdentityNotForReplicationColumn_LoadsWithClause_SetsFlag()
+    {
+        // IdentityIsNotForReplication round-trips through
+        // sys.identity_columns.is_not_for_replication so DacFx re-emits the
+        // property on export.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Seeded", t => t
+                .Column("Id", "int", identity: true, identityNotForReplication: true)
+                .Column("Val", "int", nullable: true))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        IsTrue((bool)sim.ExecuteScalar(
+            "SELECT is_not_for_replication FROM sys.identity_columns WHERE object_id = object_id('dbo.Seeded');")!);
     }
 
     [TestMethod]

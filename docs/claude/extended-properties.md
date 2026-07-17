@@ -48,7 +48,11 @@ Probe-confirmed against SQL Server 2025.
 | `major_id` (int) | DB=0, schema=schema_id, object=object_id |
 | `minor_id` (int) | 0 for tables/views/procs/funcs; 1-based column ordinal for columns; index_id for INDEX class |
 | `name` (sysname) | Property name |
-| `value` (nvarchar(MAX)) | `sql_variant` isn't modeled, so the value coerces to nvarchar — lossless for AW's all-nvarchar workload |
+| `value` (sql_variant) | Wraps the stored value's own `SqlValue`, so its base type survives (nvarchar for an `N'…'` input, varchar for a plain literal) — probe-confirmed real behavior: `@value=N'…'` stores base type nvarchar, `@value='…'` stores varchar. DacFx reads the base type off the wire (via `SQL_VARIANT_PROPERTY` / the sql_variant TDS form) to re-script the value with the correct N-prefix, so a BACPAC round-trip preserves nvarchar. |
+
+### Value base-type fidelity
+
+The dict holds the raw `SqlValue` the sproc stored (`sp_addextendedproperty` assigns `arg.Value` verbatim — no coercion), so an `N'…'` literal keeps its `NVarcharSqlType` and a plain `'…'` literal its `VarcharSqlType`. `sys.extended_properties.value` wraps that value in a `sql_variant` at enumeration time (`SqlValue.FromVariant`), matching real SQL Server's `sql_variant` column. `fn_listextendedproperty.value` still surfaces as `nvarchar(MAX)` (its TVF schema is a fixed shape; DacFx's export reads `sys.extended_properties`, not the TVF).
 
 ## `fn_listextendedproperty`
 
@@ -67,4 +71,4 @@ The `'default'` wildcard at any level-name slot fans out across every object of 
 ## Known gaps
 
 - **PARAMETER / TRIGGER level types** — not modeled (raise Msg 15600 or `NotSupportedException`). AW doesn't exercise them in extended-property declarations, and the bacpac-loader baseline doesn't need them.
-- **`sql_variant`-typed values** — surfaced as nvarchar via lossy coercion. AW's 538 properties are all nvarchar inputs, so this is invisible in practice; non-nvarchar inputs from app code would lose their original type-tag on read-back.
+- **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity). `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy. DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.

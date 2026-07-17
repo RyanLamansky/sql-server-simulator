@@ -430,7 +430,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsHidden),
                         falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
                     ];
                 }
@@ -477,7 +477,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsHidden),
                         falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
                     ];
                 }
@@ -524,7 +524,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsHidden),
                         falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
                     ];
                 }
@@ -571,7 +571,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsHidden),
                         falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
                     ];
                 }

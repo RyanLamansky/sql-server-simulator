@@ -387,7 +387,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt64(identity.Seed),
                         SqlValue.FromInt64(identity.Increment),
                         identity.Snapshot() is { } last ? SqlValue.FromInt64(last) : nullLast,
-                        falseBit,
+                        SqlValue.FromBoolean(identity.NotForReplication),
                     ];
                 }
             }

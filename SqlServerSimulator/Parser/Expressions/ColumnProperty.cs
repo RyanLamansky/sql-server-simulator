@@ -16,7 +16,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><description><c>AllowsNull</c> — 1 / 0 from <see cref="HeapColumn.Nullable"/>.</description></item>
 /// <item><description><c>IsIdentity</c> — 1 / 0 from <see cref="HeapColumn.Identity"/>.</description></item>
 /// <item><description><c>IsComputed</c> — 1 / 0 from <see cref="HeapColumn.Computed"/>.</description></item>
-/// <item><description><c>IsRowGuidCol</c> — always 0 (ROWGUIDCOL not modeled).</description></item>
+/// <item><description><c>IsRowGuidCol</c> — 1 / 0 from <see cref="HeapColumn.IsRowGuidCol"/>.</description></item>
+/// <item><description><c>IsIdNotForRepl</c> — 1 when the column is an IDENTITY
+/// declared NOT FOR REPLICATION, else 0 (0 on non-identity columns, matching
+/// real, probe-confirmed 2026-07-17).</description></item>
 /// <item><description><c>Precision</c> — type-dependent: integer family yields
 /// (decimal-equivalent precision), <c>varchar(N)</c> / <c>nvarchar(N)</c> yield
 /// <c>N</c>, money family yields 19 / 10.</description></item>
@@ -114,8 +117,13 @@ internal sealed class ColumnProperty : Expression
             },
             12 => upper switch
             {
-                "ISROWGUIDCOL" => 0,
+                "ISROWGUIDCOL" => column.IsRowGuidCol ? 1 : 0,
                 "USESANSITRIM" => SqlType.IsStringCategory(column.Type) ? 1 : 0,
+                _ => null,
+            },
+            14 => upper switch
+            {
+                "ISIDNOTFORREPL" => column.Identity is { NotForReplication: true } ? 1 : 0,
                 _ => null,
             },
             _ => null,

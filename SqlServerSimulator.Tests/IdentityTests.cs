@@ -279,4 +279,31 @@ public sealed class IdentityTests
         _ = s2.ExecuteNonQuery("create table t (id int identity(1,1), x int)");
         AreEqual(1m, s2.ExecuteScalar("select IDENT_CURRENT('t')"));
     }
+
+    [TestMethod]
+    public void NotForReplication_SetsIdentityColumnFlag()
+    {
+        // NOT FOR REPLICATION has no runtime effect (replication isn't modeled);
+        // it round-trips through sys.identity_columns + COLUMNPROPERTY for BACPAC
+        // parity. DacFx reads is_not_for_replication to emit
+        // IdentityIsNotForReplication=True.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int identity(1,1) not for replication, x int)");
+        IsTrue((bool)sim.ExecuteScalar(
+            "select is_not_for_replication from sys.identity_columns where object_id = object_id('t')")!);
+        AreEqual(1, sim.ExecuteScalar("select COLUMNPROPERTY(object_id('t'), 'id', 'IsIdNotForRepl')"));
+        // Auto-generation still works normally.
+        _ = sim.ExecuteNonQuery("insert t (x) values (10),(20)");
+        AreEqual(2, sim.ExecuteScalar("select id from t where x = 20"));
+    }
+
+    [TestMethod]
+    public void IdentityWithoutNotForReplication_FlagIsZero()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int identity(1,1), x int)");
+        IsFalse((bool)sim.ExecuteScalar(
+            "select is_not_for_replication from sys.identity_columns where object_id = object_id('t')")!);
+        AreEqual(0, sim.ExecuteScalar("select COLUMNPROPERTY(object_id('t'), 'id', 'IsIdNotForRepl')"));
+    }
 }

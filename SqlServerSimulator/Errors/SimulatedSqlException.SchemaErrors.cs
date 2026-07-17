@@ -511,6 +511,22 @@ partial class SimulatedSqlException
         new($"Identity column '{columnName}' contains invalid INCREMENT.", 2753, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 2761: the <c>ROWGUIDCOL</c> property was declared
+    /// on a column whose type isn't <c>uniqueidentifier</c>. Probe-confirmed
+    /// wording / number / state (SQL Server 2025, 2026-07-17).
+    /// </summary>
+    internal static SimulatedSqlException RowGuidColRequiresUniqueIdentifier() =>
+        new("The ROWGUIDCOL property can only be specified on the uniqueidentifier data type.", 2761, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 8196: more than one column in a table was
+    /// declared with the <c>ROWGUIDCOL</c> property. Probe-confirmed wording /
+    /// number / state (SQL Server 2025, 2026-07-17).
+    /// </summary>
+    internal static SimulatedSqlException MultipleRowGuidColumns() =>
+        new("Duplicate column specified as ROWGUIDCOL.", 8196, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8115's IDENTITY-specific wording: the next
     /// identity value would overflow the column's underlying integer type.
     /// Distinct from <see cref="ArithmeticOverflow"/> in only one word

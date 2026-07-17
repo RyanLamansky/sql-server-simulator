@@ -88,9 +88,11 @@ internal static partial class BuiltInResources
         // attached to schemas / tables / columns / etc. via the
         // sp_addextendedproperty / sp_updateextendedproperty /
         // sp_dropextendedproperty trio. Real SQL Server's `value` column is
-        // typed `sql_variant` — the simulator surfaces it as `nvarchar(MAX)`
-        // since sql_variant isn't modeled; AW's 538 properties are all
-        // nvarchar values so functional fidelity is preserved.
+        // typed `sql_variant`, carrying the base type of the value the sproc
+        // stored (nvarchar for an N'…' literal, varchar for a plain literal).
+        // The simulator surfaces it as sql_variant too so DacFx reads the
+        // base type off the wire and re-scripts the value with the correct
+        // N-prefix on export — a BACPAC round-trip preserves nvarchar.
         Sys("extended_properties",
         [
             new("class", SqlType.TinyInt, null, false),
@@ -98,7 +100,7 @@ internal static partial class BuiltInResources
             new("major_id", SqlType.Int32, null, false),
             new("minor_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-            new("value", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("value", SqlType.SqlVariant, null, true),
         ], EnumerateSysExtendedProperties);
 
         // sys.database_principals: probe-confirmed shipped subset of columns
@@ -471,10 +473,10 @@ internal static partial class BuiltInResources
     /// derived from the class number per real SQL Server's enum (0 =
     /// DATABASE, 1 = OBJECT_OR_COLUMN, 3 = SCHEMA — the only classes the
     /// simulator currently emits; others fall through as the string form
-    /// of the class number for forward compat). Value is coerced to
-    /// <c>nvarchar(MAX)</c> since the simulator doesn't model
-    /// <c>sql_variant</c>; for AW's all-nvarchar workload, this is a
-    /// lossless surfacing.
+    /// of the class number for forward compat). Value is surfaced as a
+    /// <c>sql_variant</c> wrapping the stored value's own type, so the value's
+    /// base type (nvarchar vs varchar) survives to <c>SQL_VARIANT_PROPERTY</c>
+    /// and the TDS wire — DacFx reads it to re-script the correct N-prefix.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysExtendedProperties(Parser.BatchContext batch, Database database)
     {
@@ -495,7 +497,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(key.MajorId),
                 SqlValue.FromInt32(key.MinorId),
                 SqlValue.FromSystemName(key.Name),
-                kvp.Value.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)) : kvp.Value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)),
+                kvp.Value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(kvp.Value),
             ];
         }
     }
