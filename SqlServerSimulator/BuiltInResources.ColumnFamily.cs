@@ -442,7 +442,7 @@ internal static partial class BuiltInResources
             obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
             on,  // uses_ansi_nulls
             on,  // uses_quoted_identifier
-            off, // is_schema_bound
+            obj is View { IsSchemaBound: true } ? on : off, // is_schema_bound
             off, // uses_database_collation
             off, // is_recompiled
             obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input

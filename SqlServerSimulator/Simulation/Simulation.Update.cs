@@ -550,6 +550,11 @@ partial class Simulation
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }
 
+        // Indexed-view maintenance: re-evaluate any unique-indexed view over
+        // this table on the post-update base rows and enforce uniqueness
+        // (Msg 2601). A violation rolls the statement back via the undo log.
+        context.Batch.Connection.Simulation.EnforceIndexedViews(table, context.Batch);
+
         // Incoming-FK cascade: if any of the updated rows participate in a
         // referenced key, fire the matching FK's UPDATE action against the
         // child tables. Filters internally on actually-changed referenced

@@ -202,7 +202,7 @@ internal static class ModelXmlReader
                     // ALTERs) come before SqlIndex entries in document order,
                     // so the per-SqlTable computed-column pass completes
                     // before the first SqlIndex emission runs.
-                    ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, viewNames, result)),
+                    ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, result)),
                     // XML indexes + full-text indexes land in phase 8: both need
                     // the table (phase 2) and its clustered PK / unique KEY INDEX
                     // (phase 3). A secondary XML index additionally needs its
@@ -1626,25 +1626,19 @@ internal static class ModelXmlReader
     /// Index Name attribute is 3-part <c>[schema].[table].[index_name]</c>;
     /// the leaf becomes the index name. IsUnique / IsClustered default False
     /// (= non-unique nonclustered). IncludedColumns relationship carries the
-    /// INCLUDE list. Indexes whose <c>IndexedObject</c> is a view land on
-    /// Skipped — indexed views need view support + SCHEMABINDING machinery
-    /// the simulator doesn't model.
+    /// INCLUDE list. An index whose <c>IndexedObject</c> is a view is an
+    /// indexed view: the same emission produces <c>CREATE UNIQUE CLUSTERED
+    /// INDEX … ON &lt;view&gt;</c> (views are created in phase 6, before this
+    /// phase-8 emission), which the CREATE INDEX parser routes to the view
+    /// path (see <c>docs/claude/indexes.md</c>).
     /// </summary>
-    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, HashSet<string> viewNames, BacpacImportResult result)
+    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, BacpacImportResult result)
     {
         if (string.IsNullOrEmpty(indexName))
             throw new InvalidDataException("bacpac: SqlIndex missing Name attribute.");
 
         var indexedObject = ReadSingleReference(element, "IndexedObject")
             ?? throw new InvalidDataException($"bacpac: SqlIndex '{indexName}' missing IndexedObject.");
-        if (viewNames.Contains(indexedObject))
-        {
-            result.AddSkipped(new BacpacSkipped(
-                "SqlIndex",
-                indexName,
-                $"Index on view '{indexedObject}' deferred — indexed views need view support + SCHEMABINDING machinery the simulator doesn't model."));
-            return;
-        }
 
         var columnRefs = element.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")

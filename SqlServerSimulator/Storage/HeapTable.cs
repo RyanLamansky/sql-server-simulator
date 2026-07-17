@@ -275,6 +275,17 @@ internal sealed class HeapTable : SchemaObject
     public readonly List<Index> Indexes = [];
 
     /// <summary>
+    /// Indexed views (<c>Schemas.View</c> with a unique clustered index) whose
+    /// body references this table as a base. Populated at CREATE INDEX-on-view
+    /// time from the view's referenced tables. A base-table INSERT / UPDATE
+    /// re-evaluates each listed view and enforces its unique indexes
+    /// (Msg 2601), matching real SQL Server's materialized-view maintenance.
+    /// Empty for the overwhelmingly common no-indexed-view case, so the
+    /// enforcement hook is zero-cost then.
+    /// </summary>
+    public readonly List<Schemas.View> DependentIndexedViews = [];
+
+    /// <summary>
     /// FOREIGN KEY constraints from other tables that reference this table.
     /// The mirror of <see cref="OutgoingForeignKeys"/>: every FK whose
     /// <see cref="ForeignKey.ReferencedTable"/> is this table appears here on

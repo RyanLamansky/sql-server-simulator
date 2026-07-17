@@ -83,6 +83,11 @@ Closed accept-list (case-insensitive, in `TableHintNames`):
 Unknown hint name → **Msg 321** verbatim: `"<name>" is not a recognized
 table hints option.` (probe-confirmed against SQL Server 2025).
 
+`NOEXPAND` (`FROM <indexed_view> WITH (NOEXPAND)` — forces the optimizer to use
+the view's own index instead of expanding it) parses and discards: the
+simulator always expands an indexed view, so results are identical. See
+[`indexes.md`](indexes.md) for indexed views.
+
 ### Legacy `(hint)` form disambiguation
 
 The legacy `FROM t (nolock)` form omits `WITH` and is FROM / JOIN-RHS

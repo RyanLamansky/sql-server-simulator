@@ -461,6 +461,13 @@ partial class Simulation
             }
         }
 
+        // Indexed-view maintenance: after all base rows are written, re-evaluate
+        // any unique-indexed view over this table and enforce its uniqueness
+        // (Msg 2601). Throwing here rolls the statement back via RunMutation's
+        // undo log. Zero-cost when the table has no dependent indexed views.
+        if (!context.Batch.IsSkipping && !insteadOfActive)
+            context.Batch.Connection.Simulation.EnforceIndexedViews(destinationTable, context.Batch);
+
         // Per SQL Server: any INSERT updates SCOPE_IDENTITY/@@IDENTITY —
         // to the generated/explicit identity if the table has one, or to
         // NULL otherwise (resetting state from a prior identity insert).

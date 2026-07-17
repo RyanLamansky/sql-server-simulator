@@ -245,15 +245,16 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
-    /// Emits an <c>SqlIndex</c> element whose IndexedObject points at a
-    /// view. The loader detects view-targeted indexes via a pre-scan of
-    /// SqlView Names and records them on Skipped with a clear reason
-    /// (indexed views need SCHEMABINDING — not modeled). Use this to
-    /// exercise that deferral path.
+    /// Emits an <c>SqlIndex</c> element whose IndexedObject points at a view
+    /// — an indexed view. The referenced view must be created (via
+    /// <see cref="View"/>) <c>WITH SCHEMABINDING</c>. Defaults to
+    /// <c>IsUnique=True IsClustered=True</c> (the required first index on a
+    /// view); the loader emits <c>CREATE UNIQUE CLUSTERED INDEX … ON
+    /// &lt;view&gt;</c>.
     /// </summary>
-    public BacpacBuilder IndexOnView(string viewSchema, string viewName, string indexName, string[] columns)
+    public BacpacBuilder IndexOnView(string viewSchema, string viewName, string indexName, string[] columns, bool isUnique = true, bool isClustered = true)
     {
-        _viewIndexes.Add(new ViewIndexDef(viewSchema, viewName, indexName, columns));
+        _viewIndexes.Add(new ViewIndexDef(viewSchema, viewName, indexName, columns, isUnique, isClustered));
         return this;
     }
 
@@ -1181,7 +1182,7 @@ internal sealed record TableTypeDef(string SchemaName, string TypeName, TableBui
 
 internal sealed record PermissionDef(string Action, string Permission, string Grantee);
 
-internal sealed record ViewIndexDef(string ViewSchema, string ViewName, string IndexName, string[] KeyColumns);
+internal sealed record ViewIndexDef(string ViewSchema, string ViewName, string IndexName, string[] KeyColumns, bool IsUnique = true, bool IsClustered = true);
 
 internal sealed record XmlIndexDef(string SchemaName, string TableName, string IndexName, string Column, bool IsPrimary, string? UsingPrimaryIndexName, int? PrimaryXmlIndexUsage);
 
@@ -1361,6 +1362,11 @@ sealed partial class BacpacBuilder
                 new XElement(ns + "Entry",
                     new XElement(ns + "References",
                         new XAttribute("Name", $"[{vi.ViewSchema}].[{vi.ViewName}]")))));
+
+        if (vi.IsUnique)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "IsUnique"), new XAttribute("Value", "True")));
+        if (vi.IsClustered)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "IsClustered"), new XAttribute("Value", "True")));
 
         var columnSpecs = new XElement(ns + "Relationship",
             new XAttribute("Name", "ColumnSpecifications"));

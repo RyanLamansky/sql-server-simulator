@@ -423,7 +423,7 @@ partial class Simulation
                     }
                 }
                 if (match)
-                    throw SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, key);
+                    throw SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, FormatIndexKeyValues(key));
             }
             seen.Add(key);
         }

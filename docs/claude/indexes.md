@@ -171,6 +171,97 @@ Any node outside that grammar returns `false`, so `RenderFilterDefinition` yield
 
 Multi-target `DROP INDEX ix1 ON t1, ix2 ON t2` resolves each entry independently in declaration order; any error short-circuits with whatever drops already happened persisted. (Real SQL Server has the same behavior — DROP INDEX is not atomic across the comma list.)
 
+## Indexed views
+
+`CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX … ON <view>` records an
+indexed (materialized) view. `CREATE INDEX` resolves the target as a table
+first; a table miss retries as a view (`CreateIndexOnView`,
+`Simulation/Simulation.IndexedViews.cs`). The simulator never materializes the
+view — it always expands it at read time (real SQL Server's Enterprise
+auto-matching of a query to an indexed view isn't modeled either, and results
+are identical because the view is always expanded), so an indexed view is
+catalog surface + **live DML uniqueness enforcement** rather than stored rows.
+
+### Storage shape
+
+View indexes reuse `Storage.Index` on a new `View.Indexes` list. A view has no
+heap and no storage ordinals, so a view index's key / INCLUDE `IndexKeyColumn`
+ordinals are **view OUTPUT-column ordinals** — the view row bytes are encoded
+in `View.OutputColumns` order, so the output ordinal doubles as the storage
+ordinal (for enforcement decode) and the column ordinal (for
+`sys.index_columns.column_id = ordinal + 1`, matching `sys.columns` of the
+view). `View.IndexIdentities()` is the view analog of `HeapTable.IndexIdentities()`:
+a view is never a heap (no synthetic index_id-0 row — probe-confirmed: an
+ordinary view has zero `sys.indexes` rows), the clustered index takes index_id
+1 / CLUSTERED, others take 2..N in object-id order.
+
+### Create-time gates (probe-confirmed order, SQL Server 2025, 2026-07-17)
+
+Applied in this exact order:
+
+1. **Msg 1939** — view not `WITH SCHEMABINDING` (`Cannot create index on view
+   '<leaf>' because the view is not schema bound.`; uses the view's **leaf**
+   name, unlike the two below which schema-qualify). `View.IsSchemaBound` is
+   captured at CREATE VIEW time.
+2. **Msg 1941** — a **non-unique CLUSTERED** index (`Cannot create nonunique
+   clustered index on view '<schema.view>' … only unique clustered indexes are
+   allowed.`). Fires before 1940.
+3. **Msg 1940** — the view has no unique clustered index yet **and** this index
+   isn't unique-clustered (`Cannot create index on view '<schema.view>'. It
+   does not have a unique clustered index.`) — i.e. the first index on a view
+   must be UNIQUE CLUSTERED. A unique *nonclustered* first index also hits 1940.
+
+A key column not in the view's output → **Msg 1911** (shared "table, index or
+view" wording). At CREATE the current view rows are evaluated once and checked
+for duplicates → **Msg 1505** on a collision (same factory / rendering as the
+heap-table create-time path).
+
+### DML enforcement (Msg 2601)
+
+Each base table the view references gets the view registered on its
+`HeapTable.DependentIndexedViews` (collected at CREATE INDEX time by re-parsing
+the body under a `BatchContext.DependencySink` that records every resolved base
+table + nested schema-bound view). After an INSERT or UPDATE applies its heap
+writes, `EnforceIndexedViews(mutatedTable, batch)` re-evaluates each dependent
+view (full re-evaluation per statement — the accepted cost) and checks every
+UNIQUE index for a duplicate key, raising **Msg 2601** naming the
+schema-qualified view + index and rendering the key (`Cannot insert duplicate
+key row in object 'schema.view' with unique index 'ix' …` — same text on
+INSERT and UPDATE). The violation throws inside the mutation body, so
+`RunMutation`'s undo log rolls the statement back (statement atomicity). The
+hook is zero-cost (`DependentIndexedViews.Count == 0` guard) for the
+overwhelmingly common no-indexed-view case.
+
+The hook is wired on the INSERT and UPDATE paths. **MERGE** into an
+indexed-view base table isn't hooked (a niche shape — AW's indexed-view bases
+are never MERGE targets); it would need the same post-apply call in
+`Simulation.Merge.cs`.
+
+**DELETE is deliberately not enforced** (verified 2026-07-17): a valid indexed
+view is an inner-join / aggregate projection, so removing base rows can only
+remove or reduce view rows — never create a new duplicate key. (The simulator
+doesn't enforce real's determinism / `COUNT_BIG(*)` / GROUP BY battery, so a
+user could in principle build a shape where this reasoning fails; AW needs none
+of it — see Fidelity gaps.)
+
+`FROM <view> WITH (NOEXPAND)` is accepted (it's in the table-hint accept-list —
+see [`query-hints.md`](query-hints.md)); results are identical since the
+simulator always expands.
+
+### Catalog surface
+
+View indexes surface through `sys.indexes` (index_id 1 / CLUSTERED /
+is_unique = 1 / is_primary_key = 0 / is_unique_constraint = 0, no HEAP row),
+`sys.index_columns` (key columns keyed on the view output ordinal),
+`sys.stats` + `sys.stats_columns` (one index-backed stat per view index,
+stats_id = index_id). `is_schema_bound` surfaces through `sys.sql_modules` /
+`sys.all_sql_modules` and `OBJECTPROPERTY(id, 'IsSchemaBound')` /
+`OBJECTPROPERTYEX`. `sys.partitions` / `sys.allocation_units` /
+`sys.dm_db_partition_stats` are **not** extended to view indexes (those read
+heap page counts; real reports a partitions row carrying the materialized view
+row count, which the simulator doesn't store) — DacFx's index export doesn't
+need them, and AW re-imports cleanly without them.
+
 ## Catalog surface
 
 ### `sys.indexes` — 24-column probe-confirmed shape
@@ -229,5 +320,6 @@ EF Core's SqlServer provider emits `CREATE INDEX` (and `CREATE UNIQUE INDEX` for
 - **WITH options ignored**: `FILLFACTOR`, `IGNORE_DUP_KEY`, `ONLINE`, `MAXDOP`, etc. all parse but have no behavior. `IGNORE_DUP_KEY = ON` notably should downgrade Msg 2601 to a warning + skip — not modeled.
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently. Real SQL Server rolls back all on any failure.
-- **`CREATE INDEX … ON view(col)` for indexed views**: not modeled. Real SQL Server requires SCHEMABINDING + WITH CHECK OPTION on the view. The simulator's CREATE INDEX requires the target to be a HeapTable.
+- **Indexed-view determinism battery**: real SQL Server rejects a non-qualifying indexed-view shape at CREATE INDEX with the Msg 10100-series / Msg 10138 checks (schema-bound, deterministic, `COUNT_BIG(*)` present when GROUP BY, no outer joins / subqueries / DISTINCT / TOP, two-part names, etc.). The simulator applies only the 1939 / 1941 / 1940 gates and accepts the rest — so it materializes-and-enforces view shapes real would reject. AW's two indexed views (both simple inner-join projections) qualify, and the DELETE-can't-violate reasoning depends on the accepted shapes being the qualifying ones. See [Indexed views](#indexed-views).
+- **Indexed-view `sys.partitions` row**: real reports a `sys.partitions` / `sys.dm_db_partition_stats` row for a view index carrying the materialized row count; the simulator (which never materializes) omits view indexes from those page-count views. `sys.indexes` / `sys.index_columns` / `sys.stats` are populated.
 - **Index hints (`SELECT … WITH (INDEX = name)`)**: not modeled — query planner is single-strategy (full scan) regardless.

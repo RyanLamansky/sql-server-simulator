@@ -1134,24 +1134,27 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
-    public void IndexOnView_LandsOn_Skipped_WithSchemabindingReason()
+    public void IndexOnView_LoadsAsIndexedView()
     {
-        // Indexed views need SCHEMABINDING machinery the simulator doesn't
-        // model; the loader pre-scans SqlView Names and routes any
-        // view-targeted SqlIndex to Skipped with a clear reason. Exercise
-        // that deferral path with a view + a matching SqlIndex.
+        // An indexed (materialized) view: the SqlView is created WITH
+        // SCHEMABINDING, then its unique clustered SqlIndex (phase 8, after
+        // views land in phase 6) dispatches as CREATE UNIQUE CLUSTERED INDEX
+        // ON the view. No Skipped entry; the index surfaces in sys.indexes at
+        // index_id 1 / CLUSTERED and enforces uniqueness on base DML.
         using var bacpac = BacpacBuilder.Create()
-            .Table("dbo", "Item", t => t.Column("Id", "int"))
-            .View("dbo", "ItemView", "CREATE VIEW dbo.ItemView AS SELECT Id FROM dbo.Item;")
+            .Table("dbo", "Item", t => t.Column("Id", "int").Column("Grp", "int"))
+            .View("dbo", "ItemView", "CREATE VIEW dbo.ItemView WITH SCHEMABINDING AS SELECT Id, Grp FROM dbo.Item;")
             .IndexOnView("dbo", "ItemView", "IX_ItemView_Id", ["Id"])
             .Build();
 
         var sim = new Simulation();
         sim.ImportBacpac(bacpac, out var diag);
-        AreEqual(0, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.indexes WHERE name = 'IX_ItemView_Id';"));
-        var skippedIndexes = diag.Skipped.Where(s => s.ElementType == "SqlIndex").ToList();
-        HasCount(1, skippedIndexes);
-        Contains("on view", skippedIndexes[0].Reason);
+        IsEmpty(diag.Skipped.Where(s => s.ElementType == "SqlIndex"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.indexes WHERE name = 'IX_ItemView_Id' AND type_desc = 'CLUSTERED' AND is_unique = 1;"));
+        // The unique clustered view index enforces uniqueness on base DML: two
+        // base rows projecting the same view key raise Msg 2601.
+        _ = sim.ExecuteNonQuery("INSERT dbo.Item VALUES (1, 10)");
+        _ = sim.AssertSqlError("INSERT dbo.Item VALUES (1, 20)", 2601);
     }
 
     [TestMethod]

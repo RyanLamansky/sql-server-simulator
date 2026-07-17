@@ -568,52 +568,66 @@ internal static partial class BuiltInResources
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
-                {
-                    var typeDesc = identity.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc };
-                    SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition;
-                    if (identity.Constraint is { } key)
-                    {
-                        var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
-                        name = SqlValue.FromSystemName(key.Name);
-                        isUnique = trueBit;
-                        isPrimaryKey = isPk ? trueBit : falseBit;
-                        isUniqueConstraint = isPk ? falseBit : trueBit;
-                        hasFilter = falseBit;
-                        filterDefinition = nullFilter;
-                    }
-                    else if (identity.Index is { } index)
-                    {
-                        name = SqlValue.FromSystemName(index.Name);
-                        isUnique = index.IsUnique ? trueBit : falseBit;
-                        isPrimaryKey = falseBit;
-                        isUniqueConstraint = falseBit;
-                        hasFilter = index.Filter is not null ? trueBit : falseBit;
-                        filterDefinition = index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter;
-                    }
-                    else
-                    {
-                        name = nullName;
-                        isUnique = falseBit;
-                        isPrimaryKey = falseBit;
-                        isUniqueConstraint = falseBit;
-                        hasFilter = falseBit;
-                        filterDefinition = nullFilter;
-                    }
-                    yield return BuildIndexRow(
-                        name: name,
-                        objectId: tableObjectId,
-                        indexId: SqlValue.FromInt32(identity.IndexId),
-                        type: SqlValue.FromByte(identity.Type),
-                        typeDesc: typeDesc,
-                        isUnique: isUnique,
-                        dataSpaceId: primaryDataSpace,
-                        isPrimaryKey: isPrimaryKey,
-                        isUniqueConstraint: isUniqueConstraint,
-                        hasFilter: hasFilter,
-                        filterDefinition: filterDefinition,
-                        falseBit, trueBit, zeroByte);
-                }
+                    yield return RowForIdentity(tableObjectId, identity);
             }
+            // Indexed views: one row per index the view carries (no HEAP row —
+            // an ordinary view contributes nothing, probe-confirmed). The
+            // clustered unique index lands at index_id = 1 / CLUSTERED.
+            foreach (var view in schema.Views.Values)
+            {
+                if (view.Indexes.Count == 0)
+                    continue;
+                var viewObjectId = SqlValue.FromInt32(view.ObjectId);
+                foreach (var identity in view.IndexIdentities())
+                    yield return RowForIdentity(viewObjectId, identity);
+            }
+        }
+
+        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity)
+        {
+            var typeDesc = identity.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc };
+            SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition;
+            if (identity.Constraint is { } key)
+            {
+                var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
+                name = SqlValue.FromSystemName(key.Name);
+                isUnique = trueBit;
+                isPrimaryKey = isPk ? trueBit : falseBit;
+                isUniqueConstraint = isPk ? falseBit : trueBit;
+                hasFilter = falseBit;
+                filterDefinition = nullFilter;
+            }
+            else if (identity.Index is { } index)
+            {
+                name = SqlValue.FromSystemName(index.Name);
+                isUnique = index.IsUnique ? trueBit : falseBit;
+                isPrimaryKey = falseBit;
+                isUniqueConstraint = falseBit;
+                hasFilter = index.Filter is not null ? trueBit : falseBit;
+                filterDefinition = index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter;
+            }
+            else
+            {
+                name = nullName;
+                isUnique = falseBit;
+                isPrimaryKey = falseBit;
+                isUniqueConstraint = falseBit;
+                hasFilter = falseBit;
+                filterDefinition = nullFilter;
+            }
+            return BuildIndexRow(
+                name: name,
+                objectId: objectId,
+                indexId: SqlValue.FromInt32(identity.IndexId),
+                type: SqlValue.FromByte(identity.Type),
+                typeDesc: typeDesc,
+                isUnique: isUnique,
+                dataSpaceId: primaryDataSpace,
+                isPrimaryKey: isPrimaryKey,
+                isUniqueConstraint: isUniqueConstraint,
+                hasFilter: hasFilter,
+                filterDefinition: filterDefinition,
+                falseBit, trueBit, zeroByte);
         }
 
         SqlValue[] BuildIndexRow(
@@ -894,6 +908,40 @@ internal static partial class BuiltInResources
                 nullName, // replica_name
             ];
         }
+        // Indexed-view statistics: one index-backed stat per view index
+        // (stats_id = index_id, name = index name), matching real SQL Server.
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var view in schema.Views.Values)
+            {
+                if (view.Indexes.Count == 0)
+                    continue;
+                var viewObjectId = SqlValue.FromInt32(view.ObjectId);
+                foreach (var identity in view.IndexIdentities())
+                {
+                    yield return
+                    [
+                        viewObjectId,
+                        SqlValue.FromSystemName(identity.Name!),
+                        SqlValue.FromInt32(identity.IndexId),
+                        falseBit, // auto_created
+                        falseBit, // user_created
+                        falseBit, // no_recompute
+                        falseBit, // has_filter
+                        nullFilter,
+                        falseBit, // is_temporary
+                        falseBit, // is_incremental
+                        falseBit, // has_persisted_sample
+                        zeroInt,  // stats_generation_method
+                        methodDesc,
+                        falseBit, // auto_drop
+                        nullRole,
+                        nullRoleDesc,
+                        nullName, // replica_name
+                    ];
+                }
+            }
+        }
         // XML-index statistics live on the owning primary's internal node
         // table (sys.objects type IT), one per index, stats_id sequential
         // within that node table (probe-confirmed). DacFx's XML-index export
@@ -990,6 +1038,19 @@ internal static partial class BuiltInResources
                         yield return row;
                 }
             }
+            // Indexed views: one stats_columns row per view-index key column
+            // (column_id = view OUTPUT ordinal + 1). No INCLUDE columns.
+            foreach (var view in schema.Views.Values)
+            {
+                if (view.Indexes.Count == 0)
+                    continue;
+                var viewObjectId = SqlValue.FromInt32(view.ObjectId);
+                foreach (var identity in view.IndexIdentities())
+                {
+                    foreach (var row in EmitStatsColumns(viewObjectId, SqlValue.FromInt32(identity.IndexId), IndexKeyColumnIds(identity.Index!)))
+                        yield return row;
+                }
+            }
         }
 
         static int[] ResolveConstraintColumnIds(KeyConstraint key, HeapTable table) =>
@@ -1049,38 +1110,8 @@ internal static partial class BuiltInResources
                     }
                     else
                     {
-                        var index = identity.Index!;
-                        for (var i = 0; i < index.KeyColumns.Length; i++)
-                        {
-                            var keyCol = index.KeyColumns[i];
-                            yield return [
-                                tableObjectId,
-                                indexIdValue,
-                                SqlValue.FromInt32(i + 1),
-                                SqlValue.FromInt32(keyCol.ColumnOrdinal + 1),
-                                SqlValue.FromByte((byte)(i + 1)),
-                                zeroByte,
-                                keyCol.IsDescending ? trueBit : falseBit,
-                                falseBit,
-                                nullByte,
-                                nullByte,
-                            ];
-                        }
-                        for (var i = 0; i < index.IncludedColumnOrdinals.Length; i++)
-                        {
-                            yield return [
-                                tableObjectId,
-                                indexIdValue,
-                                SqlValue.FromInt32(index.KeyColumns.Length + i + 1),
-                                SqlValue.FromInt32(index.IncludedColumnOrdinals[i] + 1),
-                                zeroByte,
-                                zeroByte,
-                                falseBit,
-                                trueBit,
-                                nullByte,
-                                nullByte,
-                            ];
-                        }
+                        foreach (var row in IndexColumnRows(tableObjectId, indexIdValue, identity.Index!))
+                            yield return row;
                     }
                 }
                 // XML indexes: one index_column row per index (the indexed xml
@@ -1102,6 +1133,54 @@ internal static partial class BuiltInResources
                         nullByte,
                     ];
                 }
+            }
+            // Indexed views: KEY / INCLUDE columns keyed on the view OUTPUT
+            // ordinal (column_id = ordinal + 1, matching sys.columns of views).
+            foreach (var view in schema.Views.Values)
+            {
+                if (view.Indexes.Count == 0)
+                    continue;
+                var viewObjectId = SqlValue.FromInt32(view.ObjectId);
+                foreach (var identity in view.IndexIdentities())
+                {
+                    foreach (var row in IndexColumnRows(viewObjectId, SqlValue.FromInt32(identity.IndexId), identity.Index!))
+                        yield return row;
+                }
+            }
+        }
+
+        IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index)
+        {
+            for (var i = 0; i < index.KeyColumns.Length; i++)
+            {
+                var keyCol = index.KeyColumns[i];
+                yield return [
+                    objectId,
+                    indexIdValue,
+                    SqlValue.FromInt32(i + 1),
+                    SqlValue.FromInt32(keyCol.ColumnOrdinal + 1),
+                    SqlValue.FromByte((byte)(i + 1)),
+                    zeroByte,
+                    keyCol.IsDescending ? trueBit : falseBit,
+                    falseBit,
+                    nullByte,
+                    nullByte,
+                ];
+            }
+            for (var i = 0; i < index.IncludedColumnOrdinals.Length; i++)
+            {
+                yield return [
+                    objectId,
+                    indexIdValue,
+                    SqlValue.FromInt32(index.KeyColumns.Length + i + 1),
+                    SqlValue.FromInt32(index.IncludedColumnOrdinals[i] + 1),
+                    zeroByte,
+                    zeroByte,
+                    falseBit,
+                    trueBit,
+                    nullByte,
+                    nullByte,
+                ];
             }
         }
     }

@@ -1315,6 +1315,15 @@ internal sealed class BatchContext
         name.Length >= 2 && name[0] == '@';
 
     /// <summary>
+    /// When non-null, every base <see cref="HeapTable"/> and every
+    /// <see cref="View"/> resolved during parsing is recorded here. Set only
+    /// while collecting an indexed view's base-table dependencies at CREATE
+    /// INDEX-on-view time (<c>Simulation.IndexedViews.cs</c>); null on the hot
+    /// path, so normal parsing pays a single null check.
+    /// </summary>
+    public (HashSet<HeapTable> Tables, HashSet<View> Views)? DependencySink;
+
+    /// <summary>
     /// Resolves <paramref name="name"/> against the right table dictionary —
     /// the connection's <see cref="SimulatedDbConnection.TempTables"/> for
     /// <c>#foo</c> names, otherwise the named schema (or
@@ -1429,6 +1438,7 @@ internal sealed class BatchContext
         if (schema.HeapTables.TryGetValue(name.Leaf, out table))
         {
             this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
+            _ = this.DependencySink?.Tables.Add(table);
             return true;
         }
 
@@ -1548,6 +1558,7 @@ internal sealed class BatchContext
             return false;
         }
         this.AcquireStatementLock(view.SchemaLock, LockMode.SchemaStability);
+        _ = this.DependencySink?.Views.Add(view);
         return true;
     }
 

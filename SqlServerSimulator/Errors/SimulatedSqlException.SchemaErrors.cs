@@ -1,5 +1,3 @@
-using SqlServerSimulator.Storage;
-
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
@@ -876,15 +874,13 @@ partial class SimulatedSqlException
     /// PRIMARY KEY / UNIQUE</c> would create a unique index over existing
     /// data containing duplicate key tuples. Real SQL Server wraps the
     /// duplicate-on-create message in CREATE-UNIQUE-INDEX framing
-    /// (distinct from the runtime INSERT-time Msg 2627). The simulator
-    /// renders the key tuple via <see cref="SqlValue"/>'s default ToString
-    /// per column, comma-joined inside parens.
+    /// (distinct from the runtime INSERT-time Msg 2627). Also raised for
+    /// <c>CREATE UNIQUE INDEX ON &lt;view&gt;</c> over duplicate view rows.
+    /// <paramref name="formattedKeyValues"/> is the rendered tuple text without
+    /// enclosing parens (via <c>FormatIndexKeyValues</c>).
     /// </summary>
-    internal static SimulatedSqlException DuplicateKeyOnCreate(string qualifiedTableName, string indexName, SqlValue[] keyValues)
-    {
-        var rendered = string.Join(", ", keyValues.Select(v => v.IsNull ? "<NULL>" : v.ToString()));
-        return new($"The CREATE UNIQUE INDEX statement terminated because a duplicate key was found for the object name '{qualifiedTableName}' and the index name '{indexName}'. The duplicate key value is ({rendered}).", 1505, 16, 1);
-    }
+    internal static SimulatedSqlException DuplicateKeyOnCreate(string qualifiedTableName, string indexName, string formattedKeyValues) =>
+        new($"The CREATE UNIQUE INDEX statement terminated because a duplicate key was found for the object name '{qualifiedTableName}' and the index name '{indexName}'. The duplicate key value is ({formattedKeyValues}).", 1505, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1781: <c>ALTER TABLE … ADD CONSTRAINT …
@@ -962,6 +958,32 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotFindObjectForCreateIndex(string qualifiedName) =>
         new($"Cannot find the object \"{qualifiedName}\" because it does not exist or you do not have permissions.", 1088, 16, 12);
+
+    /// <summary>
+    /// Mimics SQL Server error 1939: <c>CREATE INDEX</c> on a view that wasn't
+    /// declared <c>WITH SCHEMABINDING</c>. Probe-confirmed wording (SQL Server
+    /// 2025, 2026-07-17) uses the view's <b>leaf</b> name (unqualified),
+    /// unlike Msg 1940 / 1941 which qualify it — mirrored verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotIndexViewNotSchemaBound(string viewLeafName) =>
+        new($"Cannot create index on view '{viewLeafName}' because the view is not schema bound.", 1939, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1940: an index other than a UNIQUE CLUSTERED
+    /// one is created on a schema-bound view that doesn't yet have a unique
+    /// clustered index (the first index on a view must be unique clustered).
+    /// Probe-confirmed wording; the view name is schema-qualified.
+    /// </summary>
+    internal static SimulatedSqlException CannotIndexViewNoUniqueClustered(string qualifiedViewName) =>
+        new($"Cannot create index on view '{qualifiedViewName}'. It does not have a unique clustered index.", 1940, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1941: a non-unique CLUSTERED index is created on
+    /// a view (only unique clustered indexes are allowed on a view). Probe-
+    /// confirmed wording; the view name is schema-qualified.
+    /// </summary>
+    internal static SimulatedSqlException CannotIndexViewNonUniqueClustered(string qualifiedViewName) =>
+        new($"Cannot create nonunique clustered index on view '{qualifiedViewName}' because only unique clustered indexes are allowed. Consider creating unique clustered index instead.", 1941, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 3701 with the <c>index</c> wording variant:

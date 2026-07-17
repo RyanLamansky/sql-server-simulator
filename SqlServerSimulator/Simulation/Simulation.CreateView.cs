@@ -85,11 +85,14 @@ partial class Simulation
             }
         }
 
-        // Optional WITH-clause: SCHEMABINDING / ENCRYPTION / VIEW_METADATA
-        // (parse-and-ignore). Other options raise NotSupportedException.
+        // Optional WITH-clause: SCHEMABINDING / ENCRYPTION / VIEW_METADATA.
+        // SCHEMABINDING is captured (it gates CREATE INDEX on the view and
+        // surfaces through sys.sql_modules.is_schema_bound / OBJECTPROPERTY);
+        // the other two parse-and-ignore.
+        var isSchemaBound = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            ParseViewOptions(context);
+            isSchemaBound = ParseViewOptions(context);
         }
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
@@ -156,6 +159,7 @@ partial class Simulation
             outputColumns,
             bodyText,
             withCheckOption,
+            isSchemaBound,
             createDate: context.Batch.CurrentStatement.UtcNow,
             baseTable: baseTable,
             baseColumnOrdinals: baseColumnOrdinals,
@@ -173,9 +177,11 @@ partial class Simulation
     /// Consumes a <c>WITH option [, option ...]</c> clause on a view's
     /// header. Cursor on entry: the <c>WITH</c> keyword. Cursor on exit:
     /// the first token after the option list (expected to be <c>AS</c>).
+    /// Returns true when <c>SCHEMABINDING</c> was among the options.
     /// </summary>
-    private static void ParseViewOptions(ParserContext context)
+    private static bool ParseViewOptions(ParserContext context)
     {
+        var isSchemaBound = false;
         context.MoveNextRequired();
         while (true)
         {
@@ -184,11 +190,14 @@ partial class Simulation
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }
+            if (opt.ContextualKeyword is ContextualKeyword.SchemaBinding)
+                isSchemaBound = true;
             context.MoveNextRequired();
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
         }
+        return isSchemaBound;
     }
 
     /// <summary>

@@ -142,7 +142,18 @@ partial class Simulation
             return true;
 
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
+        {
+            // CREATE INDEX ON a view → indexed (materialized) view. Views live
+            // in a separate namespace from heap tables, so table resolution
+            // misses first; the view path applies the schema-binding /
+            // unique-clustered gates and records the index on the View.
+            if (context.Batch.TryResolveView(targetTableName, out var view))
+            {
+                context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition);
+                return true;
+            }
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+        }
 
         var qualifiedTableName = FormatQualifiedTableName(targetTableName, table);
 
@@ -254,7 +265,7 @@ partial class Simulation
                     }
                 }
                 if (match)
-                    throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedTableName, index.Name, key);
+                    throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedTableName, index.Name, FormatIndexKeyValues(key));
             }
             seen.Add(key);
         }

@@ -147,7 +147,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **`FOREIGN KEY` + referential actions, `sys.foreign_keys`** → [`foreign-keys.md`](docs/claude/foreign-keys.md).
 - **`PERIOD FOR SYSTEM_TIME`, `FOR SYSTEM_TIME ALL/AS OF`, history sibling, `temporal_type`** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
 - **`ALTER TABLE` ADD/DROP/ALTER COLUMN + CONSTRAINT (incl. trust toggling)** → [`alter-table.md`](docs/claude/alter-table.md).
-- **`CREATE INDEX` (UNIQUE / CLUSTERED / INCLUDE / WHERE filter), `sys.indexes`, `DBCC SHOW_STATISTICS … WITH HISTOGRAM`** → [`indexes.md`](docs/claude/indexes.md).
+- **`CREATE INDEX` (UNIQUE / CLUSTERED / INCLUDE / WHERE filter), indexed views (`CREATE INDEX ON <schema-bound view>`, Msg 1939/1940/1941 gates, live Msg 2601 uniqueness enforcement, NOEXPAND), `sys.indexes`, `DBCC SHOW_STATISTICS … WITH HISTOGRAM`** → [`indexes.md`](docs/claude/indexes.md).
 - **Table hints (`WITH (NOLOCK …)`) + statement `OPTION (…)` hints** → [`query-hints.md`](docs/claude/query-hints.md).
 - **Heap page lifecycle** (reclamation/reuse, tail-only shrink, `DBCC SHRINKDATABASE`/`SHRINKFILE`) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **Per-`Simulation` plan cache** (single-SELECT `Selection` reuse keyed by text + db + param-type sig + QUOTED_IDENTIFIER setting, `SchemaVersion`-stamped invalidation, inline-in-SELECT-arm promotion since the iterator's post-yield code is unreachable on a non-draining `ExecuteReader`; `VariableReference` Run-time slot lookup is the co-fix) → [`plan-cache.md`](docs/claude/plan-cache.md).

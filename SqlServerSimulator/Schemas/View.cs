@@ -37,6 +37,7 @@ internal sealed class View(
     HeapColumn[] outputColumns,
     string bodyText,
     bool withCheckOption,
+    bool isSchemaBound,
     DateTime createDate,
     HeapTable? baseTable,
     int[] baseColumnOrdinals,
@@ -78,6 +79,70 @@ internal sealed class View(
     /// violation).
     /// </summary>
     public readonly bool WithCheckOption = withCheckOption;
+
+    /// <summary>
+    /// True when the view was declared <c>WITH SCHEMABINDING</c>. Surfaced
+    /// through <c>sys.sql_modules.is_schema_bound</c> and
+    /// <c>OBJECTPROPERTY(id, 'IsSchemaBound')</c>, and required before a view
+    /// can carry an index (a non-schema-bound view raises Msg 1939 at
+    /// CREATE INDEX). The simulator doesn't otherwise enforce schema-binding
+    /// (a referenced table can still be dropped — see
+    /// <c>Simulation.CreateView.cs</c>).
+    /// </summary>
+    public readonly bool IsSchemaBound = isSchemaBound;
+
+    /// <summary>
+    /// Unique-clustered (and any secondary) indexes declared on this view via
+    /// <c>CREATE INDEX ON &lt;view&gt;</c> — an indexed (materialized) view.
+    /// Reuses <see cref="Storage.Index"/>: a view index's key / include
+    /// ordinals are <b>view OUTPUT-column</b> ordinals (the view row bytes are
+    /// encoded in <see cref="OutputColumns"/> order, so
+    /// <see cref="Storage.IndexKeyColumn.StorageOrdinal"/> ==
+    /// <see cref="Storage.IndexKeyColumn.ColumnOrdinal"/> == the output
+    /// ordinal). Empty for an ordinary view. Surfaced through
+    /// <c>sys.indexes</c> / <c>sys.index_columns</c> / <c>sys.stats</c>;
+    /// UNIQUE entries drive live DML uniqueness enforcement (Msg 2601) as base
+    /// rows change under the view.
+    /// </summary>
+    public readonly List<Storage.Index> Indexes = [];
+
+    /// <summary>
+    /// Base <see cref="HeapTable"/>s the body references, collected the first
+    /// time an index is created on this view. Used only to wire each base
+    /// table's <see cref="HeapTable.DependentIndexedViews"/> so a base-table
+    /// INSERT / UPDATE re-validates this view's unique indexes. Empty for an
+    /// ordinary (unindexed) view.
+    /// </summary>
+    public HeapTable[] ReferencedBaseTables = [];
+
+    /// <summary>
+    /// The <c>(index_id, type, name, index)</c> rows this indexed view projects
+    /// into <c>sys.indexes</c> — the view analog of
+    /// <see cref="HeapTable.IndexIdentities"/>. A view is never a heap (no
+    /// synthetic index_id-0 row): the clustered index takes index_id 1, every
+    /// other index takes 2..N in object-id (creation) order. Empty for an
+    /// ordinary view (ordinary views carry no <c>sys.indexes</c> rows —
+    /// probe-confirmed).
+    /// </summary>
+    public List<IndexIdentity> IndexIdentities()
+    {
+        if (this.Indexes.Count == 0)
+            return [];
+        var ordered = new List<Storage.Index>(this.Indexes);
+        ordered.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+        var clusteredIndex = ordered.FindIndex(static ix => ix.IsClustered);
+        var result = new List<IndexIdentity>(ordered.Count);
+        if (clusteredIndex >= 0)
+            result.Add(new IndexIdentity(1, 1, ordered[clusteredIndex].Name, null, ordered[clusteredIndex]));
+        var nextId = 2;
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            if (i == clusteredIndex)
+                continue;
+            result.Add(new IndexIdentity(nextId++, 2, ordered[i].Name, null, ordered[i]));
+        }
+        return result;
+    }
 
     /// <summary>
     /// Resolved underlying heap table that DML through this view writes to,
