@@ -46,9 +46,9 @@ public sealed class TableBuilder
     /// IsNullable=True default, but for test setup NOT NULL is more
     /// useful so explicit assertions on NULL-handling become opt-in.
     /// </summary>
-    public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null, bool rowGuidCol = false)
+    public TableBuilder Column(string name, string sqlType, bool nullable = false, bool identity = false, int identitySeed = 1, int identityIncrement = 1, PeriodColumnKind periodKind = PeriodColumnKind.None, string? collation = null, bool rowGuidCol = false, string? xmlSchemaCollection = null)
     {
-        _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol));
+        _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol, xmlSchemaCollection));
         _order.Add((Computed: false, _columns.Count - 1));
         return this;
     }
@@ -462,11 +462,35 @@ public sealed class TableBuilder
         if (column.RowGuidCol)
             element.Add(PropertyElement(ns, "IsRowGuidColumn", "True"));
 
+        var typeSpecifier = column.XmlSchemaCollectionRef is { } collectionRef
+            ? XmlTypeSpecifierElement(ns, collectionRef)
+            : TypeSpecifierElement(ns, column.SqlType);
         element.Add(new XElement(ns + "Relationship",
             new XAttribute("Name", "TypeSpecifier"),
-            new XElement(ns + "Entry", TypeSpecifierElement(ns, column.SqlType))));
+            new XElement(ns + "Entry", typeSpecifier)));
         return element;
     }
+
+    /// <summary>
+    /// Emits a <c>SqlXmlTypeSpecifier</c> bound to a schema collection — the
+    /// shape DACFx uses for a typed-xml column (<c>xml([schema].[collection])</c>).
+    /// A <c>Type</c> relationship to the <c>[xml]</c> built-in plus an
+    /// <c>XmlSchemaCollection</c> relationship to the collection reference.
+    /// </summary>
+    private static XElement XmlTypeSpecifierElement(XNamespace ns, string collectionRef) =>
+        new(ns + "Element",
+            new XAttribute("Type", "SqlXmlTypeSpecifier"),
+            new XElement(ns + "Relationship",
+                new XAttribute("Name", "Type"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", "[xml]"),
+                        new XAttribute("ExternalSource", "BuiltIns")))),
+            new XElement(ns + "Relationship",
+                new XAttribute("Name", "XmlSchemaCollection"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", collectionRef)))));
 
     private static XElement TypeSpecifierElement(XNamespace ns, string sqlType)
     {
@@ -550,7 +574,7 @@ public enum PeriodColumnKind
 }
 
 /// <summary>Column metadata captured by <see cref="TableBuilder.Column"/>.</summary>
-internal readonly record struct ColumnDef(string Name, string SqlType, bool Nullable, bool Identity = false, int IdentitySeed = 1, int IdentityIncrement = 1, PeriodColumnKind PeriodKind = PeriodColumnKind.None, string? Collation = null, bool RowGuidCol = false);
+internal readonly record struct ColumnDef(string Name, string SqlType, bool Nullable, bool Identity = false, int IdentitySeed = 1, int IdentityIncrement = 1, PeriodColumnKind PeriodKind = PeriodColumnKind.None, string? Collation = null, bool RowGuidCol = false, string? XmlSchemaCollectionRef = null);
 
 /// <summary>Base for constraint declarations accumulated on a table.</summary>
 internal abstract record ConstraintDef(string Name);

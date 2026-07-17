@@ -84,6 +84,24 @@ public sealed class XmlTests
     }
 
     [TestMethod]
+    public void TypedXmlColumn_SysColumnsXmlCollectionId_JoinsBackToCollection()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml(xsc1))");
+        // The typed column's sys.columns.xml_collection_id resolves to the
+        // collection through sys.xml_schema_collections (the join DacFx's
+        // reverse-engineering query relies on).
+        AreEqual("xsc1", sim.ExecuteScalar("""
+            select x.name from sys.columns c
+              join sys.xml_schema_collections x on c.xml_collection_id = x.xml_collection_id
+             where c.object_id = object_id('dbo.doc') and c.name = 'body'
+            """));
+        // The untyped id column reports the non-nullable 0 default.
+        AreEqual(0, sim.ExecuteScalar("select xml_collection_id from sys.columns where object_id = object_id('dbo.doc') and name = 'id'"));
+    }
+
+    [TestMethod]
     public void XmlColumn_WithContentDiscriminator_Parses()
     {
         var sim = new Simulation();

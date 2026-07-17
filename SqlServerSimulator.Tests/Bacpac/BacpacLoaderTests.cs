@@ -1806,4 +1806,57 @@ public class BacpacLoaderTests
         Contains("-122", wkt);
         Contains("47", wkt);
     }
+
+    [TestMethod]
+    public void XmlSchemaCollection_And_TypedXmlColumn_RoundTrip()
+    {
+        // A SqlXmlSchemaCollection element creates the collection in phase 1;
+        // a typed-xml column (SqlXmlTypeSpecifier + XmlSchemaCollection
+        // relationship) binds it so sys.columns.xml_collection_id joins back —
+        // the gap that made AW's re-exported bacpac lose typed xml.
+        const string xsd = "<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"><xsd:element name=\"Note\" type=\"xsd:string\" /></xsd:schema>";
+        using var bacpac = BacpacBuilder.Create()
+            .XmlSchemaCollection("dbo", "NoteSchema", xsd)
+            .Table("dbo", "Doc", t => t
+                .Column("Id", "int")
+                .Column("Body", "xml", nullable: true, xmlSchemaCollection: "[dbo].[NoteSchema]"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, diag.ElementCounts["SqlXmlSchemaCollection"]);
+        // The collection exists in the catalog.
+        AreEqual("NoteSchema", sim.ExecuteScalar("SELECT name FROM sys.xml_schema_collections WHERE name = 'NoteSchema';"));
+        // The typed column's xml_collection_id resolves back to the collection.
+        AreEqual("NoteSchema", sim.ExecuteScalar("""
+            SELECT x.name
+              FROM sys.columns c
+              JOIN sys.tables t ON c.object_id = t.object_id
+              JOIN sys.xml_schema_collections x ON c.xml_collection_id = x.xml_collection_id
+             WHERE t.name = 'Doc' AND c.name = 'Body';
+            """));
+    }
+
+    [TestMethod]
+    public void UntypedXmlColumn_LoadsWith_ZeroXmlCollectionId()
+    {
+        // An untyped xml column carries no XmlSchemaCollection relationship;
+        // sys.columns.xml_collection_id reports the non-nullable 0 default.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Doc", t => t
+                .Column("Id", "int")
+                .Column("Body", "xml", nullable: true))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(0, sim.ExecuteScalar("""
+            SELECT c.xml_collection_id
+              FROM sys.columns c
+              JOIN sys.tables t ON c.object_id = t.object_id
+             WHERE t.name = 'Doc' AND c.name = 'Body';
+            """));
+    }
 }

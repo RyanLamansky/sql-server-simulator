@@ -41,6 +41,7 @@ public sealed partial class BacpacBuilder
     private readonly List<PermissionDef> _permissions = [];
     private readonly List<ViewIndexDef> _viewIndexes = [];
     private readonly List<UserDefinedDataTypeDef> _uddts = [];
+    private readonly List<XmlSchemaCollectionDef> _xmlSchemaCollections = [];
     private readonly List<(string ElementType, string Name)> _silentlySkipped = [];
     private readonly List<(string ElementType, string Name)> _unknownElements = [];
     private string? _dspName;
@@ -244,6 +245,22 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
+    /// Adds a <c>CREATE XML SCHEMA COLLECTION [schema].[name] AS N'…'</c>
+    /// emission. <paramref name="xsdText"/> is the raw XSD source (no <c>N'…'</c>
+    /// wrapping) — the builder wraps it into the complete T-SQL string literal
+    /// DACFx stores in the <c>SchemaExpression</c> property's CDATA body (N
+    /// prefix, quotes, doubled embedded quotes). Reference the collection from a
+    /// typed-xml column via <see cref="TableBuilder.Column"/>'s
+    /// <c>xmlSchemaCollection</c> argument.
+    /// </summary>
+    public BacpacBuilder XmlSchemaCollection(string schemaName, string collectionName, string xsdText)
+    {
+        _ = _schemas.Add(schemaName);
+        _xmlSchemaCollections.Add(new XmlSchemaCollectionDef(schemaName, collectionName, xsdText));
+        return this;
+    }
+
+    /// <summary>
     /// Emits a <c>SqlPartitionFunction</c> element. The loader treats this
     /// as a silent no-op (filegroup-mapping metadata with no semantic effect
     /// on the simulator's row-store-only storage); the test surface for
@@ -414,6 +431,9 @@ public sealed partial class BacpacBuilder
 
         foreach (var uddt in _uddts)
             model.Add(BuildUddtElement(ns, uddt));
+
+        foreach (var xsc in _xmlSchemaCollections)
+            model.Add(BuildXmlSchemaCollectionElement(ns, xsc));
 
         foreach (var seq in _sequences)
             model.Add(BuildSequenceElement(ns, seq));
@@ -1077,6 +1097,8 @@ internal sealed record ViewIndexDef(string ViewSchema, string ViewName, string I
 
 internal sealed record UserDefinedDataTypeDef(string SchemaName, string TypeName, string BaseType, bool Nullable);
 
+internal sealed record XmlSchemaCollectionDef(string SchemaName, string CollectionName, string XsdText);
+
 sealed partial class BacpacBuilder
 {
     private static XElement BuildUddtElement(XNamespace ns, UserDefinedDataTypeDef uddt)
@@ -1129,6 +1151,21 @@ sealed partial class BacpacBuilder
                 : (baseName, args.Trim(), null, null, false);
         }
         return (baseName, null, args[..commaIndex].Trim(), args[(commaIndex + 1)..].Trim(), false);
+    }
+
+    private static XElement BuildXmlSchemaCollectionElement(XNamespace ns, XmlSchemaCollectionDef xsc)
+    {
+        // DACFx stores the SchemaExpression as a complete N'…' string literal
+        // in the property's CDATA body — N prefix, surrounding quotes, doubled
+        // embedded quotes. Mirror that so the loader forwards it verbatim into
+        // the AS clause.
+        var literal = "N'" + xsc.XsdText.Replace("'", "''", StringComparison.Ordinal) + "'";
+        return new XElement(ns + "Element",
+            new XAttribute("Type", "SqlXmlSchemaCollection"),
+            new XAttribute("Name", $"[{xsc.SchemaName}].[{xsc.CollectionName}]"),
+            new XElement(ns + "Property",
+                new XAttribute("Name", "SchemaExpression"),
+                new XElement(ns + "Value", new XCData(literal))));
     }
 
     private static XElement BuildSequenceElement(XNamespace ns, SequenceDef seq)

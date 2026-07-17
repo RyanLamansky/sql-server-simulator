@@ -44,7 +44,7 @@ Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and 
 
 | Phase | Elements |
 |---|---|
-| 1 | DB options + schemas + UDDTs + sequences + roles + table types + filegroups (silent skip) + partition function/scheme/columnstore (silent skip) |
+| 1 | DB options + schemas + UDDTs + sequences + roles + table types + XML schema collections + filegroups (silent skip) + partition function/scheme/columnstore (silent skip) |
 | 2 | Tables (columns + computed columns inline at model ordinal, defaults inline; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
@@ -95,6 +95,14 @@ DACFx-emitted BCP files exclude computed columns from the wire layout regardless
 A computed expression that forward-references a user function can't resolve in the CREATE TABLE column-list parser (the UDF only lands in phase 7). `EmitTable` runs a **two-attempt** strategy per table: build the full DDL with computed columns inline and try it; on any failure *when the table has computed columns*, re-create with computed columns stripped and register the table in a `deferredComputedTables` set that phase 8 consumes (it processes only those tables). The stripped-then-appended path leaves those computed columns at the **end** of `sys.columns` for that one table — the accepted tradeoff. AW's `Sales.Customer.AccountNumber` (`isnull('AW'+[dbo].[ufnLeadingZeros]([CustomerID]),'')`) is the only such column across AW + WWI; it lands at ordinal 7 rather than its true 5. No temporal table in either reference has a UDF-referencing computed column, so no history pair is affected.
 
 The alias side-map (`TableColumnIsAlias`, consumed by the BCP decoder) is built index-aligned to the resulting `HeapTable.Columns` order: full model order (computed slots `false`, never read since BCP filters computed columns out) on the inline path, simple-columns-only on the fallback path (computed appended last).
+
+## XML schema collections + typed-xml columns
+
+`SqlXmlSchemaCollection` elements dispatch in phase 1 (`EmitXmlSchemaCollection`), alongside the other type-namespace objects (UDDTs / table types) so they exist before any table that binds one. The element carries a single `SchemaExpression` property whose CDATA body is a **complete T-SQL string literal** — DACFx stores the `N'…'` prefix, the surrounding quotes, and any doubled embedded quotes verbatim — so the loader forwards it into `CREATE XML SCHEMA COLLECTION [schema].[name] AS <literal>` without re-wrapping.
+
+Typed-xml columns arrive as `SqlXmlTypeSpecifier` (vs `SqlTypeSpecifier` for every other type) carrying an `XmlSchemaCollection` relationship whose `References` names the bound `[schema].[collection]`. `TranslateTypeSpecifier` detects the relationship and emits `xml([schema].[collection])` instead of bare `xml`, so `HeapColumn.XmlSchemaCollection` binds and `sys.columns.xml_collection_id` reports the collection's id (0 when untyped). Only the default CONTENT facet is handled — AW carries no `XmlStyle`/DOCUMENT property (probe: zero occurrences across the model), so a DOCUMENT facet would need a separate property read.
+
+This closes the round-trip that made AW's re-exported bacpac lose typed xml: `Person.vAdditionalContactInfo`'s `.value()` XQuery needs typed xml for singleton inference, and untyped columns raise Msg 2389 at real-server re-import. On the export side, `sys.columns.xml_collection_id` populates from the binding so DacFx re-serializes the `SqlXmlTypeSpecifier` shape. `SqlXmlIndex` (AW's 8 XML indexes) is a separate element type still on the loader-wiring backlog — the engine models `CREATE [PRIMARY] XML INDEX`, but `ModelXmlReader` doesn't dispatch the element yet.
 
 ## Reference sample coverage
 

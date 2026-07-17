@@ -306,10 +306,11 @@ internal static partial class BuiltInResources
             new("is_sparse", SqlType.Bit, null, true),
             // Probe-confirmed constants (SQL Server 2025, 2026-07-15) that SMO's
             // SSMS Object-Explorer column / index / key sub-node queries read
-            // off sys.all_columns: no XML documents, XML-schema collections,
-            // column sets, dropped ledger columns, or vector columns are
-            // modeled, so is_xml_document / is_column_set / is_dropped_ledger_column
-            // are 0, xml_collection_id is 0, and the vector_* pair is NULL.
+            // off sys.all_columns: no XML documents, column sets, dropped ledger
+            // columns, or vector columns are modeled, so is_xml_document /
+            // is_column_set / is_dropped_ledger_column are 0 and the vector_*
+            // pair is NULL. xml_collection_id carries the bound schema
+            // collection's id for a typed-xml column (0 when untyped / non-xml).
             new("is_xml_document", SqlType.Bit, null, false),
             new("xml_collection_id", SqlType.Int32, null, false),
             new("is_column_set", SqlType.Bit, null, true),
@@ -370,6 +371,14 @@ internal static partial class BuiltInResources
             c.Type.SystemTypeId is 165 or 167 or 173 or 175 or 231 or 239 ? trueBit : falseBit;
         SqlValue DefaultObjectIdFor(HeapColumn c) =>
             c.DefaultConstraint is { } df ? SqlValue.FromInt32(df.ObjectId) : zeroInt;
+        // xml_collection_id is the id of the schema collection a typed-xml
+        // column binds (0 for untyped xml and every non-xml column — real SQL
+        // Server's non-nullable-int convention for this column). The binding
+        // lives on HeapColumn.XmlSchemaCollection, set by the xml(collection)
+        // column DDL. View / inline-TVF output columns never carry a binding,
+        // so their rows keep the 0 default below.
+        SqlValue XmlCollectionIdFor(HeapColumn c) =>
+            c.XmlSchemaCollection is { } coll ? SqlValue.FromInt32(coll.Id) : zeroInt;
         // The per-database default collation flows from CurrentDatabase.
         // The captured defaultCollation arg is a legacy fallback; today the
         // active database's CollationName drives the value, with per-column
@@ -404,7 +413,7 @@ internal static partial class BuiltInResources
                         CollationFor(col),
                         falseBit,
                         falseBit,
-                        zeroInt,
+                        XmlCollectionIdFor(col),
                         falseBit,
                         falseBit,
                         nullInt,
@@ -545,7 +554,7 @@ internal static partial class BuiltInResources
                         CollationFor(col),
                         falseBit,
                         falseBit,
-                        zeroInt,
+                        XmlCollectionIdFor(col),
                         falseBit,
                         falseBit,
                         nullInt,

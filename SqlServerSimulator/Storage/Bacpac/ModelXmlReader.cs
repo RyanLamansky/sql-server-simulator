@@ -168,6 +168,7 @@ internal static class ModelXmlReader
                     ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
                     ("SqlRole", 1) => Run(() => EmitRole(element, name, connection)),
                     ("SqlTableType", 1) => Run(() => EmitTableType(element, name, connection, result)),
+                    ("SqlXmlSchemaCollection", 1) => Run(() => EmitXmlSchemaCollection(element, name, connection)),
                     ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result, deferredComputedTables)),
                     ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
                     ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
@@ -251,7 +252,8 @@ internal static class ModelXmlReader
     /// </summary>
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
-        or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlFilegroup"
+        or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlXmlSchemaCollection"
+        or "SqlFilegroup"
         or "SqlPartitionFunction" or "SqlPartitionScheme" or "SqlColumnStoreIndex"
         or "SqlTable"
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
@@ -537,6 +539,32 @@ internal static class ModelXmlReader
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         command.CommandText = $"CREATE TYPE {qualifiedName} AS TABLE ({body});";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE XML SCHEMA COLLECTION [schema].[name] AS &lt;literal&gt;</c>
+    /// for a <c>SqlXmlSchemaCollection</c> element. The <c>SchemaExpression</c>
+    /// property carries a complete T-SQL string literal in its CDATA body — the
+    /// <c>N'…'</c> prefix, the surrounding quotes, and any doubled embedded
+    /// quotes are all present — so the loader forwards it verbatim into the
+    /// <c>AS</c> clause. Emitted in phase 1 alongside the other type-namespace
+    /// objects (alias types / table types) so any table whose column binds
+    /// <c>xml([schema].[collection])</c> resolves the reference when the table
+    /// is created in phase 2.
+    /// </summary>
+    private static void EmitXmlSchemaCollection(XElement element, string? qualifiedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(qualifiedName))
+            throw new InvalidDataException("bacpac: SqlXmlSchemaCollection element missing Name attribute.");
+
+        var schemaExpression = ReadScriptProperty(element, "SchemaExpression")
+            ?? throw new InvalidDataException($"bacpac: SqlXmlSchemaCollection '{qualifiedName}' missing SchemaExpression.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE XML SCHEMA COLLECTION {qualifiedName} AS {schemaExpression};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -907,6 +935,18 @@ internal static class ModelXmlReader
         // user-defined alias types keep their bracketed 2-part shape so the
         // simulator's Schema.AliasTypes lookup runs through the qualified path.
         var renderedTypeName = isBuiltin ? NormalizeBuiltinName(typeName) : typeName;
+
+        // Typed-xml column: a SqlXmlTypeSpecifier carries an XmlSchemaCollection
+        // relationship naming the [schema].[collection] the xml value is bound
+        // to. Emit xml([schema].[collection]) so the column records the binding
+        // (surfaced through sys.columns.xml_collection_id) — the collection was
+        // created in phase 1, ahead of this table. Only the default CONTENT
+        // facet is handled: AW carries no XmlStyle/DOCUMENT property (probe:
+        // zero occurrences), so a DOCUMENT facet would need a separate property
+        // read and CONTENT/DOCUMENT emission here.
+        var xmlCollectionRef = ReadSingleReference(typeSpec, "XmlSchemaCollection");
+        if (xmlCollectionRef is not null)
+            return $"{renderedTypeName}({xmlCollectionRef})";
 
         var isMax = ReadBoolProperty(typeSpec, "IsMax", defaultValue: false);
         var length = ReadStringProperty(typeSpec, "Length");
