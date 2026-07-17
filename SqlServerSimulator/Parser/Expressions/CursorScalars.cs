@@ -32,11 +32,14 @@ internal sealed class CursorRowsExpression : Expression
 }
 
 /// <summary>
-/// SQL <c>CURSOR_STATUS(scope, name)</c>: reports a named cursor's state as a
-/// <see cref="SqlType.SmallInt"/> — <c>1</c> open (with rows, or any open DYNAMIC
-/// cursor), <c>0</c> open but empty, <c>-1</c> closed, <c>-3</c> the cursor
-/// doesn't exist. The scope argument (<c>'global'</c> / <c>'local'</c>) is
-/// accepted and ignored (the simulator keeps one per-connection cursor map).
+/// SQL <c>CURSOR_STATUS(scope, name)</c>: reports a cursor's state as a
+/// <see cref="SqlType.SmallInt"/>. The scope argument selects the namespace and
+/// is honored (probe-confirmed): <c>'global'</c> / <c>'local'</c> look in the
+/// connection-global / batch-local named-cursor maps, <c>'variable'</c> looks up
+/// the cursor variable <c>@name</c>. Return codes: <c>1</c> open (with rows, or
+/// any open DYNAMIC cursor), <c>0</c> open but empty, <c>-1</c> closed /
+/// allocated-not-open, <c>-2</c> a cursor variable declared with no cursor
+/// allocated, <c>-3</c> no cursor of that name in the named scope.
 /// </summary>
 internal sealed class CursorStatusFunction : Expression
 {
@@ -55,12 +58,29 @@ internal sealed class CursorStatusFunction : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        _ = this.scopeArg.Run(runtime); // scope ignored; evaluated for side-effect parity
+        var scopeValue = this.scopeArg.Run(runtime);
         var nameValue = this.nameArg.Run(runtime);
         if (nameValue.IsNull)
             return SqlValue.Null(SqlType.SmallInt);
+        var batch = runtime.Batch;
+        var scope = scopeValue.IsNull ? "" : scopeValue.AsString;
         var name = nameValue.AsString;
-        return SqlValue.FromInt16((short)(runtime.Batch.Connection.Cursors.TryGetValue(name, out var cursor)
+
+        // 'variable' scope: @name is a cursor variable. -2 = declared but no
+        // cursor allocated; -3 = not a declared cursor variable at all.
+        if (string.Equals(scope, "variable", StringComparison.OrdinalIgnoreCase))
+        {
+            var varName = name.StartsWith('@') ? name[1..] : name;
+            return SqlValue.FromInt16((short)(batch.CursorVariables.TryGetValue(varName, out var bound)
+                ? bound?.StatusValue ?? -2
+                : -3));
+        }
+
+        // 'local' / 'global' scope: the respective named-cursor map only.
+        var map = string.Equals(scope, "local", StringComparison.OrdinalIgnoreCase)
+            ? batch.LocalCursors
+            : batch.Connection.Cursors;
+        return SqlValue.FromInt16((short)(map.TryGetValue(name, out var cursor)
             ? cursor.StatusValue
             : -3));
     }

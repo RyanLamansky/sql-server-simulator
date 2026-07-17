@@ -121,6 +121,18 @@ releases) depends on the mode and surrounding transaction state:
 | Writer row-X (per mutated row)| COMMIT / ROLLBACK                     |
 | Escalated table-X             | COMMIT / ROLLBACK                     |
 
+**Cursor-scoped locks** are a third scope, introduced for `SCROLL_LOCKS`
+cursors (see [`cursors.md`](cursors.md)): a table-IX held for the cursor's open
+lifetime plus a row-U that follows the fetched row. They live directly on the
+`Cursor` (`scrollTableLock` / `scrollRowLock`), *not* in either release list, so
+they persist across statement and autocommit boundaries while the cursor is
+positioned (probe-confirmed). Each FETCH moves the row-U (`Cursor.MoveScrollLock`
+releases the row scrolled off, acquires U on the new one); `Cursor.ReleaseScrollLocks`
+frees both on CLOSE, the last DEALLOCATE, frame teardown (LOCAL cursor), and
+connection dispose. A concurrent writer of the held row blocks on the U-X
+conflict; a positioned UPDATE upgrades the row to X via the normal writer path
+(same-owner re-entrance lets the cursor's U and the writer's X coexist).
+
 Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and
 release in `DispatchOneStatement`'s `finally`. Transaction-scoped locks
 live in `SimulatedDbTransaction.HeldLocks` and release in `Commit()` /

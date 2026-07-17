@@ -173,6 +173,20 @@ partial class Simulation
         var name = variable.Value;
         context.MoveNextRequired();
 
+        // Cursor parameter: `@c CURSOR [VARYING] OUTPUT`. Real SQL Server
+        // requires VARYING OUTPUT (a cursor parameter is output-only); the
+        // simulator accepts VARYING / OUTPUT / OUT in any of the usual orders.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Cursor })
+        {
+            context.MoveNextRequired();
+            while (context.Token is ReservedKeyword { Keyword: Keyword.Varying }
+                or UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+            {
+                context.MoveNextRequired();
+            }
+            return new ProcedureParameter(name, SqlType.Int32, declaredMaxLength: null, defaultExpression: null, isOutput: true, isCursor: true);
+        }
+
         // Try table-valued-parameter binding first. A multi-part name (e.g.
         // `dbo.MyType`) unambiguously means user-defined type; a 1-part name
         // checks TableTypes first with fallback to the scalar parser.

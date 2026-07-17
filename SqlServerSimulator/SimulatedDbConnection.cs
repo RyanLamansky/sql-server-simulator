@@ -527,7 +527,11 @@ public sealed class SimulatedDbConnection : DbConnection
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
             this.TempTables.Clear();
-            // Cursors are session-scoped and auto-deallocate at close.
+            // Cursors are session-scoped and auto-deallocate at close. Release
+            // any SCROLL_LOCKS locks the open GLOBAL cursors still hold before
+            // dropping them.
+            foreach (var cursor in this.Cursors.Values)
+                cursor.ReleaseScrollLocks(this);
             this.Cursors.Clear();
             // Global temp tables: drop every ##foo owned by this connection.
             // Probe-confirmed against SQL Server 2025 (pooling disabled) that

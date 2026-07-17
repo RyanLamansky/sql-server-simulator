@@ -240,7 +240,7 @@ public sealed class CursorTests
         => AreEqual((short)1, ExecuteScalar<short>(Seed + """
             declare c cursor for select id from t;
             open c;
-            select cursor_status('local', 'c')
+            select cursor_status('global', 'c')
             """));
 
     [TestMethod]
@@ -307,9 +307,13 @@ public sealed class CursorTests
             select @@cursor_rows
             """));
 
+    /// <summary>
+    /// Cursor variables are modeled — see CursorBreadthTests for the full
+    /// lifecycle. A bare DECLARE registers an unallocated slot.
+    /// </summary>
     [TestMethod]
-    public void CursorVariable_NotSupported()
-        => Throws<NotSupportedException>(() => ExecuteScalar("declare @c cursor"));
+    public void CursorVariable_DeclareRegistersUnallocatedSlot()
+        => AreEqual((short)-2, ExecuteScalar<short>("declare @c cursor; select cursor_status('variable','@c')"));
 
     [TestMethod]
     public void JoinCursor_ForwardLoopOverMultipleSources()

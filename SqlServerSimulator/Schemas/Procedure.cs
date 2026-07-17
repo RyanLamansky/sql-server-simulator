@@ -68,10 +68,19 @@ internal sealed class Procedure(
 /// is stored with the leading <c>@</c> stripped (matching the
 /// <see cref="BatchContext.Variables"/> keying convention).
 /// </summary>
-internal sealed class ProcedureParameter(string name, SqlType type, int? declaredMaxLength, Expression? defaultExpression, bool isOutput, TableType? tableType = null)
+internal sealed class ProcedureParameter(string name, SqlType type, int? declaredMaxLength, Expression? defaultExpression, bool isOutput, TableType? tableType = null, bool isCursor = false)
 {
     public readonly string Name = name;
     public readonly SqlType Type = type;
+
+    /// <summary>
+    /// True when the parameter is a cursor parameter (<c>@c CURSOR VARYING
+    /// OUTPUT</c>). Cursor parameters are output-only (real SQL Server requires
+    /// <c>VARYING OUTPUT</c>): the body <c>SET</c>s and <c>OPEN</c>s a cursor
+    /// on the parameter, and the invocation binds it back into the caller's
+    /// cursor variable. The <see cref="Type"/> placeholder is unused for these.
+    /// </summary>
+    public readonly bool IsCursor = isCursor;
 
     /// <summary>
     /// Non-null when this parameter is a table-valued parameter — references

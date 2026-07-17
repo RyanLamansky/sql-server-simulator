@@ -258,6 +258,17 @@ partial class Simulation
                 context.MoveNextOptional();
                 return new ProcArgument(name, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tableVar);
             }
+            // Cursor variable argument (`@c OUTPUT` for a cursor parameter):
+            // carry the caller's variable name so the invocation can bind the
+            // proc's assigned cursor back into it. The trailing OUTPUT keyword
+            // is consumed like the scalar path.
+            if (batch.CursorVariables.ContainsKey(varRef.Value))
+            {
+                context.MoveNextOptional();
+                if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+                    context.MoveNextOptional();
+                return new ProcArgument(name, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, cursorVariableName: varRef.Value);
+            }
             var slot = batch.GetVariableSlot(varRef.Value);
             context.MoveNextOptional();
             VariableSlot? outputSlot = null;
@@ -320,12 +331,20 @@ partial class Simulation
 /// invocation writes the proc's final parameter value back into this slot
 /// at exit.
 /// </summary>
-internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null)
+internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null, string? cursorVariableName = null)
 {
     public readonly string? Name = name;
     public readonly bool IsDefault = isDefault;
     public readonly SqlValue Value = value;
     public readonly VariableSlot? OutputSlot = outputSlot;
+
+    /// <summary>
+    /// Non-null when the caller passed a cursor variable (<c>@c OUTPUT</c>) as
+    /// the argument for a cursor parameter — the caller's cursor-variable name
+    /// (leading <c>@</c> stripped). The invocation binds the cursor the proc
+    /// body assigned to its cursor parameter back into this variable at exit.
+    /// </summary>
+    public readonly string? CursorVariableName = cursorVariableName;
 
     /// <summary>
     /// Non-null when the caller passed a table variable (or, eventually, an

@@ -38,7 +38,8 @@ partial class Simulation
             // sits in a dead branch (probe-confirmed against SQL Server
             // 2025). Only the initializer is execution-scoped.
             if (context.Batch.Variables.ContainsKey(variableName)
-                || context.Batch.TableVariables.ContainsKey(variableName))
+                || context.Batch.TableVariables.ContainsKey(variableName)
+                || context.Batch.CursorVariables.ContainsKey(variableName))
             {
                 throw SimulatedSqlException.VariableAlreadyDeclared(variableName);
             }
@@ -50,10 +51,14 @@ partial class Simulation
 
             switch (context.Token)
             {
-                // Cursor variables (`DECLARE @c CURSOR`) aren't modeled — named
-                // cursors only.
+                // Cursor variable: `DECLARE @c CURSOR`. Registers an unallocated
+                // slot (CURSOR_STATUS('variable','@c') → -2 until SET) in the
+                // frame's cursor-variable namespace. No type spec follows.
                 case ReservedKeyword { Keyword: Keyword.Cursor }:
-                    throw new NotSupportedException("Cursor variables (DECLARE @c CURSOR / cursor-typed parameters) aren't modeled; use a named cursor.");
+                    context.Batch.CursorVariables[variableName] = null;
+                    context.MoveNextOptional();
+                    sawScalar = true;
+                    continue;
 
                 // Table variable form: `DECLARE @t TABLE (cols)`. Only one
                 // table-variable declaration per statement (probe-confirmed:

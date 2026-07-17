@@ -68,6 +68,15 @@ internal static class Tds
     public const ushort TmSaveTransaction = 9;
 
     // Well-known RPC ProcIDs.
+    public const ushort ProcIdCursor = 1;
+    public const ushort ProcIdCursorOpen = 2;
+    public const ushort ProcIdCursorPrepare = 3;
+    public const ushort ProcIdCursorExecute = 4;
+    public const ushort ProcIdCursorPrepExec = 5;
+    public const ushort ProcIdCursorUnprepare = 6;
+    public const ushort ProcIdCursorFetch = 7;
+    public const ushort ProcIdCursorOption = 8;
+    public const ushort ProcIdCursorClose = 9;
     public const ushort ProcIdExecuteSql = 10;
     public const ushort ProcIdPrepare = 11;
     public const ushort ProcIdExecute = 12;

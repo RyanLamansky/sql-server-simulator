@@ -199,7 +199,7 @@ partial class Simulation
         {
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
-                positionedCursor = ParseWhereCurrentOf(context, table);
+                positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)]);
             else
                 where = BooleanExpression.Parse(context);
         }

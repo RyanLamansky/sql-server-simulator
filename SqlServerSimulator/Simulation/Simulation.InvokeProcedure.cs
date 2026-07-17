@@ -50,6 +50,7 @@ partial class Simulation
         var boundOutputSlots = new VariableSlot?[procedure.Parameters.Length];
         var boundIsDefault = new bool[procedure.Parameters.Length];
         var boundTableValues = new HeapTable?[procedure.Parameters.Length];
+        var boundCursorArgNames = new string?[procedure.Parameters.Length];
         var positionalIndex = 0;
         foreach (var arg in arguments)
         {
@@ -85,6 +86,7 @@ partial class Simulation
             boundOutputSlots[paramIndex] = arg.OutputSlot;
             boundIsDefault[paramIndex] = arg.IsDefault;
             boundTableValues[paramIndex] = arg.TableValue;
+            boundCursorArgNames[paramIndex] = arg.CursorVariableName;
         }
 
         // Apply defaults for unbound parameters; raise Msg 201 for any
@@ -96,6 +98,10 @@ partial class Simulation
         for (var i = 0; i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];
+            // Cursor parameters carry no scalar value / default — the body
+            // assigns the cursor, and it binds back to the caller at exit.
+            if (param.IsCursor)
+                continue;
             if (param.TableType is { } tvpType)
             {
                 if (boundValues[i] is not null && boundTableValues[i] is null && !boundIsDefault[i])
@@ -124,6 +130,8 @@ partial class Simulation
         for (var i = 0; i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];
+            if (param.IsCursor)
+                continue; // seeded into the child's CursorVariables below
             if (param.TableType is { } tvpType)
             {
                 // The caller may have supplied an existing table variable
@@ -155,6 +163,7 @@ partial class Simulation
         // no output-param mutations).
         var procFrame = new ProcFrame(procedure.Name);
         List<SimulatedStatementOutcome> outcomes;
+        BatchContext? innerBatch = null;
         if (string.IsNullOrEmpty(procedure.BodyText))
         {
             outcomes = [];
@@ -166,7 +175,14 @@ partial class Simulation
             bodyCommand.CommandText = procedure.BodyText;
 #pragma warning restore CA2100
 
-            var innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables);
+            innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables);
+            // Seed cursor parameters as unallocated cursor variables in the
+            // child frame; the body SETs and OPENs a cursor on each.
+            foreach (var param in procedure.Parameters)
+            {
+                if (param.IsCursor)
+                    innerBatch.CursorVariables[param.Name] = null;
+            }
             connection.NestingLevel++;
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code
@@ -198,12 +214,32 @@ partial class Simulation
         for (var i = 0; i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];
+            // Cursor OUTPUT parameter: bind the cursor the body assigned to the
+            // parameter into the caller's cursor variable (refcounting it so it
+            // survives the child frame's teardown). Must run before the child
+            // frame is torn down (which drops the param's own reference).
+            if (param.IsCursor)
+            {
+                if (boundCursorArgNames[i] is { } callerCursorName && innerBatch is not null
+                    && innerBatch.CursorVariables.TryGetValue(param.Name, out var producedCursor))
+                {
+                    RebindCursorVariable(outerBatch, callerCursorName, producedCursor);
+                }
+                continue;
+            }
             if (param.IsOutput && boundOutputSlots[i] is { } callerSlot)
             {
                 var finalValue = variables[param.Name].Value;
                 callerSlot.Value = finalValue.CoerceTo(callerSlot.DeclaredType);
             }
         }
+
+        // Frame-exit teardown of the proc body's LOCAL cursors + cursor
+        // variables (releasing their SCROLL_LOCKS locks). Cursors handed out
+        // through an OUTPUT parameter above already have the caller's reference,
+        // so the teardown's decrement leaves them alive.
+        if (innerBatch is not null)
+            TeardownFrameCursors(innerBatch);
 
         // Return code: coerce the proc's RETURN value (or default 0) to
         // int and store into the caller's `@rc` slot. Probe-confirmed:

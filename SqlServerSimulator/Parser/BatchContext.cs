@@ -977,6 +977,29 @@ internal sealed class BatchContext
     public readonly Dictionary<string, HeapTable> TableVariables = new(StringComparer.InvariantCultureIgnoreCase);
 
     /// <summary>
+    /// LOCAL cursors declared in this batch / procedure / trigger frame
+    /// (<c>DECLARE … CURSOR LOCAL FOR …</c>). Scoped to the frame: implicitly
+    /// deallocated when the frame exits (probe-confirmed a LOCAL cursor is
+    /// gone in the next GO-separated batch on the same connection), unless a
+    /// cursor variable still references it (the refcount keeps the underlying
+    /// <see cref="Cursor"/> object alive past its name-scope). GLOBAL cursors
+    /// live on <see cref="SimulatedDbConnection.Cursors"/> instead and persist
+    /// for the connection. Names are bare identifiers keyed like the global map.
+    /// </summary>
+    public readonly Dictionary<string, Cursor> LocalCursors = new(BuiltInToken.Comparer);
+
+    /// <summary>
+    /// Cursor variables (<c>DECLARE @c CURSOR</c>) declared or seeded in this
+    /// frame, keyed by name with the leading <c>@</c> stripped (mirroring
+    /// <see cref="Variables"/>). The value is the referenced <see cref="Cursor"/>
+    /// object, or null for a declared-but-unallocated variable (Msg 16950 on
+    /// use). Distinct namespace from scalar / table variables. Refcounted:
+    /// binding increments <see cref="Cursor.VariableRefCount"/>, rebinding /
+    /// <c>DEALLOCATE @c</c> / frame exit decrements and tears down at zero.
+    /// </summary>
+    public readonly Dictionary<string, Cursor?> CursorVariables = new(StringComparer.InvariantCultureIgnoreCase);
+
+    /// <summary>
     /// Monotonically-increasing per-row stamp consumed by
     /// <c>NEXT VALUE FOR</c>. The per-row iterator at each DML / SELECT
     /// site bumps this just before evaluating row expressions, so multiple

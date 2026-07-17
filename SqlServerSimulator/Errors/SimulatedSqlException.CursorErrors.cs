@@ -67,4 +67,40 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CursorNoCurrentRow() =>
         new("There are no rows in the current fetch buffer.", 16931, 16, 1);
+
+    /// <summary>
+    /// Msg 16932: a positioned <c>UPDATE … WHERE CURRENT OF</c> assigns a
+    /// column that isn't in the cursor's <c>FOR UPDATE OF (…)</c> list.
+    /// Probe-confirmed verbatim against SQL Server 2025 (state 1).
+    /// </summary>
+    internal static SimulatedSqlException CursorColumnNotInForUpdateList() =>
+        new("The cursor has a FOR UPDATE list and the requested column to be updated is not in this list.", 16932, 16, 1);
+
+    /// <summary>
+    /// A positioned <c>UPDATE</c> / <c>DELETE WHERE CURRENT OF</c> on an
+    /// <c>OPTIMISTIC</c> cursor found the current row modified (or deleted)
+    /// out-of-band since it was fetched. Real SQL Server surfaces a three-error
+    /// chain (probe-confirmed against SQL Server 2025): the terminating
+    /// <b>Msg 16947</b> (class 16, state 1, <c>"No rows were updated or
+    /// deleted."</c>) — the number a SqlClient consumer catches — followed by
+    /// the descriptive class-0 <b>Msg 16934</b> and the standard <b>Msg
+    /// 3621</b> statement-terminated companion. The full chain is reproduced so
+    /// <c>SqlException.Errors</c> and <c>.Message</c> match.
+    /// </summary>
+    internal static SimulatedSqlException CursorOptimisticConflict() =>
+        new(
+            "No rows were updated or deleted.\nOptimistic concurrency check failed. The row was modified outside of this cursor.\nThe statement has been terminated.",
+            new SimulatedError(@class: 16, lineNumber: 0, "No rows were updated or deleted.", 16947, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1),
+            new SimulatedError(@class: 0, lineNumber: 0, "Optimistic concurrency check failed. The row was modified outside of this cursor.", 16934, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1),
+            new SimulatedError(@class: 0, lineNumber: 0, "The statement has been terminated.", 3621, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 0));
+
+    /// <summary>
+    /// Msg 16950: a <c>FETCH</c> (or other cursor operation) named a cursor
+    /// <em>variable</em> that has no cursor allocated to it — declared with
+    /// <c>DECLARE @c CURSOR</c> but never <c>SET</c>, or referencing a
+    /// deallocated cursor. Probe-confirmed verbatim against SQL Server 2025
+    /// (class 16, state 2).
+    /// </summary>
+    internal static SimulatedSqlException CursorVariableNotAllocated(string variableName) =>
+        new($"The variable '@{variableName}' does not currently have a cursor allocated to it.", 16950, 16, 2);
 }

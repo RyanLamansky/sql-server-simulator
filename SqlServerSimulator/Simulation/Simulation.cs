@@ -732,6 +732,11 @@ public sealed partial class Simulation
             // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
             // fired before the first SELECT silently vanishes.
             batch.FlushPrintMessages();
+            // LOCAL cursors + cursor variables are frame-scoped: implicitly
+            // deallocated when the batch ends (GLOBAL cursors persist on the
+            // connection). Releases any SCROLL_LOCKS locks the deallocated
+            // cursors held.
+            TeardownFrameCursors(batch);
         }
     }
 

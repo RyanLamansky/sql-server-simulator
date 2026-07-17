@@ -30,6 +30,28 @@ internal enum CursorSensitivity
 internal enum FetchDirection { Next, Prior, First, Last, Absolute, Relative }
 
 /// <summary>
+/// The concurrency-control model of an updatable cursor (the
+/// <c>READ_ONLY</c> / <c>SCROLL_LOCKS</c> / <c>OPTIMISTIC</c> keyword family).
+/// A read-only cursor carries <see cref="Cursor.ReadOnly"/> instead.
+/// </summary>
+internal enum CursorConcurrency
+{
+    /// <summary>Default optimistic-without-detection: positioned DML just
+    /// re-locates the row and rewrites it (the pre-existing behavior).</summary>
+    Default,
+
+    /// <summary><c>SCROLL_LOCKS</c>: a U lock is held on the currently-fetched
+    /// row (cursor-scoped — released when the cursor scrolls off the row,
+    /// closes, or deallocates), and positioned DML upgrades it to X.</summary>
+    ScrollLocks,
+
+    /// <summary><c>OPTIMISTIC</c>: no lock is held; positioned DML re-reads the
+    /// row and raises the optimistic-conflict chain (Msg 16947 / 16934) when it
+    /// was modified out-of-band since the fetch.</summary>
+    Optimistic,
+}
+
+/// <summary>
 /// A session-scoped T-SQL cursor (declared with <c>DECLARE … CURSOR FOR
 /// &lt;select&gt;</c>). Lives in <see cref="SimulatedDbConnection.Cursors"/>.
 /// Position is tracked by the base row's stable <c>(page, slot)</c> address,
@@ -44,7 +66,9 @@ internal sealed class Cursor(
     CursorSensitivity sensitivity,
     bool scrollable,
     bool readOnly,
-    HeapTable? baseTable)
+    HeapTable? baseTable,
+    CursorConcurrency concurrency = CursorConcurrency.Default,
+    List<string>? forUpdateColumns = null)
 {
     public readonly string Name = name;
     public readonly Selection Selection = selection;
@@ -55,7 +79,50 @@ internal sealed class Cursor(
     /// <summary>The single base table, non-null for KEYSET / DYNAMIC / positioned DML.</summary>
     public readonly HeapTable? BaseTable = baseTable;
 
+    /// <summary>The concurrency model — <see cref="CursorConcurrency.ScrollLocks"/>
+    /// holds a cursor-scoped U lock on the fetched row, <see cref="CursorConcurrency.Optimistic"/>
+    /// detects out-of-band modification at positioned DML time.</summary>
+    public readonly CursorConcurrency Concurrency = concurrency;
+
+    /// <summary>The <c>FOR UPDATE OF (col, …)</c> column list (surface names),
+    /// or null when the cursor was declared <c>FOR UPDATE</c> without an OF list
+    /// (every column updatable) or without a FOR UPDATE clause. A positioned
+    /// UPDATE of a column absent from a non-null list raises Msg 16932.</summary>
+    public readonly List<string>? ForUpdateColumns = forUpdateColumns;
+
+    /// <summary>
+    /// Reference count of cursor variables (<c>DECLARE @c CURSOR</c>) pointing
+    /// at this object. A named cursor sits at 0; each <c>SET @c = …</c> binding
+    /// increments, each <c>DEALLOCATE @c</c> decrements, and the object is torn
+    /// down only when the count returns to 0 with no name. Matches SQL Server's
+    /// refcounted cursor-variable model (probe-confirmed).
+    /// </summary>
+    public int VariableRefCount;
+
+    /// <summary>True for an unnamed cursor that exists only through cursor
+    /// variables (created by <c>SET @c = CURSOR FOR …</c>); such a cursor is
+    /// destroyed when its last variable reference is deallocated.</summary>
+    public bool IsUnnamed;
+
     public bool IsOpen;
+
+    /// <summary>
+    /// OPTIMISTIC snapshot of the currently-fetched row's full stored bytes,
+    /// captured at each FETCH. Positioned DML compares the live bytes at
+    /// <see cref="CurrentRid"/> against this; any difference (a value change, a
+    /// rowversion bump, or the row's disappearance) is an optimistic conflict.
+    /// A full-row byte compare subsumes both real detection bases — rowversion
+    /// column when present, column checksum otherwise. Null when the cursor
+    /// isn't OPTIMISTIC or isn't on a live row.
+    /// </summary>
+    private byte[]? optimisticSnapshot;
+
+    // SCROLL_LOCKS: cursor-scoped locks held directly (not through the
+    // statement / transaction release lists). The table-IX is held for the
+    // cursor's open lifetime; the row-U follows the current fetch position and
+    // is released when the cursor scrolls off the row, closes, or deallocates.
+    private LockResource? scrollTableLock;
+    private LockResource? scrollRowLock;
 
     /// <summary>
     /// The value <c>CURSOR_STATUS</c> reports for this (existing) cursor:
@@ -119,20 +186,113 @@ internal sealed class Cursor(
 
         this.CurrentRid = null;
         this.IsOpen = true;
+
+        // SCROLL_LOCKS: take table-IX for the cursor's open lifetime (the
+        // per-row U locks ride the fetch position). Held cursor-scoped, so it
+        // outlives individual statements and any autocommit boundary — matching
+        // real SQL Server, where scroll locks persist while the cursor is
+        // positioned regardless of an enclosing transaction.
+        if (this.Concurrency == CursorConcurrency.ScrollLocks && this.BaseTable is { } table2)
+        {
+            var connection = batch.Connection;
+            connection.Simulation.LockManager.Acquire(table2.TableDataLock, LockMode.IntentExclusive, connection, connection.LockTimeoutMillis);
+            this.scrollTableLock = table2.TableDataLock;
+        }
     }
 
     /// <summary>CLOSE the cursor: release the materialized state and reset
     /// position. The cursor stays declared (re-OPEN-able). Raises Msg 16917
     /// (state 1) if not open.</summary>
-    public void Close()
+    public void Close(BatchContext batch)
     {
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 1);
+        this.ReleaseScrollLocks(batch.Connection);
         this.staticRows = null;
         this.keysetIdentities = null;
         this.dynamicLast = null;
         this.CurrentRid = null;
+        this.optimisticSnapshot = null;
         this.IsOpen = false;
+    }
+
+    /// <summary>
+    /// Releases both cursor-scoped SCROLL_LOCKS locks (the position-following
+    /// row-U and the open-lifetime table-IX). Called on CLOSE, on the last
+    /// DEALLOCATE, and at connection dispose. No-op for non-SCROLL_LOCKS
+    /// cursors.
+    /// </summary>
+    internal void ReleaseScrollLocks(SimulatedDbConnection connection)
+    {
+        var lockManager = connection.Simulation.LockManager;
+        if (this.scrollRowLock is { } row)
+        {
+            lockManager.Release(row, LockMode.Update, connection);
+            this.scrollRowLock = null;
+        }
+        if (this.scrollTableLock is { } tbl)
+        {
+            lockManager.Release(tbl, LockMode.IntentExclusive, connection);
+            this.scrollTableLock = null;
+        }
+    }
+
+    /// <summary>
+    /// Moves the SCROLL_LOCKS row-U lock onto the freshly-fetched row: releases
+    /// the row we scrolled off (if any) and acquires U on
+    /// <see cref="CurrentRid"/>. A concurrent writer of the current row then
+    /// blocks (U conflicts with the writer's X); scrolling away frees it.
+    /// </summary>
+    private void MoveScrollLock(BatchContext batch)
+    {
+        if (this.BaseTable is not { } table)
+            return;
+        var connection = batch.Connection;
+        var lockManager = connection.Simulation.LockManager;
+        if (this.scrollRowLock is { } prior)
+        {
+            lockManager.Release(prior, LockMode.Update, connection);
+            this.scrollRowLock = null;
+        }
+        if (this.CurrentRid is { } rid)
+        {
+            var resource = table.GetOrCreateRowLock(rid.Page, rid.Slot);
+            lockManager.Acquire(resource, LockMode.Update, connection, connection.LockTimeoutMillis);
+            this.scrollRowLock = resource;
+        }
+    }
+
+    /// <summary>
+    /// For an <see cref="CursorConcurrency.Optimistic"/> cursor, raises the
+    /// optimistic-conflict chain (Msg 16947 / 16934) when the current row's
+    /// live bytes differ from the snapshot captured at FETCH — a value change,
+    /// a rowversion bump, or the row's deletion out-of-band. No-op for other
+    /// concurrency modes. Called at positioned UPDATE / DELETE time.
+    /// </summary>
+    internal void CheckOptimisticConflict()
+    {
+        if (this.Concurrency != CursorConcurrency.Optimistic || this.BaseTable is not { } table)
+            return;
+        var current = this.CurrentRid is { } rid ? table.Heap.ReadSlotBytes(rid.Page, rid.Slot) : null;
+        if (current is null || this.optimisticSnapshot is null || !current.AsSpan().SequenceEqual(this.optimisticSnapshot))
+            throw SimulatedSqlException.CursorOptimisticConflict();
+    }
+
+    /// <summary>
+    /// True when <paramref name="column"/> may be updated through a positioned
+    /// <c>WHERE CURRENT OF</c>: always true unless the cursor carries a
+    /// <c>FOR UPDATE OF (…)</c> column list that omits it (Msg 16932).
+    /// </summary>
+    internal bool IsColumnUpdatable(string column, BatchContext batch)
+    {
+        if (this.ForUpdateColumns is null)
+            return true;
+        foreach (var allowed in this.ForUpdateColumns)
+        {
+            if (batch.CurrentDatabase.Collation.Equals(allowed, column))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -146,12 +306,25 @@ internal sealed class Cursor(
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 2);
         this.EnsureDirectionAllowed(direction);
-        return this.Sensitivity switch
+        var result = this.Sensitivity switch
         {
             CursorSensitivity.Static => this.FetchStatic(direction, offset),
             CursorSensitivity.Keyset => this.FetchKeyset(batch, direction, offset),
             _ => this.FetchDynamic(batch, direction),
         };
+
+        // OPTIMISTIC: snapshot the landed row's live bytes so a later positioned
+        // UPDATE / DELETE can detect out-of-band modification. SCROLL_LOCKS:
+        // move the cursor-scoped U lock onto the newly-fetched row (releasing
+        // the row we scrolled off), so a concurrent writer of the current row
+        // blocks. Both are no-ops when the fetch didn't land on a live row.
+        this.optimisticSnapshot = this.Concurrency == CursorConcurrency.Optimistic && this.CurrentRid is { } orid
+            ? this.BaseTable?.Heap.ReadSlotBytes(orid.Page, orid.Slot)
+            : null;
+        if (this.Concurrency == CursorConcurrency.ScrollLocks)
+            this.MoveScrollLock(batch);
+
+        return result;
     }
 
     /// <summary>

@@ -440,6 +440,11 @@ partial class Simulation
     /// </summary>
     private static bool TryParseSetVariable(ParserContext context, AtPrefixedString variableToken)
     {
+        // Cursor variable: SET @c = CURSOR … / SET @c = @otherVar / SET @c =
+        // named_cursor. Routes away from the scalar slot machinery.
+        if (context.Batch.CursorVariables.ContainsKey(variableToken.Value))
+            return TryParseSetCursorVariable(context, variableToken.Value);
+
         var slot = context.Batch.GetVariableSlot(variableToken.Value);
 
         context.MoveNextRequired();
@@ -455,6 +460,52 @@ partial class Simulation
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs);
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         slot.Value = Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>SET @c = &lt;cursor-source&gt;</c> where <c>@c</c> is a cursor
+    /// variable: a fresh <c>CURSOR … FOR …</c> definition (an unnamed,
+    /// refcounted cursor), another cursor variable, or a named cursor. The
+    /// variable is rebound — dropping the reference it previously held and
+    /// taking one on the new cursor. On entry the cursor is on the variable
+    /// token.
+    /// </summary>
+    private static bool TryParseSetCursorVariable(ParserContext context, string variableName)
+    {
+        context.MoveNextRequired(); // step onto '='
+        if (context.Token is not Operator { Character: '=' })
+            return false;
+        context.MoveNextRequired(); // step onto the RHS first token
+
+        Cursor? newCursor;
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Cursor }:
+                if (BuildCursorDefinition(context.Batch, "", reqStatic: false, scroll: false) is not { } built)
+                    return true; // skipping — tokens consumed
+                built.Cursor.IsUnnamed = true;
+                newCursor = built.Cursor;
+                break;
+            case AtPrefixedString sourceVar:
+                context.MoveNextOptional();
+                if (context.Batch.IsSkipping)
+                    return true;
+                newCursor = context.Batch.CursorVariables.TryGetValue(sourceVar.Value, out var src) && src is not null
+                    ? src
+                    : throw SimulatedSqlException.CursorVariableNotAllocated(sourceVar.Value);
+                break;
+            case Name namedCursor:
+                context.MoveNextOptional();
+                if (context.Batch.IsSkipping)
+                    return true;
+                newCursor = ResolveNamedCursor(context.Batch, namedCursor.Value);
+                break;
+            default:
+                return false;
+        }
+
+        RebindCursorVariable(context.Batch, variableName, newCursor);
         return true;
     }
 

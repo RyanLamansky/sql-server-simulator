@@ -46,6 +46,41 @@ Dispatch (`TdsSession.Rpc.cs`):
 - **Response shape**: per statement outcome DONEINPROC (0xFF, always `DONE_MORE` since trailing tokens follow), then RETURNSTATUS, RETURNVALUE per output parameter (name-matched by the client; values re-encoded via `DbType` → `SqlType.GetByDbType` + `ConvertParameter`), then DONEPROC final. Errors: ERROR token(s) + DONEPROC with `DONE_ERROR`.
 - Output-parameter writeback happens when the engine's outcome enumerator is fully drained — the streaming loop always drains, which is what makes RETURNVALUE correct.
 
+## API server cursors (sp_cursor\* RPC family)
+
+`TdsSession.Cursors.cs` handles the special-ProcID cursor family SSMS's query-editor grid and legacy ODBC / OLE DB server-cursor apps drive. `WellKnownProcId` in `TdsSession.Rpc.cs` maps both the well-known numeric ProcIDs (1 sp_cursor, 2 sp_cursoropen, 3 sp_cursorprepare, 4 sp_cursorexecute, 5 sp_cursorprepexec, 6 sp_cursorunprepare, 7 sp_cursorfetch, 8 sp_cursoroption, 9 sp_cursorclose) **and** the by-name form (SqlClient sends `CommandType.StoredProcedure` with `CommandText = "sp_cursoropen"` as ProcID 0 + name) to the dispatch. Each open cursor rides an engine `Cursor` (built by synthesizing a `DECLARE … CURSOR … FOR <stmt>; OPEN` batch and pulling the object out of `SimulatedDbConnection.Cursors` under an opaque `sss_apicursor_<handle>` name), stored in a per-session `Dictionary<int, ApiCursor>` — wire-protocol state, so on the session not the engine. Fetch drives `Cursor.Fetch` directly per row; positioned DML sets `Cursor.CurrentRid` to a buffered RID and runs a synthesized `UPDATE/DELETE … WHERE CURRENT OF <name>` so the full engine machinery (triggers, constraints, statement atomicity) fires. Probed against SQL Server 2025 (2026-07-17).
+
+**sp_cursoropen**(@cursor OUT, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT) — builds + opens the cursor and writes a **metadata-only announce**: COLMETADATA for the projection plus a trailing `ROWSTAT` int column, **zero rows**. Return status 0. The OUT scrollopt/ccopt are the *effective* (resolved) options, and @rowcount is the row count for keyset/static or −1 for the non-materialized shapes:
+
+| scrollopt (low bits) | requested | effective OUT scrollopt | @rowcount |
+|---|---|---|---|
+| 0x1 KEYSET | updatable single table | 0x1 | row count |
+| 0x2 DYNAMIC | updatable single table | 0x2 | −1 |
+| 0x4 FORWARD_ONLY | updatable single table | 0x4 | −1 |
+| 0x8 STATIC | any | 0x8 | row count |
+| 0x10 FAST_FORWARD | updatable single table | 0x10 | −1 |
+| any | **non-updatable** (GROUP BY / DISTINCT / join) | **0x8** (forced STATIC), ccopt → **0x1** READ_ONLY | row count |
+
+ccopt low bits: 0x1 READ_ONLY, 0x2 SCROLL_LOCKS, 0x4 OPTIMISTIC (values), 0x8 OPTIMISTIC (rowversion). The `0x1000`-series flag bits (PARAMETERIZED_STMT / AUTO_FETCH / AUTO_CLOSE / …) are stripped from the effective value. On an **invalid statement**, the engine's error (e.g. Msg 208) plus **Msg 16945** (`The cursor was not declared.`, state 2) are emitted, the handle comes back 0, the option values echo the requested low bits, and the return status is the engine error number.
+
+**sp_cursorfetch**(@cursor, @fetchtype, @rownum, @nrows) — @rownum / @nrows are **input** for a data fetch (a real server rejects them ByRef with Msg 16902 for non-INFO fetch types; the simulator simply reads them as input). Rows come back as an ordinary result set of up to @nrows rows, each with the trailing ROWSTAT = 1 column. fetchtype: 0x1 FIRST, 0x2 NEXT, 0x4 PREV, 0x8 LAST, 0x10 ABSOLUTE (@rownum), 0x20 RELATIVE (@rownum), 0x100 INFO. The first buffer row uses the requested direction; subsequent rows advance NEXT. A **past-end** fetch returns an empty result set with return status 0. **INFO** writes no rows and reports the current 1-based position (@rownum) and total row count (@nrows) as OUT params. An **invalid handle** → **Msg 16909** (`sp_cursorfetch: The cursor identifier value provided (<hex>) is not valid.`, state 1), return status 1. Each fetch's RIDs are buffered on the ApiCursor for positioned DML.
+
+**sp_cursor**(@cursor, @optype, @rownum, @table, @col=value…) — positioned DML against the last fetch buffer, @rownum 1-based into it. optype 0x1 UPDATE (named `@col` params become `SET [col] = @col`), 0x2 DELETE, 0x20 SETPOSITION (no DML, just repositions). Empty buffer → **Msg 16931** (`There are no rows in the current fetch buffer.`) + Msg 3621; @rownum past the buffer → **Msg 16930** (`The requested row is not in the fetch buffer.`) + Msg 3621; in both the return status is the primary Msg number. A DML enforcement failure surfaces the engine error and returns its number.
+
+**sp_cursorprepexec**(@prep OUT, @cursor OUT, @paramdef, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) — prepares (stores statement + declaration-parsed parameter names in a per-session handle map) and opens in one call, returning both handles; the parameterized statement's bindings are the trailing params. **sp_cursorexecute**(@prep, @cursor OUT, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) re-opens the stored statement with fresh param values, yielding a **new** cursor handle (probe-confirmed). **sp_cursorprepare** / **sp_cursorunprepare** store / drop without executing (miss → Msg 8179). Prepared-cursor parameter values are frozen at open onto the ApiCursor and re-applied to every fetch batch, since a keyset / dynamic cursor re-runs its SELECT per fetch.
+
+**sp_cursorclose**(@cursor) — closes + unbinds, return status 0. Double-close or invalid handle → **Msg 16909** (state 1), return status 1.
+
+**Accept-and-ignore / divergences (documented, not byte-identical):**
+
+- **sp_cursoroption** is accepted and discarded (return status 0) — its codes weren't reachably probed from SqlClient.
+- **Concurrency control is not wired for the API path.** ccopt SCROLL_LOCKS / OPTIMISTIC keep the cursor updatable and echo in the OUT ccopt, but no scroll locks are held and **no optimistic conflict is raised** — probe-confirmed the real API cursor did **not** surface a conflict even with a second connection modifying a buffered row (unlike the T-SQL `OPTIMISTIC` cursor, which raises the Msg 16947 chain). The positioned DML uses the default relocate-and-rewrite.
+- **Handle values** are a simple per-session counter, not the real server's descriptor-derived integers (opaque to the client).
+- **FAST_FORWARD @rowcount** reports −1 (matching real) even though the engine materializes it as STATIC internally.
+- **sp_cursor @rownum = 0** (real: "apply to every buffered row" batch update) is not modeled — only 1-based single-row positioned DML.
+- **REFRESH fetchtype (0x80)** maps to a plain re-fetch rather than an in-place buffer refresh.
+- The `0x1000` PARAMETERIZED_STMT flag requirement (real raises Msg 16902 when a parameterized prepexec omits it) is **not enforced** — the flag is simply stripped.
+
 ## Transaction Manager requests
 
 `SqlTransaction` uses TM requests (packet type 14), not SQL text. Begin (5) maps the wire isolation byte onto `BeginTransaction(IsolationLevel)` and answers ENVCHANGE type 8 carrying an opaque 8-byte transaction descriptor (a per-session counter; the client echoes it in ALL_HEADERS, which the listener ignores — the session connection *is* the transaction scope). Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 / 10 with empty values. `SqlTransaction.Save(name)` (9) and `Rollback(name)` route through SQL text (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION [name]`, bracket-escaped); rollback-to-savepoint keeps the transaction alive so no transaction ENVCHANGE is emitted. **Names in TM requests are B_VARBYTE** — the length prefix counts UTF-16 *bytes*, unlike the char-counted B_VARCHAR elsewhere (SqlClient writes `name.Length * 2`); misreading it as B_VARCHAR overruns the payload on every savepoint call.
@@ -87,7 +122,7 @@ ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_engli
 - Login INFO states are approximations.
 - No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating), no `SqlBulkCopy`.
 - Credential-enforcement edges not modeled: `ALTER LOGIN … DISABLE` parses but doesn't block login; password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
-- RPC parameter gaps: TVP / UDT / `sql_variant` / `image` parameters rejected with ERROR 50000 (`text`/`ntext` string params ARE accepted); `sp_cursor*` and other well-known ProcIDs likewise.
+- RPC parameter gaps: TVP / UDT / `sql_variant` / `image` parameters rejected with ERROR 50000 (`text`/`ntext` string params ARE accepted). Non-cursor well-known ProcIDs beyond the sp_execute/sp_prepare family are rejected with ERROR 50000 naming the id.
 - Attention is acked only between messages (no mid-stream cancel).
 - SPID in packet headers truncates to 16 bits.
 

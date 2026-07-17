@@ -76,13 +76,24 @@ internal sealed partial class TdsSession
     private async ValueTask DispatchRpcAsync(TdsRpcRequest request, TdsTokenWriter writer, bool moreRequests, CancellationToken cancellationToken)
     {
         var procId = request.ProcId;
-        if (procId == 0 && request.ProcName.Equals("sp_executesql", StringComparison.OrdinalIgnoreCase))
-            procId = Tds.ProcIdExecuteSql;
+        if (procId == 0 && request.ProcName.Length != 0)
+            procId = WellKnownProcId(request.ProcName);
 
         switch (procId)
         {
             case 0:
                 await this.ExecuteProcedureRpcAsync(request, writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                break;
+            case Tds.ProcIdCursor:
+            case Tds.ProcIdCursorOpen:
+            case Tds.ProcIdCursorPrepare:
+            case Tds.ProcIdCursorExecute:
+            case Tds.ProcIdCursorPrepExec:
+            case Tds.ProcIdCursorUnprepare:
+            case Tds.ProcIdCursorFetch:
+            case Tds.ProcIdCursorOption:
+            case Tds.ProcIdCursorClose:
+                this.DispatchCursorRpc(procId, request, writer, moreRequests);
                 break;
             case Tds.ProcIdExecuteSql:
                 {
@@ -218,6 +229,29 @@ internal sealed partial class TdsSession
             this.WriteDatabaseChangeIfAny(writer);
         writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
     }
+
+    /// <summary>
+    /// The well-known RPC procedures SqlClient (and legacy ODBC / OLE DB) may
+    /// send by name rather than by numeric ProcID — <c>sp_executesql</c> and the
+    /// API-server-cursor family. Returns 0 for any other name (a genuine
+    /// stored-procedure call routed to <see cref="ExecuteProcedureRpcAsync"/>).
+    /// </summary>
+    private static ushort WellKnownProcId(string procName) =>
+        WellKnownProcIds.TryGetValue(procName, out var id) ? id : (ushort)0;
+
+    private static readonly Dictionary<string, ushort> WellKnownProcIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["sp_executesql"] = Tds.ProcIdExecuteSql,
+        ["sp_cursor"] = Tds.ProcIdCursor,
+        ["sp_cursoropen"] = Tds.ProcIdCursorOpen,
+        ["sp_cursorprepare"] = Tds.ProcIdCursorPrepare,
+        ["sp_cursorexecute"] = Tds.ProcIdCursorExecute,
+        ["sp_cursorprepexec"] = Tds.ProcIdCursorPrepExec,
+        ["sp_cursorunprepare"] = Tds.ProcIdCursorUnprepare,
+        ["sp_cursorfetch"] = Tds.ProcIdCursorFetch,
+        ["sp_cursoroption"] = Tds.ProcIdCursorOption,
+        ["sp_cursorclose"] = Tds.ProcIdCursorClose,
+    };
 
     private static SimulatedDbParameter AddParameter(SimulatedDbCommand command, TdsRpcParameter wire)
     {
