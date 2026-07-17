@@ -131,6 +131,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     /// </remarks>
     private sealed class SqlValueCursor(SqlType[] schema, IEnumerator<byte[]> source) : RowCursor
     {
+        private readonly HeapColumn[] columns = RowDecoder.ColumnsFor(schema);
         private byte[]? buffered;
         private byte[]? current;
         private bool peeked;
@@ -186,7 +187,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
 
         public override SqlValue this[int ordinal] => current is null
             ? throw new InvalidOperationException("No current row.")
-            : RowDecoder.DecodeColumn(schema, current, ordinal);
+            : RowDecoder.DecodeColumn(columns, current, ordinal);
 
         protected override void DisposeCore() => source.Dispose();
     }

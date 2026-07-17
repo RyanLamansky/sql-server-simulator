@@ -106,14 +106,32 @@ internal static class RowDecoder
     /// Decodes a single column from a row's bytes without materializing the
     /// other columns. The data reader uses this to navigate row bytes directly
     /// per <see cref="System.Data.Common.DbDataReader"/> accessor call.
+    /// Routes through <see cref="ColumnsFor"/> so repeated reads against the
+    /// same schema array reuse one <see cref="HeapColumn"/>[] — and therefore
+    /// one cached <see cref="RowLayout"/> — instead of allocating and
+    /// re-laying-out per call (the per-call rebuild dominated result-drain CPU
+    /// at 34% and its discarded arrays defeated the layout cache's identity
+    /// key).
     /// </summary>
-    public static SqlValue DecodeColumn(ReadOnlySpan<SqlType> schema, ReadOnlySpan<byte> bytes, int ordinal)
-    {
-        var columns = new HeapColumn[schema.Length];
-        for (var i = 0; i < schema.Length; i++)
-            columns[i] = new HeapColumn(string.Empty, schema[i], maxLength: null, nullable: true);
-        return DecodeColumn(columns, bytes, ordinal, lobStore: null);
-    }
+    public static SqlValue DecodeColumn(SqlType[] schema, ReadOnlySpan<byte> bytes, int ordinal) =>
+        DecodeColumn(ColumnsFor(schema), bytes, ordinal, lobStore: null);
+
+    /// <summary>
+    /// The nameless all-nullable <see cref="HeapColumn"/>[] equivalent of a
+    /// type-only schema, cached by the schema array's identity (schema arrays
+    /// are per-result-set and long-lived, mirroring <see cref="RowLayout"/>'s
+    /// keying).
+    /// </summary>
+    public static HeapColumn[] ColumnsFor(SqlType[] schema) =>
+        typeOnlyColumns.GetValue(schema, static s =>
+        {
+            var columns = new HeapColumn[s.Length];
+            for (var i = 0; i < s.Length; i++)
+                columns[i] = new HeapColumn(string.Empty, s[i], maxLength: null, nullable: true);
+            return columns;
+        });
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<SqlType[], HeapColumn[]> typeOnlyColumns = [];
 
     /// <summary>
     /// Array-schema fast path of

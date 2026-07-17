@@ -130,9 +130,18 @@ Reference bacpacs live in `.vs/<probe>/` as gitignored cross-check probes (`aw-c
 
 **Cross-check probes** capture each reference DB's per-column COUNT / MIN / MAX / SUM / SUM(DATALENGTH) against the live SQL Server 2025 reference instance. WideWorldImporters-Standard cross-checks 100% clean (51/51 tables, every per-column metric byte-equal, zero divergences). AdventureWorks2025 cross-check is the active fidelity oracle; current state is 55/91 tables clean, 32 → 10 errored, 32 → 9 of 10 scalar UDFs clean.
 
+## Export verification workflow
+
+DacFx export (sqlpackage over the TDS endpoint) is verified in escalating rigor, each layer catching what the previous can't:
+
+1. **Simulator round-trip** — export, re-import through `Simulation.ImportBacpac`, per-table row-count + value spot checks. Blind to losses both sides agree on.
+2. **Model-diff pre-flight** — diff the exported bacpac's model.xml against the Microsoft-authored original: element inventory by (Type, Name), per-table column order, property bags (harness: the session-local reimport tool's `modeldiff` mode). The cheap standing detector for export fidelity gaps — most real-import rejections (duplicate index column Msg 1909, temporal ordinal Msg 13524, Query Store capture mode) were visible here before any import ran.
+3. **Real-server import** — `sqlpackage /Action:Import` into an actual SQL Server (the in-container instance gives full sysadmin), then live parity queries against the original imported beside it. The strictest oracle: real DacFx validates harder than the simulator's own loader (XQuery singleton inference over typed xml, SYSTEM_VERSIONING ordinal identity, model-schema value ranges). Note the original AW bacpac needs full-text installed (`mssql-server-fts` on Linux) or its catalog aborts the import mid-script.
+
+Both AW and WWI exports pass all three layers (row/FK/collection/typed-column parity, 0 missing elements for WWI, 2 for AW — the indexed views).
+
 ## Deferred work
 
-- **Hierarchyid byte-identical CAST encoding** — the BCP wire decoder ships (covers AW's `[0..79]` positive-ordinal envelope; throws `NotSupportedException` on negative ordinals, ordinals ≥ 80, and dotted sub-ordinals so a follow-up bundle can extend cleanly). The simulator's own `HierarchyIdSqlType.Encode` / `Decode` still uses its segment-array-LE internal form. Replacing both with the documented OrdPath encoding makes cross-engine CAST byte equality hold round-trip. See [`hierarchyid.md`](hierarchyid.md) for the cracked tiers + remaining research notes.
 - **Real XPath/XQuery evaluation** — see [`xml.md`](xml.md).
 - **Real OGC method evaluation** — see [`spatial.md`](spatial.md).
 - **Full-text search** — see [`full-text.md`](full-text.md).

@@ -84,4 +84,20 @@ public sealed class DecodeColumnTests
         _ = Throws<ArgumentOutOfRangeException>(() => RowDecoder.DecodeColumn(schema, bytes, 1));
         _ = Throws<ArgumentOutOfRangeException>(() => RowDecoder.DecodeColumn(schema, bytes, -1));
     }
+
+    /// <summary>
+    /// The type-only schema's <see cref="HeapColumn"/>[] conversion must be
+    /// cached by schema-array identity: a fresh array per call would defeat
+    /// <see cref="RowLayout"/>'s identity-keyed cache, re-laying-out the row
+    /// geometry on every single-column read (measured at a third of
+    /// result-drain CPU before the conversion was cached).
+    /// </summary>
+    [TestMethod]
+    public void ColumnsFor_SameSchemaArray_ReturnsCachedInstance()
+    {
+        SqlType[] schema = [SqlType.Int32, SqlType.Varchar];
+
+        AreSame(RowDecoder.ColumnsFor(schema), RowDecoder.ColumnsFor(schema));
+        AreNotSame(RowDecoder.ColumnsFor(schema), RowDecoder.ColumnsFor([SqlType.Int32, SqlType.Varchar]));
+    }
 }
