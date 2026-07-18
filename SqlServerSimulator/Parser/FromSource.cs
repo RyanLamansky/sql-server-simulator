@@ -39,7 +39,9 @@ internal sealed class FromSource(
     View? backingView = null,
     DataLockPlan? heapPlan = null,
     bool materializeOnce = false,
-    bool isPlaceholder = false)
+    bool isPlaceholder = false,
+    CatalogView? backingCatalogView = null,
+    Database? backingCatalogDatabase = null)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -125,6 +127,27 @@ internal sealed class FromSource(
     /// execution, so the placeholder's rows never surface.
     /// </summary>
     public readonly bool IsPlaceholder = isPlaceholder;
+
+    /// <summary>
+    /// The <see cref="CatalogView"/> backing this source (<c>FROM sys.columns</c>
+    /// etc.); null for every non-catalog source. <see cref="LateralPlan"/> holds
+    /// the generator-wrapping plan, but the predicate-pushdown detector in
+    /// <c>Selection.BuildSqlProjection</c> reads the view (its
+    /// <see cref="CatalogView.PushdownColumns"/> / <see cref="CatalogView.FilteredRowGenerator"/>)
+    /// from here to decide whether a WHERE equality can be pushed into the
+    /// generator, then rebuilds <see cref="LateralPlan"/> via the pushdown-carrying
+    /// <see cref="Selection.ForCatalogView(CatalogView,Database,string,Expression)"/>.
+    /// </summary>
+    public readonly CatalogView? BackingCatalogView = backingCatalogView;
+
+    /// <summary>
+    /// The database the catalog view was scoped to (current DB for a 2-part
+    /// <c>sys.columns</c> reference, the named DB for a 3-part cross-database
+    /// reference). Paired with <see cref="BackingCatalogView"/> so the pushdown
+    /// rebuild reconstructs the generator plan against the same target database.
+    /// Null whenever <see cref="BackingCatalogView"/> is.
+    /// </summary>
+    public readonly Database? BackingCatalogDatabase = backingCatalogDatabase;
 
     /// <summary>
     /// Builds a placeholder source for a table that failed to resolve while a

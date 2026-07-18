@@ -10,6 +10,9 @@ internal static partial class BuiltInResources
     {
         void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
             views["sys." + name] = new CatalogView(name, columns, rows);
+        // Pushdown-aware sys.<view> (see BuiltInResources.CoreObjects.cs::SysP).
+        void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
+            views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
         // sys.dm_tran_locks: per-Hold rows across every schema-bound
         // SchemaLock, every HeapTable.TableDataLock, and every per-row
         // entry in HeapTable.RowLocks. GRANT entries come from
@@ -93,7 +96,7 @@ internal static partial class BuiltInResources
         // The simulator surfaces it as sql_variant too so DacFx reads the
         // base type off the wire and re-scripts the value with the correct
         // N-prefix on export — a BACPAC round-trip preserves nvarchar.
-        Sys("extended_properties",
+        SysP("extended_properties",
         [
             new("class", SqlType.TinyInt, null, false),
             new("class_desc", SqlType.SystemName, 60, true),
@@ -101,7 +104,7 @@ internal static partial class BuiltInResources
             new("minor_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("value", SqlType.SqlVariant, null, true),
-        ], EnumerateSysExtendedProperties);
+        ], ["major_id"], EnumerateSysExtendedProperties);
 
         // sys.database_principals: probe-confirmed shipped subset of columns
         // (real SQL Server's full row is ~16 cols). The simulator's principal
@@ -478,11 +481,16 @@ internal static partial class BuiltInResources
     /// base type (nvarchar vs varchar) survives to <c>SQL_VARIANT_PROPERTY</c>
     /// and the TDS wire — DacFx reads it to re-script the correct N-prefix.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysExtendedProperties(Parser.BatchContext batch, Database database)
+    private static IEnumerable<SqlValue[]> EnumerateSysExtendedProperties(Parser.BatchContext batch, Database database, CatalogFilter filter)
     {
+        var hasMajorFilter = filter.TargetsInt("major_id", out var wantMajorId, out var majorMatchesNothing);
+        if (hasMajorFilter && majorMatchesNothing)
+            yield break;
         foreach (var kvp in database.ExtendedProperties)
         {
             var key = kvp.Key;
+            if (hasMajorFilter && key.MajorId != wantMajorId)
+                continue;
             var classDesc = key.Class switch
             {
                 0 => "DATABASE",

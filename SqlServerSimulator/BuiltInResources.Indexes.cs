@@ -9,6 +9,9 @@ internal static partial class BuiltInResources
     {
         void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
             views["sys." + name] = new CatalogView(name, columns, rows);
+        // Pushdown-aware sys.<view> (see BuiltInResources.CoreObjects.cs::SysP).
+        void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
+            views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
         // sys.indexes: probe-confirmed 24-column shape against SQL Server
         // 2025 (2026-05-14). One row per (table, index) — PK / UQ
         // constraints surface alongside CREATE-INDEX rows, and a HEAP row
@@ -17,7 +20,7 @@ internal static partial class BuiltInResources
         // heap" semantic). EF Migrations introspection reads name /
         // is_unique / is_primary_key / is_unique_constraint /
         // has_filter / filter_definition.
-        Sys("indexes",
+        SysP("indexes",
         [
             new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
@@ -43,7 +46,7 @@ internal static partial class BuiltInResources
             new("auto_created", SqlType.Bit, null, false),
             new("optimize_for_sequential_key", SqlType.Bit, null, false),
             new("statistics_incremental", SqlType.Bit, null, true),
-        ], EnumerateSysIndexes);
+        ], ["object_id"], EnumerateSysIndexes);
 
         // sys.data_spaces: the simulator models a single PRIMARY row-filegroup
         // (data_space_id = 1) — the same id every sys.indexes row reports for
@@ -101,7 +104,7 @@ internal static partial class BuiltInResources
         // (index, column) pair — KEY columns get key_ordinal = 1..N and
         // index_column_id = 1..N; INCLUDE columns get key_ordinal = 0 and
         // index_column_id continuing past the key column count.
-        Sys("index_columns",
+        SysP("index_columns",
         [
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
@@ -113,7 +116,7 @@ internal static partial class BuiltInResources
             new("is_included_column", SqlType.Bit, null, false),
             new("column_store_order_ordinal", SqlType.TinyInt, null, true),
             new("data_clustering_ordinal", SqlType.TinyInt, null, true),
-        ], EnumerateSysIndexColumns);
+        ], ["object_id"], EnumerateSysIndexColumns);
 
         // sys.partitions: probe-confirmed 11-column shape against SQL Server
         // 2025 (2026-07-15). One row per (object_id, index_id) that
@@ -548,8 +551,11 @@ internal static partial class BuiltInResources
     /// other index / constraint (incl. a NONCLUSTERED PK) lands at index_id
     /// 2..N type_desc = NONCLUSTERED in object-id (declaration) order.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysIndexes(Parser.BatchContext batch, Database database)
+    private static IEnumerable<SqlValue[]> EnumerateSysIndexes(Parser.BatchContext batch, Database database, CatalogFilter filter)
     {
+        var hasIdFilter = filter.TargetsInt("object_id", out var wantObjectId, out var idMatchesNothing);
+        if (hasIdFilter && idMatchesNothing)
+            yield break;
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
@@ -566,6 +572,8 @@ internal static partial class BuiltInResources
         {
             foreach (var table in schema.HeapTables.Values)
             {
+                if (hasIdFilter && table.ObjectId != wantObjectId)
+                    continue;
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
                     yield return RowForIdentity(tableObjectId, identity);
@@ -576,6 +584,8 @@ internal static partial class BuiltInResources
             foreach (var view in schema.Views.Values)
             {
                 if (view.Indexes.Count == 0)
+                    continue;
+                if (hasIdFilter && view.ObjectId != wantObjectId)
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
@@ -1087,8 +1097,11 @@ internal static partial class BuiltInResources
     /// the key column count. HEAP rows (index_id = 0) don't appear here —
     /// real SQL Server's catalog omits them and the simulator matches.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysIndexColumns(Parser.BatchContext batch, Database database)
+    private static IEnumerable<SqlValue[]> EnumerateSysIndexColumns(Parser.BatchContext batch, Database database, CatalogFilter filter)
     {
+        var hasIdFilter = filter.TargetsInt("object_id", out var wantObjectId, out var idMatchesNothing);
+        if (hasIdFilter && idMatchesNothing)
+            yield break;
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var zeroByte = SqlValue.FromByte(0);
@@ -1097,6 +1110,8 @@ internal static partial class BuiltInResources
         {
             foreach (var table in schema.HeapTables.Values)
             {
+                if (hasIdFilter && table.ObjectId != wantObjectId)
+                    continue;
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
                 {
@@ -1139,6 +1154,8 @@ internal static partial class BuiltInResources
             foreach (var view in schema.Views.Values)
             {
                 if (view.Indexes.Count == 0)
+                    continue;
+                if (hasIdFilter && view.ObjectId != wantObjectId)
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())

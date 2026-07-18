@@ -147,6 +147,12 @@ internal sealed class ObjectId : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
+    // OBJECT_ID resolves a name against the current database at runtime,
+    // independent of any table row — row-independent exactly when its
+    // name/type arguments are (the canonical `OBJECT_ID(N'[dbo].[T]')` case).
+    internal override bool IsRowIndependent =>
+        this.nameArg.IsRowIndependent && (this.typeArg is null || this.typeArg.IsRowIndependent);
+
     internal override string DebugDisplay() =>
         this.typeArg is null
             ? $"OBJECT_ID({this.nameArg.DebugDisplay()})"

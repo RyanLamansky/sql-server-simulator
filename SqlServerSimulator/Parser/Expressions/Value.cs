@@ -89,5 +89,7 @@ internal sealed class Value : Expression
 
     internal override string DebugDisplay() => this.Constant.DebugDisplay();
 
+    internal override bool IsRowIndependent => true;
+
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Constant.IsNull;
 }

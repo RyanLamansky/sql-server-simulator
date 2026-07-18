@@ -10,6 +10,9 @@ internal static partial class BuiltInResources
     {
         void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
             views["sys." + name] = new CatalogView(name, columns, rows);
+        // Pushdown-aware sys.<view> (see BuiltInResources.CoreObjects.cs::SysP).
+        void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
+            views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
         void Iso(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
             views["INFORMATION_SCHEMA." + name] = new CatalogView(name, columns, rows);
         // INFORMATION_SCHEMA.TABLES: ISO-standard 4-column shape. TABLE_TYPE
@@ -124,7 +127,7 @@ internal static partial class BuiltInResources
             new("vector_dimensions", SqlType.Int32, null, true),
             new("vector_base_type_desc", SqlType.NVarchar, 20, true),
         ];
-        Sys("parameters", parameterColumns, EnumerateParameters);
+        SysP("parameters", parameterColumns, ["object_id"], EnumerateParameters);
 
         // sys.all_parameters: identical shape to sys.parameters in real SQL
         // Server (parameters of user objects + system objects). The simulator
@@ -134,7 +137,7 @@ internal static partial class BuiltInResources
         // (LEFT JOIN … ret_param.object_id = udf.object_id AND
         // ret_param.is_output = 1); without the view every such property errors
         // Msg 208.
-        Sys("all_parameters", parameterColumns, EnumerateParameters);
+        SysP("all_parameters", parameterColumns, ["object_id"], EnumerateParameters);
 
         // sys.views: per-view rows. Load-bearing subset of real SQL Server's
         // sys.views shape — object_id / name / schema_id / with_check_option /
@@ -920,8 +923,11 @@ internal static partial class BuiltInResources
     /// (the columns surface in <c>sys.columns</c> instead). Probe-confirmed
     /// against SQL Server 2025.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch, Database database)
+    private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch, Database database, CatalogFilter filter)
     {
+        var hasIdFilter = filter.TargetsInt("object_id", out var wantObjectId, out var idMatchesNothing);
+        if (hasIdFilter && idMatchesNothing)
+            yield break;
         var emptyName = SqlValue.FromSystemName("");
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
@@ -934,6 +940,8 @@ internal static partial class BuiltInResources
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
             {
+                if (hasIdFilter && proc.ObjectId != wantObjectId)
+                    continue;
                 var procObjectId = SqlValue.FromInt32(proc.ObjectId);
                 for (var i = 0; i < proc.Parameters.Length; i++)
                 {
@@ -967,6 +975,8 @@ internal static partial class BuiltInResources
             }
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
+                if (hasIdFilter && fn.ObjectId != wantObjectId)
+                    continue;
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
                 // Scalar UDFs get a synthetic parameter_id=0 return-type row;
                 // inline TVFs don't (their TABLE shape lives in sys.columns).

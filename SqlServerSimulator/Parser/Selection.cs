@@ -206,6 +206,54 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ForCatalogView(CatalogView view, Database targetDatabase)
     {
+        var (schema, columnNames) = CatalogViewShape(view);
+        return new Selection(
+            schema,
+            columnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            rowSource: (batch, _) =>
+            {
+                CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
+                return view.RowGenerator(batch, targetDatabase).Select(values => RowEncoder.EncodeRow(view.Columns, values));
+            });
+    }
+
+    /// <summary>
+    /// Predicate-pushdown variant of <see cref="ForCatalogView(CatalogView,Database)"/>:
+    /// the WHERE equality <c>&lt;pushdownColumn&gt; = &lt;comparand&gt;</c> is
+    /// evaluated once per execution (the comparand is row-independent, so a column
+    /// resolver is never consulted) and handed to the view's
+    /// <see cref="CatalogView.FilteredRowGenerator"/> so it enumerates only
+    /// matching objects. The enclosing SELECT keeps applying the full WHERE as a
+    /// residual filter, so this only narrows the generator's output — never the
+    /// result. A NULL comparand yields no rows (<c>= NULL</c> is UNKNOWN for every
+    /// candidate). The comparand's value is resolved per execution (variables /
+    /// parameters differ between runs), keeping the compiled plan shareable across
+    /// sessions.
+    /// </summary>
+    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, string pushdownColumn, Expression comparand)
+    {
+        var (schema, columnNames) = CatalogViewShape(view);
+        var filteredGenerator = view.FilteredRowGenerator!;
+        return new Selection(
+            schema,
+            columnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            rowSource: (batch, _) =>
+            {
+                var value = comparand.Run(new RuntimeContext(
+                    name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+                CatalogPushdownDiagnostics.Sink?.Add(
+                    value.IsNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
+                var filter = new CatalogFilter(pushdownColumn, value);
+                return filteredGenerator(batch, targetDatabase, filter).Select(values => RowEncoder.EncodeRow(view.Columns, values));
+            });
+    }
+
+    private static (SqlType[] Schema, string[] ColumnNames) CatalogViewShape(CatalogView view)
+    {
         var schema = new SqlType[view.Columns.Length];
         var columnNames = new string[view.Columns.Length];
         for (var i = 0; i < view.Columns.Length; i++)
@@ -213,12 +261,7 @@ internal sealed partial class Selection
             schema[i] = view.Columns[i].Type;
             columnNames[i] = view.Columns[i].Name;
         }
-        return new Selection(
-            schema,
-            columnNames,
-            hasOrderBy: false,
-            hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, _) => view.RowGenerator(batch, targetDatabase).Select(values => RowEncoder.EncodeRow(view.Columns, values)));
+        return (schema, columnNames);
     }
 
     /// <summary>
@@ -1427,7 +1470,9 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb),
-                        materializeOnce: true);
+                        materializeOnce: true,
+                        backingCatalogView: catalogView,
+                        backingCatalogDatabase: catalogTargetDb);
                 }
 
                 // View resolution: `FROM schema.view [alias]` or

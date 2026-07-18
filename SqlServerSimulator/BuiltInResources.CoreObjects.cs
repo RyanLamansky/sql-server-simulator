@@ -9,6 +9,12 @@ internal static partial class BuiltInResources
     {
         void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
             views["sys." + name] = new CatalogView(name, columns, rows);
+        // Pushdown-aware sys.<view>: `filtered` is the single source of truth —
+        // the plain (unfiltered) generator just calls it with CatalogFilter.None,
+        // so the full-scan and pushed-scan paths can't drift. `pushdownColumns`
+        // lists the view columns a WHERE equality may push into `filtered`.
+        void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
+            views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
         // sys.schemas: (name sysname, schema_id int, principal_id int null)
         Sys("schemas",
         [
@@ -342,19 +348,27 @@ internal static partial class BuiltInResources
             new("is_rowguidcol", SqlType.Bit, null, false),
             new("rule_object_id", SqlType.Int32, null, false),
         ];
-        IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database) =>
-            EnumerateColumns(batch, database, defaultCollation, nullCollation);
-        Sys("columns", ColumnsShape(), ColumnRows);
-        Sys("all_columns", ColumnsShape(), ColumnRows);
+        IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database, CatalogFilter filter) =>
+            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter);
+        SysP("columns", ColumnsShape(), ["object_id"], ColumnRows);
+        SysP("all_columns", ColumnsShape(), ["object_id"], ColumnRows);
     }
 
     private static IEnumerable<SqlValue[]> EnumerateColumns(
         Parser.BatchContext batch,
         Database database,
         SqlValue defaultCollation,
-        SqlValue nullCollation)
+        SqlValue nullCollation,
+        CatalogFilter filter)
     {
         _ = batch;
+        // object_id pushdown: skip every object whose id doesn't match, so a
+        // per-table column query materializes one table's columns instead of
+        // every table's (the dominant SMO per-column-bag cost). An all-NULL
+        // comparand (`object_id = NULL`) is UNKNOWN for every row → no rows.
+        var hasIdFilter = filter.TargetsInt("object_id", out var wantObjectId, out var idMatchesNothing);
+        if (hasIdFilter && idMatchesNothing)
+            yield break;
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var zeroInt = SqlValue.FromInt32(0);
@@ -393,6 +407,8 @@ internal static partial class BuiltInResources
         {
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
             {
+                if (hasIdFilter && t.ObjectId != wantObjectId)
+                    continue;
                 var objectId = SqlValue.FromInt32(t.ObjectId);
                 for (var i = 0; i < t.Columns.Length; i++)
                 {
@@ -440,6 +456,8 @@ internal static partial class BuiltInResources
             // projection, not a heap).
             foreach (var fn in schema.Functions.Values.OfType<InlineTableValuedFunction>().OrderBy(f => f.ObjectId))
             {
+                if (hasIdFilter && fn.ObjectId != wantObjectId)
+                    continue;
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
                 for (var i = 0; i < fn.OutputColumns.Length; i++)
                 {
@@ -487,6 +505,8 @@ internal static partial class BuiltInResources
             // false; nullability conservatively True).
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
             {
+                if (hasIdFilter && view.ObjectId != wantObjectId)
+                    continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 for (var i = 0; i < view.OutputColumns.Length; i++)
                 {
@@ -534,6 +554,8 @@ internal static partial class BuiltInResources
             // is_computed=true; identity columns inherit is_identity=true.
             foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
             {
+                if (hasIdFilter && tt.ObjectId != wantObjectId)
+                    continue;
                 var typeObjectId = SqlValue.FromInt32(tt.ObjectId);
                 for (var i = 0; i < tt.Columns.Length; i++)
                 {

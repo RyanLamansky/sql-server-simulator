@@ -42,4 +42,6 @@ internal sealed class VariableReference : Expression
     internal override string DebugDisplay() => $"@{this.variableName}";
 
     internal override bool ContainsVariableReference => true;
+
+    internal override bool IsRowIndependent => true;
 }

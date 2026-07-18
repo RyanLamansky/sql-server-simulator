@@ -69,6 +69,8 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Inner.VisitColumnReferences(visit);
 
+    internal override bool IsRowIndependent => this.Inner.IsRowIndependent;
+
     /// <summary>
     /// Consumes the <c>COLLATE collation_name</c> postfix when invoked from
     /// <see cref="Expression.Parse"/>'s binary-operator loop. The current

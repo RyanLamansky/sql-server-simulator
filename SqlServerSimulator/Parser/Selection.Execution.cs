@@ -137,6 +137,74 @@ internal sealed partial class Selection
     /// in unmatched LEFT-JOIN slots) is decoded column-by-column on demand
     /// and projected through <see cref="Expression.Run(RuntimeContext)"/>.
     /// </summary>
+    /// <summary>
+    /// Finds a WHERE equality that can be pushed into the leftmost catalog-view
+    /// source's row generator. Eligible when <c>sources[0]</c> is a
+    /// pushdown-aware catalog view and some top-level AND-conjunct is
+    /// <c>&lt;key&gt; = &lt;comparand&gt;</c> (either operand order) where the key
+    /// is one of the view's <see cref="Schemas.CatalogView.PushdownColumns"/>
+    /// qualified to this source, and the comparand is row-independent (reads no
+    /// column, so it evaluates to one value for the whole scan). Returns the
+    /// source, the canonical key-column name, and the comparand; null when
+    /// nothing qualifies. Only the leftmost source is considered — a catalog view
+    /// deeper in a JOIN keeps its full scan.
+    /// </summary>
+    private static (FromSource Source, string Column, Expression Comparand)? DetectCatalogPushdown(
+        FromSource[] sources,
+        List<BooleanExpression> excluders)
+    {
+        if (sources.Length == 0)
+            return null;
+        var source = sources[0];
+        if (source.BackingCatalogView is not { PushdownColumns: { } pushColumns, FilteredRowGenerator: not null })
+            return null;
+
+        var singleSource = sources.Length == 1;
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+
+        foreach (var conjunct in conjuncts)
+        {
+            if (!conjunct.TryGetEqualityOperands(out var left, out var right))
+                continue;
+            if (MatchPushdownKey(left, right, source.Qualifier, singleSource, pushColumns) is { } forward)
+                return (source, forward.Column, forward.Comparand);
+            if (MatchPushdownKey(right, left, source.Qualifier, singleSource, pushColumns) is { } reversed)
+                return (source, reversed.Column, reversed.Comparand);
+        }
+        return null;
+    }
+
+    // When `keySide` is a column reference to the catalog source naming one of
+    // `pushColumns`, and `valueSide` is row-independent, returns the canonical
+    // column name (from `pushColumns`) paired with the comparand; else null.
+    private static (string Column, Expression Comparand)? MatchPushdownKey(
+        Expression keySide,
+        Expression valueSide,
+        string? sourceQualifier,
+        bool singleSource,
+        string[] pushColumns)
+    {
+        if (keySide is not Reference reference || !valueSide.IsRowIndependent)
+            return null;
+
+        var name = reference.ReferencedName;
+        // Qualified (`c.object_id`) must match this source's alias / view name;
+        // unqualified (`object_id`) is only unambiguous when it's the sole source.
+        var qualifier = name.ImmediateQualifier;
+        var qualifierMatches = qualifier is null ? singleSource : BuiltInToken.Equals(qualifier, sourceQualifier);
+        if (!qualifierMatches)
+            return null;
+
+        foreach (var pushColumn in pushColumns)
+        {
+            if (BuiltInToken.Equals(pushColumn, name.Leaf))
+                return (pushColumn, valueSide);
+        }
+        return null;
+    }
+
     private static Selection BuildSqlProjection(
         BatchContext parseBatch,
         FromSource[] sources,
@@ -159,6 +227,30 @@ internal sealed partial class Selection
         // instead of the O(L×R) nested loop. Value-independent, so it's done
         // once here and the rewritten array is captured in the cached plan.
         joins = RewriteCommaJoinsToEquiJoins(sources, joins, fromClause.Excluders);
+
+        // Catalog-view predicate pushdown: when the leftmost source is a
+        // pushdown-aware catalog view (sys.columns etc.) and WHERE carries a
+        // top-level `<key> = <row-independent comparand>` conjunct, rebuild the
+        // source's generator plan so it enumerates only matching objects instead
+        // of materializing every row. Value-independent decision (compiled into
+        // the shared plan); the comparand's value is resolved per execution. The
+        // full WHERE still runs as a residual filter, so this can only narrow the
+        // generator output, never change the result.
+        if (DetectCatalogPushdown(sources, fromClause.Excluders) is (var pushSource, var pushColumn, var pushComparand))
+        {
+            sources[0] = new FromSource(
+                qualifier: pushSource.Qualifier,
+                columnNames: pushSource.ColumnNames,
+                columns: pushSource.Columns,
+                storedSchema: pushSource.StoredSchema,
+                storageOrdinals: pushSource.StorageOrdinals,
+                lobStore: pushSource.LobStore,
+                rows: pushSource.Rows,
+                lateralPlan: ForCatalogView(pushSource.BackingCatalogView!, pushSource.BackingCatalogDatabase!, pushColumn, pushComparand),
+                materializeOnce: true,
+                backingCatalogView: pushSource.BackingCatalogView,
+                backingCatalogDatabase: pushSource.BackingCatalogDatabase);
+        }
 
         var orderBy = fromClause.OrderBy;
         var outputSchema = new SqlType[expressions.Count];

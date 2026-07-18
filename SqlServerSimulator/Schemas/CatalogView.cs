@@ -27,7 +27,13 @@ namespace SqlServerSimulator.Schemas;
 /// metadata without bookkeeping.
 /// </para>
 /// </remarks>
-internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchContext, Database, IEnumerable<SqlValue[]>> rowGenerator, bool masterScoped = false)
+internal sealed class CatalogView(
+    string name,
+    HeapColumn[] columns,
+    Func<BatchContext, Database, IEnumerable<SqlValue[]>> rowGenerator,
+    bool masterScoped = false,
+    Func<BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>>? filteredRowGenerator = null,
+    string[]? pushdownColumns = null)
 {
     public readonly string Name = name;
 
@@ -77,4 +83,91 @@ internal sealed class CatalogView(string name, HeapColumn[] columns, Func<BatchC
     /// catalog inspection lands correctly.
     /// </summary>
     public readonly Func<BatchContext, Database, IEnumerable<SqlValue[]>> RowGenerator = rowGenerator;
+
+    /// <summary>
+    /// Predicate-pushdown row generator. Non-null only for pushdown-aware views;
+    /// the extra <see cref="CatalogFilter"/> carries a resolved WHERE-equality key
+    /// (<c>object_id</c> / <c>major_id</c>) so the generator can enumerate only
+    /// the matching object(s) instead of materializing every row. Purely an
+    /// optimization — the enclosing SELECT keeps applying the full WHERE as a
+    /// residual filter, so this generator may over-produce but must never drop a
+    /// row the predicate keeps. Null when the view can't exploit a pushed key, in
+    /// which case <see cref="RowGenerator"/> always runs.
+    /// </summary>
+    public readonly Func<BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>>? FilteredRowGenerator = filteredRowGenerator;
+
+    /// <summary>
+    /// The view-column names a WHERE equality can push into
+    /// <see cref="FilteredRowGenerator"/> (e.g. <c>["object_id"]</c>); null when
+    /// the view isn't pushdown-aware. The pushdown detector matches a top-level
+    /// AND-conjunct <c>&lt;col&gt; = &lt;row-independent comparand&gt;</c> against
+    /// this set. Non-null exactly when <see cref="FilteredRowGenerator"/> is.
+    /// </summary>
+    public readonly string[]? PushdownColumns = pushdownColumns;
+}
+
+/// <summary>
+/// A resolved WHERE-equality key handed to a <see cref="CatalogView.FilteredRowGenerator"/>.
+/// <see cref="Column"/> names the view column being equated (matched
+/// case-insensitively) and <see cref="Value"/> is the comparand evaluated once at
+/// execution start. A generator ignores the filter when <see cref="Column"/> is
+/// null (<see cref="None"/>) or names a column it doesn't key on. A NULL
+/// <see cref="Value"/> means the predicate is <c>col = NULL</c> — UNKNOWN for
+/// every row — so the generator yields nothing.
+/// </summary>
+internal readonly struct CatalogFilter(string? column, SqlValue value)
+{
+    public readonly string? Column = column;
+
+    public readonly SqlValue Value = value;
+
+    /// <summary>The no-pushdown sentinel — the generator enumerates everything.</summary>
+    public static CatalogFilter None => default;
+
+    /// <summary>
+    /// When this filter keys on <paramref name="columnName"/> and the comparand
+    /// can drive an <c>int</c> key match, reports the key via <paramref name="id"/>
+    /// or sets <paramref name="matchesNothing"/> (comparand is NULL, or an integer
+    /// outside <c>int</c> range that no <c>object_id</c> / <c>major_id</c> can
+    /// equal — both mean the generator yields no rows). Returns false — leaving
+    /// the generator to enumerate normally, so the residual WHERE decides — when
+    /// the filter targets a different column (or is <see cref="None"/>), or the
+    /// comparand isn't an exact integer (a decimal / string / float comparand is
+    /// left to the residual filter rather than lossily narrowed). Never coerces in
+    /// a way that could raise, so a pathological comparand can't turn a query the
+    /// residual filter would answer into an error.
+    /// </summary>
+    internal bool TargetsInt(string columnName, out int id, out bool matchesNothing)
+    {
+        id = 0;
+        matchesNothing = false;
+        if (this.Column is null || !BuiltInToken.Equals(this.Column, columnName))
+            return false;
+
+        if (this.Value.IsNull)
+        {
+            matchesNothing = true;
+            return true;
+        }
+
+        // Only exact-integer comparands drive the key match; anything else
+        // (decimal / string / float) is left to the residual WHERE — the key
+        // columns are int, and over-producing is safe while a lossy narrowing
+        // isn't. An in-range int keys the seek; an out-of-int-range integer
+        // matches no row (int key), so the generator yields nothing.
+        if (!SqlType.IsIntegerCategory(this.Value.Type))
+            return false;
+
+        // Widen any integer type (tinyint/smallint/int/bigint) to bigint — always
+        // lossless, never overflows — then range-check against the int key.
+        var wide = this.Value.CoerceTo(SqlType.BigInt).AsInt64;
+        if (wide is < int.MinValue or > int.MaxValue)
+        {
+            matchesNothing = true;
+            return true;
+        }
+
+        id = (int)wide;
+        return true;
+    }
 }

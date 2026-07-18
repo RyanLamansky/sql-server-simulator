@@ -23,4 +23,6 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
     internal override bool ContainsVariableReference => this.Wrapped.ContainsVariableReference;
 
     internal override Expression? PureConversionOperand => this.Wrapped;
+
+    internal override bool IsRowIndependent => this.Wrapped.IsRowIndependent;
 }

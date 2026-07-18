@@ -541,4 +541,22 @@ internal abstract class TwoSidedExpression : Expression
             return node.ContainsVariableReference;
         }
     }
+
+    internal sealed override bool IsRowIndependent
+    {
+        get
+        {
+            // Iterative left-spine walk (see Run): AND across every right operand
+            // plus the leftmost leaf — the whole node is row-independent only when
+            // every operand is (an arithmetic combination of constants / variables).
+            Expression node = this;
+            while (node is TwoSidedExpression twoSided)
+            {
+                if (!twoSided.right.IsRowIndependent)
+                    return false;
+                node = twoSided.left;
+            }
+            return node.IsRowIndependent;
+        }
+    }
 }

@@ -679,6 +679,22 @@ internal abstract class Expression
     internal virtual Expression? PureConversionOperand => null;
 
     /// <summary>
+    /// True when this expression's value is fixed across a single table scan —
+    /// it reads no column, so it evaluates to the same result for every row.
+    /// Literals, variables, and parameters qualify; column references and
+    /// anything reaching a column (directly or through an operand) don't. The
+    /// default is a conservative <see langword="false"/>: an unrecognized node is
+    /// assumed row-dependent, so only nodes that explicitly opt in (and prove
+    /// their operands do too) are treated as constant. Consumed by the
+    /// catalog-view predicate-pushdown detector
+    /// (<c>Selection.Execution.cs::DetectCatalogPushdown</c>) to decide whether a
+    /// WHERE equality's comparand can be evaluated once and pushed into a catalog
+    /// row generator; a false negative only forgoes the optimization, so the safe
+    /// direction is to under-claim.
+    /// </summary>
+    internal virtual bool IsRowIndependent => false;
+
+    /// <summary>
     /// Maximum shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)
     /// before Msg 191. Grouped-expression parens and function-argument levels
     /// each cost <see cref="ParenNestingCost"/>; a scalar subquery costs

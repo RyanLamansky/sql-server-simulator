@@ -109,6 +109,8 @@ internal sealed class Cast : Expression
 
     internal override Expression? PureConversionOperand => this.source;
 
+    internal override bool IsRowIndependent => this.source.IsRowIndependent;
+
     /// <summary>
     /// Parses the optional <c>(length)</c> or <c>(precision, scale)</c> spec
     /// after a CAST/CONVERT target type name and resolves the type. The caller
