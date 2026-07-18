@@ -672,6 +672,13 @@ public sealed partial class Simulation
     /// </param>
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command, bool continueOnError = true)
     {
+        // Fresh cancellation scope per top-level execution, so a Cancel() /
+        // attention that fired against a previous command on this connection
+        // doesn't bleed into this one. Child batches (proc / UDF / dynamic-SQL
+        // bodies) don't re-enter here — they share this scope through the
+        // connection, so an attention aborts them too.
+        command.Connection?.BeginExecutionScope();
+
         // CommandType.StoredProcedure: CommandText is the procedure name and
         // Parameters maps by name to the proc's declared parameters. Bypass
         // the SQL-text parser and route directly to InvokeProcedure with the
@@ -1075,6 +1082,16 @@ public sealed partial class Simulation
                 // here rather than resuming at the next token is what kills the
                 // abandoned-mid-parse Msg 319 / 102 cascade.
                 if (batch.BatchAborted)
+                    yield break;
+
+                // Client attention (TDS cancel / CommandTimeout) or an
+                // in-process Cancel() aborts the batch at the statement
+                // boundary: remaining statements are abandoned. Real SQL
+                // Server aborts a cancelled batch at the next safe point;
+                // between statements is one. The transaction is left intact
+                // here (XACT_ABORT ON rollback is applied by the caller once
+                // the batch has unwound).
+                if (batch.Connection.ExecutionCancellationToken.IsCancellationRequested)
                     yield break;
 
                 if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)

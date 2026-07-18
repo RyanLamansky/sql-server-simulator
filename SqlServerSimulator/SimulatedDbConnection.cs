@@ -164,6 +164,70 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool NumericRoundabort;
 
     /// <summary>
+    /// Session-scoped <c>XACT_ABORT</c> setting (default
+    /// <see langword="false"/>). Load-bearing for one behavior: when a
+    /// running command is cancelled by a client attention (or an
+    /// <c>ExecuteReader</c> caller's <c>Cancel()</c>) while a transaction is
+    /// open, <c>XACT_ABORT ON</c> rolls that transaction back, whereas
+    /// <c>OFF</c> leaves it open and usable — probe-confirmed against SQL
+    /// Server 2025. Otherwise recorded only (the broader XACT_ABORT
+    /// error-abort semantics remain parse-and-discard). Scoping mirrors
+    /// <see cref="AnsiNulls"/>.
+    /// </summary>
+    internal bool XactAbort;
+
+    /// <summary>
+    /// The cancellation source for the command currently executing on this
+    /// connection, replaced at the start of each top-level command execution
+    /// (<see cref="Simulation.CreateResultSetsForCommand"/>). The engine polls
+    /// its token at statement boundaries and inside <c>WAITFOR DELAY</c>; the
+    /// TDS endpoint's attention watcher and <see cref="SimulatedDbCommand.Cancel"/>
+    /// trigger it. Connection-scoped rather than command-scoped so a proc /
+    /// UDF / dynamic-SQL body (which shares the connection but wraps a fresh
+    /// body command) inherits the same cancellation signal. Only one command
+    /// runs at a time per connection (the simulator has no MARS), so a single
+    /// source suffices.
+    /// </summary>
+    private CancellationTokenSource executionCancellation = new();
+
+    /// <summary>
+    /// Begins a fresh cancellation scope for one top-level command execution,
+    /// discarding any prior (possibly already-cancelled) scope. Called at the
+    /// top of <see cref="Simulation.CreateResultSetsForCommand"/> so both the
+    /// in-process ADO surface and the TDS wire path get a clean token per
+    /// execution — a cancel that fired against a previous command doesn't
+    /// bleed into the next one on the same connection.
+    /// </summary>
+    internal void BeginExecutionScope()
+    {
+        var previous = Interlocked.Exchange(ref this.executionCancellation, new CancellationTokenSource());
+        previous.Dispose();
+    }
+
+    /// <summary>The current execution's cancellation token; the engine's safe-point poll target.</summary>
+    internal CancellationToken ExecutionCancellationToken => Volatile.Read(ref this.executionCancellation).Token;
+
+    /// <summary>
+    /// Requests cancellation of the command currently executing on this
+    /// connection. Safe to call from any thread (the TDS attention watcher, an
+    /// <c>ExecuteReader</c> caller's <c>Cancel()</c>): the engine observes the
+    /// cancellation at its next safe point and aborts the batch.
+    /// </summary>
+    internal void CancelExecution()
+    {
+        try
+        {
+            Volatile.Read(ref this.executionCancellation).Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Raced with BeginExecutionScope disposing the prior source; the
+            // cancel targeted a command that already finished, so dropping it
+            // is correct.
+        }
+    }
+
+    /// <summary>
     /// UTC instant this connection object was constructed, surfaced as
     /// <c>sys.dm_exec_sessions.login_time</c> (and its
     /// <c>last_request_start_time</c> / <c>last_request_end_time</c>
@@ -546,6 +610,7 @@ public sealed class SimulatedDbConnection : DbConnection
         if (disposing)
         {
             this.CurrentTransaction?.Dispose();
+            this.executionCancellation.Dispose();
             this.ReleaseSessionAppLocks();
             // Local temp tables auto-drop at session close. Clearing the dict
             // releases each table's Heap and LOB pages for GC; nothing else

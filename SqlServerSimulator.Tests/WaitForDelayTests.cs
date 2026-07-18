@@ -5,10 +5,10 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Tests for <c>WAITFOR DELAY</c>. The simulator uses
-/// <see cref="Thread.Sleep(TimeSpan)"/> on the calling thread, matching real
-/// SQL Server's "blocks the connection" semantics. To keep CI fast, only
-/// one test actually sleeps a non-trivial duration; everything else
+/// Tests for <c>WAITFOR DELAY</c>. The simulator blocks the calling thread on
+/// a cancellable wait, matching real SQL Server's "blocks the connection"
+/// semantics while staying interruptible by a command cancel. To keep CI fast,
+/// only one test actually sleeps a non-trivial duration; everything else
 /// exercises parsing / dispatch / skip-mode / error paths with a
 /// <c>'00:00:00'</c> operand. Behavior probed against SQL Server 2025
 /// (2026-05-11).
@@ -58,6 +58,40 @@ public sealed class WaitForDelayTests
             $"Expected ≥40ms sleep, got {elapsed.TotalMilliseconds}ms");
         IsLessThan(2000, elapsed.TotalMilliseconds,
             $"Expected well under a misparsed-magnitude sleep, got {elapsed.TotalMilliseconds}ms");
+    }
+
+    /// <summary>
+    /// In-process <c>Cancel()</c> from another thread interrupts a running
+    /// <c>WAITFOR DELAY</c> — the same abort machinery the TDS attention path
+    /// drives, exposed through the ADO surface. The 30-second wait returns
+    /// promptly once cancelled; the connection stays usable.
+    /// </summary>
+    [TestMethod]
+    public void Delay_InterruptedByInProcessCancel_ReturnsPromptly()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "waitfor delay '00:00:30'";
+        var canceller = new Thread(() =>
+        {
+            Thread.Sleep(200);
+            command.Cancel();
+        });
+
+        var start = Stopwatch.GetTimestamp();
+        canceller.Start();
+        _ = command.ExecuteNonQuery();
+        canceller.Join();
+        var elapsed = Stopwatch.GetElapsedTime(start);
+
+        IsLessThan(10000, elapsed.TotalMilliseconds,
+            $"Expected the cancel to interrupt the 30s wait promptly, got {elapsed.TotalMilliseconds}ms");
+
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "select 42";
+        AreEqual(42, probe.ExecuteScalar());
     }
 
     [TestMethod]

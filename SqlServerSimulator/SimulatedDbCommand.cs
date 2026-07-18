@@ -100,14 +100,21 @@ public sealed class SimulatedDbCommand : DbCommand
     }
 
     /// <summary>
-    /// No-op. <c>SqlCommand.Cancel()</c> sends a server "attention" token that
-    /// abandons in-flight result production; it never closes the reader. The
-    /// simulator executes synchronously in-process, so a command's result set
-    /// is conceptually complete by the time it returns — there is nothing in
-    /// flight to interrupt, matching SqlClient's behavior when <c>Cancel()</c>
-    /// is called with nothing to cancel.
+    /// Requests cancellation of the command currently executing on this
+    /// command's connection, the in-process analogue of <c>SqlCommand.Cancel()</c>
+    /// sending a server attention. Safe to call from another thread while an
+    /// execute is in flight: the engine observes it at the next safe point
+    /// (statement boundary, <c>WAITFOR DELAY</c> wait) and aborts the batch —
+    /// remaining statements are discarded and, under <c>SET XACT_ABORT ON</c>,
+    /// an open transaction rolls back. Because the simulator executes a
+    /// statement's result set synchronously into memory before
+    /// <c>ExecuteReader</c> returns, a <c>Cancel</c> arriving after that
+    /// point has nothing left in flight for that statement to interrupt (the
+    /// reader then drains already-materialized rows) — matching SqlClient's
+    /// no-op when called with nothing to cancel. A <c>Cancel</c> with no
+    /// live execution is a no-op.
     /// </summary>
-    public override void Cancel() { }
+    public override void Cancel() => this.Connection?.CancelExecution();
 
     /// <summary>
     /// Drains the whole batch (all statements execute, all side effects

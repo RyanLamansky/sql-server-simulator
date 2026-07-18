@@ -170,6 +170,14 @@ partial class Simulation
             {
                 while (true)
                 {
+                    // A cancelled command (TDS attention / CommandTimeout /
+                    // in-process Cancel()) breaks the loop at the iteration
+                    // boundary — the classic cancel target of an otherwise
+                    // unbounded WHILE. Body-internal statements observe the
+                    // same signal through DispatchStatementsUntil.
+                    if (batch.Connection.ExecutionCancellationToken.IsCancellationRequested)
+                        goto ExitLoop;
+
                     if (++batch.LoopIterations > BatchContext.LoopIterationLimit)
                     {
                         throw new InvalidOperationException(

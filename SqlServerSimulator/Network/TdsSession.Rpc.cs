@@ -182,7 +182,10 @@ internal sealed partial class TdsSession
                 outputs.Add((i, boundParameters[i], bound));
         }
 
-        await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false);
+        // A cancelled RPC skips its trailing RETURNSTATUS / RETURNVALUE /
+        // DONEPROC: the batch loop emits the single DONE_ATTN acknowledgment.
+        if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false))
+            return;
 
         writer.WriteReturnStatus(0);
         if (handleReturn is { } handleValue)
@@ -219,7 +222,10 @@ internal sealed partial class TdsSession
                 outputs.Add((i, request.Parameters[i], bound));
         }
 
-        await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false);
+        // A cancelled RPC skips its trailing RETURNSTATUS / RETURNVALUE /
+        // DONEPROC: the batch loop emits the single DONE_ATTN acknowledgment.
+        if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false))
+            return;
 
         writer.WriteReturnStatus(returnParameter.Value is int returnCode ? returnCode : 0);
         foreach (var (ordinal, wire, bound) in outputs)

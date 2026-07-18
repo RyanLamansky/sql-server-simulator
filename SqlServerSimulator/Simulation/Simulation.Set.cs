@@ -202,9 +202,10 @@ partial class Simulation
     /// so only a top-level <c>SET</c> persists to the session — matching how
     /// real SQL Server scopes these options. Runs regardless of
     /// <see cref="BatchContext.IsSkipping"/> (a SET in a never-taken IF branch
-    /// still applies, as with QUOTED_IDENTIFIER). Option names outside the six
-    /// (other recognized OnOff options like XACT_ABORT) fall through the default
-    /// arm and no-op.
+    /// still applies, as with QUOTED_IDENTIFIER). XACT_ABORT records onto the
+    /// connection too (its cancel-time transaction-abort behavior reads the
+    /// flag); other recognized OnOff options fall through the default arm and
+    /// no-op.
     /// </summary>
     private static void RecordSessionStateOption(ParserContext context, string optionName, bool on)
     {
@@ -233,6 +234,9 @@ partial class Simulation
                 break;
             case "NUMERIC_ROUNDABORT":
                 connection.NumericRoundabort = on;
+                break;
+            case "XACT_ABORT":
+                connection.XactAbort = on;
                 break;
             default:
                 break;

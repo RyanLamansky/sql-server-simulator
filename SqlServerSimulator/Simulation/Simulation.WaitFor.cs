@@ -27,11 +27,14 @@ partial class Simulation
     /// both succeed without sleeping).
     /// </para>
     /// <para>
-    /// Sleep mechanism: <see cref="Thread.Sleep(TimeSpan)"/> on the calling
-    /// thread, matching real SQL Server's "blocks the connection" semantics.
-    /// The simulator's dispatch is synchronous; an <c>ExecuteReaderAsync</c>
-    /// caller's <c>CancellationToken</c> isn't threaded into the sleep —
-    /// documented gap in CLAUDE.md. <c>@@ROWCOUNT</c> resets to 0
+    /// Sleep mechanism: a cancellable wait on the calling thread (see
+    /// <see cref="WaitInterruptibly"/>), matching real SQL Server's "blocks
+    /// the connection" semantics while staying interruptible by a command
+    /// cancel (TDS attention / <c>CommandTimeout</c> / in-process
+    /// <c>Cancel()</c>) — the wait wakes early and the batch aborts. An
+    /// <c>ExecuteReaderAsync</c> caller's own <c>CancellationToken</c> is a
+    /// separate signal and still isn't threaded into the sleep.
+    /// <c>@@ROWCOUNT</c> resets to 0
     /// (probe-confirmed; applied by the dispatcher after this parser returns).
     /// Skip-mode (un-taken IF, after BREAK/CONTINUE/RETURN) suppresses the
     /// sleep entirely.
@@ -97,6 +100,26 @@ partial class Simulation
             throw SimulatedSqlException.IncorrectWaitForTimeSyntax(operandText);
 
         if (delay.Ticks > 0)
+            WaitInterruptibly(batch, delay);
+    }
+
+    /// <summary>
+    /// Sleeps for <paramref name="delay"/>, but wakes early if the command is
+    /// cancelled (a TDS attention from a client <c>SqlCommand.Cancel()</c> /
+    /// <c>CommandTimeout</c>, or an in-process <c>Cancel()</c>). This is what
+    /// makes <c>WAITFOR DELAY</c> — the canonical cancel target — actually
+    /// interruptible: the wait blocks on the execution cancellation token's
+    /// wait handle, which the attention watcher signals. On wake the caller
+    /// returns and the dispatch loop observes the same cancelled token to
+    /// abort the batch. Without an active cancellation scope (a bare
+    /// engine-only path) it falls back to a plain sleep.
+    /// </summary>
+    private static void WaitInterruptibly(BatchContext batch, TimeSpan delay)
+    {
+        var token = batch.Connection.ExecutionCancellationToken;
+        if (token.CanBeCanceled)
+            _ = token.WaitHandle.WaitOne(delay);
+        else
             Thread.Sleep(delay);
     }
 

@@ -92,36 +92,85 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.WriteLoginResponse(writer, transport.PacketSize);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
+            // One inbound read is always in flight. Between requests it is the
+            // next request; while an engine request executes it doubles as the
+            // attention watcher (see below). It is never cancelled mid-read —
+            // it is carried forward across iterations — so packet framing can
+            // never be corrupted by a partially-consumed read.
+            var pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
             while (true)
             {
-                var message = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+                var message = await pendingRead.ConfigureAwait(false);
                 if (message is null)
                     return;
+
+                if (message.PacketType == Tds.PacketAttention)
+                {
+                    // Attention with nothing executing: the session was idle, or
+                    // the attention raced a response that already completed
+                    // naturally. Either way, acknowledge it — SqlClient waits for
+                    // the DONE_ATTN before declaring the connection reusable — and
+                    // keep the session alive.
+                    writer.WriteDone(Tds.DoneAttention, 0);
+                    await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                    pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
+                    continue;
+                }
+
+                // SqlBulkCopy sends `INSERT BULK …` as a plain SQL batch that puts
+                // the session into bulk-load mode: the server sends no response and
+                // consumes the BulkLoadBCP data packet (type 7) that follows — so
+                // that path is NOT engine-cancellable and must not start a watcher
+                // (the watcher would swallow the bulk-data packet).
+                string? batchText = null;
+                var isBulkInsertBegin = false;
+                if (message.PacketType == Tds.PacketSqlBatch)
+                {
+                    batchText = ExtractBatchText(message.Payload);
+                    isBulkInsertBegin = IsBulkInsertBatch(batchText);
+                }
+
+                // Only SQLBatch / RPC drive the engine and stream a cancellable
+                // response. For those, start reading the next inbound packet
+                // concurrently: in non-MARS TDS the client sends nothing but an
+                // attention until it has drained this response, so a completed
+                // read during execution is the client's cancel. The continuation
+                // fires the connection's cancellation; the engine and the row
+                // streamer observe it at their next safe point.
+                var runsEngine = !isBulkInsertBegin && message.PacketType is Tds.PacketSqlBatch or Tds.PacketRpc;
+                Task<TdsMessage?>? watcher = null;
+                if (runsEngine)
+                {
+                    watcher = transport.ReadMessageAsync(cancellationToken).AsTask();
+                    _ = watcher.ContinueWith(
+                        static (read, state) =>
+                        {
+                            if (read.IsCompletedSuccessfully)
+                            {
+                                if (read.Result?.PacketType == Tds.PacketAttention)
+                                    ((TdsSession)state!).connection?.CancelExecution();
+                            }
+                            else
+                            {
+                                _ = read.Exception;
+                            }
+                        },
+                        this,
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.DenyChildAttach,
+                        TaskScheduler.Default);
+                }
 
                 switch (message.PacketType)
                 {
                     case Tds.PacketSqlBatch:
-                        {
-                            // SqlBulkCopy sends `INSERT BULK …` as a plain SQL
-                            // batch that puts the session into bulk-load mode:
-                            // the server sends no response and consumes the
-                            // BulkLoadBCP data packet (type 7) that follows.
-                            var batchText = ExtractBatchText(message.Payload);
-                            if (IsBulkInsertBatch(batchText))
-                            {
-                                this.BeginBulkInsert(batchText, writer);
-                                break;
-                            }
-
+                        if (isBulkInsertBegin)
+                            this.BeginBulkInsert(batchText!, writer);
+                        else
                             await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
-                            break;
-                        }
-
+                        break;
                     case Tds.PacketRpc:
                         await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
-                        break;
-                    case Tds.PacketAttention:
-                        writer.WriteDone(Tds.DoneAttention, 0);
                         break;
                     case Tds.PacketBulkLoad:
                         this.ExecuteBulkLoad(message, writer);
@@ -138,7 +187,32 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         break;
                 }
 
+                // A cancelled token is the definitive "watcher saw an attention"
+                // signal: only the watcher's continuation cancels this
+                // connection, and it does so synchronously on watcher completion,
+                // so a cancelled token means the watcher is settled on an
+                // attention (and its read is spent). An attention that arrives
+                // after this check leaves the watcher pending; it is carried
+                // forward and acknowledged on the next iteration's idle branch,
+                // never lost.
+                var attentionConsumed = runsEngine && this.connection!.ExecutionCancellationToken.IsCancellationRequested;
+                if (attentionConsumed)
+                {
+                    // Roll the transaction back only under XACT_ABORT ON, then
+                    // send the single DONE_ATTN the client is waiting for.
+                    this.ApplyCancellationTransactionSemantics();
+                    writer.WriteDone(Tds.DoneAttention, 0);
+                }
+
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+
+                // Carry the in-flight read forward. When the watcher already
+                // consumed the attention, its read is spent — start a fresh one.
+                // Otherwise the same read is the next request (or still pending,
+                // to be awaited next iteration).
+                pendingRead = watcher is not null && !attentionConsumed
+                    ? watcher
+                    : transport.ReadMessageAsync(cancellationToken).AsTask();
             }
         }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidDataException or AuthenticationException)
@@ -230,7 +304,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 #pragma warning disable CA2100 // This IS a SQL endpoint: the batch text is the client's query by design.
             command.CommandText = ExtractBatchText(message.Payload);
 #pragma warning restore CA2100
-            await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
+            // A cancelled batch (return value true) leaves the DONE_ATTN
+            // acknowledgment to the session loop; nothing more to emit here.
+            _ = await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
         }
         catch (SimulatedSqlException ex)
         {
@@ -286,7 +362,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// the more bit. Fully drains the outcome enumerator, which is what
     /// triggers the engine's output-parameter writeback.
     /// </summary>
-    private async ValueTask StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
+    private async ValueTask<bool> StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
     {
         using var outcomes = simulation.CreateResultSetsForCommand(command, continueOnError: true).GetEnumerator();
 
@@ -294,6 +370,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var anyOutcome = hasOutcome;
         while (hasOutcome)
         {
+            // Client attention (SqlCommand.Cancel / CommandTimeout) observed at
+            // an outcome boundary: stop producing, leaving the DONE_ATTN ack to
+            // the caller. Disposing the enumerator here unwinds the engine's
+            // batch (its finally runs; output-parameter writeback does not).
+            if (this.connection!.ExecutionCancellationToken.IsCancellationRequested)
+                return true;
+
             var outcome = outcomes.Current;
             // Messages from a preceding no-outcome statement (PRINT,
             // severity<=10 RAISERROR): real SQL Server gives that statement
@@ -316,6 +399,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         TdsTypeCodec.WriteRow(writer, query.Schema, cursor, query.ColumnNullability);
                         rows++;
                         await writer.FlushAsync(final: false, cancellationToken).ConfigureAwait(false);
+                        // Mid-result-set attention: stop between rows (never
+                        // mid-row — the flush above closed the last ROW token).
+                        // The partial rows already sent are discarded client-side
+                        // once it reads the DONE_ATTN the caller emits.
+                        if (this.connection!.ExecutionCancellationToken.IsCancellationRequested)
+                            return true;
                     }
                 }
 
@@ -365,6 +454,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.WriteDatabaseChangeIfAny(writer);
             writer.WriteDoneToken(doneToken, Tds.DoneFinal, 0);
         }
+
+        return false;
     }
 
     /// <summary>
@@ -375,6 +466,25 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private ushort OutcomeDoneStatus(bool hasOutcome, bool trailingTokensFollow) =>
         hasOutcome || trailingTokensFollow || this.pendingInfoMessages.Count > 0 ? Tds.DoneMore : Tds.DoneFinal;
+
+    /// <summary>
+    /// Applies the probe-confirmed transaction semantics of a cancelled batch:
+    /// under <c>SET XACT_ABORT ON</c> an open transaction rolls back (the
+    /// client observes <c>@@TRANCOUNT</c> 0 afterward); under the default
+    /// <c>OFF</c> the transaction survives the cancel intact and the session
+    /// stays usable. Variables and the aborted statements' unrun side effects
+    /// go with the ended batch either way; committed statements' effects and
+    /// the connection's temp tables persist.
+    /// </summary>
+    private void ApplyCancellationTransactionSemantics()
+    {
+        var connection = this.connection!;
+        if (connection.XactAbort && connection.CurrentTransaction is { } tx)
+        {
+            tx.Rollback();
+            this.transaction = null;
+        }
+    }
 
     private void ResetConnection()
     {
