@@ -91,6 +91,9 @@ public sealed class ExpressionNestingLimitTests
     }
 
     private void RunOnSmallStack(string sql, out object? result, out Exception? failure)
+        => RunOnStack(512 * 1024, sql, out result, out failure);
+
+    private void RunOnStack(int maxStackSize, string sql, out object? result, out Exception? failure)
     {
         object? captured = null;
         Exception? caught = null;
@@ -104,9 +107,9 @@ public sealed class ExpressionNestingLimitTests
             {
                 caught = ex;
             }
-        }, maxStackSize: 512 * 1024);
+        }, maxStackSize);
         thread.Start();
-        IsTrue(thread.Join(TimeSpan.FromSeconds(30)), "query did not complete on the small-stack thread");
+        IsTrue(thread.Join(TimeSpan.FromSeconds(30)), "query did not complete on the sized-stack thread");
         result = captured;
         failure = caught;
     }
@@ -155,10 +158,15 @@ public sealed class ExpressionNestingLimitTests
     [Timeout(60000)]
     public void NestedFunctions_OverBudget_RaisesMsg191()
     {
-        // 501 nested ABS = 501 budget units > 500. On a normal (large) test
-        // thread the structural cap trips before the stack probe.
+        // 501 nested ABS = 501 budget units > 500. The fat function frames
+        // exhaust a default 1 MB thread (Windows test runners) near ~97 levels,
+        // where the stack probe's Msg 8631 would pre-empt the budget's Msg 191
+        // — a dedicated 16 MB thread keeps the structural cap deterministic.
         var sql = "select " + string.Concat(Enumerable.Repeat("abs(", 501)) + "1" + new string(')', 501);
-        AreEqual(15, new Simulation().AssertSqlError(sql, 191).Class);
+        RunOnStack(16 * 1024 * 1024, sql, out _, out var failure);
+        var ex = IsInstanceOfType<SimulatedSqlException>(failure);
+        AreEqual(191, ex.Number);
+        AreEqual(15, ex.Class);
     }
 
     [TestMethod]
