@@ -65,7 +65,7 @@ partial class Simulation
             // InFlightError is non-null by construction (the CATCH only ran
             // because the matching TRY caught something).
             var err = batch.InFlightError!.Value;
-            throw SimulatedSqlException.ThrowRaised(err.Number, err.Message, err.State);
+            throw SimulatedSqlException.ThrowReRaised(err.Number, err.Message, err.State, err.Line, err.Procedure);
         }
 
         // Value form: parse three comma-separated expressions.

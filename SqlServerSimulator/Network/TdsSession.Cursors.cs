@@ -213,7 +213,7 @@ internal sealed partial class TdsSession
         {
             _ = connection.Cursors.Remove(name);
             foreach (var error in ex.Errors)
-                writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, error.Server, error.Procedure, error.LineNumber);
+                writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, TdsSession.ServerName, error.Procedure, error.LineNumber);
             writer.WriteErrorOrInfo(Tds.TokenError, 16945, 2, 16, "The cursor was not declared.", "SIMULATED", "", 1);
 
             // Echo the requested option values; the handle comes back zero.
@@ -373,7 +373,7 @@ internal sealed partial class TdsSession
         catch (SimulatedSqlException ex)
         {
             foreach (var error in ex.Errors)
-                writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, error.Server, error.Procedure, error.LineNumber);
+                writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, TdsSession.ServerName, error.Procedure, error.LineNumber);
             writer.WriteReturnStatus(ex.Errors[0].Number);
             this.CompleteCursorRpc(writer, moreRequests, error: true);
             return;

@@ -36,7 +36,7 @@ public sealed partial class SimulatedSqlException : DbException
     private const string SourceName = "Core Microsoft SqlClient Data Provider";
 
     private SimulatedSqlException(string message, int number, byte @class, byte state)
-        : this(message, new SimulatedError(@class, lineNumber: 0, message, number, procedure: "", server: "", source: SourceName, state))
+        : this(message, new SimulatedError(@class, lineNumber: 0, message, number, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state))
     {
     }
 
@@ -49,7 +49,7 @@ public sealed partial class SimulatedSqlException : DbException
         SimulatedError first;
         if (errors.Length == 0)
         {
-            first = new SimulatedError(@class: 0, lineNumber: 0, base.Message, number: 0, procedure: "", server: "", source: SourceName, state: 0);
+            first = new SimulatedError(@class: 0, lineNumber: 0, base.Message, number: 0, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 0);
             this.Errors = new SimulatedErrorCollection([first]);
         }
         else
@@ -117,6 +117,70 @@ public sealed partial class SimulatedSqlException : DbException
     /// <c>SqlException</c>-shaped surface.
     /// </summary>
     internal bool TerminatesBatch { get; private init; }
+
+    /// <summary>
+    /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
+    /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
+    /// its own dispatch frame's catch boundary; as it propagates outward each
+    /// enclosing frame must leave the already-resolved line / procedure alone.
+    /// </summary>
+    private bool diagnosticsResolved;
+
+    /// <summary>
+    /// Pre-stamps a known line / procedure and marks this exception resolved so
+    /// the enclosing dispatch frame's <see cref="ResolveDiagnostics"/> leaves
+    /// it untouched. Used by the <c>THROW;</c> re-raise, which carries the
+    /// original error's captured line rather than the re-raising statement's.
+    /// </summary>
+    internal void PreserveDiagnostics(int line, string? procedure)
+    {
+        this.diagnosticsResolved = true;
+        foreach (var error in this.Errors)
+        {
+            error.LineNumber = line;
+            if (procedure is { Length: > 0 } && error.Procedure.Length == 0)
+                error.Procedure = procedure;
+        }
+    }
+
+    /// <summary>
+    /// Stamps the batch-relative line, server, and enclosing-procedure context
+    /// onto this exception's <see cref="Errors"/> the first time an enclosing
+    /// dispatch frame catches it — the ambient-capture point the static error
+    /// factories can't reach. Runs once (subsequent enclosing frames no-op via
+    /// <see cref="diagnosticsResolved"/>), so the innermost frame — where the
+    /// error was actually born — wins, matching SQL Server's innermost-frame
+    /// attribution for nested procedure calls (probe-confirmed).
+    /// </summary>
+    /// <param name="baseLine">
+    /// The line to attribute when an error carries none of its own: the failing
+    /// statement's start line for runtime / bind errors, or the parser's
+    /// current-token line for syntax errors (severity 15). An error that
+    /// already carries a line (a re-raised <c>THROW;</c> preserving the
+    /// original) keeps it.
+    /// </param>
+    /// <param name="lineOffset">
+    /// Newline count preceding a procedure body's start within its
+    /// <c>CREATE</c> text, added so a body error reports the line relative to
+    /// the whole definition (probe-confirmed). Zero for top-level and
+    /// dynamic-SQL batches.
+    /// </param>
+    /// <param name="procedure">
+    /// Schema-qualified name of the enclosing procedure body, or empty for
+    /// top-level / dynamic-SQL batches.
+    /// </param>
+    internal void ResolveDiagnostics(int baseLine, int lineOffset, string procedure)
+    {
+        if (this.diagnosticsResolved)
+            return;
+        this.diagnosticsResolved = true;
+        foreach (var error in this.Errors)
+        {
+            error.LineNumber = (error.LineNumber == 0 ? baseLine : error.LineNumber) + lineOffset;
+            if (procedure.Length != 0 && error.Procedure.Length == 0)
+                error.Procedure = procedure;
+        }
+    }
 
     /// <summary>
     /// Aggregates the errors gathered while draining a batch to completion

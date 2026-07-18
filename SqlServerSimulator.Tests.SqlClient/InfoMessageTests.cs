@@ -52,6 +52,31 @@ public sealed class InfoMessageTests
         Contains("warn", messages);
     }
 
+    [TestMethod]
+    public async Task Print_InfoToken_CarriesBatchRelativeLineNumber()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var lines = new List<int>();
+        connection.InfoMessage += (_, e) =>
+        {
+            foreach (SqlError error in e.Errors)
+                lines.Add(error.LineNumber);
+        };
+
+        await using var command = new SqlCommand("select 1\nprint 'hello'", connection);
+        await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            while (await reader.NextResultAsync(TestContext.CancellationToken))
+            {
+            }
+        }
+
+        // PRINT is the batch's second line; the INFO token carries that line.
+        AreEqual(2, lines.Single());
+    }
+
     // The go-sqlcmd shakedown (2026-07-14) exposed a token-stream desync when
     // an INFO token shares a SQLBatch response with a result set: SqlClient
     // hung until command timeout on every mixed shape below (go-mssqldb

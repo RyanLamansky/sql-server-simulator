@@ -8,6 +8,27 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// Counts newline characters in <paramref name="text"/> over the
+    /// half-open range <c>[<paramref name="start"/>, <paramref name="end"/>)</c>
+    /// — the number of lines a body's start sits below its enclosing
+    /// <c>CREATE</c> statement's first line, which
+    /// <see cref="Schemas.Procedure.BodyLineOffset"/> adds to body error lines.
+    /// CR is folded into its following LF (CRLF and LF count identically),
+    /// matching <see cref="Parser.Token.LineNumber"/>.
+    /// </summary>
+    private static int CountNewlines(string text, int start, int end)
+    {
+        var count = 0;
+        for (var i = start; i < end; i++)
+        {
+            if (text[i] == '\n')
+                count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// Parses <c>CREATE [OR ALTER] PROCEDURE schema.name [(@p1 type [=
     /// default] [OUTPUT], ...)] [WITH options] AS body</c>. The body source
     /// is captured between the <c>AS</c> keyword (exclusive) and the
@@ -146,13 +167,17 @@ partial class Simulation
         // ALTER preserves the existing object_id (probe-confirmed). CREATE
         // and CREATE OR ALTER (on a missing name) allocate a fresh id.
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
+
+        // Newlines before the body start, so per-call body errors report a
+        // line relative to the whole CREATE statement (probe-confirmed).
         var procedure = new Procedure(
             schema,
             procName.Leaf,
             objectId,
             [.. parameters],
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow)
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
+            bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
         };

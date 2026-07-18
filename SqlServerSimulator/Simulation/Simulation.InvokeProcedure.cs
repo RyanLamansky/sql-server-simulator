@@ -175,7 +175,14 @@ partial class Simulation
             bodyCommand.CommandText = procedure.BodyText;
 #pragma warning restore CA2100
 
-            innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables);
+            innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
+            {
+                // Body errors report a line relative to the whole CREATE
+                // statement and carry the schema-qualified procedure name,
+                // matching real SqlClient (probe-confirmed).
+                LineOffset = procedure.BodyLineOffset,
+                ErrorProcedureName = $"{procedure.Schema.Name}.{procedure.Name}",
+            };
             // Seed cursor parameters as unallocated cursor variables in the
             // child frame; the body SETs and OPENs a cursor on each.
             foreach (var param in procedure.Parameters)

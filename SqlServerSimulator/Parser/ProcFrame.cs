@@ -29,11 +29,11 @@ internal sealed class ProcFrame(string procedureName, bool isDynamicSql = false)
     public readonly bool IsDynamicSql = isDynamicSql;
 
     /// <summary>
-    /// Procedure being executed — surfaces in <c>ERROR_PROCEDURE()</c> when
-    /// an exception is caught inside the body's dispatch. Not currently
-    /// threaded through <see cref="CaughtError.Procedure"/> (gap noted in
-    /// <c>docs/claude/control-flow.md</c>); kept here to enable that wire-up
-    /// without changing the frame shape later.
+    /// Procedure being executed. Procedure-body error attribution
+    /// (<c>ERROR_PROCEDURE()</c> / <see cref="SimulatedError.Procedure"/>) is
+    /// threaded through <see cref="BatchContext.ErrorProcedureName"/> — the
+    /// schema-qualified name set on the child batch at invocation — rather than
+    /// this leaf name; see <c>docs/claude/errors.md</c>.
     /// </summary>
     public readonly string ProcedureName = procedureName;
 

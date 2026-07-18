@@ -1191,6 +1191,18 @@ public sealed partial class Simulation
             }
             catch (SimulatedSqlException ex)
             {
+                // Stamp the batch-relative line / server / procedure the static
+                // factories couldn't know at throw time — the ambient-capture
+                // point. Syntax errors (severity 15) report the parser's
+                // current-token line; runtime / bind errors report the failing
+                // statement's start line. The innermost dispatch frame wins:
+                // ResolveDiagnostics no-ops on an already-resolved error as it
+                // propagates outward (matching SQL Server's innermost-frame
+                // attribution for nested calls).
+                var diagnosticLine = ex.Class == 15
+                    ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
+                    : batch.CurrentStatement.StartLine;
+                ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
                 // Class 13 = deadlock victim. Real SQL Server auto-rolls
                 // back the active transaction before propagating (probe-
                 // confirmed: @@TRANCOUNT reads 0 in the catch handler).
@@ -1298,13 +1310,16 @@ public sealed partial class Simulation
             // is what CATCH sees.
             if (!batch.ErrorSignaled)
             {
+                // The exception's diagnostics were resolved at the catch
+                // above, so ERROR_LINE() / ERROR_PROCEDURE() report the same
+                // values the exception carries (probe-confirmed parity).
                 batch.InFlightError = new CaughtError(
                     caught.Number,
                     caught.Message,
                     caught.Class,
                     caught.State,
-                    batch.CurrentStatement.StartLine,
-                    Procedure: null);
+                    caught.LineNumber,
+                    caught.Procedure.Length == 0 ? null : caught.Procedure);
                 batch.ErrorSignaled = true;
             }
             connection.LastErrorNumber = caught.Number;

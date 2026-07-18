@@ -463,8 +463,20 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <inheritdoc/>
     public override string Database => this.CurrentDatabase.Name;
 
+    /// <summary>
+    /// The fixed data-source name reported by <see cref="DataSource"/>.
+    /// Real <c>SqlException.Server</c> / <c>SqlError.Server</c> carry the
+    /// connection's data source (probe-confirmed against SQL Server 2025 —
+    /// <c>ex.Server</c> reports <c>localhost,1433</c>, the connect target, not
+    /// the server's <c>@@SERVERNAME</c>), so simulated errors stamp this value
+    /// as their <see cref="SimulatedError.Server"/>. Distinct from the TDS
+    /// ERROR-token server field, which carries the server's own name
+    /// (<c>SIMULATED</c>, matching <c>SERVERPROPERTY('ServerName')</c>).
+    /// </summary>
+    internal const string DataSourceName = "simulator";
+
     /// <inheritdoc/>
-    public override string DataSource => "simulator";
+    public override string DataSource => DataSourceName;
 
     /// <inheritdoc/>
     public override string ServerVersion => "17.0.0";

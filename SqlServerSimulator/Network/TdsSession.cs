@@ -393,13 +393,23 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         this.connection = fresh;
     }
 
+    /// <summary>
+    /// The server-name field carried by every ERROR / INFO token — the
+    /// server's own name (<c>@@SERVERNAME</c> / <c>SERVERPROPERTY('ServerName')</c>),
+    /// which a real SQL Server writes into these tokens and which token-rendering
+    /// clients (sqlcmd) display. Distinct from <see cref="SimulatedError.Server"/>
+    /// (the connection data source that SqlClient surfaces on
+    /// <c>SqlException.Server</c>); SqlClient ignores this token field.
+    /// </summary>
+    internal const string ServerName = "SIMULATED";
+
     /// <summary>Writes all queued info messages as INFO tokens; true when any were written.</summary>
     private bool FlushInfoMessages(TdsTokenWriter writer)
     {
         var any = false;
         while (this.pendingInfoMessages.TryDequeue(out var error))
         {
-            writer.WriteErrorOrInfo(Tds.TokenInfo, error.Number, error.State, error.Class, error.Message, error.Server, error.Procedure, error.LineNumber);
+            writer.WriteErrorOrInfo(Tds.TokenInfo, error.Number, error.State, error.Class, error.Message, ServerName, error.Procedure, error.LineNumber);
             any = true;
         }
 
@@ -409,7 +419,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private static void WriteErrors(TdsTokenWriter writer, SimulatedSqlException exception)
     {
         foreach (var error in exception.Errors)
-            writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, error.Server, error.Procedure, error.LineNumber);
+            writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, ServerName, error.Procedure, error.LineNumber);
     }
 
     /// <summary>Skips the ALL_HEADERS section and decodes the UCS-2 batch text.</summary>

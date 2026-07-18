@@ -98,6 +98,25 @@ public sealed class ErrorSurfaceTests
     }
 
     [TestMethod]
+    public async Task Error_CarriesBatchRelativeLineNumber()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var command = new SqlCommand("declare @x int\nset @x = 1 / 0", connection);
+            _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        });
+
+        // The failing SET is the batch's second line; the wire ERROR token
+        // carries that line and SqlClient surfaces it on LineNumber.
+        AreEqual(2, ex.LineNumber);
+        AreEqual(2, ex.Errors[0].LineNumber);
+    }
+
+    [TestMethod]
     public async Task MissingTable_Number208()
     {
         var simulation = new Simulation();

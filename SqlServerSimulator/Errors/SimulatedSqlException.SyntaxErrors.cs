@@ -288,6 +288,22 @@ partial class SimulatedSqlException
         new(message, number, 16, state) { TerminatesBatch = true };
 
     /// <summary>
+    /// The no-argument <c>THROW;</c> re-raise form, reconstructed from the
+    /// enclosing CATCH's in-flight error. Unlike the value form, real SQL
+    /// Server preserves the <em>original</em> error's line and procedure
+    /// (probe-confirmed: a <c>THROW;</c> re-raising a divide-by-zero from line
+    /// 2 still reports line 2, not the <c>THROW</c> statement's line), so this
+    /// pre-stamps them and marks the exception resolved to keep the enclosing
+    /// dispatch frame from overwriting with the <c>THROW</c> statement's line.
+    /// </summary>
+    internal static SimulatedSqlException ThrowReRaised(int number, string message, byte state, int line, string? procedure)
+    {
+        var exception = new SimulatedSqlException(message, number, 16, state) { TerminatesBatch = true };
+        exception.PreserveDiagnostics(line, procedure);
+        return exception;
+    }
+
+    /// <summary>
     /// Mimics SQL Server error 2787: a <c>RAISERROR</c> format string contains
     /// a specifier the runtime doesn't accept. Real SQL Server's RAISERROR
     /// printf-style formatter supports a fixed subset of C runtime specifiers

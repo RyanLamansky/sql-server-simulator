@@ -36,10 +36,21 @@ internal sealed class Procedure(
     int objectId,
     ProcedureParameter[] parameters,
     string bodyText,
-    DateTime createDate)
+    DateTime createDate,
+    int bodyLineOffset = 0)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public Schema Schema = schema;
+
+    /// <summary>
+    /// Number of newlines in the <c>CREATE</c> text that precede
+    /// <see cref="BodyText"/>'s start. Added to a body error's line so the
+    /// reported number is relative to the whole <c>CREATE PROCEDURE</c>
+    /// statement rather than the stored body span, matching real SQL Server
+    /// (probe-confirmed). Threaded onto the per-call child batch's
+    /// <see cref="BatchContext.LineOffset"/>.
+    /// </summary>
+    public readonly int BodyLineOffset = bodyLineOffset;
 
     public override string ObjectTypeCode => "P ";
     public override string ObjectTypeDescription => "SQL_STORED_PROCEDURE";

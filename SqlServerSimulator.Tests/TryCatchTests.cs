@@ -74,11 +74,25 @@ public sealed class TryCatchTests
         => AreEqual(1, new Simulation().ExecuteScalar(
             "begin try select cast('abc' as int) end try begin catch select error_line() end catch"));
 
-    // ERROR_LINE multi-line fidelity: line tracking is approximate (uses
-    // the dispatching statement's start-line token); some constant-folded
-    // expressions can throw at a position the dispatch wrap doesn't see, so
-    // the line surfaces as 1. Acceptable approximation today — fix needs
-    // per-error line carry-through on SimulatedSqlException.
+    /// <summary>
+    /// The failing SET is on batch line 3; ERROR_LINE() reports it, not the
+    /// TRY / batch start.
+    /// </summary>
+    [TestMethod]
+    public void ErrorLine_MultiLineBatch_ReportsFailingStatementLine()
+        => AreEqual(3, new Simulation().ExecuteScalar(
+            "declare @x int\nbegin try\nset @x = cast('abc' as int)\nend try begin catch select error_line() end catch"));
+
+    [TestMethod]
+    public void ErrorLine_MatchesExceptionLineNumber()
+    {
+        // ERROR_LINE() reports the same line the surfaced exception carries.
+        var sim = new Simulation();
+        var caught = sim.AssertSqlError("declare @x int\nset @x = cast('abc' as int)", 245);
+        AreEqual(2, caught.LineNumber);
+        AreEqual(2, sim.ExecuteScalar(
+            "declare @x int\nbegin try set @x = cast('abc' as int) end try begin catch select error_line() end catch"));
+    }
 
     [TestMethod]
     public void ErrorProcedure_OutsideProc_ReturnsNull()

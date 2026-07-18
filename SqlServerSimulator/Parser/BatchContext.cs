@@ -454,6 +454,28 @@ internal sealed class BatchContext
     public ProcFrame? ProcFrame;
 
     /// <summary>
+    /// Newline count preceding this batch's text within the definition it was
+    /// carved from — added to a body error's line so the reported number is
+    /// relative to the whole <c>CREATE</c> statement rather than the stored
+    /// body span (probe-confirmed: a procedure whose body starts on the CREATE
+    /// text's line 2 reports its errors at the CREATE-relative line). Zero for
+    /// a top-level command and for dynamic-SQL (<c>EXEC('…')</c> /
+    /// <c>sp_executesql</c>) batches, whose text the client sent verbatim.
+    /// Read by <see cref="Simulation.DispatchOneStatement"/> when stamping a
+    /// caught exception's diagnostics.
+    /// </summary>
+    public int LineOffset;
+
+    /// <summary>
+    /// Schema-qualified name of the procedure whose body this batch executes
+    /// (<c>dbo.p1</c>), stamped onto a caught exception's
+    /// <see cref="SimulatedError.Procedure"/> and thence <c>ERROR_PROCEDURE()</c>
+    /// to mirror real SqlClient (probe-confirmed). Empty for top-level and
+    /// dynamic-SQL batches, which carry no procedure attribution.
+    /// </summary>
+    public string ErrorProcedureName = "";
+
+    /// <summary>
     /// Non-null when this batch is executing a trigger body. Holds the
     /// <c>INSERTED</c> / <c>DELETED</c> pseudo-tables (materialized from
     /// the firing DML's affected rows) so the trigger body's bare-name

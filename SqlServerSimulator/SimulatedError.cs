@@ -32,8 +32,15 @@ public sealed class SimulatedError
     /// <summary>Severity level (0-10 for the informational event surface). Mirrors <c>SqlError.Class</c>.</summary>
     public byte Class { get; }
 
-    /// <summary>1-based line number of the originating statement within the batch. Mirrors <c>SqlError.LineNumber</c>.</summary>
-    public int LineNumber { get; }
+    /// <summary>
+    /// 1-based line number of the originating statement within the batch.
+    /// Mirrors <c>SqlError.LineNumber</c>. The <c>internal set</c> lets the
+    /// dispatch loop stamp the resolved line once the failing statement's
+    /// frame is known (see
+    /// <c>SimulatedSqlException.ResolveDiagnostics</c>) — the public contract
+    /// stays get-only, matching <c>SqlError</c>.
+    /// </summary>
+    public int LineNumber { get; internal set; }
 
     /// <summary>The message text. Mirrors <c>SqlError.Message</c>.</summary>
     public string Message { get; }
@@ -41,10 +48,22 @@ public sealed class SimulatedError
     /// <summary>Error number. <c>0</c> for <c>PRINT</c>; <c>50000</c> for inline-string <c>RAISERROR</c>. Mirrors <c>SqlError.Number</c>.</summary>
     public int Number { get; }
 
-    /// <summary>Name of the stored procedure or trigger generating the message, or empty string. Mirrors <c>SqlError.Procedure</c>.</summary>
-    public string Procedure { get; }
+    /// <summary>
+    /// Name of the stored procedure or trigger generating the message, or
+    /// empty string. Schema-qualified (<c>dbo.p1</c>) when an error fires
+    /// inside a procedure body, matching real SqlClient (probe-confirmed).
+    /// Mirrors <c>SqlError.Procedure</c>; the <c>internal set</c> lets the
+    /// dispatch loop stamp the enclosing procedure once known, keeping the
+    /// public contract get-only.
+    /// </summary>
+    public string Procedure { get; internal set; }
 
-    /// <summary>Name of the server (matches <see cref="SimulatedDbConnection.DataSource"/>). Mirrors <c>SqlError.Server</c>.</summary>
+    /// <summary>
+    /// Name of the server. Matches <see cref="SimulatedDbConnection.DataSource"/>,
+    /// mirroring real SqlClient — <c>SqlError.Server</c> reports the connection's
+    /// data source, not the server's <c>@@SERVERNAME</c> (probe-confirmed).
+    /// Mirrors <c>SqlError.Server</c>.
+    /// </summary>
     public string Server { get; }
 
     /// <summary>Provider identifier (<c>"SqlServerSimulator"</c>). Mirrors <c>SqlError.Source</c>.</summary>
