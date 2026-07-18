@@ -167,13 +167,82 @@ internal abstract partial class SqlType
     private static SqlType PromoteFromString(SqlType a, SqlType b) => b.Category switch
     {
         SqlTypeCategory.Approximate or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier or SqlTypeCategory.Integer => b,
-        SqlTypeCategory.String => (a, b) switch
-        {
-            (CharSqlType ca, CharSqlType cb) => ca.length >= cb.length ? a : b,
-            (NCharSqlType na, NCharSqlType nb) => na.length >= nb.length ? a : b,
-            _ => a.Precedence >= b.Precedence ? a : b,
-        },
+        SqlTypeCategory.String => PromoteStringPair(a, b),
         _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+    };
+
+    /// <summary>
+    /// Joint-envelope unification of two string operands for CASE / COALESCE /
+    /// NULLIF / IIF / set-op / comparison common-type decisions. The result
+    /// takes the <b>maximum declared width</b> of the two operands (not the
+    /// sum — that's concatenation, in <see cref="PromoteForArithmetic"/>) so a
+    /// projected column is wide enough for either arm's value: probe-confirmed
+    /// against SQL Server 2025 (<c>CASE … 'ab' … 'wxyz'</c> → <c>varchar(4)</c>,
+    /// <c>… 'ab' … N'wxyz'</c> → <c>nvarchar(4)</c>, <c>SELECT 'ab' UNION ALL
+    /// SELECT 'wxyz'</c> → <c>varchar(4)</c>). National family (nvarchar /
+    /// nchar) wins over the CP1252 family and the width stays measured in
+    /// characters across the family change; a fixed pair (char / nchar) stays
+    /// fixed, and any variable operand drops the result to the variable form.
+    /// Either operand at <see cref="MaxLengthSentinel"/> makes the result MAX.
+    /// The length-unspecified sentinel (0) contributes 0 to the max so a bare
+    /// var* operand yields to a sized partner. Operands outside the four
+    /// bounded var/fixed classes (text / ntext / sysname / xml-ish) fall back
+    /// to the precedence pick, preserving prior behavior.
+    /// </summary>
+    private static SqlType PromoteStringPair(SqlType a, SqlType b)
+    {
+        var aLen = SimpleStringLength(a);
+        var bLen = SimpleStringLength(b);
+        if (aLen is null || bLen is null)
+        {
+            return a.Precedence >= b.Precedence ? a : b;
+        }
+
+        var national = a is NVarcharSqlType or NCharSqlType || b is NVarcharSqlType or NCharSqlType;
+        var fixedLength = a is CharSqlType or NCharSqlType && b is CharSqlType or NCharSqlType;
+        var resolved = Collation.Resolve(a, b);
+        var (collation, coercibility) = resolved
+            ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
+
+        if (aLen == MaxLengthSentinel || bLen == MaxLengthSentinel)
+        {
+            return national
+                ? NVarcharSqlType.Get(MaxLengthSentinel, collation, coercibility)
+                : VarcharSqlType.Get(MaxLengthSentinel, collation, coercibility);
+        }
+
+        var max = Math.Max(aLen.Value, bLen.Value);
+        if (max == 0)
+        {
+            return national
+                ? NVarcharSqlType.Get(0, collation, coercibility)
+                : VarcharSqlType.Get(0, collation, coercibility);
+        }
+
+        var capped = Math.Min(national ? 4000 : 8000, max);
+        return (national, fixedLength) switch
+        {
+            (true, true) => NCharSqlType.Get(capped, collation, coercibility),
+            (true, false) => NVarcharSqlType.Get(capped, collation, coercibility),
+            (false, true) => CharSqlType.Get(capped, collation, coercibility),
+            (false, false) => VarcharSqlType.Get(capped, collation, coercibility),
+        };
+    }
+
+    /// <summary>
+    /// Declared width of a bounded var / fixed string operand
+    /// (<c>varchar</c> / <c>nvarchar</c> / <c>char</c> / <c>nchar</c>), for
+    /// the max-width unification in <see cref="PromoteStringPair"/>. Returns
+    /// <see langword="null"/> for LOB / sysname / any other string type so the
+    /// caller falls back to precedence.
+    /// </summary>
+    private static int? SimpleStringLength(SqlType type) => type switch
+    {
+        VarcharSqlType v => v.length,
+        NVarcharSqlType nv => nv.length,
+        CharSqlType c => c.length,
+        NCharSqlType nc => nc.length,
+        _ => null,
     };
 
     /// <summary>

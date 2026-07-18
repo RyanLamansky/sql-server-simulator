@@ -374,7 +374,7 @@ partial class SimulatedSqlException
     /// used for <c>bigint</c> overflows.
     /// </summary>
     internal static SimulatedSqlException OverflowConvertingNarrowInt(SqlType sourceType, string sourceValue, string targetTypeAlias) =>
-        new($"The conversion of the {sourceType} value '{sourceValue}' overflowed an {targetTypeAlias} column. Use a larger integer column.", 244, 16, 1);
+        new($"The conversion of the {sourceType.SqlServerName} value '{sourceValue}' overflowed an {targetTypeAlias} column. Use a larger integer column.", 244, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 248: the int-target counterpart of Msg 244.
@@ -382,7 +382,7 @@ partial class SimulatedSqlException
     /// integer column" sentence — both verified against real SQL Server.
     /// </summary>
     internal static SimulatedSqlException OverflowConvertingToInt(SqlType sourceType, string sourceValue) =>
-        new($"The conversion of the {sourceType} value '{sourceValue}' overflowed an int column.", 248, 16, 1);
+        new($"The conversion of the {sourceType.SqlServerName} value '{sourceValue}' overflowed an int column.", 248, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 242, state 3: a date/time conversion
@@ -460,7 +460,7 @@ partial class SimulatedSqlException
     /// lazily). Same Msg + same wording; only the firing point differs.
     /// </summary>
     internal static SimulatedSqlException CollateClauseRequiresString(SqlType operandType) =>
-        new($"Expression type {operandType} is invalid for COLLATE clause.", 447, 16, 1);
+        new($"Expression type {FamilyRootName(operandType)} is invalid for COLLATE clause.", 447, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 448: an explicit <c>COLLATE</c> clause names

@@ -227,7 +227,7 @@ static class Tokenizer
     {
         var start = index;
         var body = ParseQuotedBody(command, ref index, '\'');
-        var literalType = VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+        var literalType = VarcharSqlType.Get(VarcharLiteralLength(body.Length), activeCollation, Coercibility.CoercibleDefault);
         return new Literal(SqlValue.FromVarchar(literalType, body), command, start, index - start);
     }
 
@@ -245,7 +245,7 @@ static class Tokenizer
     {
         var start = index;
         var body = ParseQuotedBody(command, ref index, '"');
-        var literalType = VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+        var literalType = VarcharSqlType.Get(VarcharLiteralLength(body.Length), activeCollation, Coercibility.CoercibleDefault);
         return new Literal(SqlValue.FromVarchar(literalType, body), command, start, index - start);
     }
 
@@ -262,9 +262,30 @@ static class Tokenizer
         var start = index;
         index++; // skip the N
         var body = ParseQuotedBody(command, ref index, '\'');
-        var literalType = NVarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault);
+        var literalType = NVarcharSqlType.Get(NVarcharLiteralLength(body.Length), activeCollation, Coercibility.CoercibleDefault);
         return new Literal(SqlValue.FromNVarchar(literalType, body), command, start, index - start);
     }
+
+    /// <summary>
+    /// Result length for a <c>varchar</c> / hex literal of
+    /// <paramref name="valueUnits"/> characters or bytes: SQL Server types a
+    /// literal at its exact value width (probe-confirmed: <c>'abc'</c> →
+    /// <c>varchar(3)</c>, trailing spaces counted), with an empty literal
+    /// floored to width 1 (<c>''</c> → <c>varchar(1)</c>, <c>0x</c> →
+    /// <c>varbinary(1)</c>) and anything over the 8000-byte bound widening to
+    /// <c>varchar(MAX)</c> / <c>varbinary(MAX)</c>.
+    /// </summary>
+    private static int VarcharLiteralLength(int valueUnits) =>
+        valueUnits == 0 ? 1 : valueUnits > 8000 ? SqlType.MaxLengthSentinel : valueUnits;
+
+    /// <summary>
+    /// Result length for an <c>nvarchar</c> literal of
+    /// <paramref name="codeUnits"/> UTF-16 code units: exact width, floored to
+    /// 1 for the empty literal (<c>N''</c> → <c>nvarchar(1)</c>) and widened to
+    /// <c>nvarchar(MAX)</c> past the 4000-code-unit bound.
+    /// </summary>
+    private static int NVarcharLiteralLength(int codeUnits) =>
+        codeUnits == 0 ? 1 : codeUnits > 4000 ? SqlType.MaxLengthSentinel : codeUnits;
 
     /// <summary>
     /// Scans a quote-delimited body whose opening <paramref name="quote"/> is
@@ -341,7 +362,8 @@ static class Tokenizer
             : bodyLength % 2 == 0 ? Convert.FromHexString(command.AsSpan(bodyStart, bodyLength))
             : Convert.FromHexString(string.Concat("0", command.AsSpan(bodyStart, bodyLength)));
 
-        return new Literal(SqlValue.FromVarbinary(bytes), command, start, index - start);
+        var literalType = VarbinarySqlType.Get(VarcharLiteralLength(bytes.Length));
+        return new Literal(SqlValue.FromVarbinary(literalType, bytes), command, start, index - start);
     }
 
     private static bool IsHexDigit(char c) =>

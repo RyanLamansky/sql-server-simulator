@@ -32,7 +32,7 @@ internal sealed class Replace : Expression
         var rawOld = oldValue.Run(runtime);
         var rawNew = newValue.Run(runtime);
         if (rawInput.IsNull || rawOld.IsNull || rawNew.IsNull)
-            return SqlValue.Null(StringScalars.ResolveResultType(rawInput.Type, runtime.Batch));
+            return SqlValue.Null(StringScalars.ContainerResultType(rawInput.Type, runtime.Batch));
         var i = StringScalars.CoerceToVarchar(rawInput, runtime.Batch, "replace", argumentIndex: 1);
         var o = StringScalars.CoerceToVarchar(rawOld, runtime.Batch, "replace", argumentIndex: 2);
         var n = StringScalars.CoerceToVarchar(rawNew, runtime.Batch, "replace", argumentIndex: 3);
@@ -42,11 +42,15 @@ internal sealed class Replace : Expression
         var replaced = oldString.Length == 0
             ? i.AsString
             : i.AsString.Replace(oldString, n.AsString, StringComparison.InvariantCultureIgnoreCase);
-        return SqlValue.FromString(i.Type, replaced);
+        // REPLACE can grow the input (a longer replacement per match), so the
+        // result type is the family container (varchar(8000) / nvarchar(4000))
+        // regardless of the input's declared width — probe-confirmed against
+        // SQL Server 2025 (REPLACE(varchar(3), 'a', 'XY') → varchar(8000)).
+        return SqlValue.FromString(StringScalars.ContainerResultType(i.Type, runtime.Batch), replaced);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveResultType(input.GetSqlType(batch, resolveColumnType), batch);
+        StringScalars.ContainerResultType(input.GetSqlType(batch, resolveColumnType), batch);
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
 }

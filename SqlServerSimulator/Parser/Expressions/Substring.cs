@@ -36,8 +36,9 @@ internal sealed class Substring : Expression
         var s = source.Run(runtime);
         var startValue = start.Run(runtime);
         var lengthValue = length.Run(runtime);
+        var resultType = ResolveResultType(s.Type, runtime.Batch);
         if (s.IsNull || startValue.IsNull || lengthValue.IsNull)
-            return SqlValue.Null(s.Type);
+            return SqlValue.Null(resultType);
         if (!SqlType.IsStringCategory(s.Type))
             throw SimulatedSqlException.InvalidArgumentDataType(s.Type.SqlServerName, argumentIndex: 1, "substring");
 
@@ -65,13 +66,32 @@ internal sealed class Substring : Expression
         var sliceStart = (int)effectiveStart;
         var sliceLength = (int)effectiveLength;
         if (!isSc)
-            return SqlValue.FromString(s.Type, input.Substring(sliceStart, sliceLength));
+            return SqlValue.FromString(resultType, input.Substring(sliceStart, sliceLength));
         var startCu = SupplementaryCharacters.CodepointToCodeUnit(input, sliceStart);
         var endCu = SupplementaryCharacters.CodepointToCodeUnit(input, sliceStart + sliceLength);
-        return SqlValue.FromString(s.Type, input[startCu..endCu]);
+        return SqlValue.FromString(resultType, input[startCu..endCu]);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+
+    /// <summary>
+    /// SUBSTRING preserves the input's string family; a constant length
+    /// argument tightens the projected width to <c>min(inputWidth, length)</c>
+    /// (probe-confirmed: <c>SUBSTRING(varchar(10), 2, 3)</c> → <c>varchar(3)</c>,
+    /// <c>SUBSTRING(varchar(10), 5, 20)</c> → <c>varchar(10)</c> — start does
+    /// not affect the width). A MAX / LOB input, a non-constant length, or an
+    /// unspecified input width leaves the width at the input's.
+    /// </summary>
+    private SqlType ResolveResultType(SqlType sourceType, BatchContext batch)
+    {
+        if (StringScalars.IsMaxForm(sourceType) || !SqlType.IsStringCategory(sourceType))
+            return sourceType;
+        var inputWidth = StringScalars.DeclaredWidth(sourceType);
+        return inputWidth > 0 && StringScalars.TryConstantCount(length, out var n)
+            ? StringScalars.SizedResultType(sourceType, Math.Min(inputWidth, n), batch)
+            : sourceType;
+    }
 
     internal override string DebugDisplay() => $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()}, {length.DebugDisplay()})";
 }

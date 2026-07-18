@@ -744,7 +744,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
 
 
     public bool Equals(SqlValue other) =>
-        this.Type == other.Type
+        (this.Type == other.Type || IsLengthOnlyBinaryVariance(this.Type, other.Type))
         && this.IsNull == other.IsNull
         && (this.IsNull
             || (this.Type is SqlVariantSqlType
@@ -784,6 +784,21 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     private static bool IsStringTypeRef(SqlType t) => t.Category == SqlTypeCategory.String;
 
     /// <summary>
+    /// True when two types differ only in the declared length of the same
+    /// variable- or fixed-length binary family (<c>varbinary(N)</c> vs
+    /// <c>varbinary(M)</c>, <c>binary(N)</c> vs <c>binary(M)</c>). Binary
+    /// equality / ordering compares the raw byte spans regardless of declared
+    /// length, so the type-identity guards in <see cref="Equals(SqlValue)"/> /
+    /// <see cref="CompareTo(SqlValue)"/> admit these pairs — needed since two
+    /// binary literals now carry their exact value width (<c>0x01</c> →
+    /// <c>varbinary(1)</c>, <c>0x0100</c> → <c>varbinary(2)</c>) and
+    /// <c>varbinary</c> coercion doesn't pin the target length.
+    /// </summary>
+    private static bool IsLengthOnlyBinaryVariance(SqlType a, SqlType b) =>
+        (a is VarbinarySqlType && b is VarbinarySqlType)
+            || (a is BinarySqlType && b is BinarySqlType);
+
+    /// <summary>
     /// Strips trailing ASCII spaces, modeling SQL Server's ANSI padding for
     /// <c>=</c>/<c>&lt;&gt;</c>/<c>ORDER BY</c> on varchar/nvarchar — only
     /// space (U+0020) is trimmed; other whitespace is significant.
@@ -812,7 +827,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public int CompareTo(SqlValue other) =>
         this.IsNull || other.IsNull
             ? throw new InvalidOperationException("CompareTo on NULL is undefined; check IsNull before calling.")
-            : this.Type != other.Type
+            : this.Type != other.Type && !IsLengthOnlyBinaryVariance(this.Type, other.Type)
             ? throw new NotSupportedException($"Cross-type comparison isn't implemented: {this.Type} vs {other.Type}.")
             : this.Type.Category switch
             {

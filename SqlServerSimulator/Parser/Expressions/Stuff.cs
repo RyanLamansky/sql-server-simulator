@@ -44,7 +44,7 @@ internal sealed class Stuff : Expression
         // STUFF(99, 2, 1, 99) → '999', both varchar).
         var inputValue = StringScalars.CoerceToVarchar(this.input.Run(runtime), runtime.Batch, "stuff", argumentIndex: 1);
         var replacementValue = StringScalars.CoerceToVarchar(this.replacement.Run(runtime), runtime.Batch, "stuff", argumentIndex: 4);
-        var resultType = ResolveResultType(inputValue.Type, replacementValue.Type);
+        var resultType = ResolveResultType(inputValue.Type, replacementValue.Type, runtime.Batch);
 
         if (inputValue.IsNull)
             return SqlValue.Null(resultType);
@@ -80,19 +80,41 @@ internal sealed class Stuff : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         ResolveResultType(
             StringScalars.ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), batch),
-            StringScalars.ResolveResultType(this.replacement.GetSqlType(batch, resolveColumnType), batch));
+            StringScalars.ResolveResultType(this.replacement.GetSqlType(batch, resolveColumnType), batch),
+            batch);
 
     /// <summary>
-    /// Promotes input + replacement string types to the result type.
-    /// <c>nvarchar</c> dominates <c>varchar</c>; LOB-ness on either side
-    /// propagates. Both inputs are pre-promoted via
-    /// <see cref="StringScalars.ResolveResultType"/> on the call sites, so
-    /// non-string types land here as the database-collation
-    /// <see cref="SqlType.Varchar"/>; <see cref="SqlType.Promote"/> handles
-    /// the rest.
+    /// STUFF's projected width follows SQL Server's probed rule: the deletion
+    /// removes <c>min(length, inputWidth - start + 1)</c> characters from the
+    /// declared input width and the replacement adds its own width, so the
+    /// result is <c>min(cap, (inputWidth - clampedDelete) + replacementWidth)</c>
+    /// — <c>STUFF(varchar(10), 8, 5, 'XY')</c> → <c>varchar(9)</c> (only 3
+    /// characters remain to delete), <c>STUFF(varchar(10), 2, 0, 'ZZZZ')</c> →
+    /// <c>varchar(14)</c> (pure insert). The family is the <c>nvarchar</c>-wins
+    /// promotion of input + replacement, and either operand being MAX carries
+    /// MAX through. When <c>start</c> or <c>length</c> isn't a constant (or a
+    /// width is unspecified), the result falls back to the family container,
+    /// matching real's non-constant behavior.
     /// </summary>
-    private static SqlType ResolveResultType(SqlType inputType, SqlType replacementType) =>
-        SqlType.Promote(inputType, replacementType);
+    private SqlType ResolveResultType(SqlType inputType, SqlType replacementType, BatchContext batch)
+    {
+        var promoted = SqlType.Promote(inputType, replacementType);
+        if (StringScalars.IsMaxForm(inputType) || StringScalars.IsMaxForm(replacementType))
+            return promoted;
+
+        var inputWidth = StringScalars.DeclaredWidth(inputType);
+        var replacementWidth = StringScalars.DeclaredWidth(replacementType);
+        if (inputWidth <= 0 || replacementWidth <= 0
+            || !StringScalars.TryConstantCount(this.start, out var start)
+            || !StringScalars.TryConstantCount(this.length, out var deleteLength))
+        {
+            return StringScalars.ContainerResultType(promoted, batch);
+        }
+
+        var clampedDelete = Math.Min(deleteLength, Math.Max(0, inputWidth - start + 1));
+        var width = Math.Max(0, inputWidth - clampedDelete) + replacementWidth;
+        return StringScalars.SizedResultType(promoted, width, batch);
+    }
 
     internal override string DebugDisplay() =>
         $"STUFF({this.input.DebugDisplay()}, {this.start.DebugDisplay()}, {this.length.DebugDisplay()}, {this.replacement.DebugDisplay()})";

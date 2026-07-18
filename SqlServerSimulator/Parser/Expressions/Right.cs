@@ -25,8 +25,9 @@ internal sealed class Right : Expression
         var rawSource = source.Run(runtime);
         var n = count.Run(runtime);
         if (rawSource.IsNull || n.IsNull)
-            return SqlValue.Null(StringScalars.ResolveResultType(rawSource.Type, runtime.Batch));
+            return SqlValue.Null(ResolveResultType(rawSource.Type, runtime.Batch));
         var s = StringScalars.CoerceToVarchar(rawSource, runtime.Batch, "right");
+        var resultType = ResolveResultType(s.Type, runtime.Batch);
 
         var len = StringScalars.CoerceLengthArgument(n);
         if (len < 0)
@@ -36,11 +37,28 @@ internal sealed class Right : Expression
         var result = s.Type.Collation?.IsSupplementaryCharacterAware == true
             ? SupplementaryCharacters.RightByCodepoints(input, len)
             : len >= input.Length ? input : input[(input.Length - len)..];
-        return SqlValue.FromString(s.Type, result);
+        return SqlValue.FromString(resultType, result);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+        ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+
+    /// <summary>
+    /// RIGHT preserves the input's string family; a constant count tightens the
+    /// projected width to <c>min(inputWidth, count)</c> (probe-confirmed,
+    /// mirroring <see cref="Left"/>). A MAX / LOB input, a non-constant count,
+    /// or an unspecified input width leaves the width at the input's.
+    /// </summary>
+    private SqlType ResolveResultType(SqlType sourceType, BatchContext batch)
+    {
+        var stringType = StringScalars.ResolveResultType(sourceType, batch);
+        if (StringScalars.IsMaxForm(stringType))
+            return stringType;
+        var inputWidth = StringScalars.DeclaredWidth(stringType);
+        return inputWidth > 0 && StringScalars.TryConstantCount(count, out var n)
+            ? StringScalars.SizedResultType(stringType, Math.Min(inputWidth, n), batch)
+            : stringType;
+    }
 
     internal override string DebugDisplay() => $"RIGHT({source.DebugDisplay()}, {count.DebugDisplay()})";
 }

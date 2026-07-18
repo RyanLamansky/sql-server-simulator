@@ -73,12 +73,25 @@ internal sealed class Replicate : Expression
         ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), batch);
 
     /// <summary>
-    /// Non-string input projects as <c>varchar</c> in the active database's
-    /// collation (matches the runtime coerce + real-server probe). String
-    /// input preserves its declared family.
+    /// Result width mirrors SQL Server's probed rule: a <c>varchar(MAX)</c> /
+    /// <c>nvarchar(MAX)</c> input carries MAX through (unbounded); a bounded
+    /// input with a constant count projects as the family-capped product
+    /// <c>min(8000/4000, inputWidth × count)</c> (<c>REPLICATE(varchar(5), 3)</c>
+    /// → <c>varchar(15)</c>); a non-constant count — or an input whose width is
+    /// unspecified — falls back to the family container (<c>varchar(8000)</c> /
+    /// <c>nvarchar(4000)</c>), matching real's non-constant behavior. Non-string
+    /// input projects as <c>varchar</c> in the active database collation.
     /// </summary>
-    private static SqlType ResolveResultType(SqlType inputType, BatchContext batch) =>
-        StringScalars.ResolveResultType(inputType, batch);
+    private SqlType ResolveResultType(SqlType inputType, BatchContext batch)
+    {
+        var stringType = StringScalars.ResolveResultType(inputType, batch);
+        if (IsMaxForm(stringType))
+            return stringType;
+        var inputWidth = StringScalars.DeclaredWidth(stringType);
+        return inputWidth > 0 && StringScalars.TryConstantCount(this.count, out var times)
+            ? StringScalars.SizedResultType(stringType, (int)Math.Min((long)inputWidth * times, StringScalars.FamilyCap(stringType)), batch)
+            : StringScalars.ContainerResultType(stringType, batch);
+    }
 
     /// <summary>
     /// A string value is MAX-form when its declared type is a LOB
