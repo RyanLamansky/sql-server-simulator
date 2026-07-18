@@ -4,13 +4,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal abstract class TwoSidedExpression : Expression
 {
-    private Expression left, right;
-
-    private protected TwoSidedExpression(Expression left, ParserContext context)
-    {
-        this.left = left;
-        this.right = Parse(context.MoveNextRequiredReturnSelf());
-    }
+    // `left` is re-homed by SinkUnaryPrefixToLeftmostLeaf (unary `~`); `right`
+    // is set once at construction.
+    private Expression left;
+    private readonly Expression right;
 
     private protected TwoSidedExpression(Expression left, Expression right)
     {
@@ -38,32 +35,14 @@ internal abstract class TwoSidedExpression : Expression
         _ => throw new ArgumentException($"'{op}' isn't a compound-assignment arithmetic operator.", nameof(op)),
     };
 
-    public TwoSidedExpression AdjustForPrecedence()
-    {
-        if (this.right is not TwoSidedExpression rightTwo || rightTwo.Precedence < this.Precedence)
-            return this;
-
-        // Left-rotate so this operator drops below rightTwo's equal-or-looser-
-        // binding one. The rotated-down node (this, now holding the old
-        // rightTwo.left as its right operand) can itself still be mis-grouped when
-        // that operand is another operator chain, so re-adjust it: a single
-        // rotation only fixes the top of a 3+-term right-leaning parse, leaving
-        // e.g. `100*a + 10*b + c` as `(100 * (a + 10*b)) + c` without this step.
-        (rightTwo.left, this.right) = (this, rightTwo.left);
-        rightTwo.left = this.AdjustForPrecedence();
-        return rightTwo;
-    }
-
     /// <summary>
     /// Sinks a tightest-binding unary prefix (the <c>~</c> bitwise-NOT, the
-    /// only operator SQL Server ranks above <c>* / %</c>) that parsed around
-    /// this whole binary sub-tree down to its leftmost leaf, then returns the
-    /// sub-tree. <c>~2 * 3</c> first parses as <c>~(2 * 3)</c> because the
-    /// prefix's operand parse consumes the full following expression; because
-    /// every binary operator binds looser than <c>~</c>, the prefix must
-    /// re-home onto <c>2</c>, giving <c>(~2) * 3</c>. Mirrors the intent of
-    /// <see cref="AdjustForPrecedence"/> but re-wraps a leaf rather than
-    /// re-parenting an operator node.
+    /// only operator SQL Server ranks above <c>* / %</c>) down to this
+    /// sub-tree's leftmost leaf, then returns the sub-tree. Reached when
+    /// <c>~</c>'s operand primary is itself a binary node — a leading unary
+    /// minus, e.g. <c>~ -1</c> parses the operand as <c>0 - 1</c>, and the
+    /// <c>~</c> must re-home onto the <c>0</c> leaf rather than wrapping the
+    /// whole <c>-1</c>. Re-wraps a leaf rather than re-parenting a node.
     /// </summary>
     internal Expression SinkUnaryPrefixToLeftmostLeaf(Func<Expression, Expression> wrap)
     {
@@ -74,14 +53,68 @@ internal abstract class TwoSidedExpression : Expression
     }
 
     public sealed override SqlValue Run(RuntimeContext runtime)
-        => Run(left.Run(runtime), right.Run(runtime));
+    {
+        // Fast path — the dominant per-row shape (col op const, col op col, any
+        // depth-1 arithmetic) has a non-chain left operand: evaluate directly
+        // with no allocation, exactly as the former recursive form did.
+        if (this.left is not TwoSidedExpression)
+            return Run(this.left.Run(runtime), this.right.Run(runtime));
+
+        // Deeper left-leaning chain (a op b op c op …, the shape
+        // ParseBinaryContinuation builds): walk the spine iteratively so a long
+        // flat chain doesn't recurse once per term and stack-overflow. Only
+        // right operands recurse, and right-leaning nesting arises solely from
+        // parentheses — capped by Msg 191 — so this can't run away. Evaluation
+        // order (leftmost leaf, then each right in source order) is identical to
+        // the former recursive form.
+        var spine = new List<TwoSidedExpression>();
+        Expression node = this;
+        while (node is TwoSidedExpression twoSided)
+        {
+            spine.Add(twoSided);
+            node = twoSided.left;
+        }
+        var accumulated = node.Run(runtime);
+        for (var i = spine.Count - 1; i >= 0; i--)
+        {
+            var current = spine[i];
+            accumulated = current.Run(accumulated, current.right.Run(runtime));
+        }
+        return accumulated;
+    }
 
     protected abstract SqlValue Run(SqlValue left, SqlValue right);
 
     public sealed override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var leftType = left.GetSqlType(batch, resolveColumnType);
-        var rightType = right.GetSqlType(batch, resolveColumnType);
+        // Fast path — shallow left operand, no allocation (mirrors Run).
+        if (this.left is not TwoSidedExpression)
+            return CombineType(this.left.GetSqlType(batch, resolveColumnType), batch, resolveColumnType);
+
+        // Iterative left-spine walk, mirroring Run: fold the leftmost operand's
+        // type through each node's CombineType so a flat chain resolves its
+        // projection type without per-term recursion.
+        var spine = new List<TwoSidedExpression>();
+        Expression node = this;
+        while (node is TwoSidedExpression twoSided)
+        {
+            spine.Add(twoSided);
+            node = twoSided.left;
+        }
+        var accumulated = node.GetSqlType(batch, resolveColumnType);
+        for (var i = spine.Count - 1; i >= 0; i--)
+            accumulated = spine[i].CombineType(accumulated, batch, resolveColumnType);
+        return accumulated;
+    }
+
+    /// <summary>
+    /// Combines an already-resolved left-operand type with this node's right
+    /// operand and operator, applying the same string-concat collation
+    /// propagation the former recursive <see cref="GetSqlType"/> did per node.
+    /// </summary>
+    private SqlType CombineType(SqlType leftType, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var rightType = this.right.GetSqlType(batch, resolveColumnType);
         var result = SqlType.PromoteForArithmetic(leftType, rightType, this.Operator);
         if (result.Category == SqlTypeCategory.String
             && leftType.Category == SqlTypeCategory.String
@@ -477,9 +510,35 @@ internal abstract class TwoSidedExpression : Expression
 
     internal sealed override void VisitColumnReferences(Action<MultiPartName> visit)
     {
-        this.left.VisitColumnReferences(visit);
-        this.right.VisitColumnReferences(visit);
+        // Iterative left-spine walk (see Run) so a long flat chain doesn't
+        // recurse per term; visits the leftmost leaf then each right operand in
+        // source order, matching the former recursive traversal.
+        var spine = new List<TwoSidedExpression>();
+        Expression node = this;
+        while (node is TwoSidedExpression twoSided)
+        {
+            spine.Add(twoSided);
+            node = twoSided.left;
+        }
+        node.VisitColumnReferences(visit);
+        for (var i = spine.Count - 1; i >= 0; i--)
+            spine[i].right.VisitColumnReferences(visit);
     }
 
-    internal sealed override bool ContainsVariableReference => this.left.ContainsVariableReference || this.right.ContainsVariableReference;
+    internal sealed override bool ContainsVariableReference
+    {
+        get
+        {
+            // Iterative left-spine walk (see Run): OR across every right operand
+            // plus the leftmost leaf, avoiding per-term recursion on long chains.
+            Expression node = this;
+            while (node is TwoSidedExpression twoSided)
+            {
+                if (twoSided.right.ContainsVariableReference)
+                    return true;
+                node = twoSided.left;
+            }
+            return node.ContainsVariableReference;
+        }
+    }
 }

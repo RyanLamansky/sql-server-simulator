@@ -40,6 +40,19 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException StatementNestedTooDeeply() =>
         new("Some part of your SQL statement is nested too deeply. Rewrite the query or break it up into smaller queries.", 191, 15, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 125: <c>CASE</c> / <c>IIF</c> expressions were
+    /// lexically nested beyond ten levels. Probe-confirmed 2026-07-18: Class
+    /// 15, exact wording verbatim, and the <b>state</b> identifies the
+    /// construct being entered when the eleventh level is reached — <c>4</c>
+    /// for a searched/simple <c>CASE</c>, <c>2</c> for <c>IIF</c> (which
+    /// desugars to a searched CASE). Nesting in a <c>WHEN</c> condition
+    /// counts identically to a <c>THEN</c> / <c>ELSE</c> result, and the
+    /// count is not reset by an intervening scalar-subquery boundary.
+    /// </summary>
+    internal static SimulatedSqlException CaseExpressionsNestedTooDeeply(byte state) =>
+        new("Case expressions may only be nested to level 10.", 125, 15, state);
+
     internal static SimulatedSqlException SyntaxErrorNearKeyword(ReservedKeyword token) => new($"Incorrect syntax near the keyword '{token}'.", 156, 15, 1);
 
     /// <summary>

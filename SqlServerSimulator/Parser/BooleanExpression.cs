@@ -141,44 +141,67 @@ internal abstract class BooleanExpression
     /// </summary>
     private static BooleanExpression ParseOr(ParserContext context)
     {
-        var result = ParseAnd(context);
+        var first = ParseAnd(context);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Or })
+            return first;
+        // Collect the whole OR chain into one n-ary node so a flat
+        // `p1 OR p2 OR … OR pN` predicate of any length evaluates in a loop
+        // rather than recursing per term (the shape that stack-overflowed a
+        // long WHERE chain at Run time).
+        var operands = new List<BooleanExpression> { first };
         while (context.Token is ReservedKeyword { Keyword: Keyword.Or })
         {
             context.MoveNextRequired();
-            result = new OrExpression(result, ParseAnd(context));
+            operands.Add(ParseAnd(context));
         }
-        return result;
+        return new OrExpression([.. operands]);
     }
 
     /// <summary>
     /// Mid-precedence level: zero or more <c>AND</c>-separated
-    /// <see cref="ParseNot"/> chains.
+    /// <see cref="ParseNot"/> chains, collected into one n-ary node.
     /// </summary>
     private static BooleanExpression ParseAnd(ParserContext context)
     {
-        var result = ParseNot(context);
+        var first = ParseNot(context);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
+            return first;
+        var operands = new List<BooleanExpression> { first };
         while (context.Token is ReservedKeyword { Keyword: Keyword.And })
         {
             context.MoveNextRequired();
-            result = new AndExpression(result, ParseNot(context));
+            operands.Add(ParseNot(context));
         }
-        return result;
+        return new AndExpression([.. operands]);
     }
 
     /// <summary>
     /// Highest-precedence boolean combinator: a sequence of <c>NOT</c>
     /// prefixes wrapping a single atom. Stacking is allowed
     /// (<c>NOT NOT predicate</c>) — each layer adds a
-    /// <see cref="NotExpression"/>.
+    /// <see cref="NotExpression"/>. This is the only per-term-recursive parse
+    /// path in the boolean grammar (the AND / OR chains loop), and boolean
+    /// parenthesization re-enters it once per level, so the stack probe here
+    /// bounds both NOT-stacking and paren-nesting to a graceful Msg 8631
+    /// instead of a fatal overflow.
     /// </summary>
     private static BooleanExpression ParseNot(ParserContext context)
     {
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
+        Expression.EnsureParseStack();
+        // Collapse a run of NOT prefixes: three-valued NOT is an involution
+        // (NOT NOT p ≡ p for true / false / UNKNOWN alike), so an even count
+        // is the identity and an odd count is a single negation. Counting in a
+        // loop — rather than recursing per NOT — keeps `NOT NOT … p` of any
+        // length from building a deep NotExpression spine that would overflow
+        // at Run time.
+        var negations = 0;
+        while (context.Token is ReservedKeyword { Keyword: Keyword.Not })
         {
+            negations++;
             context.MoveNextRequired();
-            return new NotExpression(ParseNot(context));
         }
-        return ParseAtom(context);
+        var atom = ParseAtom(context);
+        return negations % 2 == 1 ? new NotExpression(atom) : atom;
     }
 
     /// <summary>
@@ -610,7 +633,7 @@ internal abstract class BooleanExpression
     /// re-splits cleanly through <see cref="CollectConjuncts"/>, so the join
     /// planner recovers the individual key equalities.
     /// </summary>
-    internal static BooleanExpression And(BooleanExpression left, BooleanExpression right) => new AndExpression(left, right);
+    internal static BooleanExpression And(BooleanExpression left, BooleanExpression right) => new AndExpression([left, right]);
 
     /// <summary>
     /// Flattens a top-level <c>OR</c> chain into its individual disjunct terms,
@@ -684,111 +707,119 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
-    /// Three-valued <c>AND</c>: <c>false AND x = false</c> regardless of
-    /// <c>x</c>; <c>true AND x = x</c>; <c>NULL AND NULL = NULL</c>. Short-
-    /// circuits when the left side is <c>false</c> — the right side isn't
-    /// evaluated. SQL Server doesn't guarantee evaluation order, but it
-    /// permits short-circuit; the simulator commits to it for predictability.
+    /// Three-valued <c>AND</c> over an n-ary operand list (a whole flat
+    /// <c>p1 AND p2 AND … AND pN</c> chain collapses to one node, so
+    /// evaluation loops instead of recursing per term): <c>false AND x =
+    /// false</c> regardless of <c>x</c>; <c>true AND x = x</c>; <c>NULL AND
+    /// NULL = NULL</c>. Short-circuits on the first <c>false</c> operand —
+    /// later operands aren't evaluated. SQL Server doesn't guarantee
+    /// evaluation order, but it permits short-circuit; the simulator commits
+    /// to it (left-to-right) for predictability.
     /// </summary>
-    private sealed class AndExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
+    private sealed class AndExpression(BooleanExpression[] operands) : BooleanExpression
     {
         public override bool? Run(RuntimeContext runtime)
         {
-            var l = left.Run(runtime);
-            if (l == false)
-                return false;
-            var r = right.Run(runtime);
-            return r == false
-                ? false
-                : l == true && r == true ? true : null;
+            var result = (bool?)true;
+            foreach (var operand in operands)
+            {
+                var value = operand.Run(runtime);
+                if (value == false)
+                    return false;
+                result = result == true && value == true ? true : null;
+            }
+            return result;
         }
 
-        internal override string DebugDisplay() => $"{left.DebugDisplay()} AND {right.DebugDisplay()}";
+        internal override string DebugDisplay() => string.Join(" AND ", operands.Select(o => o.DebugDisplay()));
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
-            left.VisitOperandExpressions(visitor);
-            right.VisitOperandExpressions(visitor);
+            foreach (var operand in operands)
+                operand.VisitOperandExpressions(visitor);
         }
 
         internal override void CollectConjuncts(List<BooleanExpression> sink)
         {
-            left.CollectConjuncts(sink);
-            right.CollectConjuncts(sink);
+            foreach (var operand in operands)
+                operand.CollectConjuncts(sink);
         }
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
-            if (!left.TryAppendFilterDefinition(sb, batch))
-                return false;
-            _ = sb.Append(" AND ");
-            return right.TryAppendFilterDefinition(sb, batch);
+            for (var i = 0; i < operands.Length; i++)
+            {
+                if (i > 0)
+                    _ = sb.Append(" AND ");
+                if (!operands[i].TryAppendFilterDefinition(sb, batch))
+                    return false;
+            }
+            return true;
         }
     }
 
     /// <summary>
-    /// Three-valued <c>OR</c>: <c>true OR x = true</c> regardless of
-    /// <c>x</c>; <c>false OR x = x</c>; <c>NULL OR NULL = NULL</c>. Short-
-    /// circuits when the left side is <c>true</c>.
+    /// Three-valued <c>OR</c> over an n-ary operand list (see
+    /// <see cref="AndExpression"/> for why the chain is flattened): <c>true OR
+    /// x = true</c> regardless of <c>x</c>; <c>false OR x = x</c>; <c>NULL OR
+    /// NULL = NULL</c>. Short-circuits on the first <c>true</c> operand.
     /// </summary>
-    private sealed class OrExpression(BooleanExpression left, BooleanExpression right) : BooleanExpression
+    private sealed class OrExpression(BooleanExpression[] operands) : BooleanExpression
     {
         public override bool? Run(RuntimeContext runtime)
         {
-            var l = left.Run(runtime);
-            if (l == true)
-                return true;
-            var r = right.Run(runtime);
-            return r == true
-                ? true
-                : l == false && r == false ? false : null;
+            var result = (bool?)false;
+            foreach (var operand in operands)
+            {
+                var value = operand.Run(runtime);
+                if (value == true)
+                    return true;
+                result = result == false && value == false ? false : null;
+            }
+            return result;
         }
 
-        internal override string DebugDisplay() => $"{left.DebugDisplay()} OR {right.DebugDisplay()}";
+        internal override string DebugDisplay() => string.Join(" OR ", operands.Select(o => o.DebugDisplay()));
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
-            left.VisitOperandExpressions(visitor);
-            right.VisitOperandExpressions(visitor);
+            foreach (var operand in operands)
+                operand.VisitOperandExpressions(visitor);
         }
 
         internal override void CollectDisjuncts(List<BooleanExpression> sink)
         {
-            left.CollectDisjuncts(sink);
-            right.CollectDisjuncts(sink);
+            foreach (var operand in operands)
+                operand.CollectDisjuncts(sink);
         }
 
-        // Flatten the OR-tree (any nesting depth) into leaf equality pairs.
-        // Succeeds only when EVERY leaf is itself an equality family — a single
-        // equality compare (one pair), a nested OR-tree (recursed via the
-        // virtual on the child), or an IN list (multiple pairs against a
-        // common LHS). One non-equality leaf aborts the whole walk so the
-        // predicate falls back to scan.
+        // Flatten the OR chain into leaf equality pairs. Succeeds only when
+        // EVERY operand is itself an equality family — a single equality
+        // compare (one pair), a nested OR node (recursed via the virtual on
+        // the child), or an IN list (multiple pairs against a common LHS). One
+        // non-equality operand aborts the whole walk so the predicate falls
+        // back to scan.
         internal override bool TryGetEqualityFamily([NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
         {
             var sink = new List<(Expression Left, Expression Right)>();
-            if (TryAppend(left, sink) && TryAppend(right, sink))
+            foreach (var operand in operands)
             {
-                pairs = sink;
-                return true;
+                if (operand.TryGetEqualityOperands(out var le, out var re))
+                {
+                    sink.Add((le, re));
+                }
+                else if (operand.TryGetEqualityFamily(out var nested))
+                {
+                    sink.AddRange(nested);
+                }
+                else
+                {
+                    pairs = null;
+                    return false;
+                }
             }
-            pairs = null;
-            return false;
-        }
-
-        private static bool TryAppend(BooleanExpression node, List<(Expression Left, Expression Right)> sink)
-        {
-            if (node.TryGetEqualityOperands(out var le, out var re))
-            {
-                sink.Add((le, re));
-                return true;
-            }
-            if (node.TryGetEqualityFamily(out var nested))
-            {
-                sink.AddRange(nested);
-                return true;
-            }
-            return false;
+            pairs = sink;
+            return true;
         }
     }
 

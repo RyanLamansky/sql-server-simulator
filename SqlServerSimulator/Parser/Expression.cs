@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -23,13 +24,6 @@ internal abstract class Expression
     public virtual string Name => string.Empty;
 
     /// <summary>
-    /// The relative precedence of an expression.
-    /// When two are in scope, the higher one runs first, otherwise they run left-to-right.
-    /// </summary>
-    /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/language-elements/operator-precedence-transact-sql</remarks>
-    public virtual byte Precedence => 0;
-
-    /// <summary>
     /// Converts the tokens from a command into a single expression. Follows
     /// the lookahead contract documented on <see cref="ParserContext"/>: on
     /// return, <see cref="ParserContext.Token"/> is the first token not
@@ -41,126 +35,185 @@ internal abstract class Expression
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
     public static Expression Parse(ParserContext context)
     {
-        // Stack-probe guard: expression parsing recurses per operator /
-        // nesting level (TwoSidedExpression's parsing ctor re-enters Parse
-        // for its right side), and a .NET stack overflow is uncatchable and
+        // Stack-probe guard: a .NET stack overflow is uncatchable and
         // process-fatal — unacceptable for an in-process library fed a
         // pathological query. Real SQL Server's Msg 8631 is likewise a
         // genuine stack probe (threshold varies with its thread stack), so
         // deferring to the runtime's own remaining-stack check is the
-        // faithful shape. Every recursive parse path (boolean chains, CASE,
-        // function arguments, subquery projections) passes through here at
-        // least once per nesting level, so this single site bounds them all.
+        // faithful shape. Every recursive parse path (nested parens, function
+        // arguments, subquery projections, unary-operator stacks) passes
+        // through here at least once per nesting level, so this single site
+        // bounds them all. Left-associative binary-operator chains, by
+        // contrast, parse iteratively (see ParseBinaryContinuation) so a flat
+        // `a + b + c + …` chain of arbitrary length no longer recurses per
+        // term — matching real SQL Server's tolerance of thousands of terms.
+        EnsureParseStack();
+        var primary = ParsePrimary(context);
+        return ParseBinaryContinuation(primary, minTightness: 1, context);
+    }
+
+    /// <summary>
+    /// Converts the runtime's remaining-stack check into Msg 8631, isolated in
+    /// its own non-inlined frame so the <c>try/catch</c> doesn't inflate the
+    /// hot recursive <see cref="Parse"/> frame (deep function / paren nesting
+    /// is stack-bound, so every byte on the recursive frame lowers the depth
+    /// the simulator tolerates before this guard fires).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static void EnsureParseStack()
+    {
         try
         {
-            System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+            RuntimeHelpers.EnsureSufficientExecutionStack();
         }
         catch (InsufficientExecutionStackException)
         {
             throw SimulatedSqlException.ServerStackLimitReached();
         }
+    }
 
-        Expression expression;
-        switch (context.Token)
-        {
-            // Unary +/- delegate to a recursive Parse on the next token. That
-            // recursive call already runs the binary-operator lookahead loop
-            // and leaves context.Token at the first token NOT consumed by the
-            // operand. Returning here (instead of falling into the outer
-            // while loop) avoids a second GetNextOptional that would silently
-            // swallow the surrounding context's terminator (e.g. the `as` in
-            // CAST, the `from` in SELECT). AdjustForPrecedence on the outer
-            // unary `Subtract` still correctly rebalances `-1 + 2`-style
-            // continuations because the right side carries its operator tree.
-            case Operator { Character: '+' }:
-                return Expression.Parse(context.MoveNextRequiredReturnSelf());
-            case Operator { Character: '-' }:
-                return new Subtract(new Value(Storage.SqlValue.FromInt32(0)), context).AdjustForPrecedence();
-            // Unary ~ (bitwise NOT) is SQL Server's highest-precedence
-            // operator, so — like unary minus — it early-returns rather than
-            // falling into the binary loop (preserving the surrounding
-            // terminator). The recursive Parse consumes the full following
-            // chain; BitwiseNot.Create re-homes the prefix onto the chain's
-            // leftmost leaf so `~2 * 3` binds as `(~2) * 3`.
-            case Operator { Character: '~' }:
-                return BitwiseNot.Create(Expression.Parse(context.MoveNextRequiredReturnSelf()));
-        }
+    /// <summary>
+    /// The binding tightness of a left-associative binary operator: <c>* / %</c>
+    /// bind tighter (2) than <c>+ - &amp; | ^</c> (1); every other token is a
+    /// non-operator terminator (0). This is SQL Server's arithmetic/bitwise
+    /// operator precedence (multiplicative above additive), the sole distinction
+    /// the precedence-climbing loop needs.
+    /// </summary>
+    private static int BinaryTightness(Token? token) => token switch
+    {
+        Operator { Character: '*' or '/' or '%' } => 2,
+        Operator { Character: '+' or '-' or '&' or '|' or '^' } => 1,
+        _ => 0,
+    };
 
-        expression = context.Token switch
+    /// <summary>
+    /// Iterative precedence-climbing over the left-associative binary
+    /// operators (<c>+ - * / % &amp; | ^</c>). Consumes operators whose
+    /// tightness is at least <paramref name="minTightness"/>, parsing each
+    /// right operand as a primary and folding in any strictly-tighter
+    /// following operators via a bounded recursion (depth ≤ the number of
+    /// precedence levels, i.e. 2). A flat same-precedence chain stays in the
+    /// loop, so <c>1 + 1 + … + 1</c> of any length builds a left-leaning tree
+    /// with no per-term parse recursion — the structural fix that lets flat
+    /// chains reach real SQL Server's thousands-of-terms tolerance instead of
+    /// tripping the stack probe. On entry <see cref="ParserContext.Token"/> is
+    /// already positioned on the first operator (or terminator); on return it
+    /// is on the first token not part of the chain.
+    /// </summary>
+    private static Expression ParseBinaryContinuation(Expression left, int minTightness, ParserContext context)
+    {
+        var tightness = BinaryTightness(context.Token);
+        while (tightness >= minTightness && tightness > 0)
         {
-            Numeric number => new Value(number.Value),
-            Literal literal => new Value(literal.Value),
-            AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
-            DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
+            var op = ((Operator)context.Token!).Character;
+            var opTightness = tightness;
+            var right = ParsePrimary(context.MoveNextRequiredReturnSelf());
+            var nextTightness = BinaryTightness(context.Token);
+            while (nextTightness > opTightness)
             {
-                AtAtKeyword.Error => new LastErrorExpression(),
-                AtAtKeyword.Identity => new LastIdentityExpression(),
-                AtAtKeyword.TranCount => new TranCountExpression(context),
-                AtAtKeyword.RowCount => new RowCountExpression(),
-                AtAtKeyword.LockTimeout => new LockTimeoutExpression(context),
-                AtAtKeyword.SpId => new SpidExpression(context),
-                AtAtKeyword.NestLevel => new NestLevelExpression(),
-                AtAtKeyword.Dbts => new DbTsExpression(),
-                AtAtKeyword.ProcId => new ProcIdExpression(),
-                AtAtKeyword.FetchStatus => new FetchStatusExpression(),
-                AtAtKeyword.CursorRows => new CursorRowsExpression(),
-                AtAtKeyword.Options => Value.FromAtAtOptions(context),
-                _ => new Value(doubleAtPrefixedString),
-            },
-            ReservedKeyword { Keyword: Keyword.Null } => new Value(),
-            ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
-            // CURRENT_TIMESTAMP is a parens-less function in SQL Server's
-            // grammar — it sits in the reserved-keyword space but never takes
-            // an argument list. CURRENT_TIMESTAMP() with parens raises Msg 102
-            // in SQL Server (probe-confirmed 2026-05-09); the simulator
-            // inherits the same Msg-102 path from the surrounding parser
-            // catching the unexpected `(`.
-            ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp),
-            ReservedKeyword { Keyword: Keyword.Current_Date } => new CurrentTimeFunction(CurrentTimeKind.CurrentDate),
-            ReservedKeyword { Keyword: Keyword.Current_User } => new CurrentPrincipalKeyword("CURRENT_USER"),
-            ReservedKeyword { Keyword: Keyword.Session_User } => new CurrentPrincipalKeyword("SESSION_USER"),
-            ReservedKeyword { Keyword: Keyword.System_user } => new CurrentPrincipalKeyword("SYSTEM_USER"),
-            ReservedKeyword { Keyword: Keyword.User } => new CurrentPrincipalKeyword("USER"),
-            // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
-            // reserved keywords but dispatch as function calls when followed
-            // by '(' — the surrounding loop hands the call shape off to
-            // ResolveBuiltIn.
-            ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => new Reference(reserved.ToString()),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? new Reference(nextToken),
-            Name name => new Reference(name),
-            Operator { Character: '(' } => ParseGroupedExpression(context),
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context)
-        };
+                right = ParseBinaryContinuation(right, opTightness + 1, context);
+                nextTightness = BinaryTightness(context.Token);
+            }
+            left = TwoSidedExpression.FromCompoundOp(op, left, right);
+            tightness = BinaryTightness(context.Token);
+        }
+        return left;
+    }
 
+    /// <summary>
+    /// Parses a single primary expression: a leading atom (literal, reference,
+    /// grouped expression, CASE, function name, …) plus every postfix that
+    /// binds tighter than a binary operator (member / method access, the
+    /// <c>::</c> type-scope, a function-call argument list, <c>OVER</c>,
+    /// <c>WITHIN GROUP</c>, <c>AT TIME ZONE</c>, <c>COLLATE</c>) and any
+    /// leading unary operator (<c>+ - ~</c>). Returns with
+    /// <see cref="ParserContext.Token"/> on the first token not consumed by
+    /// the primary (a binary operator or a surrounding terminator), so the
+    /// caller's <see cref="ParseBinaryContinuation"/> reads it without a
+    /// further advance.
+    /// </summary>
+    private static Expression ParsePrimary(ParserContext context)
+    {
+        // Leading unary operators bind to the following primary (not the whole
+        // binary chain); the surrounding ParseBinaryContinuation then folds in
+        // any looser operators. `-2 + 3` therefore parses as `(0 - 2) + 3`
+        // (left-associative, value 1) rather than `0 - (2 + 3)`. Unary `~`
+        // (SQL Server's tightest operator) re-homes onto the leftmost leaf of
+        // a unary-minus operand via BitwiseNot.Create so `~ -1` stays sane.
+        return context.Token switch
+        {
+            Operator { Character: '+' } => ParsePrimary(context.MoveNextRequiredReturnSelf()),
+            Operator { Character: '-' } => new Subtract(new Value(Storage.SqlValue.FromInt32(0)), ParsePrimary(context.MoveNextRequiredReturnSelf())),
+            Operator { Character: '~' } => BitwiseNot.Create(ParsePrimary(context.MoveNextRequiredReturnSelf())),
+            _ => ParsePostfix(ParseLeadingAtom(context), context),
+        };
+    }
+
+    /// <summary>
+    /// Dispatches the leading token of a primary to its atom expression.
+    /// Extracted (and kept off the hot postfix / binary path) so its large
+    /// switch doesn't inflate the recursive frame that deep function / paren
+    /// nesting keeps live.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static Expression ParseLeadingAtom(ParserContext context) => context.Token switch
+    {
+        Numeric number => new Value(number.Value),
+        Literal literal => new Value(literal.Value),
+        AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
+        DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
+        {
+            AtAtKeyword.Error => new LastErrorExpression(),
+            AtAtKeyword.Identity => new LastIdentityExpression(),
+            AtAtKeyword.TranCount => new TranCountExpression(context),
+            AtAtKeyword.RowCount => new RowCountExpression(),
+            AtAtKeyword.LockTimeout => new LockTimeoutExpression(context),
+            AtAtKeyword.SpId => new SpidExpression(context),
+            AtAtKeyword.NestLevel => new NestLevelExpression(),
+            AtAtKeyword.Dbts => new DbTsExpression(),
+            AtAtKeyword.ProcId => new ProcIdExpression(),
+            AtAtKeyword.FetchStatus => new FetchStatusExpression(),
+            AtAtKeyword.CursorRows => new CursorRowsExpression(),
+            AtAtKeyword.Options => Value.FromAtAtOptions(context),
+            _ => new Value(doubleAtPrefixedString),
+        },
+        ReservedKeyword { Keyword: Keyword.Null } => new Value(),
+        ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
+        // CURRENT_TIMESTAMP is a parens-less function in SQL Server's
+        // grammar — it sits in the reserved-keyword space but never takes
+        // an argument list. CURRENT_TIMESTAMP() with parens raises Msg 102
+        // in SQL Server (probe-confirmed 2026-05-09); the simulator
+        // inherits the same Msg-102 path from the surrounding parser
+        // catching the unexpected `(`.
+        ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp),
+        ReservedKeyword { Keyword: Keyword.Current_Date } => new CurrentTimeFunction(CurrentTimeKind.CurrentDate),
+        ReservedKeyword { Keyword: Keyword.Current_User } => new CurrentPrincipalKeyword("CURRENT_USER"),
+        ReservedKeyword { Keyword: Keyword.Session_User } => new CurrentPrincipalKeyword("SESSION_USER"),
+        ReservedKeyword { Keyword: Keyword.System_user } => new CurrentPrincipalKeyword("SYSTEM_USER"),
+        ReservedKeyword { Keyword: Keyword.User } => new CurrentPrincipalKeyword("USER"),
+        // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
+        // reserved keywords but dispatch as function calls when followed
+        // by '(' — the postfix loop hands the call shape off to ResolveBuiltIn.
+        ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => new Reference(reserved.ToString()),
+        UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? new Reference(nextToken),
+        Name name => new Reference(name),
+        Operator { Character: '(' } => ParseGroupedExpression(context),
+        _ => throw SimulatedSqlException.SyntaxErrorNear(context)
+    };
+
+    /// <summary>
+    /// Consumes the postfix operators that bind tighter than any binary
+    /// operator onto <paramref name="expression"/>, looping until the next
+    /// token is a binary operator or a surrounding terminator (which it leaves
+    /// on <see cref="ParserContext.Token"/> for the caller). See
+    /// <see cref="ParsePrimary"/> for the full postfix set.
+    /// </summary>
+    private static Expression ParsePostfix(Expression expression, ParserContext context)
+    {
         while (true)
         {
             switch (context.GetNextOptional())
             {
-                case Operator { Character: '+' }:
-                    expression = new Add(expression, context);
-                    break;
-                case Operator { Character: '-' }:
-                    expression = new Subtract(expression, context);
-                    break;
-                case Operator { Character: '*' }:
-                    expression = new Multiply(expression, context);
-                    break;
-                case Operator { Character: '/' }:
-                    expression = new Divide(expression, context);
-                    break;
-                case Operator { Character: '%' }:
-                    expression = new Modulus(expression, context);
-                    break;
-                case Operator { Character: '&' }:
-                    expression = new BitwiseAnd(expression, context);
-                    break;
-                case Operator { Character: '|' }:
-                    expression = new BitwiseOr(expression, context);
-                    break;
-                case Operator { Character: '^' }:
-                    expression = new BitwiseExclusiveOr(expression, context);
-                    break;
-
                 case Operator { Character: '.' }:
                     {
                         var afterDot = context.GetNextRequired();
@@ -252,7 +305,7 @@ internal abstract class Expression
                         // by GetNextOptional; peek to confirm the `::` shape.
                         // When the surrounding context has set
                         // StopExpressionAtBareColon (currently JSON_OBJECT's
-                        // key parse), a single ':' rewinds and breaks out so
+                        // key parse), a single ':' rewinds and returns so
                         // the caller can consume it as a separator.
                         var beforeSecond = context.SaveCheckpoint();
                         var secondColon = context.GetNextOptional();
@@ -261,7 +314,7 @@ internal abstract class Expression
                             if (context.StopExpressionAtBareColon)
                             {
                                 context.RestoreCheckpoint(beforeSecond);
-                                break;
+                                return expression;
                             }
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         }
@@ -279,12 +332,10 @@ internal abstract class Expression
                                     : throw SimulatedSqlException.SyntaxErrorNear(context);
                         continue;
                     }
-                case Operator { Character: ')' }:
-                    break;
                 case Operator { Character: '(' }:
                     {
                         if (expression is not Reference reference)
-                            break;
+                            return expression;
 
                         context.MoveNextRequired(); // Move past (
                         // 2- and 3-part dotted names route to user-defined
@@ -298,38 +349,7 @@ internal abstract class Expression
                         // probe-confirmed real SQL Server treats a table-valued
                         // function used in scalar position as "missing scalar
                         // UDF or ambiguous" rather than a distinct error.
-                        if (reference.ReferencedName.Count >= 2)
-                        {
-                            if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
-                            {
-                                expression = systemFunction;
-                            }
-                            else if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn)
-                            {
-                                expression = UserFunctionCall.ParseCall(scalarFn, context);
-                            }
-                            else if (context.Batch.IsSkipping)
-                            {
-                                // Skip mode: real SQL Server defers user-function
-                                // binding, so an un-taken branch calling a missing
-                                // schema-qualified function compiles and is
-                                // discarded. Parse-and-discard the argument list so
-                                // the statement (and any trailing ELSE / END) parses
-                                // to completion instead of throwing Msg 4121 mid-
-                                // expression. A bare 1-part unrecognized function
-                                // still raises Msg 195 below — real SQL Server errors
-                                // on that at compile time even in a dead branch.
-                                expression = ParseDeferredCallAndDiscard(context);
-                            }
-                            else
-                            {
-                                throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName);
-                            }
-                        }
-                        else
-                        {
-                            expression = ResolveBuiltIn(reference.Name, context);
-                        }
+                        expression = ParseCallArguments(reference, context);
                         // ResolveBuiltIn / ParseCall leave context.Token at the
                         // closing ). The next loop iteration's GetNextOptional
                         // advances past it; advancing here would skip an extra token.
@@ -381,9 +401,51 @@ internal abstract class Expression
                         expression = CollateExpression.ParsePostfix(expression, context);
                         continue;
                     }
+                default:
+                    return expression;
             }
+        }
+    }
 
-            return expression is TwoSidedExpression twoSided ? twoSided.AdjustForPrecedence() : expression;
+    /// <summary>
+    /// Resolves and parses a function-call argument list once the opening
+    /// <c>(</c> of a <c>&lt;reference&gt;(</c> shape has been consumed. Charges
+    /// the shared nesting budget (a function-argument level costs the same as a
+    /// paren level; probe-confirmed 2026-07-18) so deeply nested calls raise
+    /// Msg 191 rather than driving the stack probe. On entry
+    /// <see cref="ParserContext.Token"/> is the first argument token; on return
+    /// it is the closing <c>)</c>.
+    /// </summary>
+    private static Expression ParseCallArguments(Reference reference, ParserContext context)
+    {
+        context.NestingDepth += FunctionCallNestingCost;
+        if (context.NestingDepth > MaxNestingDepth)
+            throw SimulatedSqlException.StatementNestedTooDeeply();
+        try
+        {
+            if (reference.ReferencedName.Count >= 2)
+            {
+                if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
+                    return systemFunction;
+                if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn)
+                    return UserFunctionCall.ParseCall(scalarFn, context);
+                // Skip mode: real SQL Server defers user-function binding, so
+                // an un-taken branch calling a missing schema-qualified
+                // function compiles and is discarded. Parse-and-discard the
+                // argument list so the statement (and any trailing ELSE / END)
+                // parses to completion instead of throwing Msg 4121 mid-
+                // expression. A bare 1-part unrecognized function still raises
+                // Msg 195 below — real SQL Server errors on that at compile
+                // time even in a dead branch.
+                return context.Batch.IsSkipping
+                    ? ParseDeferredCallAndDiscard(context)
+                    : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName);
+            }
+            return ResolveBuiltIn(reference.Name, context);
+        }
+        finally
+        {
+            context.NestingDepth -= FunctionCallNestingCost;
         }
     }
 
@@ -617,6 +679,40 @@ internal abstract class Expression
     internal virtual Expression? PureConversionOperand => null;
 
     /// <summary>
+    /// Maximum shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)
+    /// before Msg 191. Grouped-expression parens and function-argument levels
+    /// each cost <see cref="ParenNestingCost"/>; a scalar subquery costs
+    /// <see cref="SubqueryNestingCost"/> (probe-confirmed 2026-07-18: on real
+    /// SQL Server the three share one budget where a subquery level costs
+    /// roughly six paren levels). Real's absolute limit is higher and
+    /// stack-dependent (1015 nested parens succeed, 1016 fail; 168 nested
+    /// subqueries succeed, 169 fail) but the simulator's parse frames are
+    /// fatter — a 1 MB thread parses only ~1000 nested parens (Debug) before
+    /// <see cref="Parse"/>'s stack probe would claim the same shape as Msg 8631.
+    /// So the cap is set to 500 (paren limit 500, subquery limit ⌊500/6⌋ = 83),
+    /// which keeps the structural Msg 191 firing with ~2× headroom on the
+    /// tightest test configuration (a 1 MB Debug thread) and preserves the
+    /// probed subquery ≈ 6× paren ratio; the lower absolute numbers are a
+    /// documented divergence (see docs/claude/grammar.md). Function-call
+    /// nesting alone has fatter frames still (~76 levels on a 1 MB Debug
+    /// thread), so it reaches the stack probe (Msg 8631) before this cap —
+    /// another documented divergence from real's Msg 191.
+    /// </summary>
+    private const int MaxNestingDepth = 500;
+
+    /// <summary>Shared-budget cost of one grouped-expression paren level.</summary>
+    private const int ParenNestingCost = 1;
+
+    /// <summary>Shared-budget cost of one function-call argument-list level (same as a paren).</summary>
+    private const int FunctionCallNestingCost = 1;
+
+    /// <summary>
+    /// Shared-budget cost of one scalar-subquery level — six paren-equivalents,
+    /// fitting real SQL Server's probed 1015-paren / 168-subquery ratio.
+    /// </summary>
+    private const int SubqueryNestingCost = 6;
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar
@@ -625,27 +721,21 @@ internal abstract class Expression
     /// token immediately after <c>(</c>: a <c>SELECT</c> keyword routes to
     /// the subquery path; anything else falls through to the standard
     /// parenthesized form. Both leave the cursor on the closing <c>)</c>,
-    /// matching the lookahead contract <see cref="Parse"/>'s
-    /// binary loop expects.
+    /// matching the lookahead contract <see cref="Parse"/> expects. Each level
+    /// charges the shared nesting budget before recursing (Msg 191 on
+    /// overflow).
     /// </summary>
-    /// <summary>
-    /// Maximum <c>(</c>-nesting depth for grouped expressions before Msg 191.
-    /// Real SQL Server's structural limit is higher (1000 nested parens
-    /// succeed, 2000 fail — probe-confirmed 2026-07-15) but stack-dependent;
-    /// 512 keeps the structural error firing before <see cref="Parse"/>'s
-    /// stack probe would convert the same shape into Msg 8631 on a
-    /// default-size (1 MB) thread.
-    /// </summary>
-    private const int MaxGroupingDepth = 512;
-
     private static Expression ParseGroupedExpression(ParserContext context)
     {
-        if (++context.GroupingDepth > MaxGroupingDepth)
+        context.MoveNextRequired();
+        var isSubquery = context.Token is ReservedKeyword { Keyword: Keyword.Select };
+        var cost = isSubquery ? SubqueryNestingCost : ParenNestingCost;
+        context.NestingDepth += cost;
+        if (context.NestingDepth > MaxNestingDepth)
             throw SimulatedSqlException.StatementNestedTooDeeply();
         try
         {
-            context.MoveNextRequired();
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
+            if (isSubquery)
             {
                 var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
                 return inner.Schema.Length != 1
@@ -659,7 +749,7 @@ internal abstract class Expression
         }
         finally
         {
-            context.GroupingDepth--;
+            context.NestingDepth -= cost;
         }
     }
 

@@ -151,6 +151,24 @@ internal sealed class CaseExpression : Expression
     /// </summary>
     public static CaseExpression ParseCase(ParserContext context)
     {
+        // SQL Server caps CASE / IIF lexical nesting at ten levels (Msg 125,
+        // State 4 for CASE). The count wraps the entire CASE parse so nesting
+        // in a WHEN condition counts the same as in a THEN / ELSE result, and
+        // it persists across a scalar-subquery boundary (both probe-confirmed).
+        if (++context.CaseDepth > ParserContext.MaxCaseNestingDepth)
+            throw SimulatedSqlException.CaseExpressionsNestedTooDeeply(4);
+        try
+        {
+            return ParseCaseBody(context);
+        }
+        finally
+        {
+            context.CaseDepth--;
+        }
+    }
+
+    private static CaseExpression ParseCaseBody(ParserContext context)
+    {
         context.MoveNextRequired();
 
         Expression? input = null;

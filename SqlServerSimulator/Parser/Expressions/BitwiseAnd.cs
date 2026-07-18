@@ -2,10 +2,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal sealed class BitwiseAnd : TwoSidedExpression
 {
-    public BitwiseAnd(Expression left, ParserContext context) : base(left, context) { }
     internal BitwiseAnd(Expression left, Expression right) : base(left, right) { }
-
-    public override byte Precedence => 3;
 
     protected override Storage.SqlValue Run(Storage.SqlValue left, Storage.SqlValue right) => IntegerArithmetic(left, right, '&', static (a, b) => a & b);
 

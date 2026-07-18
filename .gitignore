@@ -12,3 +12,4 @@ obj/
 
 # Suppress temporary files that might otherwise leak into a commit.
 tmp/
+.claude/worktrees/

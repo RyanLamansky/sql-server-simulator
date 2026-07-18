@@ -12,12 +12,33 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class Iif : Expression
 {
-    private readonly BooleanExpression condition;
-    private readonly Expression trueValue;
-    private readonly Expression falseValue;
+    // Assigned in ParseBody (invoked from the ctor inside the CASE-depth
+    // try/finally), so these can't be readonly.
+    private BooleanExpression condition = null!;
+    private Expression trueValue = null!;
+    private Expression falseValue = null!;
     private SqlType? cachedResultType;
 
     public Iif(ParserContext context)
+    {
+        // IIF desugars to a searched CASE and shares its ten-level nesting cap
+        // (Msg 125), but reports State 2 rather than CASE's State 4 — the state
+        // identifies the construct being entered at the eleventh level
+        // (probe-confirmed 2026-07-18). The counter is shared with CASE via
+        // ParserContext.CaseDepth, so mixed CASE/IIF nesting accumulates.
+        if (++context.CaseDepth > ParserContext.MaxCaseNestingDepth)
+            throw SimulatedSqlException.CaseExpressionsNestedTooDeeply(2);
+        try
+        {
+            ParseBody(context);
+        }
+        finally
+        {
+            context.CaseDepth--;
+        }
+    }
+
+    private void ParseBody(ParserContext context)
     {
         this.condition = BooleanExpression.Parse(context);
         if (context.Token is not Tokens.Operator { Character: ',' })

@@ -65,14 +65,36 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool QuotedIdentifiers = command.Connection!.QuotedIdentifiers;
 
     /// <summary>
-    /// Live <c>(</c>-nesting depth inside grouped-expression parsing,
-    /// maintained by <c>Expression.ParseGroupedExpression</c> (increment on
-    /// entry, decrement in <c>finally</c>). Crossing the structural limit
-    /// raises Msg 191; the companion stack-probe guard at
-    /// <see cref="Expression.Parse"/> entry raises Msg 8631 when actual
-    /// remaining stack runs low first.
+    /// Live weighted nesting budget shared by grouped-expression parens,
+    /// scalar subqueries, and function-call argument lists — the constructs
+    /// SQL Server pools into one "nested too deeply" limit (probe-confirmed
+    /// 2026-07-18: nesting them together fails on a single shared budget, a
+    /// subquery level costing roughly six paren levels). Each construct's
+    /// parser adds its cost on entry and subtracts it in a <c>finally</c>;
+    /// crossing <c>Expression.MaxNestingDepth</c> raises Msg 191. The
+    /// companion stack-probe guard at <see cref="Expression.Parse"/> entry
+    /// raises Msg 8631 when actual remaining stack runs low first.
     /// </summary>
-    public int GroupingDepth;
+    public int NestingDepth;
+
+    /// <summary>
+    /// Live lexical nesting depth of <c>CASE</c> / <c>IIF</c> expressions,
+    /// incremented on entry and decremented in a <c>finally</c> by their
+    /// parsers. SQL Server caps this at <see cref="MaxCaseNestingDepth"/>
+    /// (Msg 125) and counts nesting in any child position — <c>WHEN</c>
+    /// condition, <c>THEN</c> / <c>ELSE</c> result — and does not reset the
+    /// count across a scalar-subquery boundary (probe-confirmed 2026-07-18),
+    /// so the counter lives on the shared context rather than resetting per
+    /// nested SELECT.
+    /// </summary>
+    public int CaseDepth;
+
+    /// <summary>
+    /// SQL Server's fixed <c>CASE</c> / <c>IIF</c> lexical-nesting cap: ten
+    /// levels succeed, an eleventh raises Msg 125 ("Case expressions may only
+    /// be nested to level 10.").
+    /// </summary>
+    public const int MaxCaseNestingDepth = 10;
 
     /// <summary>
     /// The most recently identified token in the command string.
