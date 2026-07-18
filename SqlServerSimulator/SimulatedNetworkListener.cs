@@ -106,6 +106,7 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
         finally
         {
             _ = this.sessions.TryRemove(session, out _);
+            session.Dispose();
         }
     }
 }

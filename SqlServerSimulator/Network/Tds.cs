@@ -83,6 +83,18 @@ internal static class Tds
     public const ushort ProcIdPrepExec = 13;
     public const ushort ProcIdUnprepare = 15;
 
+    // SMP (Session Multiplex Protocol, [MC-SMP]) framing — the 16-byte header
+    // wrapping every post-login TDS packet on a MARS-negotiated connection.
+    public const byte SmpSmid = 0x53;
+    public const int SmpHeaderSize = 16;
+    public const byte SmpFlagSyn = 0x01;
+    public const byte SmpFlagAck = 0x02;
+    public const byte SmpFlagFin = 0x04;
+    public const byte SmpFlagData = 0x08;
+
+    /// <summary>Receive-window size (in SMP packets) advertised for each session.</summary>
+    public const uint SmpWindow = 4;
+
     // PRELOGIN option tokens.
     public const byte PreloginVersion = 0;
     public const byte PreloginEncryption = 1;

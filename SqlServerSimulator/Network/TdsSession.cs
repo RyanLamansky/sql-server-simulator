@@ -13,16 +13,44 @@ namespace SqlServerSimulator.Network;
 /// <see cref="SimulatedDbConnection"/>. Runs as a single task; teardown is
 /// triggered by client disconnect, listener disposal, or a protocol error.
 /// </summary>
-internal sealed partial class TdsSession(Simulation simulation, Socket socket, X509Certificate2 certificate)
+internal sealed partial class TdsSession(Simulation simulation, Socket socket, X509Certificate2 certificate) : IDisposable, ISmpHost
 {
     private readonly Queue<SimulatedError> pendingInfoMessages = new();
     private SimulatedDbConnection? connection;
+
+    /// <summary>
+    /// Serializes engine execution across all SMP logical sessions on a MARS
+    /// connection: real MARS is cooperative multiplexing, never parallel
+    /// execution, and the engine assumes one executor per connection
+    /// (<c>CurrentExecutingThreadId</c>, transaction machinery). A session
+    /// acquires this before driving the engine and buffers its whole response
+    /// before releasing, so overlap happens only during the window-controlled
+    /// send, not inside the engine. Unused by non-MARS sessions.
+    /// </summary>
+    private readonly SemaphoreSlim engineExecutionGate = new(1, 1);
+
+    private SmpMultiplexer? multiplexer;
+    private int marsPacketSize = Tds.DefaultPacketSize;
 
     /// <summary>
     /// Closes the socket; the session task observes the closure at its next
     /// I/O operation and runs its normal cleanup.
     /// </summary>
     public void Abort() => socket.Dispose();
+
+    /// <summary>
+    /// Tears down the session's backing connection and the MARS machinery.
+    /// Called by the listener after <see cref="RunAsync"/> returns; the
+    /// connection's own teardown rolls back open transactions and drops temp
+    /// tables.
+    /// </summary>
+    public void Dispose()
+    {
+        this.transaction?.Dispose();
+        this.connection?.Dispose();
+        this.engineExecutionGate.Dispose();
+        this.multiplexer?.Dispose();
+    }
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -37,7 +65,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
             var clientEncryption = ParsePreloginEncryption(prelogin.Payload);
             var fedAuthRequested = ParsePreloginHasOption(prelogin.Payload, Tds.PreloginFedAuthRequired);
-            await transport.WritePacketAsync(Tds.PacketTabularResult, BuildPreloginResponse(fedAuthRequested), endOfMessage: true, cancellationToken).ConfigureAwait(false);
+            var marsRequested = ParsePreloginMars(prelogin.Payload);
+            await transport.WritePacketAsync(Tds.PacketTabularResult, BuildPreloginResponse(fedAuthRequested, marsRequested), endOfMessage: true, cancellationToken).ConfigureAwait(false);
             if (clientEncryption == Tds.EncryptNotSupported)
                 return;
 
@@ -59,7 +88,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 cancellationToken).ConfigureAwait(false);
 #pragma warning restore CA5398
             framing.EnablePassthrough();
-            transport.SwitchStream(ssl);
+            Stream postTls = ssl;
+            transport.SwitchStream(postTls);
 
             var loginMessage = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
             if (loginMessage is null || loginMessage.PacketType != Tds.PacketLogin7)
@@ -91,6 +121,20 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             transport.Spid = unchecked((ushort)this.connection!.Spid);
             this.WriteLoginResponse(writer, transport.PacketSize);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+
+            // MARS negotiated: prelogin, TLS, and LOGIN7 stayed raw (the login
+            // response above is unwrapped), but every post-login TDS message is
+            // wrapped in SMP frames. Hand the socket to the multiplexer, which
+            // demuxes SMP sessions and drives one batch loop per session against
+            // this shared connection. Non-MARS keeps the single-session loop
+            // below byte-for-byte.
+            if (marsRequested)
+            {
+                this.marsPacketSize = transport.PacketSize;
+                this.multiplexer = new SmpMultiplexer(postTls, this);
+                await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
 
             // One inbound read is always in flight. Between requests it is the
             // next request; while an engine request executes it doubles as the
@@ -222,7 +266,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
         finally
         {
-            this.connection?.Dispose();
+            // The connection, transaction, and MARS machinery are torn down in
+            // Dispose (invoked by the listener once this returns); here only the
+            // transport stream, a RunAsync-local, needs releasing.
             await transportStream.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -287,6 +333,135 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         writer.WriteLoginAck(Tds.Version74, "Microsoft SQL Server", 17, 0);
         writer.WriteEnvChange(Tds.EnvPacketSize, packetSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Tds.DefaultPacketSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
         writer.WriteDone(Tds.DoneFinal, 0);
+    }
+
+    /// <summary>
+    /// Cancels whatever command currently holds the connection's execution
+    /// scope. Called by the multiplexer when a client attention targets the
+    /// session that is actively driving the engine; because execution is
+    /// serialized, the current scope belongs to that session.
+    /// </summary>
+    public void CancelConnectionExecution() => this.connection?.CancelExecution();
+
+    /// <summary>
+    /// Runs the TDS batch loop for one SMP logical session. Mirrors the
+    /// non-MARS loop but over a per-session transport riding the session's
+    /// demuxed stream, guards engine execution with the per-connection
+    /// execution gate, and buffers the whole response (deferred flush) so the
+    /// window-controlled send happens outside the lock. All logical sessions
+    /// share this session's <see cref="SimulatedDbConnection"/>.
+    /// </summary>
+    public async Task RunMarsSessionAsync(SmpSession session, CancellationToken cancellationToken)
+    {
+        using var logicalStream = new SmpSessionStream(session);
+        var transport = new TdsPacketTransport(logicalStream)
+        {
+            PacketSize = this.marsPacketSize,
+            Spid = unchecked((ushort)this.connection!.Spid),
+        };
+        var writer = new TdsTokenWriter(transport) { DeferFlush = true };
+        try
+        {
+            while (true)
+            {
+                var message = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+                if (message is null)
+                    return;
+
+                if (message.PacketType == Tds.PacketAttention)
+                {
+                    // Idle-session attention, delivered through the pipe (the
+                    // executing case is handled after the switch). Ack only if
+                    // this consumes the flag — a post-execution check may already
+                    // have consumed it when the attention raced completion.
+                    if (Interlocked.Exchange(ref session.AttentionState, 0) == 1)
+                    {
+                        writer.WriteDone(Tds.DoneAttention, 0);
+                        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    continue;
+                }
+
+                string? batchText = null;
+                var isBulkInsertBegin = false;
+                if (message.PacketType == Tds.PacketSqlBatch)
+                {
+                    batchText = ExtractBatchText(message.Payload);
+                    isBulkInsertBegin = IsBulkInsertBatch(batchText);
+                }
+
+                bool cancelled;
+                await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                session.Executing = true;
+                try
+                {
+                    switch (message.PacketType)
+                    {
+                        case Tds.PacketSqlBatch:
+                            if (isBulkInsertBegin)
+                                this.BeginBulkInsert(batchText!, writer);
+                            else
+                                await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                            break;
+                        case Tds.PacketRpc:
+                            await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                            break;
+                        case Tds.PacketBulkLoad:
+                            this.ExecuteBulkLoad(message, writer);
+                            break;
+                        case Tds.PacketTransactionManager:
+                            this.ExecuteTransactionManagerRequest(message, writer);
+                            break;
+                        default:
+                            writer.WriteErrorOrInfo(
+                                Tds.TokenError, 50000, 1, 16,
+                                $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType}.",
+                                "SIMULATED", "", 1);
+                            writer.WriteDone(Tds.DoneError, 0);
+                            break;
+                    }
+
+                    // A mid-execution cancel rolls the transaction back only under
+                    // XACT_ABORT ON; captured under the lock so the shared
+                    // transaction isn't touched concurrently with another session.
+                    cancelled = this.connection!.ExecutionCancellationToken.IsCancellationRequested;
+                    if (cancelled)
+                        this.ApplyCancellationTransactionSemantics();
+                }
+                finally
+                {
+                    session.Executing = false;
+                    _ = this.engineExecutionGate.Release();
+                }
+
+                // Consume any attention the multiplexer signalled. Reading the
+                // flag with an exchange AFTER clearing Executing closes the race
+                // where the attention lands just as execution finishes: the
+                // multiplexer either saw Executing and left the flag for this
+                // exchange, or saw it cleared and fed the pipe — the exchange
+                // de-dupes so exactly one site emits the DONE_ATTN.
+                var attention = Interlocked.Exchange(ref session.AttentionState, 0) == 1;
+                if (cancelled || attention)
+                    writer.WriteDone(Tds.DoneAttention, 0);
+
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidDataException or AuthenticationException)
+        {
+            // Client disconnect / teardown / malformed traffic ends the session.
+        }
+        finally
+        {
+            try
+            {
+                await this.multiplexer!.SendFinAsync(session, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
+            {
+            }
+        }
     }
 
     private async ValueTask ExecuteBatchAsync(TdsMessage message, TdsTokenWriter writer, CancellationToken cancellationToken)
@@ -578,7 +753,22 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         return false;
     }
 
-    private static byte[] BuildPreloginResponse(bool includeFedAuth)
+    private static bool ParsePreloginMars(ReadOnlySpan<byte> payload)
+    {
+        for (var i = 0; (i + 5) <= payload.Length && payload[i] != Tds.PreloginTerminator; i += 5)
+        {
+            if (payload[i] != Tds.PreloginMars)
+                continue;
+
+            var offset = (payload[i + 1] << 8) | payload[i + 2];
+            if (offset < payload.Length)
+                return payload[offset] == 1;
+        }
+
+        return false;
+    }
+
+    private static byte[] BuildPreloginResponse(bool includeFedAuth, bool marsRequested)
     {
         // Options: VERSION(6) ENCRYPTION(1) INSTOPT(1) THREADID(0) MARS(1)
         // [FEDAUTHREQUIRED(1)], each with a 5-byte descriptor, then the
@@ -591,7 +781,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             (Tds.PreloginEncryption, [Tds.EncryptRequired]),
             (Tds.PreloginInstance, [0]),
             (Tds.PreloginThreadId, []),
-            (Tds.PreloginMars, [0]),
+            (Tds.PreloginMars, [marsRequested ? (byte)1 : (byte)0]),
         };
         if (includeFedAuth)
             data.Add((Tds.PreloginFedAuthRequired, [0]));

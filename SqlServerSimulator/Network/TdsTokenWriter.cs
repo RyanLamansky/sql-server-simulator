@@ -16,12 +16,23 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     private int length;
 
     /// <summary>
+    /// When set, non-final flushes accumulate rather than send — the MARS path
+    /// buffers a session's whole response under the connection's execution lock
+    /// and sends it only on the final flush, once the lock is released, so a
+    /// window-blocked send never stalls another session's execution.
+    /// </summary>
+    public bool DeferFlush;
+
+    /// <summary>
     /// Sends every full packet's worth of buffered bytes; when
     /// <paramref name="final"/>, sends the remainder with the end-of-message
     /// bit, completing the response.
     /// </summary>
     public async ValueTask FlushAsync(bool final, CancellationToken cancellationToken)
     {
+        if (this.DeferFlush && !final)
+            return;
+
         var capacity = this.transport.PacketSize - Tds.HeaderSize;
         var offset = 0;
         while (this.length - offset > capacity)

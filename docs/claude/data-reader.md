@@ -18,6 +18,10 @@ The reader consumes the unified continue-on-error outcome stream (see [`control-
 
 **Dispose = statement-level drain**: closing the reader executes the batch's remaining statements (side effects persist) and swallows their errors — a disposed reader never throws. Row-level pull *inside* the statement the reader was parked on stays abandoned (unchanged; a non-draining reader still doesn't run a SELECT iterator's post-yield code — see [`plan-cache.md`](plan-cache.md)).
 
+## In-process MARS (overlapping readers)
+
+The in-process `SimulatedDbConnection` has no wire and no "one open reader" enforcement: a second command — or a second open reader — while a reader is live **just works**, the permissive superset EF Core's lazy loading needs (iterate a parent query, touch a navigation per row). Probe-confirmed safe: a nested reader-per-row loop and two interleaved readers both return correct results, because a query result materializes before it streams, so overlapping enumeration never races shared session state (no two live engine iterations, no transaction/identity/plan-cache stomp). This mirrors a MARS-enabled wire connection (`MultipleActiveResultSets=True`), where the endpoint negotiates MARS and serializes execution — see [`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets). A non-MARS wire connection still rejects the overlap client-side in SqlClient, so the in-process surface is deliberately more permissive than a bare `SqlConnection`.
+
 ## Divergence
 
 **`GetBytes` / `GetChars` materialize, don't stream**: each call decodes the full column value via `RowDecoder` and slices into the caller's buffer. Per-call observation matches SqlClient; the streaming-memory guarantee doesn't.
