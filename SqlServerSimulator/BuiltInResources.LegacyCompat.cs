@@ -50,6 +50,10 @@ internal static partial class BuiltInResources
         "xp_msver",
         "xp_qv",
         "xp_instance_regread",
+        // sp_tablecollations_100: SqlClient's SqlBulkCopy metadata batch calls
+        // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
+        // destination columns' TDS collation structures before streaming rows.
+        "sp_tablecollations_100",
     ];
 
     /// <summary>

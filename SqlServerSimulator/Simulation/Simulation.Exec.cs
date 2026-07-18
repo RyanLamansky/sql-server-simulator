@@ -93,7 +93,10 @@ partial class Simulation
             yield break;
         }
 
-        if (context.Token is not Name)
+        // A leading `.` opens a name whose db/schema positions are omitted
+        // (`..sp_tablecollations_100`, the form SqlClient's SqlBulkCopy sends);
+        // ParseObjectName consumes the empty leading segments.
+        if (context.Token is not Name and not Operator { Character: '.' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var procName = BatchContext.ParseObjectName(context);
@@ -118,6 +121,7 @@ partial class Simulation
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
+            "sp_tablecollations_100" => InvokeSpTableCollations(batch),
             "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
             "xp_instance_regread" => InvokeXpInstanceRegread(batch),
             "xp_msver" => InvokeXpMsver(batch),

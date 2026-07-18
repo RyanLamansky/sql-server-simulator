@@ -86,6 +86,18 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int LockTimeoutMillis = -1;
 
     /// <summary>
+    /// Session-scoped <c>SET FMTONLY</c> state. While <see langword="true"/>,
+    /// a SELECT returns its result-set metadata (COLMETADATA) with zero rows
+    /// and every data-modifying statement is suppressed (no side effects) —
+    /// the deprecated metadata-discovery mode SqlClient's <c>SqlBulkCopy</c>
+    /// still uses to shape the destination-table metadata batch
+    /// (<c>SET FMTONLY ON select * from dest SET FMTONLY OFF</c>).
+    /// Probe-confirmed against SQL Server 2025 (2026-07-18): a FMTONLY-wrapped
+    /// INSERT persists no rows. Toggled by top-level <c>SET FMTONLY ON|OFF</c>.
+    /// </summary>
+    internal bool FmtOnly;
+
+    /// <summary>
     /// Session-scoped <c>QUOTED_IDENTIFIER</c> setting: <see langword="true"/>
     /// (the default, matching SqlClient connections — probe-confirmed
     /// <c>@@OPTIONS &amp; 256</c> is set on a fresh session) tokenizes

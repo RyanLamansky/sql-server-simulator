@@ -37,9 +37,10 @@ internal static class Wire
     }
 
     /// <summary>
-    /// Inserts through the in-process surface with one bound parameter. The wire
-    /// listener does not yet accept RPC / parameterized commands, so large or
-    /// binary payloads seed via ADO here, then read back over the wire.
+    /// Inserts through the in-process surface with one bound parameter — a
+    /// convenience for seeding large or binary payloads in-proc before reading
+    /// them back over the wire (the wire path accepts RPC / parameterized
+    /// commands too; this just keeps seeding terse).
     /// </summary>
     public static void ExecInProcParam(Simulation simulation, string sql, string parameterName, object value)
     {

@@ -164,7 +164,7 @@ Per-feature deep-dives live under `docs/claude/`. Each entry below is a trigger:
 - **New top-level statement parser or dispatch-loop separator rules, double-quoted identifiers / QUOTED_IDENTIFIER** → [`grammar.md`](docs/claude/grammar.md) + [`control-flow.md`](docs/claude/control-flow.md).
 - **BACPAC import** (`Simulation.ImportBacpac` — multi-database via repeated calls, `BacpacImportOptions`, `ModelXmlReader` dispatcher, BCP wire format, `BacpacBuilder` test harness) → [`bacpac-loader.md`](docs/claude/bacpac-loader.md).
 - **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part FROM routing through the remote's ADO.NET pipeline, `OPENQUERY(server,'query')` ad-hoc pass-through + compile-time schema discovery, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).
-- **TDS network endpoint** (`Simulation.ListenAsync` → `SimulatedNetworkListener`; real SqlClient over loopback TCP+TLS; SQLBatch/RPC/TM, no bulk; `sp_cursor*` API-server-cursor RPC family; credential enforcement via the `CREATE LOGIN` registry, Msg 18456 on mismatch; EF via plain `UseSqlServer`; oracles = `*.Tests.SqlClient` + `*.Tests.Smo`, the real-SMO consumer oracle) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
+- **TDS network endpoint** (`Simulation.ListenAsync` → `SimulatedNetworkListener`; real SqlClient over loopback TCP+TLS; SQLBatch/RPC/TM/BulkLoad (`SqlBulkCopy`); `sp_cursor*` API-server-cursor RPC family; credential enforcement via the `CREATE LOGIN` registry, Msg 18456 on mismatch; EF via plain `UseSqlServer`; oracles = `*.Tests.SqlClient` + `*.Tests.Smo`, the real-SMO consumer oracle) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
 ## Not modeled
 

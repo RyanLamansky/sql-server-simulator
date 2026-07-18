@@ -641,7 +641,13 @@ internal sealed partial class Selection
 
         if (firstToken is ReservedKeyword { Keyword: Keyword.Top })
         {
-            topExpression = Expression.Parse(context.MoveNextRequiredReturnSelf());
+            // The TOP count is a single operand — a parenthesized expression
+            // `TOP (expr)` or the legacy bare constant / variable. Parsing it as
+            // a full expression would fold a following select-list star into a
+            // multiplication (`TOP 1 *` → `1 * …`, `TOP (1) *` → `(1) * …`),
+            // swallowing the star and failing near the next token; ParsePrimary
+            // stops before any binary operator, leaving `*` for the select list.
+            topExpression = Expression.ParsePrimary(context.MoveNextRequiredReturnSelf());
             _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
         }
 
@@ -1244,7 +1250,17 @@ internal sealed partial class Selection
         var token = context.GetNextRequired();
         switch (token)
         {
-            case Name tableName:
+            // A leading `.` opens a name whose db/schema positions are omitted
+            // (`.[sys].[all_columns]`, `..t`) — SqlClient 7.x's SqlBulkCopy
+            // metadata query reads `FROM .[sys].[all_columns]`. It routes
+            // through the ordinary table path (ParseObjectName drops the empty
+            // leading segments); the 1-part built-in rowset functions below
+            // never carry a leading dot, so they stay gated on a Name token.
+            case Name:
+            case Operator { Character: '.' }:
+                if (token is not Name tableName)
+                    goto AfterBuiltInRowsetDispatch;
+
                 // OPENJSON dispatch wins over CTE / table lookup. Case-
                 // insensitive match on the function name; ParseOpenJson
                 // enforces the trailing `(`. SQL Server reserves OPENJSON
@@ -1345,6 +1361,7 @@ internal sealed partial class Selection
                 // (alias / AS / WHERE / JOIN / etc.). CTE binding only fires
                 // for a single-segment leaf (CTE names can't be schema-
                 // qualified — they're aliases, not real tables).
+            AfterBuiltInRowsetDispatch:
                 var objectName = BatchContext.ParseObjectName(context);
 
                 // Linked-server fork: four-part `server.db.schema.t` routes

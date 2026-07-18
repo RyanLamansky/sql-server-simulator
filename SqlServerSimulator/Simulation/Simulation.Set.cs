@@ -126,6 +126,16 @@ partial class Simulation
                 context.Connection.LockTimeoutMillis = negativeInteger ? -literal.AsInt32 : literal.AsInt32;
         }
 
+        // FMTONLY carries semantic effect: while ON, SELECT returns
+        // metadata-only zero-row results and data-modifying statements are
+        // suppressed. Session-scoped like LOCK_TIMEOUT; gated on !IsSkipping so
+        // a never-taken IF branch's SET FMTONLY doesn't perturb the session.
+        if (firstName.Equals("FMTONLY", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
+            && context.Token is ReservedKeyword { Keyword: var fmtOnOff })
+        {
+            context.Connection.FmtOnly = fmtOnOff == Keyword.On;
+        }
+
         // CONTEXT_INFO carries semantic effect: store the binary value,
         // right-padded / truncated to exactly 128 bytes (SQL Server's
         // fixed buffer), surfaced by CONTEXT_INFO(). The literal-binary form

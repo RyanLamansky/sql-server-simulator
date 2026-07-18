@@ -132,7 +132,15 @@ internal abstract class Expression
     /// caller's <see cref="ParseBinaryContinuation"/> reads it without a
     /// further advance.
     /// </summary>
-    private static Expression ParsePrimary(ParserContext context)
+    /// <summary>
+    /// Parses a single operand — a literal / variable / parenthesized
+    /// expression / function call with its unary prefixes and postfixes — and
+    /// stops before any binary operator. Exposed for the legacy bare
+    /// <c>SELECT TOP n</c> form, whose count is a lone operand: parsing it as a
+    /// full expression would fold <c>TOP 1 *</c> into a multiplication and
+    /// swallow the select-list star.
+    /// </summary>
+    internal static Expression ParsePrimary(ParserContext context)
     {
         // Leading unary operators bind to the following primary (not the whole
         // binary chain); the surrounding ParseBinaryContinuation then folds in

@@ -101,13 +101,30 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 switch (message.PacketType)
                 {
                     case Tds.PacketSqlBatch:
-                        await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
-                        break;
+                        {
+                            // SqlBulkCopy sends `INSERT BULK …` as a plain SQL
+                            // batch that puts the session into bulk-load mode:
+                            // the server sends no response and consumes the
+                            // BulkLoadBCP data packet (type 7) that follows.
+                            var batchText = ExtractBatchText(message.Payload);
+                            if (IsBulkInsertBatch(batchText))
+                            {
+                                this.BeginBulkInsert(batchText, writer);
+                                break;
+                            }
+
+                            await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                            break;
+                        }
+
                     case Tds.PacketRpc:
                         await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
                         break;
                     case Tds.PacketAttention:
                         writer.WriteDone(Tds.DoneAttention, 0);
+                        break;
+                    case Tds.PacketBulkLoad:
+                        this.ExecuteBulkLoad(message, writer);
                         break;
                     case Tds.PacketTransactionManager:
                         this.ExecuteTransactionManagerRequest(message, writer);
@@ -115,7 +132,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     default:
                         writer.WriteErrorOrInfo(
                             Tds.TokenError, 50000, 1, 16,
-                            $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType} (bulk-load requests are a planned follow-up).",
+                            $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType}.",
                             "SIMULATED", "", 1);
                         writer.WriteDone(Tds.DoneError, 0);
                         break;

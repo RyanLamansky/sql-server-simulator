@@ -1416,6 +1416,63 @@ public sealed partial class Simulation
             ParseCteBindings(context);
         }
 
+        // SET FMTONLY ON: SELECT returns its metadata with zero rows and every
+        // data-modifying statement is suppressed (no side effects) — the
+        // deprecated metadata-discovery mode SqlClient's SqlBulkCopy still
+        // wraps its `select * from dest` in. Runs only when not already
+        // skipping (a never-taken branch's statement stays fully suppressed).
+        // Deliberately shallow: control-flow and DDL statements under FMTONLY
+        // still execute — SqlClient's usage never mixes those into the mode.
+        if (connection.FmtOnly && !batch.IsSkipping
+            && context.Token is ReservedKeyword { Keyword: var fmtKeyword }
+            && fmtKeyword is Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge)
+        {
+            if (fmtKeyword == Keyword.Select)
+            {
+                var metadataSelection = Selection.Parse(context, 0);
+                connection.LastStatementRowCount = 0;
+                if (metadataSelection.IntoTarget is null)
+                {
+                    yield return new SimulatedSqlResultSet(metadataSelection.Schema, metadataSelection.ColumnNames, new List<byte[]>())
+                    {
+                        ColumnNullability = metadataSelection.ColumnNullability,
+                    };
+                }
+
+                yield break;
+            }
+
+            // Parse the DML under skip mode so the cursor advances and syntax
+            // errors still surface, but no heap write happens.
+            batch.SkipModeFlag = true;
+            try
+            {
+                switch (fmtKeyword)
+                {
+                    case Keyword.Insert:
+                        _ = RunMutation(context, ParseInsert);
+                        break;
+                    case Keyword.Update:
+                        _ = RunMutation(context, ParseUpdate);
+                        break;
+                    case Keyword.Delete:
+                        _ = RunMutation(context, ParseDelete);
+                        break;
+                    default:
+                        _ = RunMutation(context, ParseMerge);
+                        if (context.Token is not Operator { Character: ';' })
+                            throw SimulatedSqlException.MergeMustBeTerminated();
+                        break;
+                }
+            }
+            finally
+            {
+                batch.SkipModeFlag = false;
+            }
+
+            yield break;
+        }
+
         SimulatedStatementOutcome? outcome;
         switch (context.Token)
         {

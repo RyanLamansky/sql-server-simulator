@@ -1829,6 +1829,24 @@ internal sealed class BatchContext
             context.RestoreCheckpoint(atCheckpoint);
             return new MultiPartName(leaf);
         }
+        // Leading empty segment(s): `..name` (db + schema omitted) or
+        // `.name` (schema omitted) resolve to the current database / default
+        // schema, matching real SQL Server (`SELECT * FROM ..t` reads dbo.t
+        // in the current db; `EXEC ..sp_foo` runs the system/dbo proc; the
+        // form SqlClient's SqlBulkCopy metadata batch sends is
+        // `exec ..sp_tablecollations_100`). Drop the omitted leading
+        // positions — an empty db means the current database anyway, and the
+        // trailing segments carry the schema/object identity — so the name
+        // parses as if the empties weren't written.
+        if (context.Token is Operator { Character: '.' })
+        {
+            while (context.Token is Operator { Character: '.' })
+            {
+                if (!context.MoveNext())
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+        }
+
         if (context.Token is not Name first)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = new MultiPartName(first.Value);

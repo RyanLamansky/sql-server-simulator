@@ -32,7 +32,7 @@ Everything lives in `Network/` (internal) except the public `SimulatedNetworkLis
 - **`USE`**: database change detected by comparing the session database against its value at message start (`databaseAtMessageStart`) and emitted as ENVCHANGE type 1 + INFO 5701 (`Changed database context to '<db>'.`) **before the response's final DONE** — the seam fires at every final-DONE site (batch outcome DONEs, the closing DONE, error-path DONEs, and the RPC handlers' final DONEPROC) and is idempotent, so it emits at most once per message. Ordering is load-bearing: SqlClient's token reader stalls until command timeout on an ENVCHANGE that arrives after the last DONE (probe-confirmed 2026-07-15 — this froze SSMS on its first `use [master]` once master existed; go-mssqldb tolerates the late position, which is how the original after-the-DONEs ordering shipped unnoticed). The INFO 5701 is wire-layer-only — the in-process engine raises no InfoMessage for `USE`, a minor in-process/wire asymmetry matching the login response's synthesized 5701.
 - **Reset-connection status bit** (pooled-connection recycle): backing connection disposed and recreated on the same database, acked with the empty ENVCHANGE type 18 before the batch's tokens.
 - **Attention** (type 6): acked with DONE `DONE_ATTN`. Execution is synchronous per message, so attention is only observed between messages — a cancel never interrupts a running statement server-side, it just gets acked when the stream drains. In-process execution is fast enough that this matches observable SqlClient behavior.
-- **Bulk-load (7)**: ERROR 50000 naming the unsupported request type + DONE error (`SqlBulkCopy` is a planned follow-up).
+- **Bulk-load (7)**: `SqlBulkCopy` — the `INSERT BULK` SQL batch opens bulk mode and the following BulkLoadBCP data packet streams rows. Full flow + options matrix in [Bulk load](#bulk-load-sqlbulkcopy) below.
 
 ## RPC requests
 
@@ -81,6 +81,35 @@ ccopt low bits: 0x1 READ_ONLY, 0x2 SCROLL_LOCKS, 0x4 OPTIMISTIC (values), 0x8 OP
 - **REFRESH fetchtype (0x80)** maps to a plain re-fetch rather than an in-place buffer refresh.
 - The `0x1000` PARAMETERIZED_STMT flag requirement (real raises Msg 16902 when a parameterized prepexec omits it) is **not enforced** — the flag is simply stripped.
 
+## Bulk load (SqlBulkCopy)
+
+`SqlBulkCopy.WriteToServer` runs a three-message handshake per batch, all probed against SQL Server 2025 + SqlClient 6.0.2 / 7.0.2 (2026-07-18). `TdsSession.BulkLoad.cs` + `TdsBulkLoadReader.cs` (wire) and `Simulation.BulkLoad.cs` (engine) implement it.
+
+1. **Metadata pre-batch** (SQLBatch) — once per `WriteToServer`. SqlClient 6.x sends `select @@trancount; SET FMTONLY ON select * from [dest] SET FMTONLY OFF exec ..sp_tablecollations_100 N'[dest]'`; SqlClient 7.x wraps a bigger version that reads the ordered column list from `.[sys].[all_columns]` via `sp_executesql`, then `SET FMTONLY ON; EXEC(N'SELECT '+@cols+' FROM [dest]'); SET FMTONLY OFF; EXEC ..sp_tablecollations_100 …`. This drove four cross-cutting engine fixes: **FMTONLY is now session state** (`SimulatedDbConnection.FmtOnly`) — while ON a SELECT returns metadata-only zero rows and DML is suppressed (probe-confirmed a FMTONLY-wrapped INSERT persists nothing); **leading-empty-segment names** (`..sp_tablecollations_100`, `FROM .[sys].[all_columns]`) drop their omitted db/schema positions in `BatchContext.ParseObjectName` and the FROM-source dispatch; **`sp_tablecollations_100`** is a modeled system proc returning `colid / name / tds_collation binary(5) / collation` per column (the 5-byte TDS collation from `TdsCollationCodec`, NULL for non-string columns); and **bare `SELECT TOP n *`** parses (the count is now a single operand via `Expression.ParsePrimary`, so `TOP 1 *` no longer folds into `1 * …`).
+2. **`INSERT BULK` statement** (SQLBatch) — `insert bulk [schema].[table] ([col] Type [COLLATE c], …) [WITH (opt, …)]`. The session parses it into a `BulkInsertPlan` (target table + ordered target columns + options), answers a bare DONE (SqlClient reads it before streaming), and holds the plan. One `INSERT BULK` per `BatchSize` chunk (BatchSize 2 over 5 rows → three statements), the metadata pre-batch only once.
+3. **BulkLoadBCP data packet** (type 7) — COLMETADATA + ROW tokens + DONE, the same wire encoding results use, decoded by `TdsBulkLoadReader`. The session writes the rows through `Simulation.ExecuteBulkInsert` and answers DONE with the row count. Wire-decode notes: SqlClient sends **FIXEDLENTYPE tokens** (INT4TYPE `0x38`, etc.) with raw un-prefixed values for NOT NULL columns and the nullable variants for nullable columns; **numeric/decimal values carry a fixed sign + 16-byte mantissa** (17 value bytes) behind a length byte that only flags NULL — the precision-implied width the byte reports is ignored. Unsupported column types in the stream (`text`/`ntext`/`image`, `sql_variant`, CLR-UDT/spatial/hierarchyid) raise ERROR 50000.
+
+**Options matrix** (probed → modeled):
+
+| Option | Real behavior | Simulator |
+|---|---|---|
+| default (no options) | CHECK / FK not enforced; both left `is_not_trusted = 1` | matches — enforcement skipped, trust flipped on success via the existing plumbing |
+| `CheckConstraints` | CHECK / FK enforce (Msg 547); trust unchanged | matches |
+| PK / UNIQUE | always enforce, even default (Msg 2627 / 2601) | matches |
+| NOT NULL | always enforces (Msg 515) | matches |
+| triggers | AFTER triggers do **not** fire by default | matches |
+| `FireTriggers` | AFTER triggers fire (INSERTED populated) | matches |
+| KeepIdentity | expressed by the **identity column's presence in the column list**, not a WITH option; source values kept, seed advances past the max | matches (via IDENTITY_INSERT-style `ObserveExplicit`) |
+| no KeepIdentity | identity column omitted from the list; server generates | matches |
+| `KeepNulls` off | a NULL supplied for a defaulted column takes the DEFAULT | matches |
+| `KeepNulls` on | NULL stored as NULL; omitted columns still take their DEFAULT | matches |
+| computed / rowversion / period | client never sends them; server computes / stamps | matches (shared INSERT machinery) |
+| external `SqlTransaction` | rollback undoes the bulk rows | matches — `ExecuteBulkInsert` runs under `RunMutation`, so the tx undo log covers it |
+| `BatchSize > 0` | one `INSERT BULK` round per batch, each committing separately | matches |
+| `TableLock` / `ORDER` / `ROWS_PER_BATCH` | storage-organization decorations | accepted and ignored |
+
+**Divergences / not modeled:** client-side validations (string truncation, NULL into a DataTable NOT-NULL column) throw in SqlClient before any bytes hit the wire, so the server never sees them. ANSI (`varchar`) bulk values decode via CP1252 / UTF-8 (the fUTF8 collation bit) like RPC params — a non-CP1252 ANSI collation would mis-decode. `INSERT BULK` into a temp table / view isn't exercised. Column types outside the scalar + LOB + `xml` set (UDT / spatial / hierarchyid / legacy LOB) reject rather than stream.
+
 ## Transaction Manager requests
 
 `SqlTransaction` uses TM requests (packet type 14), not SQL text. Begin (5) maps the wire isolation byte onto `BeginTransaction(IsolationLevel)` and answers ENVCHANGE type 8 carrying an opaque 8-byte transaction descriptor (a per-session counter; the client echoes it in ALL_HEADERS, which the listener ignores — the session connection *is* the transaction scope). Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 / 10 with empty values. `SqlTransaction.Save(name)` (9) and `Rollback(name)` route through SQL text (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION [name]`, bracket-escaped); rollback-to-savepoint keeps the transaction alive so no transaction ENVCHANGE is emitted. **Names in TM requests are B_VARBYTE** — the length prefix counts UTF-16 *bytes*, unlike the char-counted B_VARCHAR elsewhere (SqlClient writes `name.Length * 2`); misreading it as B_VARCHAR overruns the payload on every savepoint call.
@@ -120,7 +149,7 @@ ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_engli
 ## Divergences / deferred
 
 - Login INFO states are approximations.
-- No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating), no `SqlBulkCopy`.
+- No MARS (prelogin answers MARS off), no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating).
 - Credential-enforcement edges not modeled: `ALTER LOGIN … DISABLE` parses but doesn't block login; password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
 - RPC parameter gaps: TVP / UDT / `sql_variant` / `image` parameters rejected with ERROR 50000 (`text`/`ntext` string params ARE accepted). Non-cursor well-known ProcIDs beyond the sp_execute/sp_prepare family are rejected with ERROR 50000 naming the id.
 - Attention is acked only between messages (no mid-stream cancel).
