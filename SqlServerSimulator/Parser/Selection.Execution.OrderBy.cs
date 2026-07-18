@@ -51,6 +51,44 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Computes ORDER BY keys for the top-level (post-set-op) sort directly off
+    /// an encoded <c>byte[]</c> row, decoding only the columns an ORDER BY item
+    /// references rather than the whole tuple. References resolve against the
+    /// inner plan's projected column names / ordinals only — there are no source
+    /// columns to fall back to (an unresolved name is Msg 207), matching the
+    /// <see cref="ComputeOrderKeys"/> path this mirrors. <paramref name="columns"/>
+    /// is the schema's cached <see cref="HeapColumn"/>[] so each per-column decode
+    /// hits the RowLayout geometry cache.
+    /// </summary>
+    private static SqlValue[] ComputeTopLevelOrderKeys(
+        List<OrderBySpec> orderBy,
+        string[] columnNames,
+        HeapColumn[] columns,
+        byte[] rowBytes,
+        BatchContext batch)
+    {
+        SqlValue ResolveByOutputName(MultiPartName name)
+        {
+            for (var j = 0; j < columnNames.Length; j++)
+            {
+                if (BuiltInToken.Equals(columnNames[j], name.Leaf))
+                    return RowDecoder.DecodeColumn(columns, rowBytes, j);
+            }
+            throw SimulatedSqlException.InvalidColumnName(name);
+        }
+
+        var keys = new SqlValue[orderBy.Count];
+        for (var i = 0; i < orderBy.Count; i++)
+        {
+            var spec = orderBy[i];
+            keys[i] = spec.IsOrdinal
+                ? RowDecoder.DecodeColumn(columns, rowBytes, spec.Ordinal - 1)
+                : spec.Expr!.Run(new RuntimeContext(ResolveByOutputName, batch));
+        }
+        return keys;
+    }
+
+    /// <summary>
     /// Lexicographic compare of two key tuples per the per-key descending
     /// flags. NULL is treated as the smallest value (NULL first under ASC,
     /// NULL last under DESC), matching SQL Server. Cross-type keys are

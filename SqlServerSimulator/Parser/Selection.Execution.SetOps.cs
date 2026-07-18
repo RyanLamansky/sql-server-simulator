@@ -195,6 +195,10 @@ internal sealed partial class Selection
         var schema = inner.Schema;
         var columnNames = inner.ColumnNames;
 
+        // Cached HeapColumn[] for the combined schema, so per-column key decodes
+        // hit RowLayout's identity-keyed geometry cache (see RowDecoder.ColumnsFor).
+        var keyColumns = RowDecoder.ColumnsFor(schema);
+
         return new Selection(schema, columnNames,
             hasOrderBy: true,
             hasTopOrOffsetOrFetch: inner.HasTopOrOffsetOrFetch || offsetExpression is not null || fetchExpression is not null,
@@ -214,23 +218,16 @@ internal sealed partial class Selection
             }
             else
             {
+                // The inner set-op chain yields byte[] rows natively (branch
+                // dedup / coercion re-encode). Keep that form through the sort
+                // and let the reader / TDS cursor decode once at drain —
+                // eagerly decoding every column into SqlValue[] here only to
+                // re-materialize strings for the whole buffer measured slower
+                // and heavier than the lazy-from-bytes path. Sort keys decode
+                // only the ORDER BY columns off each row, not the full tuple.
                 var keyed = new List<(byte[] Row, SqlValue[] Keys)>(allRows.Count);
                 foreach (var rowBytes in allRows)
-                {
-                    var values = DecodeRowToValues(rowBytes, schema);
-                    SqlValue ResolveByOutputName(MultiPartName name)
-                    {
-                        for (var j = 0; j < columnNames.Length; j++)
-                        {
-                            if (BuiltInToken.Equals(columnNames[j], name.Leaf))
-                                return values[j];
-                        }
-                        throw SimulatedSqlException.InvalidColumnName(name);
-                    }
-
-                    var keys = ComputeOrderKeys(orderBy, values, columnNames, distinct: false, batch, ResolveByOutputName);
-                    keyed.Add((rowBytes, keys));
-                }
+                    keyed.Add((rowBytes, ComputeTopLevelOrderKeys(orderBy, columnNames, keyColumns, rowBytes, batch)));
 
                 keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
                 ordered = keyed.Select(r => r.Row);

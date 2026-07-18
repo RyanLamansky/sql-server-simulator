@@ -139,6 +139,56 @@ public sealed class SetOperationTests
     public void PerBranchOrderBy_RaisesMsg156()
         => _ = new Simulation().AssertSqlError("select 1 order by 1 union select 2", 156);
 
+    // The top-level (post-set-op) ORDER BY sorts the combined rows in their
+    // encoded byte[] form and decodes only the sort-key column per row; the
+    // non-key columns (here a string and a NULL-bearing int) must still drain
+    // correctly for every row after the sort, and NULL ordering / collation
+    // must match the single-SELECT path.
+    [TestMethod]
+    public void TopLevelOrderBy_MultiColumn_DrainsNonKeyColumnsAfterSort()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (k int, s varchar(10), n int);
+            create table b (k int, s varchar(10), n int);
+            insert a values (3, 'gamma', 30), (1, 'alpha', null);
+            insert b values (2, 'Beta', 20), (4, 'delta', 40)
+            """);
+
+        using var reader = simulation.CreateCommand(
+            "select k, s, n from a union all select k, s, n from b order by s").ExecuteReader();
+        var rows = new List<(int K, string S, int? N)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2)));
+
+        // Case-insensitive default collation: alpha < Beta < delta < gamma.
+        CollectionAssert.AreEqual(
+            new[] { (1, "alpha", (int?)null), (2, "Beta", 20), (4, "delta", 40), (3, "gamma", 30) },
+            rows);
+    }
+
+    // Ordinal ORDER BY over a set-op resolves against the projected column and
+    // sorts NULLs first under ASC, exercising the ordinal branch of the
+    // top-level key decode.
+    [TestMethod]
+    public void TopLevelOrderBy_Ordinal_NullsFirst()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table a (v int);
+            create table b (v int);
+            insert a values (3), (null);
+            insert b values (1), (2)
+            """);
+
+        using var reader = simulation.CreateCommand(
+            "select v from a union all select v from b order by 1").ExecuteReader();
+        var values = new List<int?>();
+        while (reader.Read())
+            values.Add(reader.IsDBNull(0) ? null : reader.GetInt32(0));
+        CollectionAssert.AreEqual(new int?[] { null, 1, 2, 3 }, values);
+    }
+
     // Non-set-op SELECT can ORDER BY a non-projected source column.
     [TestMethod]
     public void SingleSelect_OrderByNonProjectedSource_StillWorks()
