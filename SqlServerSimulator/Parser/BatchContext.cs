@@ -1187,8 +1187,8 @@ internal sealed class BatchContext
     /// <see cref="ArgumentException"/> at materialization (mirroring
     /// <c>Microsoft.Data.SqlClient</c>'s client-side check).
     /// </summary>
-    private static bool IsTableValuedParameterValue(SimulatedDbParameter parameter) =>
-        parameter.Value is System.Data.DataTable or System.Data.IDataReader;
+    internal static bool IsTableValuedParameterValue(SimulatedDbParameter parameter) =>
+        parameter.Value is System.Data.DataTable or System.Data.IDataReader or TableValuedParameterData;
 
     /// <summary>
     /// Materializes each TVP-shaped <see cref="SimulatedDbParameter"/> into the
@@ -1219,7 +1219,7 @@ internal sealed class BatchContext
             if (paramName.StartsWith('@'))
                 paramName = paramName[1..];
             var clone = tableType.Clone("@" + paramName, batch, isTableValuedParameter: true);
-            MaterializeTvpRows(parameter.Value!, tableType, clone);
+            MaterializeTvpRows(parameter.Value!, tableType, clone, batch);
             batch.TableVariables[paramName] = clone;
         }
     }
@@ -1235,7 +1235,7 @@ internal sealed class BatchContext
         return new MultiPartName(schema).WithAddedPart(leaf);
     }
 
-    private static void MaterializeTvpRows(object source, TableType tableType, HeapTable destination)
+    private static void MaterializeTvpRows(object source, TableType tableType, HeapTable destination, BatchContext batch)
     {
         switch (source)
         {
@@ -1243,7 +1243,7 @@ internal sealed class BatchContext
                 if (dt.Columns.Count != tableType.Columns.Length)
                     throw SimulatedSqlException.TableValuedParameterColumnCountMismatch(dt.Columns.Count, tableType.Columns.Length);
                 foreach (System.Data.DataRow row in dt.Rows)
-                    InsertOneRowFromValueArray(row.ItemArray, tableType, destination);
+                    InsertOneRowFromValueArray(row.ItemArray, tableType, destination, batch);
                 break;
             case System.Data.IDataReader reader:
                 if (reader.FieldCount != tableType.Columns.Length)
@@ -1253,13 +1253,24 @@ internal sealed class BatchContext
                 {
                     for (var i = 0; i < buffer.Length; i++)
                         buffer[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                    InsertOneRowFromValueArray(buffer, tableType, destination);
+                    InsertOneRowFromValueArray(buffer, tableType, destination, batch);
                 }
+                break;
+            case TableValuedParameterData wire:
+                // A TVP decoded over the TDS wire. ColumnCount -1 marks a
+                // TVP_NULL value (whole parameter NULL): it binds an empty table
+                // variable and skips the arity check, matching an unsupplied
+                // TVP. Otherwise the client-declared column count drives the
+                // Msg 500 arity check even when zero rows were sent.
+                if (wire.ColumnCount >= 0 && wire.ColumnCount != tableType.Columns.Length)
+                    throw SimulatedSqlException.TableValuedParameterColumnCountMismatch(wire.ColumnCount, tableType.Columns.Length);
+                foreach (var row in wire.Rows)
+                    InsertOneRowFromSqlValues(row, tableType, destination, batch);
                 break;
         }
     }
 
-    private static void InsertOneRowFromValueArray(object?[] sourceValues, TableType tableType, HeapTable destination)
+    private static void InsertOneRowFromValueArray(object?[] sourceValues, TableType tableType, HeapTable destination, BatchContext batch)
     {
         // Build a SqlValue[] matching the destination's stored column order.
         // Identity columns are not allowed to receive caller-supplied values
@@ -1284,17 +1295,38 @@ internal sealed class BatchContext
                 ? SqlValue.Null(column.Type)
                 : column.Type.ConvertParameter(sourceValues[i]!);
         }
-        // Encode via the destination's StoredColumns (skipping non-stored
-        // computed-without-PERSISTED slots, since the encoder works against
-        // stored cells only).
-        var storedValues = new SqlValue[destination.StoredColumns.Length];
-        var s = 0;
+        // Evaluate computed columns, enforce NOT NULL / CHECK / PK / UNIQUE, and
+        // insert through the shared engine path so a TVP whose rows violate the
+        // table type's constraints raises the same Msg 515 / 547 / 2627 / 2601
+        // real SQL Server raises (probe-confirmed 2026-07-18 over the wire).
+        Simulation.InsertTableValuedParameterRow(destination, fullValues, batch);
+    }
+
+    /// <summary>
+    /// The <see cref="Storage.SqlValue"/>-typed sibling of
+    /// <see cref="InsertOneRowFromValueArray"/> for TVP rows decoded off the TDS
+    /// wire, where each cell already carries its wire type. Coercion to the
+    /// destination column runs through <see cref="Storage.SqlValue.CoerceTo"/>,
+    /// so a type mismatch (e.g. a reordered column putting an nvarchar value
+    /// under an int column) raises Msg 245 with the correct source-type name,
+    /// matching real SQL Server's wire behavior.
+    /// </summary>
+    private static void InsertOneRowFromSqlValues(SqlValue[] sourceValues, TableType tableType, HeapTable destination, BatchContext batch)
+    {
+        var fullValues = new SqlValue[tableType.Columns.Length];
         for (var i = 0; i < tableType.Columns.Length; i++)
         {
-            if (tableType.Columns[i].IsStored)
-                storedValues[s++] = fullValues[i];
+            var column = tableType.Columns[i];
+            if (column.Identity is not null && !sourceValues[i].IsNull)
+                throw SimulatedSqlException.InsertIntoIdentityColumnNotAllowedOnTableVariables();
+            if (column.Identity is not null)
+            {
+                fullValues[i] = Simulation.CoerceForIdentity(column.Identity.GenerateNext(), column);
+                continue;
+            }
+            fullValues[i] = sourceValues[i].IsNull ? SqlValue.Null(column.Type) : sourceValues[i].CoerceTo(column.Type);
         }
-        _ = destination.Heap.Insert(Storage.RowEncoder.EncodeRow(destination.Schema, storedValues));
+        Simulation.InsertTableValuedParameterRow(destination, fullValues, batch);
     }
 
     /// <summary>

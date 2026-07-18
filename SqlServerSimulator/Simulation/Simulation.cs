@@ -914,6 +914,19 @@ public sealed partial class Simulation
             }
 
             var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
+
+            // Table-valued parameters are already materialized into the batch's
+            // TableVariables by the BatchContext ctor (the Structured-parameter
+            // seeding). Bind the live clone as a TVP argument by name — the same
+            // ProcArgument shape EXEC's `@local_t` table-variable arg produces.
+            if (parameter is SimulatedDbParameter structured
+                && BatchContext.IsTableValuedParameterValue(structured)
+                && batch.TableVariables.TryGetValue(pname, out var tvpClone))
+            {
+                arguments.Add(new ProcArgument(pname, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tvpClone));
+                continue;
+            }
+
             var dbType = SqlType.GetByDbType(parameter.DbType);
             var value = parameter.Value is null or DBNull
                 ? SqlValue.Null(dbType)

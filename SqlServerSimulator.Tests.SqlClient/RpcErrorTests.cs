@@ -32,35 +32,6 @@ public sealed class RpcErrorTests
         AreEqual(8134, ex.Number);
     }
 
-    // A table-valued parameter (SqlDbType.Structured) is decoded to the 0xF3
-    // wire token, which the RPC parser rejects. The unsupported-type error
-    // surfaces as Msg 50000 naming the table-valued form. Asserts the observed
-    // behavior; the message text documents the surface.
-    [TestMethod]
-    public async Task TableValuedParameter_SurfacesAsUnsupported()
-    {
-        var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
-        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
-
-        var table = new DataTable();
-        _ = table.Columns.Add("id", typeof(int));
-        _ = table.Rows.Add(1);
-        _ = table.Rows.Add(2);
-
-        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
-        {
-            await using var command = new SqlCommand("select count(*) from @t", connection);
-            var parameter = command.Parameters.AddWithValue("@t", table);
-            parameter.SqlDbType = SqlDbType.Structured;
-            parameter.TypeName = "dbo.IntList";
-            _ = await command.ExecuteScalarAsync(TestContext.CancellationToken);
-        });
-
-        AreEqual(50000, ex.Number);
-        Contains("table-valued", ex.Message);
-    }
-
     [TestMethod]
     public async Task OutputParameterBeforeErrorInBatch_ThrowsButWritesOutput()
     {

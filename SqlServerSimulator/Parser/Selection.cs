@@ -1261,100 +1261,31 @@ internal sealed partial class Selection
                 if (token is not Name tableName)
                     goto AfterBuiltInRowsetDispatch;
 
-                // OPENJSON dispatch wins over CTE / table lookup. Case-
-                // insensitive match on the function name; ParseOpenJson
-                // enforces the trailing `(`. SQL Server reserves OPENJSON
-                // as a built-in rowset function, so unconditional name-
-                // dispatch matches real-server behavior — a CTE / table
-                // named OPENJSON would already conflict on a real server.
-                // OPENJSON never carries a schema qualifier, so this fires
-                // before ParseObjectName / cursor advance.
+                // Built-in rowset-function dispatch wins over CTE / table
+                // lookup. Case-insensitive match on the function name; each
+                // parser enforces its trailing `(`. SQL Server reserves these
+                // names as built-in rowset functions, so unconditional name-
+                // dispatch matches real-server behavior — a CTE / table with
+                // one of these names would already conflict on a real server.
+                // None can carry a schema qualifier (a 2-part `dbo.OPENJSON`
+                // wouldn't match a single Name token), matching real SQL
+                // Server's grammar, so dispatch fires before ParseObjectName
+                // / cursor advance.
                 if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
-                {
-                    var openJsonPlan = ParseOpenJson(context, outerTypeResolver);
-                    var openJsonColumns = new HeapColumn[openJsonPlan.Schema.Length];
-                    for (var ci = 0; ci < openJsonColumns.Length; ci++)
-                        openJsonColumns[ci] = new HeapColumn(string.Empty, openJsonPlan.Schema[ci], maxLength: null, nullable: true);
-                    var openJsonAlias = ConsumeOptionalAliasInPlace(context);
-                    return new FromSource(
-                        qualifier: openJsonAlias,
-                        columnNames: openJsonPlan.ColumnNames,
-                        columns: openJsonColumns,
-                        storedSchema: openJsonColumns,
-                        storageOrdinals: null,
-                        lobStore: null,
-                        rows: [],
-                        lateralPlan: openJsonPlan);
-                }
+                    return BuiltInRowsetSource(context, ParseOpenJson(context, outerTypeResolver));
 
-                // STRING_SPLIT dispatch: same shape as OPENJSON — a built-in
-                // TVF that turns into a synthesized Selection plan. The name
-                // can't be schema-qualified (a 2-part `dbo.STRING_SPLIT(...)`
-                // wouldn't match here since this branch handles a single Name
-                // token before ParseObjectName), matching real SQL Server's
-                // grammar.
                 if (string.Equals(tableName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
-                {
-                    var stringSplitPlan = ParseStringSplit(context, outerTypeResolver);
-                    var stringSplitColumns = new HeapColumn[stringSplitPlan.Schema.Length];
-                    for (var ci = 0; ci < stringSplitColumns.Length; ci++)
-                        stringSplitColumns[ci] = new HeapColumn(stringSplitPlan.ColumnNames[ci], stringSplitPlan.Schema[ci], maxLength: null, nullable: true);
-                    var stringSplitAlias = ConsumeOptionalAliasInPlace(context);
-                    return new FromSource(
-                        qualifier: stringSplitAlias,
-                        columnNames: stringSplitPlan.ColumnNames,
-                        columns: stringSplitColumns,
-                        storedSchema: stringSplitColumns,
-                        storageOrdinals: null,
-                        lobStore: null,
-                        rows: [],
-                        lateralPlan: stringSplitPlan);
-                }
+                    return BuiltInRowsetSource(context, ParseStringSplit(context, outerTypeResolver));
 
-                // GENERATE_SERIES dispatch: sibling of STRING_SPLIT — built-in
-                // TVF (SQL Server 2022+) that synthesizes a single-column
-                // (`value`) Selection plan. Same 1-part-name grammar as
-                // STRING_SPLIT / OPENJSON.
+                // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
-                {
-                    var genSeriesPlan = ParseGenerateSeries(context, outerTypeResolver);
-                    var genSeriesColumns = new HeapColumn[genSeriesPlan.Schema.Length];
-                    for (var ci = 0; ci < genSeriesColumns.Length; ci++)
-                        genSeriesColumns[ci] = new HeapColumn(genSeriesPlan.ColumnNames[ci], genSeriesPlan.Schema[ci], maxLength: null, nullable: true);
-                    var genSeriesAlias = ConsumeOptionalAliasInPlace(context);
-                    return new FromSource(
-                        qualifier: genSeriesAlias,
-                        columnNames: genSeriesPlan.ColumnNames,
-                        columns: genSeriesColumns,
-                        storedSchema: genSeriesColumns,
-                        storageOrdinals: null,
-                        lobStore: null,
-                        rows: [],
-                        lateralPlan: genSeriesPlan);
-                }
+                    return BuiltInRowsetSource(context, ParseGenerateSeries(context, outerTypeResolver));
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the
                 // (objtype, objname, name, value) tuples for extended
-                // properties matching the filter. Same shape as STRING_SPLIT
-                // / OPENJSON — a built-in rowset function that synthesizes
-                // a Selection plan inline.
+                // properties matching the filter.
                 if (string.Equals(tableName.Value, "fn_listextendedproperty", StringComparison.OrdinalIgnoreCase))
-                {
-                    var listExtPlan = ParseListExtendedProperty(context);
-                    var listExtColumns = new HeapColumn[listExtPlan.Schema.Length];
-                    for (var ci = 0; ci < listExtColumns.Length; ci++)
-                        listExtColumns[ci] = new HeapColumn(listExtPlan.ColumnNames[ci], listExtPlan.Schema[ci], maxLength: null, nullable: true);
-                    var listExtAlias = ConsumeOptionalAliasInPlace(context);
-                    return new FromSource(
-                        qualifier: listExtAlias,
-                        columnNames: listExtPlan.ColumnNames,
-                        columns: listExtColumns,
-                        storedSchema: listExtColumns,
-                        storageOrdinals: null,
-                        lobStore: null,
-                        rows: [],
-                        lateralPlan: listExtPlan);
-                }
+                    return BuiltInRowsetSource(context, ParseListExtendedProperty(context));
 
                 // Multi-part name parse: advances the cursor past the last
                 // dotted segment, leaving Token on the first non-name token
@@ -1761,6 +1692,32 @@ internal sealed partial class Selection
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+    }
+
+    /// <summary>
+    /// Wraps a built-in rowset function's synthesized plan (OPENJSON /
+    /// STRING_SPLIT / GENERATE_SERIES / fn_listextendedproperty) as a FROM
+    /// source: projects the plan's schema into per-column
+    /// <see cref="HeapColumn"/>s (all nullable — these sources have no
+    /// storage-backed constraints), consumes the optional alias, and defers
+    /// execution to the plan via <see cref="FromSource.LateralPlan"/>. Entered
+    /// with the cursor just past the function's closing <c>)</c> (each parser
+    /// consumes through its own argument list).
+    /// </summary>
+    private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
+    {
+        var columns = new HeapColumn[plan.Schema.Length];
+        for (var ci = 0; ci < columns.Length; ci++)
+            columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: true);
+        return new FromSource(
+            qualifier: ConsumeOptionalAliasInPlace(context),
+            columnNames: plan.ColumnNames,
+            columns: columns,
+            storedSchema: columns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: [],
+            lateralPlan: plan);
     }
 
     /// <summary>

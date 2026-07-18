@@ -418,6 +418,78 @@ public sealed class TableValuedParameterTests
     }
 
     [TestMethod]
+    public void Structured_DataTable_NullIntoNotNullColumn_RaisesMsg515()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int not null, v int)");
+
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "select id from @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("id", typeof(int));
+        _ = dt.Columns.Add("v", typeof(int));
+        _ = dt.Rows.Add(DBNull.Value, 1);
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.t1";
+        _ = cmd.Parameters.Add(p);
+
+        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
+        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Structured_DataTable_DuplicatePrimaryKey_RaisesMsg2627()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int not null primary key, v int)");
+
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "select id from @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("id", typeof(int));
+        _ = dt.Columns.Add("v", typeof(int));
+        _ = dt.Rows.Add(1, 10);
+        _ = dt.Rows.Add(1, 20);
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.t1";
+        _ = cmd.Parameters.Add(p);
+
+        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
+        AreEqual("2627", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void Structured_DataTable_CheckViolation_RaisesMsg547()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int not null check (id > 0))");
+
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "select id from @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("id", typeof(int));
+        _ = dt.Rows.Add(-5);
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.t1";
+        _ = cmd.Parameters.Add(p);
+
+        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
+        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
     public void Structured_IDataReader_BindsViaCommand()
     {
         var simulation = new Simulation();

@@ -33,7 +33,7 @@ internal sealed class TdsRpcRequest
     /// </summary>
     public static List<TdsRpcRequest> ParseMessage(byte[] payload)
     {
-        var reader = new Reader(payload);
+        var reader = new TdsValueReader(payload);
 
         var headerLength = reader.ReadUInt32();
         if (headerLength < 4 || headerLength > (uint)payload.Length)
@@ -48,7 +48,7 @@ internal sealed class TdsRpcRequest
         return requests;
     }
 
-    private static TdsRpcRequest ParseRequest(Reader reader)
+    private static TdsRpcRequest ParseRequest(TdsValueReader reader)
     {
         var procName = "";
         ushort procId = 0;
@@ -78,7 +78,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcRequest(procName, procId, parameters);
     }
 
-    private static TdsRpcParameter ParseParameter(Reader reader)
+    private static TdsRpcParameter ParseParameter(TdsValueReader reader)
     {
         var name = reader.ReadUcs2(reader.ReadByte());
         var isOutput = (reader.ReadByte() & 0x01) != 0;
@@ -109,7 +109,7 @@ internal sealed class TdsRpcRequest
             0xEF => DecodeNationalString(reader, name, isOutput, DbType.StringFixedLength),
             0xF0 => throw Unsupported("CLR UDT"),
             0xF1 => DecodeXml(reader, name, isOutput),
-            0xF3 => throw Unsupported("table-valued"),
+            0xF3 => DecodeTableValued(reader, name, isOutput),
             _ => throw new NotSupportedException($"Unrecognized TDS RPC parameter type token 0x{token:X2}."),
         };
     }
@@ -117,7 +117,21 @@ internal sealed class TdsRpcRequest
     private static NotSupportedException Unsupported(string feature) =>
         new($"The network listener does not accept {feature} RPC parameters.");
 
-    private static TdsRpcParameter DecodeIntN(Reader reader, string name, bool isOutput)
+    /// <summary>
+    /// Decodes a table-valued parameter (type token <c>0xF3</c>) into a
+    /// <see cref="TableValuedParameterData"/> carried on the parameter's value,
+    /// which the engine's structured-parameter binding materializes into a
+    /// table variable — the same path the in-process ADO.NET Structured
+    /// parameter takes. The parameter's <see cref="DbType"/> is a placeholder;
+    /// the value shape is what routes it to the TVP binding.
+    /// </summary>
+    private static TdsRpcParameter DecodeTableValued(TdsValueReader reader, string name, bool isOutput)
+    {
+        var data = TdsTableValuedParameterReader.Read(reader);
+        return new TdsRpcParameter(name, isOutput, DbType.Object, data);
+    }
+
+    private static TdsRpcParameter DecodeIntN(TdsValueReader reader, string name, bool isOutput)
     {
         var declaredLength = reader.ReadByte();
         var dbType = declaredLength switch
@@ -145,7 +159,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, dbType, value);
     }
 
-    private static TdsRpcParameter DecodeBit(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeBit(TdsValueReader reader, string name, bool isOutput)
     {
         _ = reader.ReadByte();
         var length = reader.ReadByte();
@@ -154,7 +168,7 @@ internal sealed class TdsRpcRequest
             : new TdsRpcParameter(name, isOutput, DbType.Boolean, reader.ReadByte() != 0);
     }
 
-    private static TdsRpcParameter DecodeFloatN(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeFloatN(TdsValueReader reader, string name, bool isOutput)
     {
         var declaredLength = reader.ReadByte();
         var dbType = declaredLength == 4 ? DbType.Single : DbType.Double;
@@ -170,7 +184,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, dbType, value);
     }
 
-    private static TdsRpcParameter DecodeMoneyN(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeMoneyN(TdsValueReader reader, string name, bool isOutput)
     {
         var declaredLength = reader.ReadByte();
         var length = reader.ReadByte();
@@ -193,7 +207,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.Currency, scaled / 10000m);
     }
 
-    private static TdsRpcParameter DecodeDecimal(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeDecimal(TdsValueReader reader, string name, bool isOutput)
     {
         _ = reader.ReadByte();
         var precision = reader.ReadByte();
@@ -223,7 +237,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.Decimal, value, precision: precision, scale: scale);
     }
 
-    private static TdsRpcParameter DecodeGuid(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeGuid(TdsValueReader reader, string name, bool isOutput)
     {
         _ = reader.ReadByte();
         var length = reader.ReadByte();
@@ -232,7 +246,7 @@ internal sealed class TdsRpcRequest
             : new TdsRpcParameter(name, isOutput, DbType.Guid, new Guid(reader.ReadBytes(16)));
     }
 
-    private static TdsRpcParameter DecodeDate(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeDate(TdsValueReader reader, string name, bool isOutput)
     {
         var length = reader.ReadByte();
         if (length == 0)
@@ -243,7 +257,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.Date, value);
     }
 
-    private static TdsRpcParameter DecodeTime(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeTime(TdsValueReader reader, string name, bool isOutput)
     {
         var scale = reader.ReadByte();
         var length = reader.ReadByte();
@@ -255,7 +269,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.Time, TimeSpan.FromTicks(ticks), scale: scale);
     }
 
-    private static TdsRpcParameter DecodeDateTime2(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeDateTime2(TdsValueReader reader, string name, bool isOutput)
     {
         var scale = reader.ReadByte();
         var length = reader.ReadByte();
@@ -270,7 +284,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.DateTime2, value, scale: scale);
     }
 
-    private static TdsRpcParameter DecodeDateTimeOffset(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeDateTimeOffset(TdsValueReader reader, string name, bool isOutput)
     {
         var scale = reader.ReadByte();
         var length = reader.ReadByte();
@@ -288,7 +302,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.DateTimeOffset, value, scale: scale);
     }
 
-    private static TdsRpcParameter DecodeDateTimeN(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeDateTimeN(TdsValueReader reader, string name, bool isOutput)
     {
         var declaredLength = reader.ReadByte();
         var length = reader.ReadByte();
@@ -314,7 +328,7 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.DateTime, value);
     }
 
-    private static TdsRpcParameter DecodeAnsiString(Reader reader, string name, bool isOutput, DbType dbType)
+    private static TdsRpcParameter DecodeAnsiString(TdsValueReader reader, string name, bool isOutput, DbType dbType)
     {
         var maxLength = reader.ReadUInt16();
         var utf8 = ReadCollation(reader);
@@ -333,7 +347,7 @@ internal sealed class TdsRpcRequest
             : new TdsRpcParameter(name, isOutput, dbType, encoding.GetString(reader.ReadBytes(length)), size: maxLength);
     }
 
-    private static TdsRpcParameter DecodeNationalString(Reader reader, string name, bool isOutput, DbType dbType)
+    private static TdsRpcParameter DecodeNationalString(TdsValueReader reader, string name, bool isOutput, DbType dbType)
     {
         var maxLength = reader.ReadUInt16();
         _ = ReadCollation(reader);
@@ -351,7 +365,7 @@ internal sealed class TdsRpcRequest
             : new TdsRpcParameter(name, isOutput, dbType, Encoding.Unicode.GetString(reader.ReadBytes(length)), size: maxLength / 2);
     }
 
-    private static TdsRpcParameter DecodeBinary(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeBinary(TdsValueReader reader, string name, bool isOutput)
     {
         var maxLength = reader.ReadUInt16();
         if (maxLength == 0xFFFF)
@@ -366,7 +380,7 @@ internal sealed class TdsRpcRequest
             : new TdsRpcParameter(name, isOutput, DbType.Binary, reader.ReadBytes(length).ToArray(), size: maxLength);
     }
 
-    private static TdsRpcParameter DecodeXml(Reader reader, string name, bool isOutput)
+    private static TdsRpcParameter DecodeXml(TdsValueReader reader, string name, bool isOutput)
     {
         if (reader.ReadByte() == 1)
         {
@@ -398,7 +412,7 @@ internal sealed class TdsRpcRequest
     /// all-ones = NULL, then length-prefixed chunks) exactly like the MAX
     /// string types.
     /// </summary>
-    private static TdsRpcParameter DecodeLegacyLob(Reader reader, string name, bool isOutput, bool ansi)
+    private static TdsRpcParameter DecodeLegacyLob(TdsValueReader reader, string name, bool isOutput, bool ansi)
     {
         _ = reader.ReadUInt32();
         var utf8 = ReadCollation(reader);
@@ -410,7 +424,7 @@ internal sealed class TdsRpcRequest
             : new TdsRpcParameter(name, isOutput, dbType, encoding.GetString(reader.ReadBytes(checked((int)dataLength))), size: -1);
     }
 
-    private static bool ReadCollation(Reader reader)
+    private static bool ReadCollation(TdsValueReader reader)
     {
         var info = reader.ReadUInt32();
         _ = reader.ReadByte();
@@ -422,7 +436,7 @@ internal sealed class TdsRpcRequest
     /// = unknown length) followed by length-prefixed chunks terminated by a
     /// zero-length chunk. Chunks are accumulated regardless of the declared total.
     /// </summary>
-    private static byte[]? ReadPlp(Reader reader)
+    private static byte[]? ReadPlp(TdsValueReader reader)
     {
         var total = reader.ReadUInt64();
         if (total == 0xFFFFFFFFFFFFFFFF)
@@ -466,46 +480,6 @@ internal sealed class TdsRpcRequest
 
     private static int ReadThreeByteInt(ReadOnlySpan<byte> bytes) =>
         bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
-
-    /// <summary>A forward-only, bounds-checked cursor over an RPC message payload.</summary>
-    private sealed class Reader(byte[] data)
-    {
-        private readonly byte[] data = data;
-
-        /// <summary>The read offset; callers advance it by skipping the header block.</summary>
-        public int Position;
-
-        public bool AtEnd => this.Position >= this.data.Length;
-
-        public byte PeekByte() =>
-            this.Position < this.data.Length ? this.data[this.Position] : throw Truncated();
-
-        public byte ReadByte() =>
-            this.Position < this.data.Length ? this.data[this.Position++] : throw Truncated();
-
-        public ReadOnlySpan<byte> ReadBytes(int count)
-        {
-            if (count < 0 || (long)this.Position + count > this.data.Length)
-                throw Truncated();
-
-            var span = this.data.AsSpan(this.Position, count);
-            this.Position += count;
-            return span;
-        }
-
-        public ushort ReadUInt16() => BinaryPrimitives.ReadUInt16LittleEndian(this.ReadBytes(2));
-
-        public uint ReadUInt32() => BinaryPrimitives.ReadUInt32LittleEndian(this.ReadBytes(4));
-
-        public ulong ReadUInt64() => BinaryPrimitives.ReadUInt64LittleEndian(this.ReadBytes(8));
-
-        /// <summary>Reads <paramref name="charCount"/> UCS-2 characters as a string.</summary>
-        public string ReadUcs2(int charCount) =>
-            charCount == 0 ? "" : Encoding.Unicode.GetString(this.ReadBytes(charCount * 2));
-
-        private static InvalidDataException Truncated() =>
-            new("The RPC request ends before a value was fully read.");
-    }
 }
 
 /// <summary>One RPC parameter: its wire declaration plus the decoded CLR value.</summary>

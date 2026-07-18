@@ -106,6 +106,28 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Materializes one row into a table-valued-parameter / structured-parameter
+    /// clone: evaluates computed columns, enforces NOT NULL (Msg 515), CHECK
+    /// (Msg 547), PRIMARY KEY / UNIQUE constraints (Msg 2627) and UNIQUE indexes
+    /// (Msg 2601) against the rows inserted so far, then writes the row through
+    /// the heap encoder. Shared by the in-process ADO.NET Structured parameter
+    /// path and the TDS-wire TVP decode so both give the constraint-violation
+    /// fidelity real SQL Server does ("The data for table-valued parameter … SQL
+    /// Server error is: N"). The clone is a table variable, so the insert is not
+    /// transaction-logged; it exists only to seed the parameter binding.
+    /// </summary>
+    internal static void InsertTableValuedParameterRow(HeapTable destination, SqlValue[] fullRowValues, BatchContext batch)
+    {
+        EvaluateComputedColumns(destination, fullRowValues, batch);
+        EnforceNotNull(destination, fullRowValues);
+        EnforceCheckConstraints(destination, fullRowValues, batch);
+        var storedValues = ProjectStoredValues(destination, fullRowValues);
+        EnforceKeyConstraints(destination, storedValues);
+        EnforceUniqueIndexes(destination, fullRowValues, storedValues, batch);
+        _ = destination.Heap.Insert(RowEncoder.EncodeRow(destination.StoredColumns, storedValues, destination.Heap));
+    }
+
+    /// <summary>
     /// Walks the table's computed columns and fills their slots in
     /// <paramref name="rowValues"/> by evaluating each expression against the
     /// current row's stored-column values. Computed-of-computed references

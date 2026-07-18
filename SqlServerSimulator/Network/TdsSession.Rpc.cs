@@ -257,6 +257,20 @@ internal sealed partial class TdsSession
     {
         var parameter = command.CreateParameter();
         parameter.ParameterName = wire.Name;
+
+        // A table-valued parameter carries its decoded rows; setting the
+        // TypeName + structured value routes it through the engine's
+        // Structured-parameter binding (into TableVariables), the same path the
+        // in-process ADO.NET Structured parameter takes.
+        if (wire.Value is TableValuedParameterData tvp)
+        {
+            parameter.TypeName = tvp.TypeName;
+            parameter.Value = tvp;
+            parameter.Direction = ParameterDirection.Input;
+            _ = command.Parameters.Add(parameter);
+            return parameter;
+        }
+
         parameter.DbType = wire.DbType;
         parameter.Value = wire.Value ?? DBNull.Value;
         parameter.Direction = wire.IsOutput ? ParameterDirection.InputOutput : ParameterDirection.Input;
