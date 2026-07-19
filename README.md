@@ -61,37 +61,37 @@ sealed class SimulatedContext(Simulation simulation) : DbContext
 The companion `SqlServerSimulator.EFCore` package adds `UseSqlServerSimulator(...)` for entities that use CLR/store-type pairs whose EF default mappings downcast to `SqlParameter` (`DateOnly`/`DateTime`→`date`/`smalldatetime`, `TimeOnly`/`TimeSpan`→`time(N)`, `decimal`→`money`/`smallmoney`). Without it, those mappings throw at SaveChanges. The base-ADO.NET types in the example above don't need it.
 -->
 
+## Network endpoint
+
+A simulation can optionally listen on a real TDS endpoint over loopback TCP with TLS, so genuine SQL Server clients connect to it exactly as they would to a real server:
+
+```C#
+await using var listener = await simulation.ListenAsync(11433);
+// Now connect with any SQL Server client, e.g.:
+//   Server=127.0.0.1,11433;User ID=dev;Password=anything;TrustServerCertificate=True
+```
+
+Real `Microsoft.Data.SqlClient` works end-to-end — including parameterized RPC, table-valued parameters, `SqlBulkCopy`, MARS, and query cancellation — as does Entity Framework Core over the wire via a plain connection string. SQL Server Management Studio connects and browses: Object Explorer, the query editor, and object scripting run against the simulator, which presents itself as SQL Server 2025 (build 17.0.4065.4). By default any credentials are accepted; run `CREATE LOGIN` to switch the endpoint to enforced authentication.
+
 ## Fidelity
 
-Behavior was probed against a live SQL Server reference instance before being modeled. SQL Server's quirks, inconsistencies, and surprises are mostly preserved. Error messages usually match.
+Behavior was probed against a live SQL Server reference instance before being modeled. SQL Server's quirks, inconsistencies, and surprises are mostly preserved. Error messages usually match, down to the `Msg` number, severity, and wording of common diagnostics.
 
-Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations, change tracking, and the SaveChanges pipeline all flow through unchanged.
+Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations, change tracking, and the SaveChanges pipeline all flow through unchanged. The test suite — more than 8,000 cases — also drives real SqlClient, real SMO (the library behind SSMS), and EF Core against the simulator as independent oracles.
 
 ## Capabilities
 
-The simulator is feature-rich with more than 6,000 test cases covering a variety of capabilities:
+Coverage is broad; the compact map below is the shape of it, not the full inventory:
 
-- **Type system.** All base scalar families: `int`/`bigint`/`smallint`/`tinyint`, `decimal`/`numeric`, `float`/`real`, `money`/`smallmoney`, `bit`, `char`/`varchar`/`text`, `nchar`/`nvarchar`/`ntext`, `binary`/`varbinary`/`image`, `date`/`time`/`datetime`/`datetime2`/`datetimeoffset`/`smalldatetime`, `uniqueidentifier`, `rowversion`/`timestamp`, `xml`, `hierarchyid`, `geography`, `geometry`. MAX-typed strings and binaries flow through an 8KB LOB page chain.
-- **Storage.** Real 8KB pages, byte-encoded rows navigated column-by-column without rehydrating, off-row LOB pushing to keep rows within the 8060-byte limit.
-- **DDL.** `CREATE`/`ALTER`/`DROP` for tables, schemas, views, procedures, scalar UDFs, TVFs, triggers (DML + DDL), sequences, indexes (UNIQUE/CLUSTERED/INCLUDE/filtered), table types, alias (UDDT) types, and XML schema collections.
-- **DML.** `INSERT`, `UPDATE`, `DELETE`, `MERGE` (all WHEN-clause families with multiple AND-conditioned forms), `SELECT INTO`, and `OUTPUT` (including `OUTPUT INTO`). Statement-level atomicity: a multi-row mutation failing partway through rolls back its partial writes.
-- **Query.** All JOIN types including `CROSS APPLY`/`OUTER APPLY`; correlated subqueries at arbitrary nesting depth; `EXISTS`/`IN`/`ANY`/`SOME`/`ALL`; window functions; CTEs including recursive; set operations (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`); `OFFSET`/`FETCH`; `CASE`.
-- **Constraints.** `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK` (inline + table-level), `FOREIGN KEY` with all four referential actions (`NO ACTION`/`CASCADE`/`SET NULL`/`SET DEFAULT`) on both `ON DELETE` and `ON UPDATE`, cascade-cycle detection at CREATE.
-- **Transactions.** Implicit, ADO.NET API (`BeginTransaction`/`Commit`/`Rollback`), and T-SQL (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVE TRANSACTION`) - all sharing one undo log. Nested `BEGIN TRAN` honors SQL Server's "only outermost commit actually commits" rule; `@@TRANCOUNT` reflects depth.
-- **Locking & MVCC.** Full 8-mode lock matrix, row-X writers and row-mode readers, all standard table hints (`NOLOCK`/`HOLDLOCK`/`UPDLOCK`/`XLOCK`/`TABLOCK`/`READPAST`/`REPEATABLEREAD`), lock escalation at 5000 row-locks, `SNAPSHOT` and `READ_COMMITTED_SNAPSHOT` isolation with version chains and GC, `Msg 1205` deadlock detection, `Msg 1222` lock-timeout, lock-related DMVs.
-- **Temporal tables.** `PERIOD FOR SYSTEM_TIME`, system-versioned history sibling tables, `FOR SYSTEM_TIME ALL/AS OF`, `temporal_type` exposed through `sys.tables`.
-- **Programmable objects.** Scalar UDFs, table-valued functions, views, stored procedures with `OUTPUT` parameters and result sets, DML and DDL triggers (`INSERTED`/`DELETED` pseudo-tables, `TRIGGER_NESTLEVEL`, recursion control), dynamic SQL via `EXEC(@sql)` and `sp_executesql`, table-valued parameters with the ADO.NET `SqlDbType.Structured` flow.
-- **Temp tables and table variables.** `#foo` local temp tables (per-session, cleaned up at connection dispose, transactional CREATE/DROP); `DECLARE @t TABLE` with column constraints (IDENTITY, UNIQUE, CHECK, computed, rowversion); `OUTPUT … INTO @t`.
-- **Control flow.** `IF`/`ELSE`, `WHILE`/`BREAK`/`CONTINUE`, `RETURN`, `TRY`/`CATCH`/`THROW`, the `ERROR_*` family, `PRINT`, `WAITFOR DELAY`/`WAITFOR TIME`.
-- **JSON.** `JSON_VALUE`, `JSON_QUERY`, `JSON_MODIFY`, `OPENJSON` (with and without WITH-clause schema).
-- **XML.** `xml` data type, XML schema collections, the `.value()`/`.query()`/`.nodes()`/`.exist()`/`.modify()` method family, XML indexes.
-- **Spatial.** `geography` and `geometry` types with their full method dispatch (`STDistance`, `STIntersects`, `STArea`, `STContains`, `STBuffer`, etc.), static constructors (`::Point`, `::STGeomFromText`), spatial indexes.
-- **Catalog views.** `sys.tables`, `sys.columns`, `sys.indexes`, `sys.foreign_keys`, `sys.foreign_key_columns`, `sys.objects`, `sys.schemas`, `sys.triggers`, `sys.sequences`, `sys.types`, `sys.extended_properties`, plus the corresponding `INFORMATION_SCHEMA.*` surfaces.
-- **Permissions and principals.** `GRANT`/`REVOKE`/`DENY`, principal DDL, fixed-principal seeding.
-- **Built-in scalars.** The math, date, string-manipulation, current-time, `*FROMPARTS`, `AT TIME ZONE`, `CONCAT`/`CONCAT_WS`, `FORMAT`, `STRING_SPLIT`, `STRING_AGG`, `COMPRESS`/`DECOMPRESS`, char-code, and hash families.
-- **Multi-database.** `USE <db>` switches the session's current database; 3-part names (`other.dbo.t`) route reads across databases; `Simulation.Databases` exposes the dictionary.
-- **BACPAC import.** `Simulation.ImportBacpac(...)` loads a `.bacpac` file end-to-end (schema + data via BCP wire format), supporting the round-trip-from-real-SQL-Server bootstrap path.
-- **Error fidelity.** Every modeled error path raises `SimulatedSqlException` with the matching `Msg` number - including the exact wording for common diagnostics like Msg 102 syntax, Msg 207 invalid column, Msg 208 invalid object, Msg 547 constraint conflict, Msg 2627 unique violation, Msg 1205 deadlock victim, Msg 8152 string-or-binary-truncation, and many more.
+- **Types and storage.** Every base scalar type family including MAX-typed LOBs, `sql_variant`, `xml`, `hierarchyid`, `geography`/`geometry`, and the legacy `text`/`ntext`/`image` trio; per-column collations; real 8KB pages with byte-encoded rows and off-row LOB storage.
+- **Query surface.** All JOIN and APPLY forms, correlated subqueries at arbitrary depth, window functions, recursive CTEs, set operations, `PIVOT`/`UNPIVOT`, `OFFSET`/`FETCH`, cursors (T-SQL and API server cursors).
+- **DML and DDL.** `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`SELECT INTO` with `OUTPUT`, statement-level atomicity, and `CREATE`/`ALTER`/`DROP` across tables, views, procedures, functions, triggers, sequences, indexes (including filtered and indexed views), types, and schemas.
+- **Programmability.** Stored procedures, scalar UDFs and TVFs, DML + DDL triggers, dynamic SQL, table-valued parameters, control flow with `TRY`/`CATCH`/`THROW`.
+- **Concurrency.** The full lock-mode matrix with escalation and timeouts, `SNAPSHOT` and `READ_COMMITTED_SNAPSHOT` isolation with a versioned store, deadlock detection, application locks, and nested transactions with savepoints.
+- **Constraints.** `PRIMARY KEY`/`UNIQUE`/`CHECK`/`NOT NULL` and `FOREIGN KEY` with all four referential actions on both `ON DELETE` and `ON UPDATE`.
+- **System surfaces.** A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; temporal tables; `SERVERPROPERTY` and friends as true `sql_variant`.
+- **JSON, XML, spatial, full-text DDL.** The `JSON_*`/`OPENJSON` family, XML methods and schema collections, the spatial method surface, and full-text catalog/index DDL.
+- **Scale-out shapes.** Multiple databases with cross-database reads, linked servers between simulations, and BACPAC import for bootstrapping from a real database.
 
 Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 
@@ -104,12 +104,11 @@ A few examples:
 
 - Cross-database DML - writes through a 3-part name targeting a different database. Cross-database reads work; issue `USE <db>` to switch first for writes.
 - `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `GOTO`/labels.
+- `CREATE ASSEMBLY` and CLR functions; logon triggers; natively-compiled procedures beyond parser fidelity.
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset windows (`ROWS` numeric-offset ships).
-- CLR functions, logon triggers, natively-compiled procedures beyond parser fidelity.
 - A few `ALTER TABLE` shapes: `DROP PERIOD FOR SYSTEM_TIME`, `REBUILD`, `SWITCH PARTITION`, identity-type changes.
-- Byte-identical CAST encoding for `hierarchyid` / `geography` / `geometry` - simulator-native encoding is used internally.
 
 ## Limitations
 
 - No physical storage - all data lives in memory for the lifetime of the `Simulation`. Suited to test runs and bounded workloads, not larger-than-RAM datasets.
-- No network protocol. Tools like SQL Server Management Studio can't connect; the simulator is reached only through the in-process `DbConnection` it hands out.
+- The network endpoint binds to loopback only, and is meant for development tooling and tests - it is not a hardened server for untrusted clients.
