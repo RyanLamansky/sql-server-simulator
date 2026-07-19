@@ -262,6 +262,68 @@ public sealed class TableValuedParameterTests
         AreEqual(2, sim.ExecuteScalar("declare @t dbo.t1; insert @t values (1), (2); exec dbo.outer_p @t"));
     }
 
+    // ---- Off-row values crossing the proc-parameter copy ----
+
+    // A table variable's off-row bytes (LOB chains for MAX-typed columns,
+    // and bounded var columns overflow-pushed past 8060) live in the source
+    // heap; the proc-parameter copy must re-home them into the parameter's
+    // own heap or the copied rows' pointers dangle.
+
+    [TestMethod]
+    public void Exec_TvpArg_NvarcharMaxColumn_LobValueSurvivesParameterCopy()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.t1 as table (id int, doc nvarchar(max))",
+            "create proc dbo.p1 @rows dbo.t1 readonly as select cast(len(doc) as int) l, substring(doc, 99999, 2) tail from @rows");
+        using var rdr = sim.ExecuteReader("""
+            declare @t dbo.t1;
+            insert @t values (1, replicate(cast(N'x' as nvarchar(max)), 99999) + N'y');
+            exec dbo.p1 @t
+            """);
+        IsTrue(rdr.Read());
+        AreEqual(100000, rdr.GetInt32(0));
+        AreEqual("xy", rdr.GetString(1));
+    }
+
+    [TestMethod]
+    public void Exec_TvpArg_OverflowPushedBoundedColumn_SurvivesParameterCopy()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.t1 as table (id int, a varchar(8000), b varchar(8000))",
+            "create proc dbo.p1 @rows dbo.t1 readonly as select len(a) + len(b) from @rows");
+        AreEqual(16000, sim.ExecuteScalar("""
+            declare @t dbo.t1;
+            insert @t values (1, replicate('a', 8000), replicate('b', 8000));
+            exec dbo.p1 @t
+            """));
+    }
+
+    [TestMethod]
+    public void Structured_DataTable_NvarcharMaxColumn_LobValueSurvivesParameterCopy()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int, doc nvarchar(max))");
+        _ = simulation.ExecuteNonQuery("create proc dbo.p1 @rows dbo.t1 readonly as select cast(len(doc) as int) from @rows");
+
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "exec dbo.p1 @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("id", typeof(int));
+        _ = dt.Columns.Add("doc", typeof(string));
+        _ = dt.Rows.Add(1, new string('x', 100000));
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.t1";
+        _ = cmd.Parameters.Add(p);
+
+        AreEqual(100000, cmd.ExecuteScalar());
+    }
+
     // ---- ADO.NET Structured parameter (DataTable / IDataReader) ----
 
     [TestMethod]

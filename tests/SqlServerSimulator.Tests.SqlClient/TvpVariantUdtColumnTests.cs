@@ -21,12 +21,10 @@ namespace SqlServerSimulator;
 /// value — both the same forms as the matching RPC parameters.
 /// </summary>
 /// <remarks>
-/// These drive the TVP through the <c>sp_executesql</c> text path (the parameter
-/// binds as its own <c>@rows</c> table variable). Routing a LOB-backed TVP column
-/// (<c>geography</c> / <c>geometry</c>, like <c>nvarchar(max)</c>) through a
-/// stored-procedure READONLY parameter hits a pre-existing table-variable LOB-copy
-/// gap in proc-parameter binding, unrelated to the wire decode; see
-/// docs/claude/tds-endpoint.md.
+/// Most of these drive the TVP through the <c>sp_executesql</c> text path (the
+/// parameter binds as its own <c>@rows</c> table variable); the LOB-backed
+/// proc test covers the stored-procedure READONLY route, whose parameter copy
+/// re-homes off-row values into the parameter's own heap.
 /// </remarks>
 [TestClass]
 public sealed class TvpVariantUdtColumnTests
@@ -125,6 +123,43 @@ public sealed class TvpVariantUdtColumnTests
 
         AreEqual("POINT (-122.3 47.6)", await new SqlCommand("select g.ToString() from dbo.sink", connection)
             .ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    // LOB-backed columns (nvarchar(max), geography) bound to a stored-proc
+    // READONLY parameter: the proc-parameter copy must carry the off-row
+    // values into the parameter's table variable, not just the row bytes.
+    [TestMethod]
+    public async Task LobBackedColumns_ThroughProcReadonlyParameter_RoundTrip()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create type dbo.LobRows as table (id int, doc nvarchar(max), g geography)");
+        Wire.ExecInProc(simulation, "create table dbo.sink (id int, doc nvarchar(max), g geography)");
+        Wire.ExecInProc(simulation, "create proc dbo.ins_lob @rows dbo.LobRows readonly as insert into dbo.sink select id, doc, g from @rows");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var metadata = new[]
+        {
+            new SqlMetaData("id", SqlDbType.Int),
+            new SqlMetaData("doc", SqlDbType.NVarChar, SqlMetaData.Max),
+            new SqlMetaData("g", SqlDbType.Udt, typeof(SqlGeography), "geography"),
+        };
+        var record = new SqlDataRecord(metadata);
+        record.SetInt32(0, 1);
+        record.SetString(1, new string('x', 100000));
+        record.SetValue(2, SqlGeography.STGeomFromText(new SqlChars("POINT(-122.3 47.6)"), 4326));
+
+        await using var command = new SqlCommand("dbo.ins_lob", connection) { CommandType = CommandType.StoredProcedure };
+        var parameter = command.Parameters.AddWithValue("@rows", new[] { record });
+        parameter.SqlDbType = SqlDbType.Structured;
+        parameter.TypeName = "dbo.LobRows";
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        await using var reader = await new SqlCommand("select cast(len(doc) as int), g.ToString() from dbo.sink", connection)
+            .ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(100000, reader.GetInt32(0));
+        AreEqual("POINT (-122.3 47.6)", reader.GetString(1));
     }
 
     [TestMethod]

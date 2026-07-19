@@ -101,6 +101,8 @@ Two-shape recognition in `ParseExecArgument`:
 - Allocates a parallel `boundTableValues` array alongside `boundValues`.
 - For each TVP parameter: clones the type into a fresh TVP-flagged `HeapTable`, then bulk-copies the supplied source's rows via `Heap.EnumerateRows()` → `Heap.Insert()`.
   Pass-by-value semantics matching real SQL Server's TVP copy.
+  When the type has any off-row-capable column (`Heap.ReclaimColumns` non-null — a LOB-typed column or any variable-length column, since bounded var columns overflow-push past 8060 bytes), each row decodes from the source heap and re-encodes against the clone's heap so LOB chains are re-homed; raw row bytes would carry pointers into the *source* heap's `LobPages` and dangle.
+  Pointer-free schemas keep the raw byte copy.
 - Unsupplied TVP parameters get an empty clone (probe-confirmed: `EXEC p` with the TVP arg omitted is legal).
 - Scalar argument passed to a TVP parameter raises **Msg 206** ("Operand type clash: int is incompatible with `<typeleaf>`") — probe-confirmed wording, with the table-type leaf name (no schema qualifier).
 

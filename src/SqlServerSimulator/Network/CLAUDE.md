@@ -70,7 +70,7 @@ These notes are the local implementation contracts.
   UDT **input** *parameters* decode (`TdsRpc.DecodeClrUdt` → `TdsWireValue.BuildUdtValue`): the client UDT_INFO is three B_VARCHARs (db/schema/type, no max-size, no AQN — shorter than COLMETADATA) + PLP value; hierarchyid OrdPath bytes bind verbatim, spatial WKB decodes via `SpatialWkbDecoder.TryDecode`, resolved case-insensitively into a pre-built `SqlValue` (unknown type → Msg 8064, invalid spatial bytes → Msg 8023).
   **UDT columns inside a TVP** decode through the same builder (`TdsColumnDecoder`: 0xF0 + three B_VARCHARs + PLP value).
   **Output** direction stays rejected.
-  A LOB-backed UDT TVP column (`geography`/`geometry`) round-trips via the `sp_executesql` text path but hits a pre-existing table-variable LOB-copy gap when bound to a stored-proc READONLY parameter (docs/claude/tds-endpoint.md).
+  A LOB-backed UDT TVP column (`geography`/`geometry`) round-trips via both the `sp_executesql` text path and a stored-proc READONLY parameter (the proc-parameter copy re-homes off-row values — docs/claude/table-valued-parameters.md).
   Oracles: `UdtRpcParameterTests`, `TvpVariantUdtColumnTests`.
 - **Length-prefix trap**: most strings are char-counted (B_VARCHAR / US_VARCHAR), but TM-request transaction names are byte-counted — misreading them as char-counted overruns the payload on every `SqlTransaction.Save`.
   LOGIN7's password length pair is char-counted like the other LOGIN7 fields (oracle-confirmed with a surrogate-pair password); only its *bytes* are special, obfuscated per MS-TDS (client swaps nibbles then XORs 0xA5 — decode inverts the order).
