@@ -6,9 +6,11 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class SessionContextTests
 {
+    // SESSION_CONTEXT preserves the stored value's base type through the
+    // sql_variant result: an int round-trips as int, an nvarchar as nvarchar.
     [TestMethod]
-    public void SetAndRead_Named()
-        => AreEqual("42", ExecuteScalar(
+    public void SetAndRead_Named_PreservesIntType()
+        => AreEqual(42, ExecuteScalar(
             "exec sp_set_session_context @key = N'TenantId', @value = 42; select session_context(N'TenantId')"));
 
     [TestMethod]
@@ -19,6 +21,29 @@ public sealed class SessionContextTests
     [TestMethod]
     public void MissingKey_ReturnsNull()
         => IsInstanceOfType<DBNull>(ExecuteScalar("select session_context(N'nope')"));
+
+    // SESSION_CONTEXT projects sql_variant (like real); a stored int surfaces
+    // its int inner and compares against an int column by unwrapping.
+    [TestMethod]
+    public void ReportsSqlVariantMetadata()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "exec sp_set_session_context N'k', 7; select session_context(N'k')");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        AreEqual(typeof(object), reader.GetFieldType(0));
+        IsTrue(reader.Read());
+        _ = IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(7, reader.GetValue(0));
+    }
+
+    [TestMethod]
+    public void ConnectionProperty_ReportsSqlVariantMetadata()
+    {
+        using var reader = new Simulation().ExecuteReader("select connectionproperty('net_transport')");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        IsTrue(reader.Read());
+        AreEqual("TCP", reader.GetValue(0));
+    }
 
     [TestMethod]
     public void Key_IsCaseSensitive()

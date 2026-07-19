@@ -360,16 +360,18 @@ public sealed class CatalogViewTests
     }
 
     [TestMethod]
-    public void SysConfigurations_AgentXps_ValueInUseIsBigintZero()
+    public void SysConfigurations_AgentXps_ValueInUseIsVariantIntZero()
     {
         // The exact query SSMS's SMO issues during its Object-Explorer
         // database-node preamble. Msg 208 here aborts the request before the
-        // database enumeration, so the row must resolve and surface bigint.
+        // database enumeration, so the row must resolve. value_in_use is
+        // sql_variant carrying an int inner (like real).
         using var reader = new Simulation().ExecuteReader(
             "select value_in_use from sys.configurations where configuration_id = 16384");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         IsTrue(reader.Read());
-        AreEqual(typeof(long), reader.GetFieldType(0));
-        AreEqual(0L, reader.GetInt64(0));
+        _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(0, reader.GetValue(0));
         IsFalse(reader.Read());
     }
 
@@ -389,10 +391,12 @@ public sealed class CatalogViewTests
         IsTrue(reader.Read());
         AreEqual(typeof(int), reader.GetFieldType(0));
         AreEqual(typeof(string), reader.GetFieldType(1));
-        AreEqual(typeof(long), reader.GetFieldType(2));
-        AreEqual(typeof(long), reader.GetFieldType(3));
-        AreEqual(typeof(long), reader.GetFieldType(4));
-        AreEqual(typeof(long), reader.GetFieldType(5));
+        // value / minimum / maximum / value_in_use are sql_variant (object
+        // field type), matching real — each wraps an int inner.
+        AreEqual(typeof(object), reader.GetFieldType(2));
+        AreEqual(typeof(object), reader.GetFieldType(3));
+        AreEqual(typeof(object), reader.GetFieldType(4));
+        AreEqual(typeof(object), reader.GetFieldType(5));
         AreEqual(typeof(string), reader.GetFieldType(6));
         AreEqual(typeof(bool), reader.GetFieldType(7));
         AreEqual(typeof(bool), reader.GetFieldType(8));
@@ -409,10 +413,11 @@ public sealed class CatalogViewTests
         IsTrue(reader.Read());
         AreEqual(16384, reader.GetInt32(0));
         AreEqual("Agent XPs", reader.GetString(1));
-        AreEqual(0L, reader.GetInt64(2));
-        AreEqual(0L, reader.GetInt64(3));
-        AreEqual(1L, reader.GetInt64(4));
-        AreEqual(0L, reader.GetInt64(5));
+        // The four sql_variant columns wrap an int inner (probe-confirmed).
+        AreEqual(0, reader.GetValue(2));
+        AreEqual(0, reader.GetValue(3));
+        AreEqual(1, reader.GetValue(4));
+        AreEqual(0, reader.GetValue(5));
         AreEqual("Enable or disable Agent XPs", reader.GetString(6));
         IsTrue(reader.GetBoolean(7));
         IsTrue(reader.GetBoolean(8));

@@ -22,12 +22,14 @@ public sealed class ServerPropertyTests
     public void EngineEdition_Returns3AsInt()
         => AreEqual(3, new Simulation().ExecuteScalar("select serverproperty('EngineEdition')"));
 
+    // The projection is sql_variant (like real); each cell surfaces its inner
+    // CLR type — EngineEdition an int, SqlCharSet / SqlSortOrder a tinyint byte.
     [TestMethod]
-    public void EngineEdition_SurfacesAsIntType()
+    public void EngineEdition_SurfacesAsVariantWithIntInner()
     {
         using var reader = new Simulation().ExecuteReader("select serverproperty('EngineEdition')");
         IsTrue(reader.Read());
-        AreEqual("int", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
         AreEqual(3, reader.GetValue(0));
     }
@@ -37,7 +39,7 @@ public sealed class ServerPropertyTests
     {
         using var reader = new Simulation().ExecuteReader("select serverproperty('SqlCharSet')");
         IsTrue(reader.Read());
-        AreEqual("tinyint", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         AreEqual((byte)1, reader.GetValue(0));
     }
 
@@ -46,7 +48,7 @@ public sealed class ServerPropertyTests
     {
         using var reader = new Simulation().ExecuteReader("select serverproperty('SqlSortOrder')");
         IsTrue(reader.Read());
-        AreEqual("tinyint", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         AreEqual((byte)52, reader.GetValue(0));
     }
 
@@ -74,20 +76,30 @@ public sealed class ServerPropertyTests
     public void ResourceVersion_ReturnsReferenceBuild()
         => AreEqual("17.00.4065", new Simulation().ExecuteScalar("select serverproperty('ResourceVersion')"));
 
+    // The result is always sql_variant, whether or not the name argument is a
+    // compile-time constant (a runtime @variable resolves the same value).
     [TestMethod]
-    public void NonConstantName_FallsBackToNVarchar()
-        => AreEqual("3", new Simulation().ExecuteScalar(
+    public void NonConstantName_StillReturnsVariantInner()
+        => AreEqual(3, new Simulation().ExecuteScalar(
             "declare @p nvarchar(30) = 'EngineEdition'; select serverproperty(@p)"));
 
-    // Typed values must survive set-op schema unification. int (EngineEdition)
-    // and tinyint (SqlCharSet) promote to int per data-type precedence. Mixing
-    // a numeric property with a string one instead raises a conversion error
-    // (int outranks nvarchar) — a deliberate divergence from real SQL Server,
-    // where every SERVERPROPERTY is sql_variant so no promotion occurs.
+    // sql_variant UNION ALL keeps each row's own inner base type — no schema
+    // unification / promotion (matching real, where SERVERPROPERTY is
+    // sql_variant). Mixing a numeric property with a string one now succeeds
+    // where the old bare-type substitution raised a conversion error.
     [TestMethod]
-    public void UnionOfNumericProperties_PromotesToInt()
-        => AreEqual(3, new Simulation().ExecuteScalar(
-            "SELECT SERVERPROPERTY('EngineEdition') UNION ALL SELECT SERVERPROPERTY('SqlCharSet')"));
+    public void UnionOfMixedInnerProperties_KeepsPerRowInnerTypes()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "SELECT SERVERPROPERTY('EngineEdition') AS v UNION ALL SELECT SERVERPROPERTY('Edition')");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        IsTrue(reader.Read());
+        _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(3, reader.GetValue(0));
+        IsTrue(reader.Read());
+        _ = Assert.IsInstanceOfType<string>(reader.GetValue(0));
+        AreEqual("Developer Edition (64-bit)", reader.GetValue(0));
+    }
 
     [TestMethod]
     public void Collation_ReturnsServerCollation()

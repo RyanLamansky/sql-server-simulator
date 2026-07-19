@@ -306,9 +306,9 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'Status' extra"));
 
     // === COLLATIONPROPERTY(collation_name, property) ===
-    // Probe-confirmed against SQL Server 2025 (2026-07-14). Real SQL Server
-    // projects sql_variant; the simulator surfaces the bare base type
-    // (int for CodePage/LCID/ComparisonStyle/Version, nvarchar for Name).
+    // Probe-confirmed against SQL Server 2025 (2026-07-14). Like real, the
+    // result is sql_variant carrying a per-property inner base type: int for
+    // CodePage/LCID/ComparisonStyle, tinyint for Version, nvarchar for Name.
 
     [TestMethod]
     public void CollationProperty_CodePage_ReturnsAnsiCodePage()
@@ -327,18 +327,31 @@ public sealed class CollationMetadataTests
 
     [TestMethod]
     public void CollationProperty_Version_SqlCollation_IsZero()
-        => AreEqual(0, new Simulation().ExecuteScalar(
+        => AreEqual((byte)0, new Simulation().ExecuteScalar(
             "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'Version')"));
 
     [TestMethod]
     public void CollationProperty_Version_HundredSeriesCollation_IsTwo()
-        => AreEqual(2, new Simulation().ExecuteScalar(
+        => AreEqual((byte)2, new Simulation().ExecuteScalar(
             "SELECT COLLATIONPROPERTY('Latin1_General_100_CI_AS', 'Version')"));
 
     [TestMethod]
     public void CollationProperty_Name_ReturnsCollationName()
         => AreEqual("SQL_Latin1_General_CP1_CI_AS", new Simulation().ExecuteScalar(
             "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'Name')"));
+
+    // The result projects as sql_variant; CodePage carries an int inner, Version
+    // a tinyint inner (probe-confirmed against SQL Server 2025).
+    [TestMethod]
+    public void CollationProperty_ReportsSqlVariantMetadataWithInnerType()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'CodePage')");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        IsTrue(reader.Read());
+        _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(1252, reader.GetValue(0));
+    }
 
     // ComparisonStyle tracks the suffix flags — accent-insensitive adds bit 2,
     // case-sensitive clears bit 1, KS/WS clear the ignore-kana/width bits, and

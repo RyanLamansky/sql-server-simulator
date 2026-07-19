@@ -7,18 +7,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>SQL_VARIANT_PROPERTY(expression, property)</c>: reports one facet of
 /// the <c>sql_variant</c> that would capture the <c>expression</c> —
 /// <c>BaseType</c> / <c>Precision</c> / <c>Scale</c> / <c>MaxLength</c> /
-/// <c>TotalBytes</c> / <c>Collation</c>. Real SQL Server projects the result as
-/// <c>sql_variant</c> carrying a per-property inner base type; the simulator
-/// doesn't model sql_variant, so — following the <c>SERVERPROPERTY</c>
-/// convention — it surfaces the inner base type directly: <c>BaseType</c> /
-/// <c>Collation</c> as <see cref="SqlType.SystemName"/> (sysname), the four
-/// numeric facets as <see cref="SqlType.Int32"/>. That precise typing flows to
-/// the projection schema only when the property argument is a string
-/// <em>literal</em>; a non-literal property argument (e.g.
-/// <c>DECLARE @p sysname='BaseType'</c>) can't be resolved at parse, so the
-/// result falls back to <see cref="SqlType.NVarchar"/> and the runtime value is
-/// coerced to match (the static/runtime parity contract; a divergence from
-/// real, which always returns sql_variant).
+/// <c>TotalBytes</c> / <c>Collation</c>. Like real SQL Server, the result is
+/// always <c>sql_variant</c> (<see cref="SqlType.SqlVariant"/>) carrying a
+/// per-property inner base type: <c>BaseType</c> / <c>Collation</c> as
+/// <see cref="SqlType.SystemName"/> (sysname, an <c>nvarchar</c> inner), the
+/// four numeric facets as <see cref="SqlType.Int32"/> (probe-confirmed against
+/// SQL Server 2025).
 /// </summary>
 /// <remarks>
 /// SSMS's Database Properties dialog reads
@@ -72,25 +66,14 @@ internal sealed class SqlVariantProperty : Expression
         if (propertyValue.IsNull
             || !KnownProperties.TryGetValue(propertyValue.CoerceTo(SqlType.NVarchar).AsString, out var kind))
         {
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
         }
 
         var result = Compute(kind, this.valueArg.Run(runtime));
-
-        // Static/runtime parity: a string-literal property argument resolved a
-        // precise inner type in GetSqlType (sysname / int) that the projection
-        // schema already carries; a non-literal argument fell back to nvarchar,
-        // so coerce the produced value to match.
-        return this.propertyArg is Value { Constant.IsNull: false }
-            ? result
-            : result.IsNull ? SqlValue.Null(SqlType.NVarchar) : result.CoerceTo(SqlType.NVarchar);
+        return result.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(result);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => this.propertyArg is Value { Constant: { IsNull: false } constant }
-            && KnownProperties.TryGetValue(constant.CoerceTo(SqlType.NVarchar).AsString, out var kind)
-            ? kind is PropertyKind.BaseType or PropertyKind.Collation ? SqlType.SystemName : SqlType.Int32
-            : SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     private static SqlValue Compute(PropertyKind kind, SqlValue value)
     {

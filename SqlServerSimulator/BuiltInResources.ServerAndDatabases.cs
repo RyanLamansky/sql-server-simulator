@@ -243,27 +243,25 @@ internal static partial class BuiltInResources
         ], EnumerateSysDmExecSessions);
 
         // sys.configurations: server-scoped static server-configuration
-        // catalog. Real SQL Server types value / minimum / maximum /
-        // value_in_use as sql_variant; the simulator surfaces them as bigint
-        // (config values like 'max server memory (MB)' exceed int range),
-        // following the same sql_variant-to-concrete-base substitution
-        // sys.sequences uses for its sql_variant-typed value columns. The 106
-        // rows are a stock instance's defaults (probe-confirmed against SQL
-        // Server 2025) — configuration_id and name are stable across
-        // instances, and value mirrors value_in_use on a fresh server. This is
-        // static catalog data, not a live settings model: SET / sp_configure
-        // changes are not reflected. SMO reads value_in_use for
-        // configuration_id 16384 (Agent XPs) during SSMS's Object-Explorer
-        // database-node preamble, so the row set must resolve for that folder
-        // to populate. Row set is independent of the database argument.
+        // catalog. value / minimum / maximum / value_in_use are sql_variant,
+        // matching real SQL Server — every option carries an inner base type of
+        // int (probe-confirmed against SQL Server 2025, even 'max server memory
+        // (MB)'). The 106 rows are a stock instance's defaults —
+        // configuration_id and name are stable across instances, and value
+        // mirrors value_in_use on a fresh server. This is static catalog data,
+        // not a live settings model: SET / sp_configure changes are not
+        // reflected. SMO reads value_in_use for configuration_id 16384 (Agent
+        // XPs) during SSMS's Object-Explorer database-node preamble, so the row
+        // set must resolve for that folder to populate. Row set is independent
+        // of the database argument.
         Sys("configurations",
         [
             new("configuration_id", SqlType.Int32, null, false),
             new("name", SqlType.NVarchar, 35, false),
-            new("value", SqlType.BigInt, null, true),
-            new("minimum", SqlType.BigInt, null, true),
-            new("maximum", SqlType.BigInt, null, true),
-            new("value_in_use", SqlType.BigInt, null, true),
+            new("value", SqlType.SqlVariant, null, true),
+            new("minimum", SqlType.SqlVariant, null, true),
+            new("maximum", SqlType.SqlVariant, null, true),
+            new("value_in_use", SqlType.SqlVariant, null, true),
             new("description", SqlType.NVarchar, 255, false),
             new("is_dynamic", SqlType.Bit, null, false),
             new("is_advanced", SqlType.Bit, null, false),
@@ -749,10 +747,10 @@ internal static partial class BuiltInResources
     /// Raw stock-instance rows for <c>sys.configurations</c> (probe-confirmed
     /// against SQL Server 2025). <c>configuration_id</c> and <c>name</c> are
     /// stable across instances; <c>value</c> mirrors <c>value_in_use</c> on a
-    /// fresh server. The four sql_variant columns hold integers for every
-    /// option, surfaced as bigint.
+    /// fresh server. The four sql_variant columns wrap an <c>int</c> inner for
+    /// every option.
     /// </summary>
-    private static readonly (int Id, string Name, long Value, long Minimum, long Maximum, long ValueInUse, string Description, bool IsDynamic, bool IsAdvanced)[] ConfigurationData =
+    private static readonly (int Id, string Name, int Value, int Minimum, int Maximum, int ValueInUse, string Description, bool IsDynamic, bool IsAdvanced)[] ConfigurationData =
     [
         (101, "recovery interval (min)", 0, 0, 32767, 0, "Maximum recovery interval in minutes", true, true),
         (102, "allow updates", 0, 0, 1, 0, "Allow updates to system tables", true, false),
@@ -881,10 +879,10 @@ internal static partial class BuiltInResources
             [
                 SqlValue.FromInt32(id),
                 SqlValue.FromNVarchar(name),
-                SqlValue.FromInt64(value),
-                SqlValue.FromInt64(minimum),
-                SqlValue.FromInt64(maximum),
-                SqlValue.FromInt64(valueInUse),
+                SqlValue.FromVariant(SqlValue.FromInt32(value)),
+                SqlValue.FromVariant(SqlValue.FromInt32(minimum)),
+                SqlValue.FromVariant(SqlValue.FromInt32(maximum)),
+                SqlValue.FromVariant(SqlValue.FromInt32(valueInUse)),
                 SqlValue.FromNVarchar(description),
                 SqlValue.FromBoolean(isDynamic),
                 SqlValue.FromBoolean(isAdvanced),

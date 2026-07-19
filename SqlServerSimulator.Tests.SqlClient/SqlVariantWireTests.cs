@@ -78,6 +78,46 @@ public sealed class SqlVariantWireTests
         IsFalse((bool)reader["LegacyCardinalityEstimation"]);
     }
 
+    // SERVERPROPERTY projects sql_variant over the wire (0x62 COLMETADATA) like
+    // real; each cell carries its probed inner base type — EngineEdition an int,
+    // Edition an nvarchar string.
+    [TestMethod]
+    public async Task ServerProperty_ReadOverWire_ReportsVariantWithInnerTypes()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "SELECT SERVERPROPERTY('EngineEdition') AS engine, SERVERPROPERTY('Edition') AS edition", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(1));
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        _ = IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(3, reader.GetValue(0));
+        AreEqual("Developer Edition (64-bit)", reader.GetValue(1));
+    }
+
+    // SESSION_CONTEXT round-trips the stored value's base type through the
+    // sql_variant wire form: an int stored reads back as a boxed int.
+    [TestMethod]
+    public async Task SessionContext_ReadOverWire_PreservesIntInner()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var set = new SqlCommand("exec sp_set_session_context N'tenant', 42", connection))
+            _ = await set.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("SELECT SESSION_CONTEXT(N'tenant')", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        _ = IsInstanceOfType<int>(reader.GetValue(0));
+        AreEqual(42, reader.GetValue(0));
+    }
+
     [TestMethod]
     public async Task CastWrappedInnerTypes_ReadOverWire()
     {

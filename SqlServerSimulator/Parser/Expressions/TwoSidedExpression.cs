@@ -153,6 +153,11 @@ internal abstract class TwoSidedExpression : Expression
     /// </remarks>
     private protected static SqlValue IntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute)
     {
+        // sql_variant has no arithmetic behavior; delegate to the single-source
+        // rejection so the runtime error matches GetSqlType's (Msg 402 / 257).
+        if (left.Type is SqlVariantSqlType || right.Type is SqlVariantSqlType)
+            _ = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
+
         if (left.Type.Category == SqlTypeCategory.Integer && right.Type.Category == SqlTypeCategory.String && op is not '&' and not '|' and not '^')
         {
             if (left.Type == SqlType.Bit)

@@ -280,22 +280,25 @@ public sealed class FormatMessageAndLoginScalarTests
 
     // ---- LOGINPROPERTY ----
 
+    // Each property surfaces its probed inner base type through the
+    // sql_variant result: datetime for the time properties, int for the
+    // counters / flags, nvarchar for the name properties.
     [TestMethod]
     public void LoginProperty_KnownLogin_TimeAndCountProperties()
     {
-        AreEqual("2020-01-01 00:00:00.000", Scalar("select loginproperty('dbo', 'PasswordLastSetTime')"));
-        AreEqual("0", Scalar("select loginproperty('dbo', 'BadPasswordCount')"));
-        AreEqual("1900-01-01 00:00:00.000", Scalar("select loginproperty('dbo', 'BadPasswordTime')"));
-        AreEqual("1900-01-01 00:00:00.000", Scalar("select loginproperty('dbo', 'LockoutTime')"));
-        AreEqual("0", Scalar("select loginproperty('dbo', 'HistoryLength')"));
+        AreEqual(new DateTime(2020, 1, 1), Scalar("select loginproperty('dbo', 'PasswordLastSetTime')"));
+        AreEqual(0, Scalar("select loginproperty('dbo', 'BadPasswordCount')"));
+        AreEqual(new DateTime(1900, 1, 1), Scalar("select loginproperty('dbo', 'BadPasswordTime')"));
+        AreEqual(new DateTime(1900, 1, 1), Scalar("select loginproperty('dbo', 'LockoutTime')"));
+        AreEqual(0, Scalar("select loginproperty('dbo', 'HistoryLength')"));
     }
 
     [TestMethod]
     public void LoginProperty_KnownLogin_BooleanFlags()
     {
-        AreEqual("0", Scalar("select loginproperty('dbo', 'IsExpired')"));
-        AreEqual("0", Scalar("select loginproperty('dbo', 'IsLocked')"));
-        AreEqual("0", Scalar("select loginproperty('dbo', 'IsMustChange')"));
+        AreEqual(0, Scalar("select loginproperty('dbo', 'IsExpired')"));
+        AreEqual(0, Scalar("select loginproperty('dbo', 'IsLocked')"));
+        AreEqual(0, Scalar("select loginproperty('dbo', 'IsMustChange')"));
     }
 
     [TestMethod]
@@ -313,9 +316,22 @@ public sealed class FormatMessageAndLoginScalarTests
         AreEqual("us_english", Scalar("select loginproperty('dbo', 'DefaultLanguage')"));
     }
 
+    // The result projects as sql_variant carrying the property's inner base
+    // type — an int for a counter, a datetime for a time property.
+    [TestMethod]
+    public void LoginProperty_ReportsSqlVariantMetadataWithInnerType()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select loginproperty('dbo', 'IsExpired') as flag, loginproperty('dbo', 'PasswordLastSetTime') as pwset");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        IsTrue(reader.Read());
+        _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
+        _ = Assert.IsInstanceOfType<DateTime>(reader.GetValue(1));
+    }
+
     [TestMethod]
     public void LoginProperty_CaseInsensitiveLoginAndProperty()
-        => AreEqual("0", Scalar("select loginproperty('DBO', 'isexpired')"));
+        => AreEqual(0, Scalar("select loginproperty('DBO', 'isexpired')"));
 
     [TestMethod]
     public void LoginProperty_UnknownLogin_ReturnsNull()

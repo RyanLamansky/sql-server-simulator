@@ -95,4 +95,40 @@ public sealed class SqlVariantTests
             "SELECT 'v=' + value FROM sys.database_scoped_configurations WHERE name = 'MAXDOP'", 402);
         Contains("sql_variant", ex.Message);
     }
+
+    // Arithmetic between a variant and a numeric operand is Msg 257 (implicit
+    // conversion forbidden); the non-variant side is the disallowed target.
+    // Probe-confirmed against SQL Server 2025.
+    [TestMethod]
+    public void VariantPlusInt_RaisesMsg257()
+    {
+        var ex = new Simulation().AssertSqlError("declare @v sql_variant = 5; select @v + 1", 257);
+        Contains("Implicit conversion from data type sql_variant to int is not allowed", ex.Message);
+    }
+
+    // Two variant operands in an arithmetic operator raise Msg 402.
+    [TestMethod]
+    public void VariantPlusVariant_RaisesMsg402()
+        => new Simulation().AssertSqlError("declare @a sql_variant = 5, @b sql_variant = 3; select @a + @b", 402);
+
+    // The runtime rejection matches the compile-time projection-schema
+    // rejection — a no-FROM scalar SELECT (evaluated eagerly) reports the same
+    // Msg 257 as a FROM-driven query (bound before scanning).
+    [TestMethod]
+    public void VariantArithmeticFromServerProperty_RaisesMsg257()
+        => new Simulation().AssertSqlError("select serverproperty('EngineEdition') + 1", 257);
+
+    // SELECT ... INTO from a sql_variant-producing built-in creates a
+    // sql_variant column (probe-confirmed against SQL Server 2025), and the
+    // stored inner value round-trips with its base type.
+    [TestMethod]
+    public void SelectIntoFromServerProperty_CreatesVariantColumn()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "SELECT SERVERPROPERTY('Edition') AS e INTO #t; SELECT e, SQL_VARIANT_PROPERTY(e, 'BaseType') AS bt FROM #t");
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+        IsTrue(reader.Read());
+        AreEqual("Developer Edition (64-bit)", reader.GetValue(0));
+        AreEqual("nvarchar", reader.GetValue(1));
+    }
 }

@@ -127,7 +127,7 @@ public sealed class LoginDdlTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login t with password = 'Xy!12345'");
-        AreEqual("0", sim.ExecuteScalar("select loginproperty('t', 'IsLocked')"));
+        AreEqual(0, sim.ExecuteScalar("select loginproperty('t', 'IsLocked')"));
     }
 
     [TestMethod]

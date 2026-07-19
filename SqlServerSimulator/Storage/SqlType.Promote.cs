@@ -315,11 +315,18 @@ internal abstract partial class SqlType
     /// </remarks>
     public static SqlType PromoteForArithmetic(SqlType a, SqlType b, char op)
     {
-        // sql_variant has no arithmetic / concatenation behavior — any operand
-        // pairing raises Msg 402 (probe-confirmed: `'v=' + variant` → "The data
-        // types varchar and sql_variant are incompatible in the add operator").
+        // sql_variant has no arithmetic / concatenation behavior. Probe-confirmed
+        // against SQL Server 2025: variant + variant, and variant + string
+        // (a concatenation context), raise Msg 402 ("incompatible in the <op>
+        // operator"); variant + a numeric / other convertible type raises Msg 257
+        // (the non-variant side is the disallowed implicit-conversion target).
         if (a is SqlVariantSqlType || b is SqlVariantSqlType)
-            throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, op == '+' ? "add" : BinaryOperatorWord(op));
+        {
+            var other = a is SqlVariantSqlType ? b : a;
+            throw (a is SqlVariantSqlType && b is SqlVariantSqlType) || other.Category == SqlTypeCategory.String
+                ? SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, op == '+' ? "add" : BinaryOperatorWord(op))
+                : SimulatedSqlException.ImplicitConversionFromSqlVariantNotAllowed(other);
+        }
 
         // Binary operands. One binary + one integer converts the binary side
         // to the integer type (Promote handles it — applies to arithmetic AND

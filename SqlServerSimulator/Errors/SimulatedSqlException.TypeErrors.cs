@@ -413,6 +413,16 @@ partial class SimulatedSqlException
         new($"The data types {FamilyRootName(a)} and {FamilyRootName(b)} are incompatible in the {operatorName} operator.", 402, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 257: an <c>sql_variant</c> operand meets a
+    /// non-variant type in an arithmetic operator, which requires an implicit
+    /// conversion the server forbids. Probe-confirmed State 3 and the verbatim
+    /// "Use the CONVERT function to run this query." tail (SQL Server 2025);
+    /// <paramref name="target"/> is the non-variant operand's type.
+    /// </summary>
+    internal static SimulatedSqlException ImplicitConversionFromSqlVariantNotAllowed(SqlType target) =>
+        new($"Implicit conversion from data type sql_variant to {FamilyRootName(target)} is not allowed. Use the CONVERT function to run this query.", 257, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 536: a length / count argument to a string
     /// function (left, right, substring) was negative. The function name is
     /// lowercase in the message and the state varies by function (6 for

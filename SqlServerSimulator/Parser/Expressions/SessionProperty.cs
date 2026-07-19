@@ -5,21 +5,16 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>SESSIONPROPERTY('option_name')</c>: returns the current session
-/// setting for one of the ANSI / arithmetic SET options. Real SQL Server
-/// projects the result as <c>sql_variant</c> carrying an inner base type of
-/// <c>int</c> (each option reads back as 1 / 0); the simulator doesn't model
-/// sql_variant, so — following the <c>SERVERPROPERTY</c> convention — it
-/// surfaces the inner base type directly as <see cref="SqlType.Int32"/>. The
-/// value tracks live session state on
+/// setting for one of the ANSI / arithmetic SET options. Like real SQL Server,
+/// the result is <c>sql_variant</c> (<see cref="SqlType.SqlVariant"/>) carrying
+/// an inner base type of <see cref="SqlType.Int32"/> (each option reads back as
+/// 1 / 0). The value tracks live session state on
 /// <see cref="SimulatedDbConnection"/>: the six toggles recorded by
 /// <c>SET ANSI_NULLS / ANSI_PADDING / ANSI_WARNINGS / ARITHABORT /
 /// CONCAT_NULL_YIELDS_NULL / NUMERIC_ROUNDABORT</c> plus the pre-existing
-/// <c>QUOTED_IDENTIFIER</c> state. An unknown option name returns NULL
-/// (matches real-server convention); names are case-insensitive
-/// (probe-confirmed against SQL Server 2025). When the name argument is a
-/// compile-time string constant the true type (int) flows to the projection
-/// schema; otherwise it falls back to <see cref="SqlType.NVarchar"/> and the
-/// runtime value is coerced to match (the static/runtime parity contract).
+/// <c>QUOTED_IDENTIFIER</c> state. An unknown option name returns a NULL
+/// <c>sql_variant</c>; names are case-insensitive (probe-confirmed against SQL
+/// Server 2025).
 /// </summary>
 /// <remarks>
 /// DacFx's bacpac-export preamble reads
@@ -52,21 +47,14 @@ internal sealed class SessionProperty : Expression
     {
         var n = this.nameArg.Run(runtime);
         if (n.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
         var name = n.CoerceTo(SqlType.NVarchar).AsString;
-        if (!Properties.TryGetValue(name, out var read))
-            return SqlValue.Null(SqlType.NVarchar);
-        var value = SqlValue.FromInt32(read(runtime.Batch.Connection) ? 1 : 0);
-        // A non-constant name argument couldn't resolve a true type at parse
-        // time (GetSqlType fell back to NVarchar); coerce so runtime agrees.
-        return this.nameArg is Value ? value : value.CoerceTo(SqlType.NVarchar);
+        return Properties.TryGetValue(name, out var read)
+            ? SqlValue.FromVariant(SqlValue.FromInt32(read(runtime.Batch.Connection) ? 1 : 0))
+            : SqlValue.Null(SqlType.SqlVariant);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => this.nameArg is Value { Constant: { IsNull: false } constant }
-            && Properties.ContainsKey(constant.CoerceTo(SqlType.NVarchar).AsString)
-            ? SqlType.Int32
-            : SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"SESSIONPROPERTY({this.nameArg.DebugDisplay()})";
 }

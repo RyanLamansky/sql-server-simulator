@@ -6,8 +6,9 @@ namespace SqlServerSimulator;
 /// Tests for <c>SQL_VARIANT_PROPERTY(expression, property)</c>: reports one
 /// facet (BaseType / Precision / Scale / MaxLength / TotalBytes / Collation) of
 /// the sql_variant that would capture the expression. All expected values are
-/// probe-confirmed against SQL Server 2025. The simulator has no sql_variant,
-/// so it surfaces the inner base type per the SERVERPROPERTY convention.
+/// probe-confirmed against SQL Server 2025. Like real, the result is sql_variant
+/// carrying a per-property inner base type (sysname for BaseType / Collation,
+/// int for the numeric facets); each cell surfaces that inner CLR type.
 /// </summary>
 [TestClass]
 public sealed class SqlVariantPropertyTests
@@ -195,32 +196,33 @@ public sealed class SqlVariantPropertyTests
         => AreEqual("int", Scalar("select sql_variant_property(1, 'basetype')"));
 
     // The property argument can be a runtime expression; it resolves the same
-    // facet, surfaced as nvarchar (the static-type fallback for a non-literal).
+    // facet with the same inner base type as a literal (the result is always
+    // sql_variant, whether or not the property argument is constant).
     [TestMethod]
     public void PropertyName_RuntimeExpression_Works()
         => AreEqual("int", Scalar("declare @p sysname = 'BaseType'; select sql_variant_property(1, @p)"));
 
     [TestMethod]
-    public void PropertyName_RuntimeExpression_NumericFacetCoercedToNVarchar()
-        => AreEqual("10", Scalar("declare @p sysname = 'Precision'; select sql_variant_property(1, @p)"));
+    public void PropertyName_RuntimeExpression_NumericFacetKeepsIntInner()
+        => AreEqual(10, Scalar("declare @p sysname = 'Precision'; select sql_variant_property(1, @p)"));
 
-    // --- Static projection type (string literal property) ---
+    // --- Projection type (always sql_variant) with inner base type ---
 
     [TestMethod]
-    public void BaseType_LiteralProperty_SurfacesAsSysname()
+    public void BaseType_SurfacesAsVariantWithSysnameInner()
     {
         using var reader = new Simulation().ExecuteReader("select sql_variant_property(1, 'BaseType')");
         IsTrue(reader.Read());
-        AreEqual("sysname", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         AreEqual("int", reader.GetValue(0));
     }
 
     [TestMethod]
-    public void Precision_LiteralProperty_SurfacesAsInt()
+    public void Precision_SurfacesAsVariantWithIntInner()
     {
         using var reader = new Simulation().ExecuteReader("select sql_variant_property(1, 'Precision')");
         IsTrue(reader.Read());
-        AreEqual("int", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
         AreEqual(10, reader.GetValue(0));
     }

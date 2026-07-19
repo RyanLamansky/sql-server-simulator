@@ -144,7 +144,7 @@ internal static partial class BuiltInResources
             var status = (short)((isDynamic ? 1 : 0) + (isAdvanced ? 2 : 0));
             rows[i] =
             [
-                SqlValue.FromInt32((int)value),
+                SqlValue.FromInt32(value),
                 SqlValue.FromInt32(id),
                 SqlValue.FromNVarchar(description),
                 SqlValue.FromInt16(status),

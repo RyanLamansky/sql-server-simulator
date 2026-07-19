@@ -5,13 +5,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>SESSION_CONTEXT(N'key')</c>: reads a value previously stored by
-/// <c>sp_set_session_context</c> on this session. Real SQL Server returns
-/// <c>sql_variant</c> (type-preserving); the simulator has no
-/// <c>sql_variant</c>, so the stored value surfaces as
-/// <see cref="SqlType.NVarchar"/> — the same proxy <see cref="ServerProperty"/>
-/// uses. A missing key returns NULL; a NULL key raises Msg 8116
-/// (probe-confirmed). Keys are case-sensitive — see
-/// <see cref="SimulatedDbConnection.SessionContext"/>.
+/// <c>sp_set_session_context</c> on this session. Like real SQL Server, the
+/// result is <c>sql_variant</c> (<see cref="SqlType.SqlVariant"/>) preserving
+/// the stored value's base type — an <c>int</c> stored round-trips as <c>int</c>,
+/// an <c>nvarchar</c> as <c>nvarchar</c>. A missing key returns a NULL
+/// <c>sql_variant</c>; a NULL key raises Msg 8116 (probe-confirmed). Keys are
+/// case-sensitive — see <see cref="SimulatedDbConnection.SessionContext"/>.
 /// </summary>
 internal sealed class SessionContext : Expression
 {
@@ -30,12 +29,12 @@ internal sealed class SessionContext : Expression
         if (k.IsNull)
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 1, "session_context");
         var key = k.CoerceTo(SqlType.NVarchar).AsString;
-        return runtime.Batch.Connection.SessionContext.TryGetValue(key, out var entry)
-            ? entry.Value.CoerceTo(SqlType.NVarchar)
-            : SqlValue.Null(SqlType.NVarchar);
+        return runtime.Batch.Connection.SessionContext.TryGetValue(key, out var entry) && !entry.Value.IsNull
+            ? SqlValue.FromVariant(entry.Value)
+            : SqlValue.Null(SqlType.SqlVariant);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"SESSION_CONTEXT({this.keyArg.DebugDisplay()})";
 }
@@ -67,12 +66,14 @@ internal sealed class ContextInfoFunction : Expression
 
 /// <summary>
 /// SQL <c>CONNECTIONPROPERTY('property')</c>: returns connection-level
-/// attributes. Real SQL Server projects <c>sql_variant</c>; the simulator
-/// surfaces values as <see cref="SqlType.NVarchar"/> (same proxy as
-/// <see cref="ServerProperty"/>). The in-process connection has no real
-/// network identity, so transport-shaped properties report fixed
-/// placeholder constants (probe-confirmed <c>net_transport = 'TCP'</c>,
-/// <c>protocol_type = 'TSQL'</c>); unknown property → NULL.
+/// attributes. Like real SQL Server, the result is <c>sql_variant</c>
+/// (<see cref="SqlType.SqlVariant"/>); the modeled properties carry an inner
+/// <c>nvarchar</c> base type (probe-confirmed — the port / address properties
+/// real types as <c>smallint</c> / <c>nvarchar</c> are unmodeled and return
+/// NULL). The in-process connection has no real network identity, so
+/// transport-shaped properties report fixed placeholder constants
+/// (probe-confirmed <c>net_transport = 'TCP'</c>, <c>protocol_type = 'TSQL'</c>);
+/// an unknown or unmodeled property → NULL <c>sql_variant</c>.
 /// </summary>
 internal sealed class ConnectionProperty : Expression
 {
@@ -101,14 +102,14 @@ internal sealed class ConnectionProperty : Expression
     {
         var n = this.nameArg.Run(runtime);
         if (n.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
         var name = n.CoerceTo(SqlType.NVarchar).AsString;
         return Properties.TryGetValue(name, out var value) && value is not null
-            ? SqlValue.FromNVarchar(value)
-            : SqlValue.Null(SqlType.NVarchar);
+            ? SqlValue.FromVariant(SqlValue.FromNVarchar(value))
+            : SqlValue.Null(SqlType.SqlVariant);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"CONNECTIONPROPERTY({this.nameArg.DebugDisplay()})";
 }
