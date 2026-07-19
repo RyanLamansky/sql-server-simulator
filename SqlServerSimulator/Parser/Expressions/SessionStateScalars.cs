@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -77,18 +76,6 @@ internal sealed class ContextInfoFunction : Expression
 /// </summary>
 internal sealed class ConnectionProperty : Expression
 {
-    private static readonly FrozenDictionary<string, string?> Properties = new Dictionary<string, string?>
-    {
-        ["net_transport"] = "TCP",
-        ["protocol_type"] = "TSQL",
-        ["auth_scheme"] = "SQL",
-        ["physical_net_transport"] = "TCP",
-        ["local_net_address"] = null,
-        ["local_tcp_port"] = null,
-        ["client_net_address"] = null,
-        ["sni_consumer_node"] = null,
-    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     private readonly Expression nameArg;
 
     public ConnectionProperty(ParserContext context)
@@ -104,9 +91,23 @@ internal sealed class ConnectionProperty : Expression
         if (n.IsNull)
             return SqlValue.Null(SqlType.SqlVariant);
         var name = n.CoerceTo(SqlType.NVarchar).AsString;
-        return Properties.TryGetValue(name, out var value) && value is not null
-            ? SqlValue.FromVariant(SqlValue.FromNVarchar(value))
-            : SqlValue.Null(SqlType.SqlVariant);
+        // Longer than any recognized property name; also bounds the stackalloc
+        // against an adversarially long argument. The null-valued modeled
+        // properties (local_net_address / local_tcp_port / client_net_address /
+        // sni_consumer_node) fall to the default arm — same NULL sql_variant
+        // an unknown name yields.
+        if (name.Length > 32)
+            return SqlValue.Null(SqlType.SqlVariant);
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(upper);
+        return upper switch
+        {
+            "AUTH_SCHEME" => SqlValue.FromVariant(SqlValue.FromNVarchar("SQL")),
+            "NET_TRANSPORT" => SqlValue.FromVariant(SqlValue.FromNVarchar("TCP")),
+            "PHYSICAL_NET_TRANSPORT" => SqlValue.FromVariant(SqlValue.FromNVarchar("TCP")),
+            "PROTOCOL_TYPE" => SqlValue.FromVariant(SqlValue.FromNVarchar("TSQL")),
+            _ => SqlValue.Null(SqlType.SqlVariant),
+        };
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;

@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -7,8 +6,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>DATABASEPROPERTYEX(database_name, property_name)</c>: returns
 /// the named property of a database. Real SQL Server projects this as
 /// <c>sql_variant</c> carrying a per-property inner base type; the
-/// simulator doesn't model sql_variant, so it surfaces the bare true type
-/// instead — numeric properties as <see cref="SqlType.Int32"/> /
+/// simulator doesn't model sql_variant here, so it surfaces the bare true
+/// type instead — numeric properties as <see cref="SqlType.Int32"/> /
 /// <see cref="SqlType.TinyInt"/>, string properties as
 /// <see cref="SqlType.NVarchar"/>. When the property-name argument is a
 /// compile-time constant the true type flows to the projection schema;
@@ -26,35 +25,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>SnapshotIsolationState</c>, <c>IsReadCommittedSnapshotOn</c>,
 /// <c>ComparisonStyle</c>, <c>LCID</c>, <c>SQLSortOrder</c>, <c>Version</c>.
 /// Properties not on the list return NULL (forward-compatible with future
-/// tooling that may query newer property names).
+/// tooling that may query newer property names). <see cref="Produce"/> and
+/// <see cref="TypeOf"/> carry mirrored arm lists — every property appears in
+/// both, with <see cref="TypeOf"/> declaring the type the matching
+/// <see cref="Produce"/> arm's non-NULL value carries.
 /// </remarks>
 internal sealed class DatabasePropertyEx : Expression
 {
-    private static readonly FrozenDictionary<string, (SqlType Type, Func<Database, SqlValue> Produce)> Properties = new Dictionary<string, (SqlType Type, Func<Database, SqlValue> Produce)>
-    {
-        ["Status"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("ONLINE")),
-        ["Version"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
-        ["Recovery"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("FULL")),
-        // Updateability is always READ_WRITE (the simulator models no
-        // read-only databases at the DATABASEPROPERTYEX surface). SMO's
-        // database-properties preamble reads it as [IsUpdateable].
-        ["Updateability"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("READ_WRITE")),
-        // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is NULL —
-        // typed datetime (not the unknown-property NVarchar) so SMO's
-        // CAST(ISNULL(..., 0) AS datetime) resolves to 1900-01-01 rather than
-        // failing to convert the string '0' to datetime.
-        ["LastGoodCheckDbTime"] = (SqlType.DateTime, _ => SqlValue.Null(SqlType.DateTime)),
-        ["Collation"] = (SqlType.NVarchar, db => SqlValue.FromNVarchar(db.CollationName)),
-        ["UserAccess"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("MULTI_USER")),
-        ["IsAutoClose"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
-        ["IsAutoShrink"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
-        ["SnapshotIsolationState"] = (SqlType.Int32, db => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0)),
-        ["IsReadCommittedSnapshotOn"] = (SqlType.Int32, db => SqlValue.FromInt32(db.ReadCommittedSnapshot ? 1 : 0)),
-        ["ComparisonStyle"] = (SqlType.Int32, _ => SqlValue.FromInt32(196609)),
-        ["LCID"] = (SqlType.Int32, _ => SqlValue.FromInt32(1033)),
-        ["SQLSortOrder"] = (SqlType.TinyInt, db => SqlValue.FromByte(SortIdFor(db.CollationName))),
-    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     private readonly Expression dbNameArg;
     private readonly Expression propertyArg;
 
@@ -83,10 +60,7 @@ internal sealed class DatabasePropertyEx : Expression
         if (!runtime.Batch.Connection.Simulation.Databases.TryGetValue(dbName, out var db))
             return SqlValue.Null(SqlType.NVarchar);
 
-        if (!Properties.TryGetValue(property, out var def))
-            return SqlValue.Null(SqlType.NVarchar);
-
-        var value = def.Produce(db);
+        var value = Produce(property, db);
         // A non-constant property name couldn't resolve a true type at parse
         // time (GetSqlType fell back to NVarchar); coerce so runtime agrees.
         return this.propertyArg is Value ? value : value.CoerceTo(SqlType.NVarchar);
@@ -94,9 +68,71 @@ internal sealed class DatabasePropertyEx : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => this.propertyArg is Value { Constant: { IsNull: false } constant }
-            && Properties.TryGetValue(constant.CoerceTo(SqlType.NVarchar).AsString, out var def)
-            ? def.Type
+            ? TypeOf(constant.CoerceTo(SqlType.NVarchar).AsString)
             : SqlType.NVarchar;
+
+    private static SqlValue Produce(string property, Database db)
+    {
+        // Longer than any recognized property name; also bounds the stackalloc
+        // against an adversarially long argument.
+        if (property.Length > 32)
+            return SqlValue.Null(SqlType.NVarchar);
+        Span<char> upper = stackalloc char[property.Length];
+        _ = property.AsSpan().ToUpperInvariant(upper);
+        return upper switch
+        {
+            "COLLATION" => SqlValue.FromNVarchar(db.CollationName),
+            "COMPARISONSTYLE" => SqlValue.FromInt32(196609),
+            "ISAUTOCLOSE" => SqlValue.FromInt32(0),
+            "ISAUTOSHRINK" => SqlValue.FromInt32(0),
+            "ISREADCOMMITTEDSNAPSHOTON" => SqlValue.FromInt32(db.ReadCommittedSnapshot ? 1 : 0),
+            // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is
+            // NULL — typed datetime (not the unknown-property NVarchar) so
+            // SMO's CAST(ISNULL(..., 0) AS datetime) resolves to 1900-01-01
+            // rather than failing to convert the string '0' to datetime.
+            "LASTGOODCHECKDBTIME" => SqlValue.Null(SqlType.DateTime),
+            "LCID" => SqlValue.FromInt32(1033),
+            "RECOVERY" => SqlValue.FromNVarchar("FULL"),
+            "SNAPSHOTISOLATIONSTATE" => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0),
+            "SQLSORTORDER" => SqlValue.FromByte(SortIdFor(db.CollationName)),
+            "STATUS" => SqlValue.FromNVarchar("ONLINE"),
+            // Updateability is always READ_WRITE (the simulator models no
+            // read-only databases at the DATABASEPROPERTYEX surface). SMO's
+            // database-properties preamble reads it as [IsUpdateable].
+            "UPDATEABILITY" => SqlValue.FromNVarchar("READ_WRITE"),
+            "USERACCESS" => SqlValue.FromNVarchar("MULTI_USER"),
+            "VERSION" => SqlValue.FromInt32(0),
+            _ => SqlValue.Null(SqlType.NVarchar),
+        };
+    }
+
+    private static SqlType TypeOf(string property)
+    {
+        // Same bound as Produce so a long name types as the unknown-property
+        // NVarchar it evaluates to.
+        if (property.Length > 32)
+            return SqlType.NVarchar;
+        Span<char> upper = stackalloc char[property.Length];
+        _ = property.AsSpan().ToUpperInvariant(upper);
+        return upper switch
+        {
+            "COLLATION" => SqlType.NVarchar,
+            "COMPARISONSTYLE" => SqlType.Int32,
+            "ISAUTOCLOSE" => SqlType.Int32,
+            "ISAUTOSHRINK" => SqlType.Int32,
+            "ISREADCOMMITTEDSNAPSHOTON" => SqlType.Int32,
+            "LASTGOODCHECKDBTIME" => SqlType.DateTime,
+            "LCID" => SqlType.Int32,
+            "RECOVERY" => SqlType.NVarchar,
+            "SNAPSHOTISOLATIONSTATE" => SqlType.Int32,
+            "SQLSORTORDER" => SqlType.TinyInt,
+            "STATUS" => SqlType.NVarchar,
+            "UPDATEABILITY" => SqlType.NVarchar,
+            "USERACCESS" => SqlType.NVarchar,
+            "VERSION" => SqlType.Int32,
+            _ => SqlType.NVarchar,
+        };
+    }
 
     // Derive the SQL sort-order id from the collation name; real SQL Server
     // reports 0 for collations with no SQL_* sort order.

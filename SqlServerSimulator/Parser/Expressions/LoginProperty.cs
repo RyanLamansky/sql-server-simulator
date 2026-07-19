@@ -79,6 +79,10 @@ internal sealed class LoginProperty : Expression
             return SqlValue.Null(SqlType.SqlVariant);
 
         var property = propertyValue.CoerceTo(SqlType.NVarchar).AsString;
+        // Longer than any recognized property name; also bounds the stackalloc
+        // against an adversarially long argument.
+        if (property.Length > 32)
+            return SqlValue.Null(SqlType.SqlVariant);
         Span<char> upper = stackalloc char[property.Length];
         _ = property.AsSpan().ToUpperInvariant(upper);
         // Each property carries its probed inner base type; the null-valued

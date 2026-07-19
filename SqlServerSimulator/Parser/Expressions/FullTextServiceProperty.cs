@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -19,15 +18,6 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class FullTextServiceProperty : Expression
 {
-    private static readonly FrozenDictionary<string, int> Properties = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["IsFullTextInstalled"] = 1,
-        ["ConnectTimeout"] = 0,
-        ["LoadOSResources"] = 0,
-        ["ResourceUsage"] = 0,
-        ["VerifyResourceUsage"] = 0,
-    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     private readonly Expression nameArg;
 
     public FullTextServiceProperty(ParserContext context)
@@ -43,9 +33,21 @@ internal sealed class FullTextServiceProperty : Expression
         if (n.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var name = n.CoerceTo(SqlType.NVarchar).AsString;
-        return Properties.TryGetValue(name, out var value)
-            ? SqlValue.FromInt32(value)
-            : SqlValue.Null(SqlType.Int32);
+        // Longer than any recognized property name; also bounds the stackalloc
+        // against an adversarially long argument.
+        if (name.Length > 32)
+            return SqlValue.Null(SqlType.Int32);
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(upper);
+        return upper switch
+        {
+            "CONNECTTIMEOUT" => SqlValue.FromInt32(0),
+            "ISFULLTEXTINSTALLED" => SqlValue.FromInt32(1),
+            "LOADOSRESOURCES" => SqlValue.FromInt32(0),
+            "RESOURCEUSAGE" => SqlValue.FromInt32(0),
+            "VERIFYRESOURCEUSAGE" => SqlValue.FromInt32(0),
+            _ => SqlValue.Null(SqlType.Int32),
+        };
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -23,17 +22,6 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class SessionProperty : Expression
 {
-    private static readonly FrozenDictionary<string, Func<SimulatedDbConnection, bool>> Properties = new Dictionary<string, Func<SimulatedDbConnection, bool>>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["ANSI_NULLS"] = c => c.AnsiNulls,
-        ["ANSI_PADDING"] = c => c.AnsiPadding,
-        ["ANSI_WARNINGS"] = c => c.AnsiWarnings,
-        ["ARITHABORT"] = c => c.Arithabort,
-        ["CONCAT_NULL_YIELDS_NULL"] = c => c.ConcatNullYieldsNull,
-        ["NUMERIC_ROUNDABORT"] = c => c.NumericRoundabort,
-        ["QUOTED_IDENTIFIER"] = c => c.QuotedIdentifiers,
-    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     private readonly Expression nameArg;
 
     public SessionProperty(ParserContext context)
@@ -46,11 +34,32 @@ internal sealed class SessionProperty : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var n = this.nameArg.Run(runtime);
-        if (n.IsNull)
+        return n.IsNull
+            ? SqlValue.Null(SqlType.SqlVariant)
+            : Read(n.CoerceTo(SqlType.NVarchar).AsString, runtime.Batch.Connection);
+    }
+
+    private static SqlValue Read(string name, SimulatedDbConnection connection)
+    {
+        // Longer than any recognized option name; also bounds the stackalloc
+        // against an adversarially long argument.
+        if (name.Length > 32)
             return SqlValue.Null(SqlType.SqlVariant);
-        var name = n.CoerceTo(SqlType.NVarchar).AsString;
-        return Properties.TryGetValue(name, out var read)
-            ? SqlValue.FromVariant(SqlValue.FromInt32(read(runtime.Batch.Connection) ? 1 : 0))
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(upper);
+        bool? option = upper switch
+        {
+            "ANSI_NULLS" => connection.AnsiNulls,
+            "ANSI_PADDING" => connection.AnsiPadding,
+            "ANSI_WARNINGS" => connection.AnsiWarnings,
+            "ARITHABORT" => connection.Arithabort,
+            "CONCAT_NULL_YIELDS_NULL" => connection.ConcatNullYieldsNull,
+            "NUMERIC_ROUNDABORT" => connection.NumericRoundabort,
+            "QUOTED_IDENTIFIER" => connection.QuotedIdentifiers,
+            _ => null,
+        };
+        return option is { } on
+            ? SqlValue.FromVariant(SqlValue.FromInt32(on ? 1 : 0))
             : SqlValue.Null(SqlType.SqlVariant);
     }
 

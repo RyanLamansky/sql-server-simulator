@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -37,16 +36,6 @@ internal sealed class SqlVariantProperty : Expression
         Collation,
     }
 
-    private static readonly FrozenDictionary<string, PropertyKind> KnownProperties = new Dictionary<string, PropertyKind>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["BaseType"] = PropertyKind.BaseType,
-        ["Precision"] = PropertyKind.Precision,
-        ["Scale"] = PropertyKind.Scale,
-        ["MaxLength"] = PropertyKind.MaxLength,
-        ["TotalBytes"] = PropertyKind.TotalBytes,
-        ["Collation"] = PropertyKind.Collation,
-    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     private readonly Expression valueArg;
     private readonly Expression propertyArg;
 
@@ -63,14 +52,31 @@ internal sealed class SqlVariantProperty : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var propertyValue = this.propertyArg.Run(runtime);
-        if (propertyValue.IsNull
-            || !KnownProperties.TryGetValue(propertyValue.CoerceTo(SqlType.NVarchar).AsString, out var kind))
-        {
+        if (propertyValue.IsNull || Resolve(propertyValue.CoerceTo(SqlType.NVarchar).AsString) is not { } kind)
             return SqlValue.Null(SqlType.SqlVariant);
-        }
 
         var result = Compute(kind, this.valueArg.Run(runtime));
         return result.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(result);
+    }
+
+    private static PropertyKind? Resolve(string property)
+    {
+        // Longer than any recognized property name; also bounds the stackalloc
+        // against an adversarially long argument.
+        if (property.Length > 32)
+            return null;
+        Span<char> upper = stackalloc char[property.Length];
+        _ = property.AsSpan().ToUpperInvariant(upper);
+        return upper switch
+        {
+            "BASETYPE" => PropertyKind.BaseType,
+            "COLLATION" => PropertyKind.Collation,
+            "MAXLENGTH" => PropertyKind.MaxLength,
+            "PRECISION" => PropertyKind.Precision,
+            "SCALE" => PropertyKind.Scale,
+            "TOTALBYTES" => PropertyKind.TotalBytes,
+            _ => null,
+        };
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;

@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -17,15 +16,6 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class CollationProperty : Expression
 {
-    private static readonly FrozenDictionary<string, Func<Collation.CollationMetrics, SqlValue>> Properties = new Dictionary<string, Func<Collation.CollationMetrics, SqlValue>>
-    {
-        ["CodePage"] = m => SqlValue.FromInt32(m.CodePage),
-        ["LCID"] = m => SqlValue.FromInt32(m.Lcid),
-        ["ComparisonStyle"] = m => SqlValue.FromInt32(m.ComparisonStyle),
-        ["Version"] = m => SqlValue.FromByte(checked((byte)m.Version)),
-        ["Name"] = m => SqlValue.FromNVarchar(m.Name),
-    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     private readonly Expression collationArg;
     private readonly Expression propertyArg;
 
@@ -45,10 +35,29 @@ internal sealed class CollationProperty : Expression
         var collationValue = this.collationArg.Run(runtime);
         var propertyValue = this.propertyArg.Run(runtime);
         return collationValue.IsNull || propertyValue.IsNull
-            || !Properties.TryGetValue(propertyValue.CoerceTo(SqlType.NVarchar).AsString, out var produce)
             || !Collation.TryGetMetrics(collationValue.CoerceTo(SqlType.NVarchar).AsString, out var metrics)
             ? SqlValue.Null(SqlType.SqlVariant)
-            : SqlValue.FromVariant(produce(metrics));
+            : Produce(propertyValue.CoerceTo(SqlType.NVarchar).AsString, metrics);
+    }
+
+    private static SqlValue Produce(string property, Collation.CollationMetrics metrics)
+    {
+        // Longer than any recognized property name; also bounds the stackalloc
+        // against an adversarially long argument.
+        if (property.Length > 32)
+            return SqlValue.Null(SqlType.SqlVariant);
+        Span<char> upper = stackalloc char[property.Length];
+        _ = property.AsSpan().ToUpperInvariant(upper);
+        var inner = upper switch
+        {
+            "CODEPAGE" => SqlValue.FromInt32(metrics.CodePage),
+            "COMPARISONSTYLE" => SqlValue.FromInt32(metrics.ComparisonStyle),
+            "LCID" => SqlValue.FromInt32(metrics.Lcid),
+            "NAME" => SqlValue.FromNVarchar(metrics.Name),
+            "VERSION" => SqlValue.FromByte(checked((byte)metrics.Version)),
+            _ => SqlValue.Null(SqlType.SqlVariant),
+        };
+        return inner.Type is SqlVariantSqlType ? inner : SqlValue.FromVariant(inner);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
