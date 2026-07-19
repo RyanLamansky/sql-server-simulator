@@ -994,7 +994,11 @@ public sealed partial class Simulation
             {
                 var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
                 if (batch.Variables.TryGetValue(pname, out var slot))
+                {
+                    if (parameter is SimulatedDbParameter simulated)
+                        simulated.OutputSqlValue = slot.Value;
                     parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
+                }
             }
         }
 
@@ -1896,9 +1900,10 @@ public sealed partial class Simulation
     {
         foreach (var slot in batch.Variables.Values)
         {
-            if (slot.Parameter is { } parameter
+            if (slot.Parameter is SimulatedDbParameter parameter
                 && parameter.Direction is ParameterDirection.InputOutput or ParameterDirection.Output)
             {
+                parameter.OutputSqlValue = slot.Value;
                 parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
             }
         }

@@ -42,7 +42,8 @@ Remaining phases, roughly in value order:
   **`text`/`ntext`/`image` ship fully** (2026-07-19) — result columns, `image` (0x22) input parameters, and **`SqlBulkCopy` into a legacy-LOB column** (2026-07-19: the BCP LONGLEN COLMETADATA + in-band text-pointer ROW value now decode); see [`tds-endpoint.md`](tds-endpoint.md#legacy-text--ntext--image-wire-forms).
   **`sql_variant` and UDT (`geography`/`geometry`/`hierarchyid`) ship as RPC *input* parameters AND as *columns inside a TVP*** (2026-07-19 — the shared decoder made the TVP columns near-free; see [`tds-endpoint.md`](tds-endpoint.md#tvp-parameters-sqldbtypestructured)).
   **TVP parameters (0xF3, `SqlDbType.Structured`) ship** — `DataTable` / `IEnumerable<SqlDataRecord>` / `DbDataReader` sources over proc-RPC + sp_executesql, error parity for arity / type / NOT NULL / CHECK / PK / UNIQUE / unknown-type.
-  Residuals: **output-direction** UDT / `sql_variant` params; **`SET TEXTSIZE`** doesn't truncate returned LOB data (parse-and-discard).
+  Residuals: **`SET TEXTSIZE`** doesn't truncate returned LOB data (parse-and-discard).
+  (Output-direction UDT / `sql_variant` params shipped 2026-07-19 — probed RETURNVALUE wire forms in [`tds-endpoint.md`](tds-endpoint.md#clr-udt--sql_variant-parameters).)
   (The LOB-backed TVP column → stored-proc READONLY parameter dangling-pointer bug was fixed 2026-07-19: the proc-parameter copy re-homes off-row values into the parameter's heap; see [`table-valued-parameters.md`](table-valued-parameters.md).)
 - **Smaller fidelity items**: TDS 8.0 / `Encrypt=Strict` (ALPN via `SslApplicationProtocol`); user-supplied `X509Certificate2` — an add-on-demand public-surface expansion.
   (Off-loopback binding shipped 2026-07-19 as `ListenNetworkAsync`, gated on a registered login; per-interface bind-address selection remains add-on-demand.)

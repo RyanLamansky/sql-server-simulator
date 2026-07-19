@@ -1,5 +1,6 @@
 using System.Data;
 using System.Globalization;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Network;
 
@@ -201,8 +202,7 @@ internal sealed partial class TdsSession
         if (handleReturn is { } handleValue)
             TdsTypeCodec.WriteReturnValue(writer, 0, handleValue.Name, DbType.Int32, handleValue.Handle);
 
-        foreach (var (ordinal, wire, bound) in outputs)
-            TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, wire.DbType, bound.Value);
+        WriteOutputReturnValues(writer, outputs);
 
         if (!moreRequests)
             this.WriteDatabaseChangeIfAny(writer);
@@ -238,8 +238,7 @@ internal sealed partial class TdsSession
             return;
 
         writer.WriteReturnStatus(returnParameter.Value is int returnCode ? returnCode : 0);
-        foreach (var (ordinal, wire, bound) in outputs)
-            TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, wire.DbType, bound.Value);
+        WriteOutputReturnValues(writer, outputs);
 
         if (!moreRequests)
             this.WriteDatabaseChangeIfAny(writer);
@@ -268,6 +267,26 @@ internal sealed partial class TdsSession
         ["sp_cursoroption"] = Tds.ProcIdCursorOption,
         ["sp_cursorclose"] = Tds.ProcIdCursorClose,
     };
+
+    /// <summary>
+    /// RETURNVALUE tokens for a request's output-direction parameters.
+    /// <see cref="DbType.Object"/> marks a <c>sql_variant</c> / CLR-UDT
+    /// parameter (its wire value rode a pre-built <see cref="SqlValue"/>, not
+    /// a <see cref="DbType"/>): those write from the engine-typed
+    /// <see cref="SimulatedDbParameter.OutputSqlValue"/> stamped at
+    /// end-of-batch write-back, falling back to echoing the decoded input
+    /// value when the batch never reached write-back.
+    /// </summary>
+    private static void WriteOutputReturnValues(TdsTokenWriter writer, List<(int Ordinal, TdsRpcParameter Wire, SimulatedDbParameter Bound)> outputs)
+    {
+        foreach (var (ordinal, wire, bound) in outputs)
+        {
+            if (wire.DbType == DbType.Object)
+                TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, bound.OutputSqlValue ?? (SqlValue)wire.Value!);
+            else
+                TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, wire.DbType, bound.Value);
+        }
+    }
 
     private static SimulatedDbParameter AddParameter(SimulatedDbCommand command, TdsRpcParameter wire)
     {

@@ -162,14 +162,26 @@ internal static class TdsTypeCodec
     /// </summary>
     public static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, DbType dbType, object? value)
     {
-        // DbType.Object is the RPC read side's marker for a CLR-UDT / sql_variant
-        // parameter (its value rode a pre-built SqlValue, not a DbType). Writing
-        // one back as a RETURNVALUE is unmodeled; reject up front — before any
-        // token bytes — rather than emit a malformed RETURNVALUE that desyncs the
-        // client (SqlClient surfaces the half-token as ArgumentOutOfRangeException).
-        if (dbType == DbType.Object)
-            throw new NotSupportedException("output CLR UDT / sql_variant RPC parameters");
+        var declared = SqlType.GetByDbType(dbType);
+        var sqlValue = value is null or DBNull ? SqlValue.Null(declared) : declared.ConvertParameter(value);
+        WriteReturnValue(writer, ordinal, name, sqlValue.IsNull ? declared : sqlValue.Type, sqlValue);
+    }
 
+    /// <summary>
+    /// RETURNVALUE token from an engine-typed <see cref="SqlValue"/> — the
+    /// path for <c>sql_variant</c> and CLR-UDT (<c>hierarchyid</c> /
+    /// <c>geography</c> / <c>geometry</c>) output parameters, whose wire form
+    /// (self-describing variant body; UDT_INFO + PLP value) needs the value's
+    /// own type identity rather than a <see cref="DbType"/> mapping.
+    /// Probe-captured against SQL Server 2025 (2026-07-19): the RETURNVALUE
+    /// TYPE_INFO and value bytes are the same forms the matching result
+    /// columns carry, so the column writers are reused as-is.
+    /// </summary>
+    public static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, SqlValue value)
+        => WriteReturnValue(writer, ordinal, name, value.Type, value);
+
+    private static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, SqlType wireType, SqlValue sqlValue)
+    {
         writer.EnterComposite();
         writer.WriteByte(Tds.TokenReturnValue);
         writer.WriteUInt16(ordinal);
@@ -179,9 +191,6 @@ internal static class TdsTypeCodec
         writer.WriteByte(0x09);
         writer.WriteByte(0);
 
-        var declared = SqlType.GetByDbType(dbType);
-        var sqlValue = value is null or DBNull ? SqlValue.Null(declared) : declared.ConvertParameter(value);
-        var wireType = sqlValue.IsNull ? declared : sqlValue.Type;
         WriteTypeInfo(writer, wireType);
         WriteValue(writer, wireType, sqlValue);
         writer.LeaveComposite();
@@ -829,7 +838,13 @@ internal static class TdsTypeCodec
 
     private static byte[] BuildVariantDecimal(DecimalSqlType type, SqlValue inner)
     {
-        var magnitudeBytes = MagnitudeBytes(type.precision);
+        // Server-sent variant decimal data is always 1 sign byte + a 16-byte
+        // magnitude regardless of precision (probe-captured 2026-07-19 in both
+        // a result column and a RETURNVALUE; RPC *request* decimals are the
+        // precision-width exception, on the decode side). SqlClient's row
+        // reader tolerates a narrower magnitude but its RETURNVALUE reader
+        // reads the fixed 17 and desyncs on anything shorter.
+        const int magnitudeBytes = 16;
         // 2 prop bytes (precision, scale); data = 1 sign byte + magnitude.
         var body = new byte[2 + 2 + 1 + magnitudeBytes];
         body[0] = 0x6A;

@@ -165,4 +165,69 @@ public sealed class UdtRpcParameterTests
 
         AreEqual("/3/4/", await command.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    // ---- Output direction ----
+
+    // RETURNVALUE for an output CLR-UDT parameter carries the COLMETADATA-shaped
+    // UDT_INFO (USHORT max byte size — 892 for hierarchyid, 0xFFFF for the
+    // spatial types — then db / schema / type B_VARCHARs and the US_VARCHAR
+    // assembly-qualified name) with a PLP value, PLP NULL for a NULL output —
+    // probe-captured against SQL Server 2025 + SqlClient 7.0.2 (2026-07-19).
+
+    [TestMethod]
+    public async Task HierarchyIdOutput_ThroughProc_RoundTrips()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create proc dbo.get_h @h hierarchyid output as set @h = hierarchyid::Parse('/1/2/')");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("dbo.get_h", connection) { CommandType = CommandType.StoredProcedure };
+        var output = command.Parameters.Add(new SqlParameter("@h", SqlDbType.Udt) { UdtTypeName = "hierarchyid", Direction = ParameterDirection.Output });
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        AreEqual("/1/2/", ((SqlHierarchyId)output.Value).ToString());
+    }
+
+    [TestMethod]
+    public async Task GeographyOutput_ThroughProc_RoundTrips()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create proc dbo.get_g @g geography output as set @g = geography::STGeomFromText('POINT(-122.3 47.6)', 4326)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("dbo.get_g", connection) { CommandType = CommandType.StoredProcedure };
+        var output = command.Parameters.Add(new SqlParameter("@g", SqlDbType.Udt) { UdtTypeName = "geography", Direction = ParameterDirection.Output });
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        AreEqual("POINT (-122.3 47.6)", ((SqlGeography)output.Value).ToString());
+    }
+
+    [TestMethod]
+    public async Task GeometryOutput_ThroughTextCommand_RoundTrips()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("set @g = geometry::STGeomFromText('POINT(3 4)', 0)", connection);
+        var output = command.Parameters.Add(new SqlParameter("@g", SqlDbType.Udt) { UdtTypeName = "geometry", Direction = ParameterDirection.Output });
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        AreEqual("POINT (3 4)", ((SqlGeometry)output.Value).ToString());
+    }
+
+    // A NULL UDT output arrives as PLP NULL; SqlClient surfaces the typed
+    // Null instance (SqlHierarchyId.Null), not DBNull — probed.
+    [TestMethod]
+    public async Task HierarchyIdOutput_NullValue_ReadsAsTypedNull()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create proc dbo.get_h @h hierarchyid output as set @h = null");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("dbo.get_h", connection) { CommandType = CommandType.StoredProcedure };
+        var output = command.Parameters.Add(new SqlParameter("@h", SqlDbType.Udt) { UdtTypeName = "hierarchyid", Direction = ParameterDirection.Output });
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        IsTrue(((SqlHierarchyId)output.Value).IsNull);
+    }
 }

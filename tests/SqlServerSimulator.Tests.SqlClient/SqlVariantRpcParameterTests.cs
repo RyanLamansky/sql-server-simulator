@@ -90,26 +90,8 @@ public sealed class SqlVariantRpcParameterTests
         AreEqual("int", await command.ExecuteScalarAsync(TestContext.CancellationToken));
     }
 
-    /// <summary>
-    /// Output-direction UDT / sql_variant parameters are a documented residual:
-    /// the RETURNVALUE writeback for these types is unmodeled and rejected up
-    /// front with a clear error rather than a malformed token that would desync
-    /// the client (real SQL Server supports them).
-    /// </summary>
-    [TestMethod]
-    public async Task VariantParameter_OutputDirection_RaisesResidualError()
-    {
-        var simulation = new Simulation();
-        Wire.ExecInProc(simulation, "create procedure dbo.SetVariant @v sql_variant output as set @v = cast(5 as int)");
-
-        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
-        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
-        await using var command = new SqlCommand("dbo.SetVariant", connection) { CommandType = CommandType.StoredProcedure };
-        _ = command.Parameters.Add(new SqlParameter("@v", SqlDbType.Variant) { Direction = ParameterDirection.Output, Value = DBNull.Value });
-
-        var ex = await ThrowsExactlyAsync<SqlException>(async () => await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
-        Contains("output CLR UDT / sql_variant", ex.Message);
-    }
+    // Output-direction sql_variant / UDT parameters ship: RETURNVALUE coverage
+    // lives in SqlVariantWireTests / UdtRpcParameterTests.
 
     private async Task RoundTrip(SqlConnection connection, object value, string expectedBaseType, object expectedValue)
     {

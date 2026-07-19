@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using SqlServerSimulator.Storage;
 
 [module: SuppressMessage("Microsoft.Design", "CA1065:DoNotRaiseExceptionsInUnexpectedLocations", Scope = "member", Target = "~P:SqlServerSimulator.SimulatedDbParameter.DbType", Justification = "Mirrors SqlParameter inference: a CLR Value with no DbType mapping is surfaced as ArgumentException at property read, not later at command execution.")]
 
@@ -36,6 +37,16 @@ namespace SqlServerSimulator;
 public sealed class SimulatedDbParameter : DbParameter
 {
     private DbType? dbType;
+
+    /// <summary>
+    /// The typed engine value written back to an output-direction parameter
+    /// at end of batch, alongside the CLR conversion stored in
+    /// <see cref="Value"/>. The TDS listener's RETURNVALUE writer reads it
+    /// for <c>sql_variant</c> / CLR-UDT parameters, whose wire form needs
+    /// the inner type identity (variant base type, UDT kind) that the CLR
+    /// object no longer carries.
+    /// </summary>
+    internal SqlValue? OutputSqlValue;
 
     /// <inheritdoc/>
     public override DbType DbType

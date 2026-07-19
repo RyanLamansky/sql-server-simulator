@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
@@ -139,5 +140,64 @@ public sealed class SqlVariantWireTests
         AreEqual("OFF", reader.GetValue(1));
         IsTrue((bool)reader.GetValue(2));
         IsTrue(await reader.IsDBNullAsync(3, TestContext.CancellationToken));
+    }
+
+    // ---- Output direction ----
+
+    // RETURNVALUE for an output sql_variant parameter: TYPE_INFO 0x62 + ULONG
+    // max length, value = ULONG total length (0 = NULL) + the self-describing
+    // variant body — probe-captured against SQL Server 2025 + SqlClient 7.0.2
+    // (2026-07-19), the same forms a variant result column carries.
+
+    private static async Task<object> RunVariantOutputProc(Simulation simulation, int which, CancellationToken token)
+    {
+        await using var listener = await simulation.ListenLocalAsync(0, token);
+        await using var connection = await Wire.OpenAsync(listener, token);
+        await using var command = new SqlCommand("dbo.get_v", connection) { CommandType = CommandType.StoredProcedure };
+        _ = command.Parameters.AddWithValue("@which", which);
+        var output = command.Parameters.Add(new SqlParameter("@v", SqlDbType.Variant) { Direction = ParameterDirection.Output });
+        _ = await command.ExecuteNonQueryAsync(token);
+        return output.Value;
+    }
+
+    private static Simulation CreateVariantOutputSim()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create proc dbo.get_v @which int, @v sql_variant output as
+            if @which = 1 set @v = 4242
+            else if @which = 2 set @v = cast(N'hello' as nvarchar(20))
+            else if @which = 3 set @v = cast(1.5 as decimal(5,2))
+            """);
+        return simulation;
+    }
+
+    [TestMethod]
+    public async Task VariantOutput_IntInner_ReadsAsInt()
+        => AreEqual(4242, await RunVariantOutputProc(CreateVariantOutputSim(), 1, TestContext.CancellationToken));
+
+    [TestMethod]
+    public async Task VariantOutput_NvarcharInner_ReadsAsString()
+        => AreEqual("hello", await RunVariantOutputProc(CreateVariantOutputSim(), 2, TestContext.CancellationToken));
+
+    [TestMethod]
+    public async Task VariantOutput_DecimalInner_ReadsAsDecimal()
+        => AreEqual(1.50m, await RunVariantOutputProc(CreateVariantOutputSim(), 3, TestContext.CancellationToken));
+
+    [TestMethod]
+    public async Task VariantOutput_NullValue_ReadsAsDbNull()
+        => _ = IsInstanceOfType<DBNull>(await RunVariantOutputProc(CreateVariantOutputSim(), 0, TestContext.CancellationToken));
+
+    [TestMethod]
+    public async Task VariantOutput_ThroughTextCommand_PreservesFloatInner()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("set @v = cast(3.25 as float)", connection);
+        var output = command.Parameters.Add(new SqlParameter("@v", SqlDbType.Variant) { Direction = ParameterDirection.Output });
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        AreEqual(3.25d, output.Value);
     }
 }

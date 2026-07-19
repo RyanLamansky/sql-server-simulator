@@ -58,7 +58,8 @@ These notes are the local implementation contracts.
   COLMETADATA = type byte + 4-byte max length (8009).
   Each value = 4-byte total length then the MS-TDS 2.2.5.5.3 body (base-type token + cbProps + props + data).
   **NULL is total-length 0, not 0xFFFFFFFF** — a non-NULL variant is always ≥2 bytes, so SqlClient reads 0 as NULL (the one non-obvious wire rule; got this wrong first and it desynced the stream).
-  `sql_variant` **input** *parameters* decode (RPC read side, `TdsRpc.DecodeSqlVariant` → `TdsWireValue.ReadVariantBody` — the read mirror of `BuildVariantBody`, into `SqlValue.FromVariant`; **output** direction stays rejected), and **`sql_variant` columns inside a TVP** decode through the same body reader (`TdsColumnDecoder`: 0x62 + 4-byte max length, value = 4-byte total length `0`=NULL + body).
+  `sql_variant` **input** *parameters* decode (RPC read side, `TdsRpc.DecodeSqlVariant` → `TdsWireValue.ReadVariantBody` — the read mirror of `BuildVariantBody`, into `SqlValue.FromVariant`), **output** direction writes back as a RETURNVALUE (`0x62` + ULONG maxlen 8009 + the column-form value; the engine value rides `SimulatedDbParameter.OutputSqlValue`, stamped at write-back, since the CLR `Value` loses the inner type), and **`sql_variant` columns inside a TVP** decode through the same body reader (`TdsColumnDecoder`: 0x62 + 4-byte max length, value = 4-byte total length `0`=NULL + body).
+  Variant decimal bodies are always sign + 16-byte magnitude regardless of precision (probed in column and RETURNVALUE positions; SqlClient's RETURNVALUE reader hard-reads 17 data bytes).
   Oracles: `SqlVariantWireTests`, `SqlVariantRpcParameterTests`, `TvpVariantUdtColumnTests`.
 - **`geography` / `geometry` (UDTTYPE `0xF0`)**: result-column-only.
   COLMETADATA = ushort max-byte-size (`0xFFFF`) + three B_VARCHAR names (db empty — the static codec can't reach the session db; schema `sys`; type name) + US_VARCHAR assembly-qualified name (`SpatialAssemblyQualifiedName`, probe-matched).
@@ -69,7 +70,7 @@ These notes are the local implementation contracts.
   Oracle: `HierarchyIdWireTests`, `HierarchyIdOrdPathTests`.
   UDT **input** *parameters* decode (`TdsRpc.DecodeClrUdt` → `TdsWireValue.BuildUdtValue`): the client UDT_INFO is three B_VARCHARs (db/schema/type, no max-size, no AQN — shorter than COLMETADATA) + PLP value; hierarchyid OrdPath bytes bind verbatim, spatial WKB decodes via `SpatialWkbDecoder.TryDecode`, resolved case-insensitively into a pre-built `SqlValue` (unknown type → Msg 8064, invalid spatial bytes → Msg 8023).
   **UDT columns inside a TVP** decode through the same builder (`TdsColumnDecoder`: 0xF0 + three B_VARCHARs + PLP value).
-  **Output** direction stays rejected.
+  **Output** direction writes back as a RETURNVALUE carrying the **COLMETADATA-shaped** UDT_INFO (max byte size + db/schema/type + AQN — richer than the client request form) + PLP value, from `SimulatedDbParameter.OutputSqlValue`.
   A LOB-backed UDT TVP column (`geography`/`geometry`) round-trips via both the `sp_executesql` text path and a stored-proc READONLY parameter (the proc-parameter copy re-homes off-row values — docs/claude/table-valued-parameters.md).
   Oracles: `UdtRpcParameterTests`, `TvpVariantUdtColumnTests`.
 - **Length-prefix trap**: most strings are char-counted (B_VARCHAR / US_VARCHAR), but TM-request transaction names are byte-counted — misreading them as char-counted overruns the payload on every `SqlTransaction.Save`.
