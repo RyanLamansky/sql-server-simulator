@@ -39,6 +39,7 @@ internal static class TdsTypeCodec
     /// </summary>
     public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability)
     {
+        writer.EnterComposite();
         writer.WriteByte(Tds.TokenColMetadata);
         writer.WriteUInt16(checked((ushort)schema.Length));
         for (var i = 0; i < schema.Length; i++)
@@ -50,10 +51,13 @@ internal static class TdsTypeCodec
             WriteTypeInfo(writer, type);
             writer.WriteBVarchar(columnNames[i]);
         }
+
+        writer.LeaveComposite();
     }
 
     public static void WriteRow(TdsTokenWriter writer, SqlType[] schema, RowCursor cursor, bool[]? columnNullability)
     {
+        writer.EnterComposite();
         writer.WriteByte(Tds.TokenRow);
         for (var i = 0; i < schema.Length; i++)
         {
@@ -62,6 +66,8 @@ internal static class TdsTypeCodec
             else
                 WriteValue(writer, schema[i], cursor[i]);
         }
+
+        writer.LeaveComposite();
     }
 
     /// <summary>
@@ -164,6 +170,7 @@ internal static class TdsTypeCodec
         if (dbType == DbType.Object)
             throw new NotSupportedException("output CLR UDT / sql_variant RPC parameters");
 
+        writer.EnterComposite();
         writer.WriteByte(Tds.TokenReturnValue);
         writer.WriteUInt16(ordinal);
         writer.WriteBVarchar(name);
@@ -177,6 +184,7 @@ internal static class TdsTypeCodec
         var wireType = sqlValue.IsNull ? declared : sqlValue.Type;
         WriteTypeInfo(writer, wireType);
         WriteValue(writer, wireType, sqlValue);
+        writer.LeaveComposite();
     }
 
     private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type)

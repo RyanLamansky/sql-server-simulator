@@ -16,8 +16,6 @@ namespace SqlServerSimulator.Network;
 /// </summary>
 internal static class TdsColumnDecoder
 {
-    private static readonly DateTime Epoch1900 = new(1900, 1, 1);
-
     /// <summary>
     /// Reads a column's TYPE_INFO (the type token plus its type-specific
     /// metadata bytes) into a <see cref="Column"/> whose
@@ -69,7 +67,7 @@ internal static class TdsColumnDecoder
             case 0xAF: // BIGCHAR
                 {
                     var maxLength = reader.ReadUInt16();
-                    var utf8 = ReadCollation(reader);
+                    var utf8 = ReadCollationUtf8(reader);
                     return new Column(token, maxLength, 0, 0, utf8);
                 }
 
@@ -77,7 +75,7 @@ internal static class TdsColumnDecoder
             case 0xEF: // NCHAR
                 {
                     var maxLength = reader.ReadUInt16();
-                    _ = ReadCollation(reader);
+                    _ = ReadCollationUtf8(reader);
                     return new Column(token, maxLength, 0, 0, false);
                 }
 
@@ -96,29 +94,70 @@ internal static class TdsColumnDecoder
                     return new Column(token, 0, 0, 0, false);
                 }
 
-            case 0x22: throw Unsupported("image");
-            case 0x23: throw Unsupported("text");
-            case 0x63: throw Unsupported("ntext");
-            case 0x62: throw Unsupported("sql_variant");
-            case 0xF0: throw Unsupported("CLR UDT / spatial / hierarchyid");
+            // Legacy large objects (LONGLEN): a 4-byte max size, then the 5-byte
+            // collation for text / ntext (image carries none), then the TableName
+            // field these types uniquely carry (SqlClient sends a zero part count
+            // in a client value stream — no source-table identity). The per-row
+            // value is the in-band text-pointer form, decoded in ReadLegacyLob.
+            case 0x23: // TEXT
+                {
+                    _ = reader.ReadUInt32();
+                    var utf8 = ReadCollationUtf8(reader);
+                    SkipLegacyLobTableName(reader);
+                    return new Column(token, 0, 0, 0, utf8);
+                }
+
+            case 0x63: // NTEXT
+                {
+                    _ = reader.ReadUInt32();
+                    _ = ReadCollationUtf8(reader);
+                    SkipLegacyLobTableName(reader);
+                    return new Column(token, 0, 0, 0, false);
+                }
+
+            case 0x22: // IMAGE (no collation)
+                {
+                    _ = reader.ReadUInt32();
+                    SkipLegacyLobTableName(reader);
+                    return new Column(token, 0, 0, 0, false);
+                }
+
+            case 0x62: // sql_variant — 4-byte max length (ignored; the value body is self-describing)
+                _ = reader.ReadUInt32();
+                return new Column(token, 0, 0, 0, false);
+            case 0xF0: // CLR UDT — three B_VARCHAR names (db / schema / type); no max size, no assembly-qualified name
+                {
+                    _ = reader.ReadUcs2(reader.ReadByte());
+                    _ = reader.ReadUcs2(reader.ReadByte());
+                    var typeName = reader.ReadUcs2(reader.ReadByte());
+                    return new Column(token, 0, 0, 0, false, typeName);
+                }
+
             default:
                 throw new NotSupportedException($"The network listener does not decode client value column type token 0x{token:X2}.");
         }
 #pragma warning restore SSS005
     }
 
-    private static NotSupportedException Unsupported(string feature) =>
-        new($"The network listener does not accept {feature} columns in a client value stream (SqlBulkCopy / table-valued parameter).");
+    private static bool ReadCollationUtf8(TdsValueReader reader) => TdsWireValue.ReadCollationUtf8(reader);
 
-    private static bool ReadCollation(TdsValueReader reader)
+    /// <summary>
+    /// Skips the TableName field carried only by the text / ntext / image
+    /// TYPE_INFO. In a client value stream SqlClient sends a zero part count
+    /// (the value has no source-table identity to name); a non-zero count is not
+    /// something a <c>SqlBulkCopy</c> / TVP source emits and is rejected rather
+    /// than guessed at. Probe-captured against SqlClient 7.0.2 (2026-07-19): the
+    /// count occupies two bytes.
+    /// </summary>
+    private static void SkipLegacyLobTableName(TdsValueReader reader)
     {
-        var info = reader.ReadUInt32();
-        _ = reader.ReadByte();
-        return (info & (1u << 26)) != 0;
+        var parts = reader.ReadUInt16();
+        if (parts != 0)
+            throw new NotSupportedException("The network listener does not decode a table name in a legacy-LOB client value column.");
     }
 
     /// <summary>One column's TYPE_INFO and its per-value decoder.</summary>
-    public sealed class Column(byte token, int declaredOrMax, byte precision, byte scale, bool utf8)
+    public sealed class Column(byte token, int declaredOrMax, byte precision, byte scale, bool utf8, string? udtTypeName = null)
     {
         public SqlValue ReadValue(TdsValueReader reader) => token switch
         {
@@ -141,7 +180,7 @@ internal static class TdsColumnDecoder
             0x6F => this.ReadDateTimeN(reader),
             0x24 => ByteLenNull(reader, SqlType.UniqueIdentifier) ?? SqlValue.FromGuid(new Guid(reader.ReadBytes(16))),
             0x6A or 0x6C => this.ReadDecimal(reader),
-            0x28 => ByteLenNull(reader, SqlType.Date) ?? SqlValue.FromDate(DateOnly.FromDayNumber(ReadThreeByteInt(reader.ReadBytes(3)))),
+            0x28 => ByteLenNull(reader, SqlType.Date) ?? SqlValue.FromDate(DateOnly.FromDayNumber(TdsWireValue.ReadThreeByteInt(reader.ReadBytes(3)))),
             0x29 => this.ReadTime(reader),
             0x2A => this.ReadDateTime2(reader),
             0x2B => this.ReadDateTimeOffset(reader),
@@ -149,15 +188,64 @@ internal static class TdsColumnDecoder
             0xE7 or 0xEF => this.ReadNationalString(reader),
             0xA5 or 0xAD => this.ReadBinary(reader),
             0xF1 => ReadXml(reader),
+            0x62 => ReadVariant(reader),
+            0xF0 => this.ReadUdt(reader),
+            0x22 or 0x23 or 0x63 => this.ReadLegacyLob(reader),
             _ => throw new InvalidDataException($"No client-value decoder for type token 0x{token:X2}."),
         };
+
+        /// <summary>
+        /// Decodes a <c>sql_variant</c> column value: a 4-byte total length
+        /// (<c>0</c> = NULL) then the MS-TDS §2.2.5.5.3 self-describing body — the
+        /// same value form an RPC <c>sql_variant</c> parameter and a result
+        /// <c>sql_variant</c> column carry, so the shared body reader decodes it.
+        /// </summary>
+        private static SqlValue ReadVariant(TdsValueReader reader) =>
+            reader.ReadUInt32() == 0
+                ? SqlValue.Null(SqlType.SqlVariant)
+                : SqlValue.FromVariant(TdsWireValue.ReadVariantBody(reader));
+
+        /// <summary>
+        /// Decodes a CLR-UDT column value (PLP-carried OrdPath bytes for
+        /// <c>hierarchyid</c> or MS spatial binary for <c>geography</c> /
+        /// <c>geometry</c>) via the shared builder, matching the RPC-parameter
+        /// UDT decode.
+        /// </summary>
+        private SqlValue ReadUdt(TdsValueReader reader) =>
+            TdsWireValue.BuildUdtValue(udtTypeName ?? "", "", "", 0, udtTypeName ?? "", TdsWireValue.ReadPlp(reader));
+
+        /// <summary>
+        /// Decodes a legacy large-object column value in the in-band text-pointer
+        /// form (MS-TDS §2.2.5.5.1) SqlClient sends in a bulk-load stream: a
+        /// 1-byte text-pointer length (<c>0</c> = NULL), else the text pointer +
+        /// 8-byte timestamp placeholders, a 4-byte data length, then the data
+        /// (CP1252 / UTF-8 for text, UTF-16LE for ntext, verbatim for image). The
+        /// wire-typed value coerces into the destination text / ntext / image
+        /// column on insert.
+        /// </summary>
+        private SqlValue ReadLegacyLob(TdsValueReader reader)
+        {
+            var pointerLength = reader.ReadByte();
+            if (pointerLength == 0)
+                return SqlValue.Null(token == 0x63 ? SqlType.NVarchar : token == 0x22 ? SqlType.VarbinaryMax : SqlType.Varchar);
+
+            _ = reader.ReadBytes(pointerLength);
+            _ = reader.ReadBytes(8);
+            var data = reader.ReadBytes(checked((int)reader.ReadUInt32()));
+            return token switch
+            {
+                0x22 => SqlValue.FromVarbinary(data.ToArray()),
+                0x63 => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
+                _ => SqlValue.FromVarchar((utf8 ? Encoding.UTF8 : CharSqlType.Cp1252Encoder).GetString(data)),
+            };
+        }
 
         private SqlValue ReadIntN(TdsValueReader reader)
         {
             var length = reader.ReadByte();
             if (length == 0)
                 return SqlValue.Null(IntType(declaredOrMax));
-            var raw = AssembleLittleEndian(reader.ReadBytes(length));
+            var raw = TdsWireValue.AssembleLittleEndian(reader.ReadBytes(length));
             return declaredOrMax switch
             {
                 1 => SqlValue.FromByte((byte)raw),
@@ -209,13 +297,13 @@ internal static class TdsColumnDecoder
             {
                 var days = BinaryPrimitives.ReadUInt16LittleEndian(payload);
                 var minutes = BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]);
-                return SqlValue.FromSmallDateTime(Epoch1900.AddDays(days).AddMinutes(minutes));
+                return SqlValue.FromSmallDateTime(TdsWireValue.Epoch1900.AddDays(days).AddMinutes(minutes));
             }
 
             var dtDays = BinaryPrimitives.ReadInt32LittleEndian(payload);
             var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
             var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-            return SqlValue.FromDateTime(Epoch1900.AddDays(dtDays).AddTicks(ticks));
+            return SqlValue.FromDateTime(TdsWireValue.Epoch1900.AddDays(dtDays).AddTicks(ticks));
         }
 
         private SqlValue ReadDecimal(TdsValueReader reader)
@@ -249,7 +337,7 @@ internal static class TdsColumnDecoder
             var type = SqlType.GetTime(scale);
             if (length == 0)
                 return SqlValue.Null(type);
-            var ticks = ScaledUnitsToTicks(AssembleLittleEndian(reader.ReadBytes(length)), scale);
+            var ticks = TdsWireValue.ScaledUnitsToTicks(TdsWireValue.AssembleLittleEndian(reader.ReadBytes(length)), scale);
             return SqlValue.FromTime(type, TimeSpan.FromTicks(ticks));
         }
 
@@ -261,8 +349,8 @@ internal static class TdsColumnDecoder
                 return SqlValue.Null(type);
             var timeBytes = length - 3;
             var payload = reader.ReadBytes(length);
-            var ticks = ScaledUnitsToTicks(AssembleLittleEndian(payload[..timeBytes]), scale);
-            var days = ReadThreeByteInt(payload[timeBytes..]);
+            var ticks = TdsWireValue.ScaledUnitsToTicks(TdsWireValue.AssembleLittleEndian(payload[..timeBytes]), scale);
+            var days = TdsWireValue.ReadThreeByteInt(payload[timeBytes..]);
             return SqlValue.FromDateTime2(type, DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue).AddTicks(ticks));
         }
 
@@ -274,8 +362,8 @@ internal static class TdsColumnDecoder
                 return SqlValue.Null(type);
             var timeBytes = length - 5;
             var payload = reader.ReadBytes(length);
-            var ticks = ScaledUnitsToTicks(AssembleLittleEndian(payload[..timeBytes]), scale);
-            var days = ReadThreeByteInt(payload[timeBytes..(timeBytes + 3)]);
+            var ticks = TdsWireValue.ScaledUnitsToTicks(TdsWireValue.AssembleLittleEndian(payload[..timeBytes]), scale);
+            var days = TdsWireValue.ReadThreeByteInt(payload[timeBytes..(timeBytes + 3)]);
             var offsetMinutes = BinaryPrimitives.ReadInt16LittleEndian(payload[(timeBytes + 3)..]);
             var offset = TimeSpan.FromMinutes(offsetMinutes);
             var utcTicks = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue).Ticks + ticks;
@@ -298,7 +386,7 @@ internal static class TdsColumnDecoder
         private byte[]? ReadStringBytes(TdsValueReader reader)
         {
             if (declaredOrMax == 0xFFFF)
-                return ReadPlp(reader);
+                return TdsWireValue.ReadPlp(reader);
             var length = reader.ReadUInt16();
             return length == 0xFFFF ? null : reader.ReadBytes(length).ToArray();
         }
@@ -307,7 +395,7 @@ internal static class TdsColumnDecoder
         {
             if (declaredOrMax == 0xFFFF)
             {
-                var plp = ReadPlp(reader);
+                var plp = TdsWireValue.ReadPlp(reader);
                 return plp is null ? SqlValue.Null(SqlType.VarbinaryMax) : SqlValue.FromVarbinary(plp);
             }
 
@@ -317,7 +405,7 @@ internal static class TdsColumnDecoder
 
         private static SqlValue ReadXml(TdsValueReader reader)
         {
-            var bytes = ReadPlp(reader);
+            var bytes = TdsWireValue.ReadPlp(reader);
             if (bytes is null)
                 return SqlValue.Null(SqlType.Xml);
             var value = Encoding.Unicode.GetString(bytes);
@@ -350,7 +438,7 @@ internal static class TdsColumnDecoder
             var payload = reader.ReadBytes(4);
             var days = BinaryPrimitives.ReadUInt16LittleEndian(payload);
             var minutes = BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]);
-            return SqlValue.FromSmallDateTime(Epoch1900.AddDays(days).AddMinutes(minutes));
+            return SqlValue.FromSmallDateTime(TdsWireValue.Epoch1900.AddDays(days).AddMinutes(minutes));
         }
 
         private static SqlValue ReadFixedDateTime(TdsValueReader reader)
@@ -359,44 +447,8 @@ internal static class TdsColumnDecoder
             var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
             var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
             var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-            return SqlValue.FromDateTime(Epoch1900.AddDays(days).AddTicks(ticks));
+            return SqlValue.FromDateTime(TdsWireValue.Epoch1900.AddDays(days).AddTicks(ticks));
         }
     }
 
-    private static byte[]? ReadPlp(TdsValueReader reader)
-    {
-        var total = reader.ReadUInt64();
-        if (total == 0xFFFFFFFFFFFFFFFF)
-            return null;
-
-        using var accumulated = new MemoryStream();
-        while (true)
-        {
-            var chunkLength = reader.ReadUInt32();
-            if (chunkLength == 0)
-                break;
-            accumulated.Write(reader.ReadBytes((int)chunkLength));
-        }
-
-        return accumulated.ToArray();
-    }
-
-    private static long ScaledUnitsToTicks(long units, byte scale)
-    {
-        var factor = 1L;
-        for (var i = scale; i < 7; i++)
-            factor *= 10;
-        return units * factor;
-    }
-
-    private static long AssembleLittleEndian(ReadOnlySpan<byte> bytes)
-    {
-        var value = 0L;
-        for (var i = 0; i < bytes.Length; i++)
-            value |= (long)bytes[i] << (8 * i);
-        return value;
-    }
-
-    private static int ReadThreeByteInt(ReadOnlySpan<byte> bytes) =>
-        bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
 }

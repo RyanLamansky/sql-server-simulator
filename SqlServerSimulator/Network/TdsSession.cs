@@ -55,6 +55,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         Stream transportStream = new NetworkStream(socket, ownsSocket: true);
+        TdsTokenWriter? writer = null;
         try
         {
             var transport = new TdsPacketTransport(transportStream);
@@ -99,7 +100,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (login.PacketSize is >= 512 and <= 32767)
                 transport.PacketSize = login.PacketSize;
 
-            var writer = new TdsTokenWriter(transport);
+            writer = new TdsTokenWriter(transport);
             if (!ValidateCredentials(simulation, login))
             {
                 // Probe-confirmed shape: Msg 18456 severity 14 state 1 with
@@ -264,12 +265,59 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // Client disconnects, listener teardown, and malformed traffic
             // all land here; the session simply ends.
         }
+#pragma warning disable CA1031 // Terminal backstop: every exception type must surface as an in-band severe error, not a silent transport reset.
+        catch (Exception)
+        {
+            // Terminal crash boundary: an exception the typed handlers above
+            // didn't anticipate (and never converted to an ERROR token). Rather
+            // than letting the session die silently — the client seeing only a
+            // raw transport reset — emit a best-effort in-band severe error so
+            // SqlClient surfaces a SqlException, then let the connection close.
+            await TryWriteSevereErrorAsync(writer, cancellationToken).ConfigureAwait(false);
+        }
+#pragma warning restore CA1031
         finally
         {
             // The connection, transaction, and MARS machinery are torn down in
             // Dispose (invoked by the listener once this returns); here only the
             // transport stream, a RunAsync-local, needs releasing.
             await transportStream.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The Msg 0 / severity 20 error real SQL Server sends when an internal
+    /// failure aborts the current command; SqlClient treats severity ≥ 20 as
+    /// fatal — it surfaces a <c>SqlException</c> and marks the connection dead.
+    /// </summary>
+    internal const string SevereErrorMessage = "A severe error occurred on the current command. The results, if any, should be discarded.";
+
+    /// <summary>
+    /// Best-effort terminal backstop: appends a severity-20 ERROR + DONE to the
+    /// response and flushes it, so an otherwise-silent session crash reaches the
+    /// client as a <c>SqlException</c> rather than a bare transport reset. Only
+    /// runs when the writer is at a token boundary
+    /// (<see cref="TdsTokenWriter.AtTokenBoundary"/>) — a crash that struck
+    /// mid-COLMETADATA / mid-ROW left a partial token buffered, and appending
+    /// another token there would desync the stream, so the connection just
+    /// closes. Any bytes already flushed for the current response stay
+    /// well-formed: an ERROR token legally follows complete tokens (even a
+    /// partial result set the client then discards).
+    /// </summary>
+    private static async ValueTask TryWriteSevereErrorAsync(TdsTokenWriter? writer, CancellationToken cancellationToken)
+    {
+        if (writer is null || !writer.AtTokenBoundary)
+            return;
+
+        try
+        {
+            writer.WriteErrorOrInfo(Tds.TokenError, 0, 1, 20, SevereErrorMessage, ServerName, "", 0);
+            writer.WriteDone(Tds.DoneError, 0);
+            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidDataException or AuthenticationException)
+        {
+            // The connection is already going away; the backstop is best-effort.
         }
     }
 
@@ -457,6 +505,16 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             // Client disconnect / teardown / malformed traffic ends the session.
         }
+#pragma warning disable CA1031 // Terminal backstop: a MARS session's unanticipated exception must surface as a severe error, not silently kill the mux.
+        catch (Exception)
+        {
+            // Terminal crash boundary for one MARS logical session: emit a
+            // best-effort severe error rather than letting an unanticipated
+            // exception fault the session loop and silently kill the whole mux.
+            // The FIN in the finally still tears just this session down.
+            await TryWriteSevereErrorAsync(writer, cancellationToken).ConfigureAwait(false);
+        }
+#pragma warning restore CA1031
         finally
         {
             try
@@ -478,6 +536,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
 
         this.databaseAtMessageStart = this.connection!.Database;
+        // Test-only: force an exception the typed catches below don't handle, to
+        // exercise the terminal crash boundary. No-op in production (hook null).
+        simulation.NetworkBatchCrashHookForTesting?.Invoke();
         try
         {
             using var command = this.connection.CreateCommand();

@@ -36,6 +36,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SqlServerSimulator.Tests.Internal" />
+    <InternalsVisibleTo Include="SqlServerSimulator.Tests.SqlClient" />
   </ItemGroup>
 
   <ItemGroup>

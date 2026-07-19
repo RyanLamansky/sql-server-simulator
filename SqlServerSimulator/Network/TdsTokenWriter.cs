@@ -16,6 +16,27 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     private int length;
 
     /// <summary>
+    /// True when the buffer ends at a complete-token boundary — nothing
+    /// half-written. Every self-contained token method here leaves it true (each
+    /// runs to completion synchronously); the only writers that interleave a
+    /// throw-capable sub-write between bytes of a single token — COLMETADATA and
+    /// ROW (their per-column <c>WriteTypeInfo</c> / <c>WriteValue</c>) and
+    /// RETURNVALUE — bracket their body with <see cref="EnterComposite"/> /
+    /// <see cref="LeaveComposite"/>, so a throw mid-token leaves this false. The
+    /// terminal crash backstop reads it to decide whether an in-band severe-error
+    /// token can be appended without desyncing the stream (already-flushed bytes
+    /// stay well-formed because their remainder is still buffered, and an ERROR
+    /// token legally follows any complete tokens — even a partial result set).
+    /// </summary>
+    public bool AtTokenBoundary = true;
+
+    /// <summary>Marks the start of a multi-write token whose body may throw; pair with <see cref="LeaveComposite"/>.</summary>
+    public void EnterComposite() => this.AtTokenBoundary = false;
+
+    /// <summary>Marks a composite token fully written; the buffer is at a token boundary again.</summary>
+    public void LeaveComposite() => this.AtTokenBoundary = true;
+
+    /// <summary>
     /// When set, non-final flushes accumulate rather than send — the MARS path
     /// buffers a session's whole response under the connection's execution lock
     /// and sends it only on the final flush, once the lock is released, so a

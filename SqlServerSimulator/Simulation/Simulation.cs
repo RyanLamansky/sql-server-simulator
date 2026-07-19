@@ -47,6 +47,16 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Test-only seam: when set, the TDS network session invokes it just before
+    /// executing a SQLBatch, letting a wire test force an exception the session's
+    /// typed catch list does not anticipate through the terminal crash boundary
+    /// (verifying the client receives a severity-20 <c>SqlException</c> rather
+    /// than a bare transport reset). Never set outside tests; per-instance, so
+    /// parallel test simulations stay isolated.
+    /// </summary>
+    internal Action? NetworkBatchCrashHookForTesting;
+
+    /// <summary>
     /// Creates a simulated database connection.
     /// </summary>
     /// <returns>A new simulated database connection instance.</returns>

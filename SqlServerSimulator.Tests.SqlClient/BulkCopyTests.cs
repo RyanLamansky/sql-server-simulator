@@ -416,6 +416,59 @@ public sealed class BulkCopyTests
     }
 
     [TestMethod]
+    public async Task LegacyLobColumns_TextNtextImage_InsertAndRoundTrip()
+    {
+        // SqlClient sends legacy text / ntext / image destination columns in the
+        // BCP stream with their LONGLEN TYPE_INFO (a 4-byte max size, the 5-byte
+        // collation for the string pair, and a zero-part TableName field) and the
+        // in-band text-pointer ROW value form — the same value form results carry,
+        // now decoded by the shared column decoder. Probe-captured against
+        // SqlClient 7.0.2 (2026-07-19).
+        var (_, listener, connection) = await SetUpAsync(
+            "create table t (id int, t_col text null, n_col ntext null, i_col image null)",
+            TestContext.CancellationToken);
+        await using var listenerScope = listener;
+        await using var connectionScope = connection;
+
+        var big = new string('Z', 20000);
+        var image = new byte[300];
+        for (var i = 0; i < image.Length; i++)
+            image[i] = (byte)(i & 0xFF);
+
+        var data = Table(("id", typeof(int)), ("t_col", typeof(string)), ("n_col", typeof(string)), ("i_col", typeof(byte[])));
+        _ = data.Rows.Add(1, "hello text", "wörld ntext", new byte[] { 1, 2, 3, 254 });
+        _ = data.Rows.Add(2, DBNull.Value, DBNull.Value, DBNull.Value);
+        _ = data.Rows.Add(3, big, big, image);
+        using (var bulk = new SqlBulkCopy(connection) { DestinationTableName = "t" })
+        {
+            Map(bulk, "id", "id");
+            Map(bulk, "t_col", "t_col");
+            Map(bulk, "n_col", "n_col");
+            Map(bulk, "i_col", "i_col");
+            await bulk.WriteToServerAsync(data, TestContext.CancellationToken);
+        }
+
+        await using var read = new SqlCommand("select t_col, n_col, i_col from t order by id", connection);
+        await using var reader = await read.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("hello text", reader.GetString(0));
+        AreEqual("wörld ntext", reader.GetString(1));
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 254 }, (byte[])reader.GetValue(2));
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        IsTrue(reader.IsDBNull(0));
+        IsTrue(reader.IsDBNull(1));
+        IsTrue(reader.IsDBNull(2));
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(big, reader.GetString(0));
+        AreEqual(big, reader.GetString(1));
+        CollectionAssert.AreEqual(image, (byte[])reader.GetValue(2));
+        IsFalse(await reader.ReadAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
     public async Task MixedScalarTypes_RoundTripOverTheWire()
     {
         var (_, listener, connection) = await SetUpAsync(
