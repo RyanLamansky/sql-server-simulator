@@ -748,7 +748,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         && this.IsNull == other.IsNull
         && (this.IsNull
             || (this.Type is SqlVariantSqlType
-                ? this.AsVariantInner.Equals(other.AsVariantInner)
+                ? SqlVariantOrdering.Compare(this.AsVariantInner, other.AsVariantInner) == 0
                 : IsStringTypeRef(this.Type)
                 ? this.Type.Collation!.Equals(TrimTrailing((string)this.reference!), TrimTrailing((string)other.reference!))
                 : this.Type is DateTimeOffsetSqlType
@@ -848,11 +848,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                     // OrdPath's defining property: unsigned bytewise order equals
                     // depth-first tree order, so hierarchyid comparison is a memcmp.
                     HierarchyIdSqlType => this.AsHierarchyIdBytes.AsSpan().SequenceCompareTo(other.AsHierarchyIdBytes),
-                    // sql_variant ordering compares the inner values; differing
-                    // inner base types fall to the inner CompareTo's own
-                    // cross-type rejection (SQL Server's full sql_variant sort
-                    // by type-family rank is out of scope — see docs).
-                    SqlVariantSqlType => this.AsVariantInner.CompareTo(other.AsVariantInner),
+                    // sql_variant orders by datatype-family rank, then value
+                    // within the family (probe-confirmed; see SqlVariantOrdering).
+                    SqlVariantSqlType => SqlVariantOrdering.Compare(this.AsVariantInner, other.AsVariantInner),
                     _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
                 },
                 _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
@@ -870,8 +868,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
 
         if (this.Type is SqlVariantSqlType)
         {
-            // Identity is the inner value alone; equality unwraps to it.
-            hash.Add(this.AsVariantInner.GetHashCode());
+            // Identity is the family-canonical inner value, agreeing with the
+            // family-rank equality (int 5 / bigint 5 / decimal 5.00 hash alike).
+            hash.Add(SqlVariantOrdering.InnerHashCode(this.AsVariantInner));
         }
         else if (IsStringTypeRef(this.Type))
         {

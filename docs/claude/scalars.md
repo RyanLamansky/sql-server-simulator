@@ -508,11 +508,18 @@ Probe-confirmed against SQL Server 2025 (2026-07-16):
 - **`ISNULL` / `COALESCE` / `CASE`** keep the `sql_variant` result type (variant has highest data-type precedence in `SqlType.Promote`) and preserve each value's inner type — `ISNULL(SESSIONPROPERTY('ANSI_NULLS'), 0)` stays `sql_variant`.
 - **`UNION [ALL]`** keeps each row's own inner base type — no schema unification/promotion (a variant column can be `int` on one row, `nvarchar` on the next).
 - **Comparison** against a non-variant (`WHERE int_col = SESSION_CONTEXT(N'k')`) unwraps the variant to its inner value.
+  **Both-operands-variant comparison** follows the family rules below (probe-confirmed: variant `bigint 1000 < float 0.5`, variant `int 5 = bigint 5`, variant `nvarchar N'x' = varchar 'x'`).
+  Residual: real converts the base-typed side of a mixed pair *up* to `sql_variant` (highest precedence) and applies the family rules — so a string variant never matches a numeric literal on real, while the unwrap path converts and can match; unprobed, retained.
 - **`SELECT … INTO`** from a variant-producing built-in creates a `sql_variant` column (probe-confirmed).
 - **Arithmetic** rejects: `variant + non-variant` → **Msg 257** (`Implicit conversion from data type sql_variant to <target> is not allowed. Use the CONVERT function to run this query.`); `variant + variant` and `string + variant` → **Msg 402** (`… incompatible in the add operator`).
   `PromoteForArithmetic` is the single source; a runtime guard in `IntegerArithmetic` routes through it so `Run`-time and projection-schema errors agree.
-- **Residual**: `ORDER BY` / `GROUP BY` over a variant column with *mixed inner base-type families* (e.g. `int` and `nvarchar` in the same column) isn't modeled — real orders by a documented type-family rank, the simulator's inner `CompareTo` rejects the cross-type pair (surfaces as an `InvalidOperationException` from the sort).
-  Same-inner-family ordering and mixed-inner `DISTINCT` (equality unwraps per value) both work; single-scalar / `ISNULL` / comparison / `CAST` flows the built-ins realistically feed are unaffected.
+- **Cross-type ordering / grouping** (`Storage/SqlVariantOrdering.cs`, probe-confirmed 2026-07-19): comparison is two-level — datatype-family rank first, then value within the family.
+  Six families, lowest to highest: **1 `uniqueidentifier`; 2 binary** (`binary`/`varbinary`, byte-lexicographic); **3 character** (`char`/`varchar`/`nchar`/`nvarchar` — Unicode and non-Unicode are ONE family); **4 exact numeric** (`bit`, integer types, `decimal`, `money`/`smallmoney`, compared as decimal); **5 approximate** (`real`/`float` — above *every* exact value regardless of magnitude); **6 date/time** (compared as an instant: `time` anchored to 1900-01-01, `datetimeoffset` by UTC instant).
+  Cross-family comparison is value-blind (`float 0.5 > bigint 1000000`); within a family, cross-type values compare by value and equal values are truly equal — `int 5` / `bigint 5` / `decimal 5.00` are one GROUP BY / DISTINCT bucket whose representative is the first value encountered (matching real's plan-order representative), and their ORDER BY tie order is undefined on real (plan-dependent), so tests must not pin it.
+  NULL sorts lowest.
+  `MIN`/`MAX` pick the family-hierarchy extremes.
+  Same-collation character pairs compare under that collation; cross-collation pairs compare by code point **without** a Msg 468 conflict (probed) — the character family hashes by rank alone since no single hash agrees with both regimes.
+  The `SqlValue` variant arms (`CompareTo` / `Equals` / `GetHashCode`) implement the rules, so ORDER BY, GROUP BY, DISTINCT, MIN/MAX, and hash joins all inherit them via `SqlValueKey`.
 
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution.

@@ -77,7 +77,7 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other)
     private static int ByteCount(SqlValue inner) => inner.Type switch
     {
         BitSqlType => 2,
-        _ when inner.Type.IsFixedLength && inner.Type is not (DecimalSqlType or TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType or CharSqlType or NCharSqlType)
+        _ when inner.Type.IsFixedLength && inner.Type is not (DecimalSqlType or TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType or CharSqlType or NCharSqlType or BinarySqlType)
             => 1 + inner.Type.FixedLength,
         DecimalSqlType d => 3 + d.FixedLength,
         TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType => 2 + inner.Type.FixedLength,

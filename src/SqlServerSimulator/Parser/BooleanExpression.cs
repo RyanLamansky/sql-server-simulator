@@ -1233,12 +1233,21 @@ internal abstract class BooleanExpression
     /// </summary>
     internal static bool? CompareValuesPromoted(SqlValue l, SqlValue r, string operatorName, Func<SqlValue, SqlValue, bool> compare)
     {
-        // sql_variant operands compare by their inner value: unwrap here so the
+        // Both operands sql_variant: real compares by datatype-family rank
+        // then value within the family (probe-confirmed — bigint 1000 < float
+        // 0.5, variant int 5 = variant bigint 5), which the SqlValue variant
+        // arms implement; apply the operator to the wrapped pair directly.
+        if (l.Type is SqlVariantSqlType && r.Type is SqlVariantSqlType)
+            return l.IsNull || r.IsNull ? null : compare(l, r);
+
+        // One sql_variant operand against a base-typed one: unwrap so the
         // downstream promote-and-compare runs on the base types (a variant int
         // vs an int literal, a variant bit vs 0, etc.). A NULL variant stays
-        // wrapped — the NULL short-circuit below folds it to UNKNOWN. Full
-        // sql_variant datatype-family comparison rules (where a string variant
-        // never matches a numeric literal) are out of scope; see docs.
+        // wrapped — the NULL short-circuit below folds it to UNKNOWN.
+        // Residual: real converts the base-typed side UP to sql_variant
+        // (highest precedence) and applies the family rules, so a string
+        // variant never matches a numeric literal on real, while the unwrap
+        // path here converts and can match — unprobed, retained.
         if (l.Type is SqlVariantSqlType && !l.IsNull)
             l = l.AsVariantInner;
         if (r.Type is SqlVariantSqlType && !r.IsNull)
