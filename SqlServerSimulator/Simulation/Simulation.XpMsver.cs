@@ -92,13 +92,13 @@ partial class Simulation
             // ProductVersion Internal_Value packs the major version as
             // (major << 16) — 17 << 16 = 1114112 — matching real xp_msver.
             XpMsverRow(1, "ProductName", null, "Microsoft SQL Server"),
-            XpMsverRow(2, "ProductVersion", 17 << 16, "17.0.4065.4"),
+            XpMsverRow(2, "ProductVersion", ReferenceBuild.Version.Major << 16, ReferenceBuild.ProductVersion),
             XpMsverRow(3, "Language", null, "English"),
             XpMsverRow(4, "Platform", null, "NT x64"),
             XpMsverRow(5, "Comments", null, "SQL"),
             XpMsverRow(6, "CompanyName", null, "Microsoft Corporation"),
             XpMsverRow(7, "FileDescription", null, "SQL Server Windows NT - 64 Bit"),
-            XpMsverRow(8, "FileVersion", null, "2025.0170.4065.04 ((sql2025_rtm_qfe-cu7).260709-0512)"),
+            XpMsverRow(8, "FileVersion", null, ReferenceBuild.FileVersion),
             XpMsverRow(9, "InternalName", null, "SQLSERVR"),
             XpMsverRow(10, "LegalCopyright", null, "Microsoft. All rights reserved."),
             XpMsverRow(11, "LegalTrademarks", null, "Microsoft SQL Server is a registered trademark of Microsoft Corporation."),

@@ -330,7 +330,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, "Changed language setting to us_english.", "SIMULATED", "", 1);
         var serverCollation = TdsCollationCodec.For(Collation.Get(simulation.ServerCollationName));
         writer.WriteEnvChangeSqlCollation(serverCollation.Info, serverCollation.SortId);
-        writer.WriteLoginAck(Tds.Version74, "Microsoft SQL Server", 17, 0, 4065);
+        writer.WriteLoginAck(
+            Tds.Version74,
+            "Microsoft SQL Server",
+            checked((byte)ReferenceBuild.Version.Major),
+            checked((byte)ReferenceBuild.Version.Minor),
+            checked((ushort)ReferenceBuild.Version.Build));
         writer.WriteEnvChange(Tds.EnvPacketSize, packetSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Tds.DefaultPacketSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
         writer.WriteDone(Tds.DoneFinal, 0);
     }
@@ -806,9 +811,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var dataStart = (optionCount * 5) + 1;
         var data = new List<(byte Token, byte[] Value)>
         {
-            // VERSION = major, minor, build (big-endian u16), subbuild (u16).
-            // Build 4065 = 0x0FE1; mirrors the SQL Server 2025 reference build.
-            (Tds.PreloginVersion, [17, 0, 0x0F, 0xE1, 0, 0]),
+            // VERSION = major, minor, build (big-endian u16), subbuild (u16,
+            // zero like real's prelogin); values derive from ReferenceBuild.
+            (Tds.PreloginVersion,
+                [
+                    checked((byte)ReferenceBuild.Version.Major),
+                    checked((byte)ReferenceBuild.Version.Minor),
+                    (byte)(ReferenceBuild.Version.Build >> 8),
+                    (byte)(ReferenceBuild.Version.Build & 0xFF),
+                    0,
+                    0,
+                ]),
             (Tds.PreloginEncryption, [Tds.EncryptRequired]),
             (Tds.PreloginInstance, [0]),
             (Tds.PreloginThreadId, []),

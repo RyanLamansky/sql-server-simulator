@@ -38,10 +38,8 @@ internal sealed class ServerProperty : Expression
     /// <summary>
     /// Resolves one property to its inner value; a NULL result (a null-valued
     /// property, or an unrecognized name via the default arm) becomes the NULL
-    /// <c>sql_variant</c> in <see cref="Run"/>. The version-identity constants
-    /// mirror the SQL Server 2025 reference build the simulator emulates
-    /// (17.0.4065.4, RTM-CU7 / KB5096981); a real build number is what lets
-    /// SSMS's per-build client feature gates proceed.
+    /// <c>sql_variant</c> in <see cref="Run"/>. The version identity derives
+    /// from <see cref="ReferenceBuild"/>.
     /// </summary>
     private static SqlValue Produce(string name, RuntimeContext runtime)
     {
@@ -85,17 +83,17 @@ internal sealed class ServerProperty : Expression
             // Must be non-NULL — Activity Monitor casts it like the NetBIOS
             // name above.
             "PROCESSID" => SqlValue.FromInt32(Environment.ProcessId),
-            "PRODUCTBUILD" => SqlValue.FromNVarchar("4065"),
+            "PRODUCTBUILD" => SqlValue.FromNVarchar(ReferenceBuild.ProductBuild),
             // Real SQL Server reports NULL for ProductBuildType on a CU build
             // (it's non-null only for GDR/OD servicing branches).
             "PRODUCTBUILDTYPE" => SqlValue.Null(SqlType.NVarchar),
             "PRODUCTLEVEL" => SqlValue.FromNVarchar("RTM"),
-            "PRODUCTMAJORVERSION" => SqlValue.FromNVarchar("17"),
-            "PRODUCTMINORVERSION" => SqlValue.FromNVarchar("0"),
-            "PRODUCTUPDATELEVEL" => SqlValue.FromNVarchar("CU7"),
-            "PRODUCTUPDATEREFERENCE" => SqlValue.FromNVarchar("KB5096981"),
-            "PRODUCTVERSION" => SqlValue.FromNVarchar("17.0.4065.4"),
-            "RESOURCEVERSION" => SqlValue.FromNVarchar("17.00.4065"),
+            "PRODUCTMAJORVERSION" => SqlValue.FromNVarchar(ReferenceBuild.ProductMajorVersion),
+            "PRODUCTMINORVERSION" => SqlValue.FromNVarchar(ReferenceBuild.ProductMinorVersion),
+            "PRODUCTUPDATELEVEL" => SqlValue.FromNVarchar(ReferenceBuild.UpdateLevel),
+            "PRODUCTUPDATEREFERENCE" => SqlValue.FromNVarchar(ReferenceBuild.UpdateReference),
+            "PRODUCTVERSION" => SqlValue.FromNVarchar(ReferenceBuild.ProductVersion),
+            "RESOURCEVERSION" => SqlValue.FromNVarchar(ReferenceBuild.MajorMinorBuild),
             "SERVERNAME" => SqlValue.FromNVarchar("SIMULATED"),
             "SQLCHARSET" => SqlValue.FromByte(1),
             "SQLCHARSETNAME" => SqlValue.FromNVarchar("iso_1"),
