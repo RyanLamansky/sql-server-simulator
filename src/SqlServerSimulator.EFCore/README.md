@@ -8,7 +8,8 @@ Use it when your entities rely on any of these mappings:
 - `TimeOnly` / `TimeSpan` → `time(N)`
 - `decimal` → `money` / `smallmoney`
 
-Without the adapter, those mappings throw at `SaveChanges`. The MAX-string family and the base ADO.NET types flow through plain `UseSqlServer` and don't need it.
+Without the adapter, those mappings throw at `SaveChanges`.
+The MAX-string family and the base ADO.NET types flow through plain `UseSqlServer` and don't need it.
 
 ## Usage
 

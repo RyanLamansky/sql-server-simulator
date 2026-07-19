@@ -1,8 +1,10 @@
 # SQL Server Simulator for .NET
 
-An in-process, _zero-dependency_ stand-in for `Microsoft.Data.SqlClient` and SQL Server. Consumers create a `Simulation`, get a `DbConnection` from `CreateDbConnection()`, and use it with Entity Framework Core or raw ADO.NET the same way they would with a real SQL Server.
+An in-process, _zero-dependency_ stand-in for `Microsoft.Data.SqlClient` and SQL Server.
+Consumers create a `Simulation`, get a `DbConnection` from `CreateDbConnection()`, and use it with Entity Framework Core or raw ADO.NET the same way they would with a real SQL Server.
 
-Intended for fast unit testing of SQL Server-backed applications. Can create and discard thousands of databases every second, enabling test scenarios with conflicting data dependencies to run concurrently.
+Intended for fast unit testing of SQL Server-backed applications.
+Can create and discard thousands of databases every second, enabling test scenarios with conflicting data dependencies to run concurrently.
 
 ## Example
 
@@ -71,27 +73,42 @@ await using var listener = await simulation.ListenLocalAsync(11433);
 //   Server=127.0.0.1,11433;User ID=dev;Password=anything;TrustServerCertificate=True
 ```
 
-Real `Microsoft.Data.SqlClient` works end-to-end — including parameterized RPC, table-valued parameters, `SqlBulkCopy`, MARS, and query cancellation — as does Entity Framework Core over the wire via a plain connection string. SQL Server Management Studio connects and browses: Object Explorer, the query editor, and object scripting run against the simulator, which presents itself as SQL Server 2025 (build 17.0.4065.4). By default any credentials are accepted; run `CREATE LOGIN` to switch the endpoint to enforced authentication. For clients on other machines, `ListenNetworkAsync` binds all interfaces — it requires at least one registered login up front, so an open endpoint can never face a network.
+Real `Microsoft.Data.SqlClient` works end-to-end — including parameterized RPC, table-valued parameters, `SqlBulkCopy`, MARS, and query cancellation — as does Entity Framework Core over the wire via a plain connection string.
+SQL Server Management Studio connects and browses: Object Explorer, the query editor, and object scripting run against the simulator, which presents itself as SQL Server 2025 (build 17.0.4065.4).
+By default any credentials are accepted; run `CREATE LOGIN` to switch the endpoint to enforced authentication.
+For clients on other machines, `ListenNetworkAsync` binds all interfaces — it requires at least one registered login up front, so an open endpoint can never face a network.
 
 ## Fidelity
 
-Behavior was probed against a live SQL Server reference instance before being modeled. SQL Server's quirks, inconsistencies, and surprises are mostly preserved. Error messages usually match, down to the `Msg` number, severity, and wording of common diagnostics.
+Behavior was probed against a live SQL Server reference instance before being modeled.
+SQL Server's quirks, inconsistencies, and surprises are mostly preserved.
+Error messages usually match, down to the `Msg` number, severity, and wording of common diagnostics.
 
-Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations, change tracking, and the SaveChanges pipeline all flow through unchanged. The test suite — more than 8,000 cases — also drives real SqlClient, real SMO (the library behind SSMS), and EF Core against the simulator as independent oracles.
+Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations, change tracking, and the SaveChanges pipeline all flow through unchanged.
+The test suite — more than 8,000 cases — also drives real SqlClient, real SMO (the library behind SSMS), and EF Core against the simulator as independent oracles.
 
 ## Capabilities
 
 Coverage is broad; the compact map below is the shape of it, not the full inventory:
 
-- **Types and storage.** Every base scalar type family including MAX-typed LOBs, `sql_variant`, `xml`, `hierarchyid`, `geography`/`geometry`, and the legacy `text`/`ntext`/`image` trio; per-column collations; real 8KB pages with byte-encoded rows and off-row LOB storage.
-- **Query surface.** All JOIN and APPLY forms, correlated subqueries at arbitrary depth, window functions, recursive CTEs, set operations, `PIVOT`/`UNPIVOT`, `OFFSET`/`FETCH`, cursors (T-SQL and API server cursors).
-- **DML and DDL.** `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`SELECT INTO` with `OUTPUT`, statement-level atomicity, and `CREATE`/`ALTER`/`DROP` across tables, views, procedures, functions, triggers, sequences, indexes (including filtered and indexed views), types, and schemas.
-- **Programmability.** Stored procedures, scalar UDFs and TVFs, DML + DDL triggers, dynamic SQL, table-valued parameters, control flow with `TRY`/`CATCH`/`THROW`.
-- **Concurrency.** The full lock-mode matrix with escalation and timeouts, `SNAPSHOT` and `READ_COMMITTED_SNAPSHOT` isolation with a versioned store, deadlock detection, application locks, and nested transactions with savepoints.
-- **Constraints.** `PRIMARY KEY`/`UNIQUE`/`CHECK`/`NOT NULL` and `FOREIGN KEY` with all four referential actions on both `ON DELETE` and `ON UPDATE`.
-- **System surfaces.** A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; temporal tables; `SERVERPROPERTY` and friends as true `sql_variant`.
-- **JSON, XML, spatial, full-text DDL.** The `JSON_*`/`OPENJSON` family, XML methods and schema collections, the spatial method surface, and full-text catalog/index DDL.
-- **Scale-out shapes.** Multiple databases with cross-database reads, linked servers between simulations, and BACPAC import for bootstrapping from a real database.
+- **Types and storage.**
+  Every base scalar type family including MAX-typed LOBs, `sql_variant`, `xml`, `hierarchyid`, `geography`/`geometry`, and the legacy `text`/`ntext`/`image` trio; per-column collations; real 8KB pages with byte-encoded rows and off-row LOB storage.
+- **Query surface.**
+  All JOIN and APPLY forms, correlated subqueries at arbitrary depth, window functions, recursive CTEs, set operations, `PIVOT`/`UNPIVOT`, `OFFSET`/`FETCH`, cursors (T-SQL and API server cursors).
+- **DML and DDL.**
+  `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`SELECT INTO` with `OUTPUT`, statement-level atomicity, and `CREATE`/`ALTER`/`DROP` across tables, views, procedures, functions, triggers, sequences, indexes (including filtered and indexed views), types, and schemas.
+- **Programmability.**
+  Stored procedures, scalar UDFs and TVFs, DML + DDL triggers, dynamic SQL, table-valued parameters, control flow with `TRY`/`CATCH`/`THROW`.
+- **Concurrency.**
+  The full lock-mode matrix with escalation and timeouts, `SNAPSHOT` and `READ_COMMITTED_SNAPSHOT` isolation with a versioned store, deadlock detection, application locks, and nested transactions with savepoints.
+- **Constraints.**
+  `PRIMARY KEY`/`UNIQUE`/`CHECK`/`NOT NULL` and `FOREIGN KEY` with all four referential actions on both `ON DELETE` and `ON UPDATE`.
+- **System surfaces.**
+  A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; temporal tables; `SERVERPROPERTY` and friends as true `sql_variant`.
+- **JSON, XML, spatial, full-text DDL.**
+  The `JSON_*`/`OPENJSON` family, XML methods and schema collections, the spatial method surface, and full-text catalog/index DDL.
+- **Scale-out shapes.**
+  Multiple databases with cross-database reads, linked servers between simulations, and BACPAC import for bootstrapping from a real database.
 
 Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 
@@ -102,7 +119,8 @@ In general, when that happens the simulator raises `NotSupportedException` namin
 Write a bug report if you're blocked.
 A few examples:
 
-- Cross-database DML - writes through a 3-part name targeting a different database. Cross-database reads work; issue `USE <db>` to switch first for writes.
+- Cross-database DML - writes through a 3-part name targeting a different database.
+  Cross-database reads work; issue `USE <db>` to switch first for writes.
 - `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `GOTO`/labels.
 - `CREATE ASSEMBLY` and CLR functions; logon triggers; natively-compiled procedures beyond parser fidelity.
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset windows (`ROWS` numeric-offset ships).
@@ -110,5 +128,6 @@ A few examples:
 
 ## Limitations
 
-- No physical storage - all data lives in memory for the lifetime of the `Simulation`. Suited to test runs and bounded workloads, not larger-than-RAM datasets.
+- No physical storage - all data lives in memory for the lifetime of the `Simulation`.
+  Suited to test runs and bounded workloads, not larger-than-RAM datasets.
 - The network endpoint is meant for development tooling and tests, not untrusted clients: `ListenNetworkAsync` enforces authentication, but there is no authorization model - every login that connects has unrestricted access to every database.

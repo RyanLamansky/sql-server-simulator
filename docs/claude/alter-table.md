@@ -1,6 +1,8 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships seven modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), and `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)). REBUILD, SWITCH PARTITION, and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms raise `NotSupportedException`. Probe-confirmed against SQL Server 2025 on 2026-05-14.
+`ALTER TABLE` ships seven modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), and `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)).
+REBUILD, SWITCH PARTITION, and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms raise `NotSupportedException`.
+Probe-confirmed against SQL Server 2025 on 2026-05-14.
 
 ## Grammar
 
@@ -29,13 +31,19 @@ CHECK (predicate)
 DEFAULT (expression) FOR column
 ```
 
-Single constraint per `ADD` — comma-separated multi-constraint ADD raises `NotSupportedException`. Anonymous ADD (no `CONSTRAINT name`) auto-generates a name with the same FNV-1a-based scheme as CREATE TABLE inline: `PK__<t8>__<hex>` / `UQ__<t8>__<hex>` / `FK__<t8>__<col8>__<hex>` / `CK__<t8>__<hex>` / `DF__<t8>__<col8>__<hex>`. `is_system_named` reflects the auto-name path on FK / CHECK / DEFAULT (KeyConstraint infers from the prefix — `PK__` / `UQ__` — since the existing storage doesn't carry an explicit flag).
+Single constraint per `ADD` — comma-separated multi-constraint ADD raises `NotSupportedException`.
+Anonymous ADD (no `CONSTRAINT name`) auto-generates a name with the same FNV-1a-based scheme as CREATE TABLE inline: `PK__<t8>__<hex>` / `UQ__<t8>__<hex>` / `FK__<t8>__<col8>__<hex>` / `CK__<t8>__<hex>` / `DF__<t8>__<col8>__<hex>`.
+`is_system_named` reflects the auto-name path on FK / CHECK / DEFAULT (KeyConstraint infers from the prefix — `PK__` / `UQ__` — since the existing storage doesn't carry an explicit flag).
 
 ## WITH CHECK / WITH NOCHECK
 
-`WITH NOCHECK` applies only to FK and CHECK adds. It bypasses the existing-row validation pass and sets `IsNotTrusted = true` on the new constraint. `WITH CHECK` (the default) runs the validation pass. PK / UQ / DEFAULT ignore the modifier — the grammar accepts it but validation is unconditional (PK / UQ always scan for duplicates; DEFAULT has no data to validate against).
+`WITH NOCHECK` applies only to FK and CHECK adds.
+It bypasses the existing-row validation pass and sets `IsNotTrusted = true` on the new constraint.
+`WITH CHECK` (the default) runs the validation pass.
+PK / UQ / DEFAULT ignore the modifier — the grammar accepts it but validation is unconditional (PK / UQ always scan for duplicates; DEFAULT has no data to validate against).
 
-`sys.foreign_keys.is_not_trusted` and `sys.check_constraints.is_not_trusted` reflect the flag. Re-trusting via `WITH CHECK CHECK CONSTRAINT name` isn't modeled.
+`sys.foreign_keys.is_not_trusted` and `sys.check_constraints.is_not_trusted` reflect the flag.
+Re-trusting via `WITH CHECK CHECK CONSTRAINT name` isn't modeled.
 
 ## Existing-data validation
 
@@ -56,22 +64,27 @@ Default (`WITH CHECK`) scans the live heap before mutating:
 | `DEFAULT` | column doesn't already have a DEFAULT | Msg 1781 |
 | any | constraint name unique across all schemas' tables | Msg 2714 |
 
-Real SQL Server emits a trailing Msg 1750 / 1753 after the primary failure (`"Could not create constraint or index. See previous errors."`); the simulator emits only the primary error — same end state, single-error stream. Documented quirk.
+Real SQL Server emits a trailing Msg 1750 / 1753 after the primary failure (`"Could not create constraint or index. See previous errors."`); the simulator emits only the primary error — same end state, single-error stream.
+Documented quirk.
 
-The Msg 547 verb difference is the only wording variance between INSERT-time CHECK / FK violations and ALTER-time existing-data violations. The constraint name, table reference, and column suffix follow the same format.
+The Msg 547 verb difference is the only wording variance between INSERT-time CHECK / FK violations and ALTER-time existing-data violations.
+The constraint name, table reference, and column suffix follow the same format.
 
 ## Trust toggling — bulk-import recipe
 
-`NOCHECK CONSTRAINT name` disables enforcement on a specific FK / CHECK and sets both `IsDisabled = true` and `IsNotTrusted = true`. While disabled:
+`NOCHECK CONSTRAINT name` disables enforcement on a specific FK / CHECK and sets both `IsDisabled = true` and `IsNotTrusted = true`.
+While disabled:
 
 - INSERT / UPDATE / MERGE skip the FK / CHECK validation.
 - DELETE / UPDATE on the parent skips both the NO-ACTION reject **and** any CASCADE / SET NULL / SET DEFAULT action (probe-confirmed: disabled CASCADE FK leaves children orphaned when the parent is deleted).
 
-`CHECK CONSTRAINT name` (bare, no `WITH CHECK` prefix) re-enables enforcement on subsequent rows but does **not** re-validate existing data — `IsDisabled = false` and `IsNotTrusted` stays `true`. Common gotcha.
+`CHECK CONSTRAINT name` (bare, no `WITH CHECK` prefix) re-enables enforcement on subsequent rows but does **not** re-validate existing data — `IsDisabled = false` and `IsNotTrusted` stays `true`.
+Common gotcha.
 
 `WITH CHECK CHECK CONSTRAINT name` re-enables enforcement **and** re-validates existing data — raises Msg 547 with the `"ALTER TABLE statement"` prefix on the first conflicting row; on success, `IsDisabled = false` and `IsNotTrusted = false`.
 
-`ALL` targets every FK + CHECK on the table at once. The same toggle action applies uniformly to every constraint on the target.
+`ALL` targets every FK + CHECK on the table at once.
+The same toggle action applies uniformly to every constraint on the target.
 
 | Shape | IsDisabled | IsNotTrusted | Revalidate existing? |
 |-------|------------|--------------|----------------------|
@@ -115,7 +128,8 @@ Name lookup walks all four families on the target table in order:
 3. `OutgoingForeignKeys`
 4. Each column's `DefaultConstraint`
 
-First hit wins (collation-insensitive). Probe-confirmed shapes:
+First hit wins (collation-insensitive).
+Probe-confirmed shapes:
 
 | Condition | Behavior |
 |-----------|----------|
@@ -125,14 +139,18 @@ First hit wins (collation-insensitive). Probe-confirmed shapes:
 | PK / UQ referenced by an incoming FK | Msg 3725 (`The constraint 'X' is being referenced by table 'Y', foreign key constraint 'Z'.`) |
 | Trailing comma | Msg 102 (probe-confirmed) |
 
-**Multi-drop is atomic** — all names resolve and validate first; any failure (Msg 3728 / 3725) leaves the table's constraint state unchanged. Probe-confirmed.
+**Multi-drop is atomic** — all names resolve and validate first; any failure (Msg 3728 / 3725) leaves the table's constraint state unchanged.
+Probe-confirmed.
 
 ## Storage
 
-- `HeapTable.KeyConstraints` / `CheckConstraints` are `List<>` (the reference is `readonly`, contents mutable) so ADD / DROP can append / remove in place. Inline at CREATE TABLE still goes through the same lists.
+- `HeapTable.KeyConstraints` / `CheckConstraints` are `List<>` (the reference is `readonly`, contents mutable) so ADD / DROP can append / remove in place.
+  Inline at CREATE TABLE still goes through the same lists.
 - `HeapTable.OutgoingForeignKeys` / `IncomingForeignKeys` already lists pre-existing (introduced with the FK bundle).
-- `ForeignKey.IsNotTrusted` / `CheckConstraint.IsNotTrusted` are mutable bool fields, false on CREATE-time inline / true on WITH-NOCHECK ALTER ADD / true after `NOCHECK CONSTRAINT`. Cleared by `WITH CHECK CHECK CONSTRAINT` on successful revalidation.
-- `ForeignKey.IsDisabled` / `CheckConstraint.IsDisabled` are independent mutable bools — true after `NOCHECK CONSTRAINT`, false after either `CHECK CONSTRAINT` form. The enforcement loops (`EnforceCheckConstraints`, `EnforceOutgoingForeignKeys`, `EnforceIncomingForeignKeys`, `EnforceIncomingFkOnUpdate`) skip when `IsDisabled` — including suppressing cascade actions.
+- `ForeignKey.IsNotTrusted` / `CheckConstraint.IsNotTrusted` are mutable bool fields, false on CREATE-time inline / true on WITH-NOCHECK ALTER ADD / true after `NOCHECK CONSTRAINT`.
+  Cleared by `WITH CHECK CHECK CONSTRAINT` on successful revalidation.
+- `ForeignKey.IsDisabled` / `CheckConstraint.IsDisabled` are independent mutable bools — true after `NOCHECK CONSTRAINT`, false after either `CHECK CONSTRAINT` form.
+  The enforcement loops (`EnforceCheckConstraints`, `EnforceOutgoingForeignKeys`, `EnforceIncomingForeignKeys`, `EnforceIncomingFkOnUpdate`) skip when `IsDisabled` — including suppressing cascade actions.
 - `CheckConstraint.IsSystemNamed` flags auto-named CHECKs; `KeyConstraint` infers the same from its name prefix (no explicit flag).
 - `HeapColumn.Default` is now mutable (ALTER ADD DEFAULT sets, ALTER DROP CONSTRAINT clears).
 - `HeapColumn.DefaultConstraint` is the named metadata wrapper alongside `Default` — populated at inline DEFAULT (auto-named, `IsSystemNamed = true`) and named ALTER ADD DEFAULT (explicit name, `IsSystemNamed = false`).
@@ -149,26 +167,40 @@ Three new views ship with this bundle:
 
 ## Definition columns
 
-`sys.check_constraints.definition` and `sys.default_constraints.definition` hold the **original source syntax** of the predicate / default expression, captured at CREATE / ALTER time and wrapped in one paren pair — *not* re-normalized into SQL Server's canonical serialization. The capture slices the command text from the expression's first-token `StartIndex` to the lookahead token (`ParserContext.SourceTextFrom`, the same source-span mechanism `OBJECT_DEFINITION` uses for module bodies), so `CHECK (a > 0 and b < 10)` stores `(a > 0 and b < 10)` and `DEFAULT getdate()` stores `(getdate())`.
+`sys.check_constraints.definition` and `sys.default_constraints.definition` hold the **original source syntax** of the predicate / default expression, captured at CREATE / ALTER time and wrapped in one paren pair — *not* re-normalized into SQL Server's canonical serialization.
+The capture slices the command text from the expression's first-token `StartIndex` to the lookahead token (`ParserContext.SourceTextFrom`, the same source-span mechanism `OBJECT_DEFINITION` uses for module bodies), so `CHECK (a > 0 and b < 10)` stores `(a > 0 and b < 10)` and `DEFAULT getdate()` stores `(getdate())`.
 
-This **deliberately diverges** from real SQL Server, which re-renders into a normalized canonical form (`([a]>(0) AND [b]<(10))`, `IN` desugared to reversed OR-of-equalities, `BETWEEN` to AND, multiplicative vs additive parenthesization rules, etc.). Matching that byte-for-byte across the full CHECK / DEFAULT expression grammar is a rabbit hole (and needs a per-function canonical-name registry), so the simulator retains the user's syntax instead — readable, round-trip-stable for the simulator's own re-parse, and sufficient for the apps that read these columns. (The narrower `sys.indexes.filter_definition` *is* byte-exact normalized — its filtered-predicate grammar is small enough to render canonically; see [`indexes.md`](indexes.md#filtered-index-filter_definition). The two columns intentionally take different approaches: small fixed grammar → canonical, open-ended grammar → original syntax.) A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)` → `((0))`), matching the user's text plus the convention's outer pair.
+This **deliberately diverges** from real SQL Server, which re-renders into a normalized canonical form (`([a]>(0) AND [b]<(10))`, `IN` desugared to reversed OR-of-equalities, `BETWEEN` to AND, multiplicative vs additive parenthesization rules, etc.).
+Matching that byte-for-byte across the full CHECK / DEFAULT expression grammar is a rabbit hole (and needs a per-function canonical-name registry), so the simulator retains the user's syntax instead — readable, round-trip-stable for the simulator's own re-parse, and sufficient for the apps that read these columns.
+(The narrower `sys.indexes.filter_definition` *is* byte-exact normalized — its filtered-predicate grammar is small enough to render canonically; see [`indexes.md`](indexes.md#filtered-index-filter_definition).
+The two columns intentionally take different approaches: small fixed grammar → canonical, open-ended grammar → original syntax.)
+A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)` → `((0))`), matching the user's text plus the convention's outer pair.
 
 ## Fidelity gaps
 
-- **Single primary error instead of error pair** — real SQL Server emits Msg X + trailing Msg 1750 / 3727 (`"Could not create constraint or index"` / `"Could not drop constraint"`); the simulator emits only Msg X. Test code asserting on the primary error number works unchanged.
-- **`definition` columns hold original syntax, not SQL Server's canonical form** — see [Definition columns](#definition-columns). A schema-diff tool comparing the simulator's `([a]>(0))`-equivalent against a live server's normalized text will see a cosmetic difference even when the predicate is identical.
-- **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named. Custom names matching the prefix would report `is_system_named = true` incorrectly. Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
-- **Multi-constraint ADD in one statement** — `ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY (id), CONSTRAINT fk1 FOREIGN KEY (p_id) REFERENCES p(id)` raises `NotSupportedException`. Real SQL Server supports it; EF Migrations doesn't emit it.
+- **Single primary error instead of error pair** — real SQL Server emits Msg X + trailing Msg 1750 / 3727 (`"Could not create constraint or index"` / `"Could not drop constraint"`); the simulator emits only Msg X.
+  Test code asserting on the primary error number works unchanged.
+- **`definition` columns hold original syntax, not SQL Server's canonical form** — see [Definition columns](#definition-columns).
+  A schema-diff tool comparing the simulator's `([a]>(0))`-equivalent against a live server's normalized text will see a cosmetic difference even when the predicate is identical.
+- **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
+  Custom names matching the prefix would report `is_system_named = true` incorrectly.
+  Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
+- **Multi-constraint ADD in one statement** — `ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY (id), CONSTRAINT fk1 FOREIGN KEY (p_id) REFERENCES p(id)` raises `NotSupportedException`.
+  Real SQL Server supports it; EF Migrations doesn't emit it.
 - **`ALTER TABLE … DROP CONSTRAINT name1, , name2`** (empty middle element) — accepted by real SQL Server; the simulator's grammar rejects with Msg 102.
-- **Defaults' parent_column_id for inline-DEFAULT-on-computed-column** — the simulator allows inline DEFAULT on computed columns (which real SQL Server rejects with Msg 8183). Edge case unlikely in practice.
+- **Defaults' parent_column_id for inline-DEFAULT-on-computed-column** — the simulator allows inline DEFAULT on computed columns (which real SQL Server rejects with Msg 8183).
+  Edge case unlikely in practice.
 
 ## EF Core integration
 
-EF Migrations emit FK adds via `ALTER TABLE` heavily (separate from `CREATE TABLE`). The simulator accepts that emit shape, but no EFCore-specific test ships in this bundle — once the FK is in place (whether declared inline at CREATE TABLE or added via ALTER), EF Core sees the same database state either way, so the `EFCoreForeignKey` test already covers the LINQ surface. The simulator-side `AlterTableConstraintTests` covers the parser / validation / catalog surface for ALTER directly.
+EF Migrations emit FK adds via `ALTER TABLE` heavily (separate from `CREATE TABLE`).
+The simulator accepts that emit shape, but no EFCore-specific test ships in this bundle — once the FK is in place (whether declared inline at CREATE TABLE or added via ALTER), EF Core sees the same database state either way, so the `EFCoreForeignKey` test already covers the LINQ surface.
+The simulator-side `AlterTableConstraintTests` covers the parser / validation / catalog surface for ALTER directly.
 
 ## Column ops
 
-`ALTER TABLE … ADD [COLUMN] col TYPE [, …]` and `ALTER TABLE … DROP COLUMN [IF EXISTS] col [, …]` ship as part of the EF Migrations parity workstream. Probe-confirmed against SQL Server 2025 on 2026-05-14.
+`ALTER TABLE … ADD [COLUMN] col TYPE [, …]` and `ALTER TABLE … DROP COLUMN [IF EXISTS] col [, …]` ship as part of the EF Migrations parity workstream.
+Probe-confirmed against SQL Server 2025 on 2026-05-14.
 
 ### Grammar — ADD COLUMN
 
@@ -181,13 +213,15 @@ ALTER TABLE [schema.]table ADD [COLUMN] col TYPE [(N | MAX [, scale])]
     [, col2 TYPE …]
 ```
 
-Inline column-level constraints (CHECK / UNIQUE / PRIMARY KEY / REFERENCES, with or without `CONSTRAINT name`) all parse through the shared `ParseOneColumnIntoLists` helper that backs CREATE TABLE. Computed columns via `col AS expr [PERSISTED [NOT NULL]]` are supported and resolve against the combined (existing + new) column view.
+Inline column-level constraints (CHECK / UNIQUE / PRIMARY KEY / REFERENCES, with or without `CONSTRAINT name`) all parse through the shared `ParseOneColumnIntoLists` helper that backs CREATE TABLE.
+Computed columns via `col AS expr [PERSISTED [NOT NULL]]` are supported and resolve against the combined (existing + new) column view.
 
 The optional `COLUMN` keyword between `ADD` and the column name is accepted (probe-confirmed real SQL Server accepts both shapes); the simulator's grammar recognizes `COLUMN` as a reserved keyword here.
 
 ### Backfill semantic
 
-Existing rows are re-encoded against the new schema. Per-column backfill values:
+Existing rows are re-encoded against the new schema.
+Per-column backfill values:
 
 | Column kind | Backfill for existing rows |
 |-------------|----------------------------|
@@ -198,7 +232,8 @@ Existing rows are re-encoded against the new schema. Per-column backfill values:
 | NOT NULL without DEFAULT/IDENTITY/ROWVERSION on non-empty table | Msg 4901 (probe-confirmed) |
 | Computed (non-persisted) | No backfill — evaluated on read |
 
-The DEFAULT-evaluated-once rule is a probe-confirmed SQL Server quirk: `ALTER TABLE t ADD created datetime NOT NULL DEFAULT GETUTCDATE()` produces a single timestamp for every existing row, not a per-row evaluation. The simulator matches.
+The DEFAULT-evaluated-once rule is a probe-confirmed SQL Server quirk: `ALTER TABLE t ADD created datetime NOT NULL DEFAULT GETUTCDATE()` produces a single timestamp for every existing row, not a per-row evaluation.
+The simulator matches.
 
 ### Error paths — ADD COLUMN
 
@@ -230,13 +265,15 @@ Probe-confirmed: dropping a column referenced by ANY of the following raises **M
 - `DEFAULT` constraint attached to the column
 - `INDEX` (`CREATE INDEX`-declared — either KEY column or INCLUDE column)
 
-Each blocker emits its line with the appropriate prefix: `The object 'X' is dependent on column 'col'.` for constraints, `The index 'X' is dependent on column 'col'.` for indexes. Multiple blockers on one column emit one line each.
+Each blocker emits its line with the appropriate prefix: `The object 'X' is dependent on column 'col'.` for constraints, `The index 'X' is dependent on column 'col'.` for indexes.
+Multiple blockers on one column emit one line each.
 
 `IF EXISTS` suppresses Msg 4924 (column doesn't exist) but does NOT suppress Msg 5074 (dependencies block) — matches real SQL Server.
 
 ### Storage rewrite
 
-DROP COLUMN walks every surviving `KeyConstraint` / `Index` / `ForeignKey` (outgoing + incoming) and in-place remaps their storage / full ordinals through an `oldStorageToNew[]` / `oldFullToNew[]` map. The mutation patterns:
+DROP COLUMN walks every surviving `KeyConstraint` / `Index` / `ForeignKey` (outgoing + incoming) and in-place remaps their storage / full ordinals through an `oldStorageToNew[]` / `oldFullToNew[]` map.
+The mutation patterns:
 
 - `KeyConstraint.StorageOrdinals[i]` — array element reassignment
 - `Index.KeyColumns[i]` — slot replacement with new `IndexKeyColumn(newOrdinal, oldDescending)`
@@ -244,12 +281,17 @@ DROP COLUMN walks every surviving `KeyConstraint` / `Index` / `ForeignKey` (outg
 - `ForeignKey.ChildColumnOrdinals[i]` — array element reassignment (outgoing)
 - `ForeignKey.ReferencedColumnOrdinals[i]` — array element reassignment (incoming, since this table is the referenced side)
 
-The heap is re-encoded: each row is decoded under the old `StoredColumns` layout, projected through the surviving ordinals, and re-encoded against the new `StoredColumns`. The old `Heap` is replaced wholesale (via the now-mutable `HeapTable.Heap` field).
+The heap is re-encoded: each row is decoded under the old `StoredColumns` layout, projected through the surviving ordinals, and re-encoded against the new `StoredColumns`.
+The old `Heap` is replaced wholesale (via the now-mutable `HeapTable.Heap` field).
 
 ### Fidelity gaps — Column ops
 
-- **Eager row rewrite vs metadata-only**: Real SQL Server 2012+ optimizes many ADD COLUMN cases (nullable adds, NOT NULL constant-default adds) to metadata-only — no physical row updates. The simulator always rewrites every row. Behavior is identical; performance differs (acceptable for simulator workload sizes).
-- **DROP COLUMN inside transaction**: Real SQL Server makes column-level DDL transactional. The simulator's regular-DDL non-logging pattern (see existing CREATE/DROP TABLE quirk) extends here: ALTER TABLE ADD / DROP COLUMN doesn't participate in the undo log, so a `BEGIN TRAN` / `ROLLBACK` won't undo a column mutation. Matches the existing CREATE/DROP TABLE asymmetry.
+- **Eager row rewrite vs metadata-only**: Real SQL Server 2012+ optimizes many ADD COLUMN cases (nullable adds, NOT NULL constant-default adds) to metadata-only — no physical row updates.
+  The simulator always rewrites every row.
+  Behavior is identical; performance differs (acceptable for simulator workload sizes).
+- **DROP COLUMN inside transaction**: Real SQL Server makes column-level DDL transactional.
+  The simulator's regular-DDL non-logging pattern (see existing CREATE/DROP TABLE quirk) extends here: ALTER TABLE ADD / DROP COLUMN doesn't participate in the undo log, so a `BEGIN TRAN` / `ROLLBACK` won't undo a column mutation.
+  Matches the existing CREATE/DROP TABLE asymmetry.
 - **Table variable column ops**: `DECLARE @t TABLE` then `ALTER TABLE @t ADD …` raises Msg 102 at parse — real SQL Server's grammar also doesn't allow ALTER on table variables.
 - **Single primary error**: Real SQL Server's Msg 5074 path may pair with a trailing Msg 4922 informational; the simulator emits only the primary Msg 5074.
 
@@ -262,13 +304,17 @@ ALTER TABLE [schema.]table
     ALTER COLUMN col TYPE[(precision[, scale])] [COLLATE collation] [NULL | NOT NULL]
 ```
 
-Single-column shape only (real SQL Server's grammar doesn't accept comma-separated multi-column ALTER COLUMN). Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlterColumn`. The trailing `NULL`/`NOT NULL` keyword is optional — omitting it preserves the column's existing nullability (probe-confirmed). `COLLATE` is parse-accepted and ignored (the simulator has a single default collation).
+Single-column shape only (real SQL Server's grammar doesn't accept comma-separated multi-column ALTER COLUMN).
+Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlterColumn`.
+The trailing `NULL`/`NOT NULL` keyword is optional — omitting it preserves the column's existing nullability (probe-confirmed).
+`COLLATE` is parse-accepted and ignored (the simulator has a single default collation).
 
 The `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms aren't modeled — `Keyword.Add` / `Keyword.Drop` after the column name raises `NotSupportedException`.
 
 ### Conversion fidelity
 
-Type and length changes flow per-row through `SqlValue.CoerceTo`, which is the same conversion path CAST / CONVERT use. Real SQL Server's error codes surface verbatim:
+Type and length changes flow per-row through `SqlValue.CoerceTo`, which is the same conversion path CAST / CONVERT use.
+Real SQL Server's error codes surface verbatim:
 
 | Path | Trigger | Code |
 |------|---------|------|
@@ -296,7 +342,8 @@ Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint
 | CHECK constraint that references this column | Never (constraint survives the type change and continues to enforce against future inserts) | — |
 | DEFAULT constraint on this column | Never (default expression + constraint name survive the type change) | — |
 
-Multi-blocker enumeration follows the existing `DropColumnHasDependenciesMixed` pattern: one line per blocker, all surfaced in one Msg 5074 raise. Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs → indexes (when applicable).
+Multi-blocker enumeration follows the existing `DropColumnHasDependenciesMixed` pattern: one line per blocker, all surfaced in one Msg 5074 raise.
+Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs → indexes (when applicable).
 
 ### Rejection paths (other than Msg 5074)
 
@@ -310,22 +357,31 @@ Multi-blocker enumeration follows the existing `DropColumnHasDependenciesMixed` 
 
 ### Preservation through the column instance swap
 
-`HeapColumn` instances are immutable for most fields; ALTER COLUMN constructs a fresh `HeapColumn` for the target ordinal and inherits identity / default / generated-as / hidden state from the prior instance. Specifically:
+`HeapColumn` instances are immutable for most fields; ALTER COLUMN constructs a fresh `HeapColumn` for the target ordinal and inherits identity / default / generated-as / hidden state from the prior instance.
+Specifically:
 
-- **Identity counter**: `existingCol.Identity` (the `IdentityState` reference) carries over verbatim. The high-water mark survives, so the next INSERT after `int identity` → `bigint not null` keeps incrementing from where it left off.
-- **DEFAULT expression + constraint name**: `existingCol.Default` and `existingCol.DefaultConstraint` both carry over. Probe-confirmed: a named DEFAULT keeps its name through the alter; sys.default_constraints shows the same entry post-ALTER.
+- **Identity counter**: `existingCol.Identity` (the `IdentityState` reference) carries over verbatim.
+  The high-water mark survives, so the next INSERT after `int identity` → `bigint not null` keeps incrementing from where it left off.
+- **DEFAULT expression + constraint name**: `existingCol.Default` and `existingCol.DefaultConstraint` both carry over.
+  Probe-confirmed: a named DEFAULT keeps its name through the alter; sys.default_constraints shows the same entry post-ALTER.
 - **`is_hidden` / `GeneratedAs`**: Inherited but currently rejected up front (see table above).
 - **Inline CHECK constraints**: live on `HeapTable.CheckConstraints` keyed by `InlineColumn` name, not on the HeapColumn — so they remain wired to the column by name and continue to enforce after the rebuild.
 
 ### Storage rewrite
 
-`RewriteHeapForAlterColumn` walks every row, decoding the target column under the pre-alter `HeapColumn` and re-encoding the whole row against the post-alter `StoredColumns`. The non-altered columns are decoded then re-encoded as-is (no coercion). Strategy: build the candidate post-alter Columns array, swap it onto the table (so `StoredColumns` / `Schema` reflect the new shape before re-encoding writes), walk rows; on any failure restore the original Columns + recompute. The Heap field replaces wholesale at the end.
+`RewriteHeapForAlterColumn` walks every row, decoding the target column under the pre-alter `HeapColumn` and re-encoding the whole row against the post-alter `StoredColumns`.
+The non-altered columns are decoded then re-encoded as-is (no coercion).
+Strategy: build the candidate post-alter Columns array, swap it onto the table (so `StoredColumns` / `Schema` reflect the new shape before re-encoding writes), walk rows; on any failure restore the original Columns + recompute.
+The Heap field replaces wholesale at the end.
 
-Like ADD / DROP COLUMN, the rewrite is unconditional — even pure length widening (`varchar(50) → varchar(100)`) walks every row through decode + re-encode, because the singleton `SqlType` reference differs between lengths and the StoredColumns / Schema arrays must mirror that. Storage cost is negligible at simulator workload sizes.
+Like ADD / DROP COLUMN, the rewrite is unconditional — even pure length widening (`varchar(50) → varchar(100)`) walks every row through decode + re-encode, because the singleton `SqlType` reference differs between lengths and the StoredColumns / Schema arrays must mirror that.
+Storage cost is negligible at simulator workload sizes.
 
 ### Fidelity gaps — ALTER COLUMN
 
-- **Eager rewrite even when bytes are identical**: As above — pure length widening within the same family rewrites every row, even though the encoded bytes are byte-for-byte identical between varchar(50) and varchar(100). Performance only; behavior matches.
-- **Index protection nuance**: Real SQL Server allows length widening AND length narrowing (when data fits) under an index — both pass with the same SqlType base. The simulator allows both only when the `SqlType` subclass matches; decimal precision narrowing under an index (same `DecimalSqlType` subclass) would pass in the simulator but is probably blocked in real SQL Server (not probed; EF Migrations drops indexes before significant type changes anyway, so the gap is application-unreachable through EF).
+- **Eager rewrite even when bytes are identical**: As above — pure length widening within the same family rewrites every row, even though the encoded bytes are byte-for-byte identical between varchar(50) and varchar(100).
+  Performance only; behavior matches.
+- **Index protection nuance**: Real SQL Server allows length widening AND length narrowing (when data fits) under an index — both pass with the same SqlType base.
+  The simulator allows both only when the `SqlType` subclass matches; decimal precision narrowing under an index (same `DecimalSqlType` subclass) would pass in the simulator but is probably blocked in real SQL Server (not probed; EF Migrations drops indexes before significant type changes anyway, so the gap is application-unreachable through EF).
 - **No `ALTER COLUMN ADD/DROP` sub-clause**: PERSISTED, MASKED, ROWGUIDCOL, SPARSE sub-grammar forms raise `NotSupportedException` — none of these features are modeled at the simulator level.
 - **Non-transactional column DDL**: Same as ADD / DROP COLUMN — ALTER COLUMN bypasses the undo log; `BEGIN TRAN` / `ROLLBACK` doesn't undo the type change.

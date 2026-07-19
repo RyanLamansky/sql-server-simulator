@@ -1,26 +1,37 @@
 # Extended properties
 
-Pure metadata — no semantic effect on queries. The sproc trio, `sys.extended_properties` catalog view, and `fn_listextendedproperty` system TVF all ship.
+Pure metadata — no semantic effect on queries.
+The sproc trio, `sys.extended_properties` catalog view, and `fn_listextendedproperty` system TVF all ship.
 
 ## Storage
 
-`Database.ExtendedProperties` is a `ConcurrentDictionary<ExtendedPropertyKey, SqlValue>` keyed by `(byte class, int major_id, int minor_id, string name)`. `ExtendedPropertyKey` is a readonly struct overriding `Equals` / `GetHashCode` so the name comparison routes through `Collation.Baseline` (case-insensitive). Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape — not per-schema.
+`Database.ExtendedProperties` is a `ConcurrentDictionary<ExtendedPropertyKey, SqlValue>` keyed by `(byte class, int major_id, int minor_id, string name)`.
+`ExtendedPropertyKey` is a readonly struct overriding `Equals` / `GetHashCode` so the name comparison routes through `Collation.Baseline` (case-insensitive).
+Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape — not per-schema.
 
 ## Sproc trio
 
-`Simulation.ExtendedProperties.cs` (partial). `Simulation.Exec.cs` dispatches three branches after the `sp_executesql` route — each forwards to the shared `InvokeSpExtendedProperty(batch, ExtendedPropertyOp)` body:
+`Simulation.ExtendedProperties.cs` (partial).
+`Simulation.Exec.cs` dispatches three branches after the `sp_executesql` route — each forwards to the shared `InvokeSpExtendedProperty(batch, ExtendedPropertyOp)` body:
 
 - `sp_addextendedproperty` — add (Msg 15233 on duplicate)
 - `sp_updateextendedproperty` — update (Msg 15217 on missing)
 - `sp_dropextendedproperty` — drop (Msg 15217 on missing)
 
-Named-arg parsing handles 8 args: `@name`, `@value`, `@level0type` / `@level0name` / `@level1type` / `@level1name` / `@level2type` / `@level2name`. Argument-name comparison drops the `@` prefix (the `AtPrefixedString` token's `Value` is already `@`-stripped). Target resolution routes through `ResolveExtendedPropertyTarget`.
+Named-arg parsing handles 8 args: `@name`, `@value`, `@level0type` / `@level0name` / `@level1type` / `@level1name` / `@level2type` / `@level2name`.
+Argument-name comparison drops the `@` prefix (the `AtPrefixedString` token's `Value` is already `@`-stripped).
+Target resolution routes through `ResolveExtendedPropertyTarget`.
 
 ### Recognized level types
 
-**Level 0 (schema-container or database-scoped host):** `SCHEMA`, plus the two terminal database-scoped hosts `TRIGGER` (a database DDL trigger → class 1 OBJECT_OR_COLUMN, major_id = trigger object_id resolved through `Database.DdlTriggers`) and `FILEGROUP` (→ **class 20 DATASPACE**, major_id = `data_space_id` resolved through `Database.Filegroups`). Both are terminal — later levels don't apply — and probe-confirmed against SQL Server 2025 (`sp_addextendedproperty @name=…, @value=…, @level0type=N'TRIGGER'|N'FILEGROUP', @level0name=…`). `class_desc` for 20 is `DATASPACE`. These two land through the BACPAC loader (AW's `[SqlDatabaseDdlTrigger].[ddlDatabaseTriggerLog].[MS_Description]` + `[SqlFilegroup].[PRIMARY].[MS_Description]`); a filegroup EP is only reachable from public SQL after a bacpac registers a filegroup (no `CREATE FILEGROUP`), while a DDL-trigger EP is reachable directly (`CREATE TRIGGER … ON DATABASE` + the sproc).
+**Level 0 (schema-container or database-scoped host):** `SCHEMA`, plus the two terminal database-scoped hosts `TRIGGER` (a database DDL trigger → class 1 OBJECT_OR_COLUMN, major_id = trigger object_id resolved through `Database.DdlTriggers`) and `FILEGROUP` (→ **class 20 DATASPACE**, major_id = `data_space_id` resolved through `Database.Filegroups`).
+Both are terminal — later levels don't apply — and probe-confirmed against SQL Server 2025 (`sp_addextendedproperty @name=…, @value=…, @level0type=N'TRIGGER'|N'FILEGROUP', @level0name=…`).
+`class_desc` for 20 is `DATASPACE`.
+These two land through the BACPAC loader (AW's `[SqlDatabaseDdlTrigger].[ddlDatabaseTriggerLog].[MS_Description]` + `[SqlFilegroup].[PRIMARY].[MS_Description]`); a filegroup EP is only reachable from public SQL after a bacpac registers a filegroup (no `CREATE FILEGROUP`), while a DDL-trigger EP is reachable directly (`CREATE TRIGGER … ON DATABASE` + the sproc).
 
-**Level 1:** `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `TYPE`. **Level 2:** `COLUMN`. The level-2 resolver also handles `CONSTRAINT` (reuses class=1 OBJECT_OR_COLUMN with the constraint's own object_id as major_id; walks `HeapTable.KeyConstraints` / `CheckConstraints` / `OutgoingForeignKeys` / `Columns[].DefaultConstraint`) and `INDEX` (class=7, `(major_id=table.object_id, minor_id=index_id)` via `ComputeIndexId` mirroring `sys.indexes`'s enumeration: PK=1, others sequential in ObjectId order).
+**Level 1:** `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `TYPE`.
+**Level 2:** `COLUMN`.
+The level-2 resolver also handles `CONSTRAINT` (reuses class=1 OBJECT_OR_COLUMN with the constraint's own object_id as major_id; walks `HeapTable.KeyConstraints` / `CheckConstraints` / `OutgoingForeignKeys` / `Columns[].DefaultConstraint`) and `INDEX` (class=7, `(major_id=table.object_id, minor_id=index_id)` via `ComputeIndexId` mirroring `sys.indexes`'s enumeration: PK=1, others sequential in ObjectId order).
 
 ## Errors enforced verbatim
 
@@ -54,7 +65,9 @@ Probe-confirmed against SQL Server 2025.
 
 ### Value base-type fidelity
 
-The dict holds the raw `SqlValue` the sproc stored (`sp_addextendedproperty` assigns `arg.Value` verbatim — no coercion), so an `N'…'` literal keeps its `NVarcharSqlType` and a plain `'…'` literal its `VarcharSqlType`. `sys.extended_properties.value` wraps that value in a `sql_variant` at enumeration time (`SqlValue.FromVariant`), matching real SQL Server's `sql_variant` column. `fn_listextendedproperty.value` still surfaces as `nvarchar(MAX)` (its TVF schema is a fixed shape; DacFx's export reads `sys.extended_properties`, not the TVF).
+The dict holds the raw `SqlValue` the sproc stored (`sp_addextendedproperty` assigns `arg.Value` verbatim — no coercion), so an `N'…'` literal keeps its `NVarcharSqlType` and a plain `'…'` literal its `VarcharSqlType`.
+`sys.extended_properties.value` wraps that value in a `sql_variant` at enumeration time (`SqlValue.FromVariant`), matching real SQL Server's `sql_variant` column.
+`fn_listextendedproperty.value` still surfaces as `nvarchar(MAX)` (its TVF schema is a fixed shape; DacFx's export reads `sys.extended_properties`, not the TVF).
 
 ## `fn_listextendedproperty`
 
@@ -66,11 +79,18 @@ fn_listextendedproperty(@name, @level0type, @level0name,
                                 @level2type, @level2name)
 ```
 
-Each arg may be NULL; returns 4 columns: `objtype`, `objname`, `name`, `value`. Pipeline: parse each arg expression → eval to nullable string → build `ExtendedPropertyListFilter` from the resolved target → walk `Database.ExtendedProperties` → project matches.
+Each arg may be NULL; returns 4 columns: `objtype`, `objname`, `name`, `value`.
+Pipeline: parse each arg expression → eval to nullable string → build `ExtendedPropertyListFilter` from the resolved target → walk `Database.ExtendedProperties` → project matches.
 
-The `'default'` wildcard at any level-name slot fans out across every object of that level-type under the parent (probe-confirmed). Missing target returns zero rows (distinct from the sproc path's Msg 15135). Unknown level0/1/2 type raises `NotSupportedException`.
+The `'default'` wildcard at any level-name slot fans out across every object of that level-type under the parent (probe-confirmed).
+Missing target returns zero rows (distinct from the sproc path's Msg 15135).
+Unknown level0/1/2 type raises `NotSupportedException`.
 
 ## Known gaps
 
-- **PARAMETER level type** — not modeled (raises Msg 15600). AW doesn't exercise it. (`TRIGGER` / `FILEGROUP` level-0 hosts now ship — see [Recognized level types](#recognized-level-types).)
-- **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity). `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy. DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.
+- **PARAMETER level type** — not modeled (raises Msg 15600).
+  AW doesn't exercise it.
+  (`TRIGGER` / `FILEGROUP` level-0 hosts now ship — see [Recognized level types](#recognized-level-types).)
+- **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity).
+  `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy.
+  DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.

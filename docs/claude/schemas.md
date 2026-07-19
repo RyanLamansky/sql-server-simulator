@@ -1,87 +1,169 @@
 # Schemas and OBJECT_ID
 
 ## Schemas (`CREATE SCHEMA` + schema-qualified resolution)
-`CREATE SCHEMA <name>` adds an entry to `Database.Schemas`; subsequent two-part references (`SELECT * FROM audit.t`, `INSERT audit.t VALUES (…)`, every DML / DDL targeting a table) route through it. Unqualified references fall back to `Database.DefaultSchemaName` (`"dbo"`), which every `Database` ships pre-populated with. The 9 table-lookup sites (Selection FROM, Insert/Update/Delete/Merge targets, CREATE / DROP / TRUNCATE, SET IDENTITY_INSERT, IDENT_CURRENT, SELECT INTO) all share one parser (`BatchContext.ParseObjectName`) and one resolver pair (`BatchContext.TryResolveTable` for lookup, `BatchContext.TryResolveSchema` for CREATE-shape callsites that need the dict). Every `Database` ships with three pre-populated schemas at conventional ids: `dbo=1`, `INFORMATION_SCHEMA=3`, `sys=4`. User schemas allocate ids starting at 5 from `Database.AllocateSchemaId()` (a counter seeded so the next-allocated value is 5). Probed against SQL Server 2025 (2026-05-11).
+`CREATE SCHEMA <name>` adds an entry to `Database.Schemas`; subsequent two-part references (`SELECT * FROM audit.t`, `INSERT audit.t VALUES (…)`, every DML / DDL targeting a table) route through it.
+Unqualified references fall back to `Database.DefaultSchemaName` (`"dbo"`), which every `Database` ships pre-populated with.
+The 9 table-lookup sites (Selection FROM, Insert/Update/Delete/Merge targets, CREATE / DROP / TRUNCATE, SET IDENTITY_INSERT, IDENT_CURRENT, SELECT INTO) all share one parser (`BatchContext.ParseObjectName`) and one resolver pair (`BatchContext.TryResolveTable` for lookup, `BatchContext.TryResolveSchema` for CREATE-shape callsites that need the dict).
+Every `Database` ships with three pre-populated schemas at conventional ids: `dbo=1`, `INFORMATION_SCHEMA=3`, `sys=4`.
+User schemas allocate ids starting at 5 from `Database.AllocateSchemaId()` (a counter seeded so the next-allocated value is 5).
+Probed against SQL Server 2025 (2026-05-11).
 
 - **Duplicate `CREATE SCHEMA`** (case-insensitive) → **Msg 2714** (`"There is already an object named '<n>' in the database."` — same factory as duplicate CREATE TABLE; SQL Server shares the namespace).
-- **Reserved schema names** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 2760** (`"The specified schema name \"<n>\" either does not exist or you do not have permission to use it."`). Wording is quirky for a CREATE (says "does not exist"), but probe-confirmed verbatim — real SQL Server resolves the principal first and these schemas tie to system principals.
-- **Three-part `db.schema.t`** routes the db segment through `Simulation.Databases` (case-insensitive). Missing database surfaces as Msg 208 / 3701 / 4701 per callsite (same as a missing table); existing-but-other-database resolves cross-DB for SELECT / JOIN / catalog views, but DML / DDL through 3-part names raises `NotSupportedException` via `BatchContext.RejectCrossDatabaseMutation` (cross-DB write is its own bundle — trigger scope swapping, identity allocation routing, undo-log scoping, FK validation across DBs all need plumbing). Use `USE <db>` to switch the connection's `CurrentDatabase` for mutations. **Four-part `server.db.schema.t`** always returns false (linked-server names aren't modeled — real SQL Server raises Msg 7202 for unknown server; the simulator surfaces Msg 208 instead). Empty middle segment (`db..table`) is substituted with `dbo` at parse time so `db..table` resolves identically to `db.dbo.table` — real SQL Server uses the login's default schema; the simulator has no per-login schema and routes everything through `dbo`. This makes cross-database short-form queries (`SELECT * FROM sales..Customer`) land in the correct database; temp-table forms (`tempdb..#foo`) still work because `TryResolveTable`'s `IsLocalTempName` check operates on the leaf regardless of qualifier.
-- **`CREATE TABLE schema.t`** where `schema` doesn't exist → **Msg 2760** (target schema for the create must already exist). Distinct from FROM / INSERT / UPDATE / DELETE / MERGE / DROP / TRUNCATE access which use 208 / 3701 / 4701 respectively.
+- **Reserved schema names** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 2760** (`"The specified schema name \"<n>\" either does not exist or you do not have permission to use it."`).
+  Wording is quirky for a CREATE (says "does not exist"), but probe-confirmed verbatim — real SQL Server resolves the principal first and these schemas tie to system principals.
+- **Three-part `db.schema.t`** routes the db segment through `Simulation.Databases` (case-insensitive).
+  Missing database surfaces as Msg 208 / 3701 / 4701 per callsite (same as a missing table); existing-but-other-database resolves cross-DB for SELECT / JOIN / catalog views, but DML / DDL through 3-part names raises `NotSupportedException` via `BatchContext.RejectCrossDatabaseMutation` (cross-DB write is its own bundle — trigger scope swapping, identity allocation routing, undo-log scoping, FK validation across DBs all need plumbing).
+  Use `USE <db>` to switch the connection's `CurrentDatabase` for mutations.
+  **Four-part `server.db.schema.t`** always returns false (linked-server names aren't modeled — real SQL Server raises Msg 7202 for unknown server; the simulator surfaces Msg 208 instead).
+  Empty middle segment (`db..table`) is substituted with `dbo` at parse time so `db..table` resolves identically to `db.dbo.table` — real SQL Server uses the login's default schema; the simulator has no per-login schema and routes everything through `dbo`.
+  This makes cross-database short-form queries (`SELECT * FROM sales..Customer`) land in the correct database; temp-table forms (`tempdb..#foo`) still work because `TryResolveTable`'s `IsLocalTempName` check operates on the leaf regardless of qualifier.
+- **`CREATE TABLE schema.t`** where `schema` doesn't exist → **Msg 2760** (target schema for the create must already exist).
+  Distinct from FROM / INSERT / UPDATE / DELETE / MERGE / DROP / TRUNCATE access which use 208 / 3701 / 4701 respectively.
 - **`AUTHORIZATION owner`** and the embedded `<schema_element>` list (CREATE TABLE / VIEW / GRANT nested inside CREATE SCHEMA) aren't modeled — `AUTHORIZATION` raises `NotSupportedException`; trailing statement-starting tokens (CREATE / SELECT / INSERT / etc.) parse as their own statements in the same batch (deviates from real SQL Server's strict greedy-consume but reaches the same end state for the common idiom).
-- **No "first in batch" enforcement** — real SQL Server raises Msg 111 if CREATE SCHEMA isn't the first statement, tied to its greedy schema_element grammar. The simulator's dispatch already treats each statement as independent, so CREATE SCHEMA in any position works.
-- **`sys` and `INFORMATION_SCHEMA` host catalog views** (sys.schemas / sys.tables / sys.objects / sys.columns / INFORMATION_SCHEMA.TABLES / .COLUMNS / .SCHEMATA — see [`catalog-views.md`](catalog-views.md)). Adding a user table via `CREATE TABLE sys.foo (…)` raises `NotSupportedException` ("Cannot CREATE TABLE in the built-in 'sys' schema"); same rejection for `INFORMATION_SCHEMA`. Both `Schema` entries exist in `Database.Schemas` to carry their conventional ids and to be reachable from `sys.schemas`, but their `HeapTables` dicts stay empty — catalog views live in a separate `Simulation.CatalogViews` registry.
+- **No "first in batch" enforcement** — real SQL Server raises Msg 111 if CREATE SCHEMA isn't the first statement, tied to its greedy schema_element grammar.
+  The simulator's dispatch already treats each statement as independent, so CREATE SCHEMA in any position works.
+- **`sys` and `INFORMATION_SCHEMA` host catalog views** (sys.schemas / sys.tables / sys.objects / sys.columns / INFORMATION_SCHEMA.TABLES / .COLUMNS / .SCHEMATA — see [`catalog-views.md`](catalog-views.md)).
+  Adding a user table via `CREATE TABLE sys.foo (…)` raises `NotSupportedException` ("Cannot CREATE TABLE in the built-in 'sys' schema"); same rejection for `INFORMATION_SCHEMA`.
+  Both `Schema` entries exist in `Database.Schemas` to carry their conventional ids and to be reachable from `sys.schemas`, but their `HeapTables` dicts stay empty — catalog views live in a separate `Simulation.CatalogViews` registry.
 - **Error wording**: Msg 208 wraps the qualified name in single quotes (`Invalid object name 'badschema.t'.`); Msg 3701 (DROP) does the same; Msg 4701 (TRUNCATE) carries only the leaf (probe-confirmed asymmetric — distinct error path).
 
 ## `USE <db>`
-`USE <name>` (bare or bracketed) switches the connection's `CurrentDatabase` to the named database. Routes through `Simulation.Use.cs` / `ParseUseStatement`. **Not transactional** (probe-confirmed: `BEGIN TRAN; USE other; ROLLBACK` leaves the session pointed at `other`). Skip-mode (inside an un-taken `IF` / `WHILE`) suppresses the switch.
+`USE <name>` (bare or bracketed) switches the connection's `CurrentDatabase` to the named database.
+Routes through `Simulation.Use.cs` / `ParseUseStatement`.
+**Not transactional** (probe-confirmed: `BEGIN TRAN; USE other; ROLLBACK` leaves the session pointed at `other`).
+Skip-mode (inside an un-taken `IF` / `WHILE`) suppresses the switch.
 
-- **Missing database** → **Msg 911** (`"Database '<n>' does not exist. Make sure that the name is entered correctly."` — Class 16 State 1, probe-confirmed verbatim against SQL Server 2025). The dispatch loop's mid-batch exception abort prevents subsequent statements from running, matching real-server behavior.
+- **Missing database** → **Msg 911** (`"Database '<n>' does not exist. Make sure that the name is entered correctly."` — Class 16 State 1, probe-confirmed verbatim against SQL Server 2025).
+  The dispatch loop's mid-batch exception abort prevents subsequent statements from running, matching real-server behavior.
 - **`USE @var`** / **`USE (paren)`** → **Msg 102** via `GetNextRequired<Name>()`'s type-mismatch (probe-confirmed: real SQL Server rejects both).
 - **Switching enables cross-database mutation through 1- or 2-part names** — after `USE [other]`, an unqualified `INSERT t VALUES (…)` writes to `other.dbo.t` without tripping the 3-part-name DML guard.
 
 ## DROP SCHEMA
-`DROP SCHEMA [IF EXISTS] <name>` removes an entry from `Database.Schemas`. Routes through `Simulation.Drop.cs` alongside DROP TABLE / VIEW / FUNCTION / PROCEDURE / SEQUENCE / TRIGGER / TYPE — the dispatcher's switch on `DropTargetKind` adds a `Schema` arm.
+`DROP SCHEMA [IF EXISTS] <name>` removes an entry from `Database.Schemas`.
+Routes through `Simulation.Drop.cs` alongside DROP TABLE / VIEW / FUNCTION / PROCEDURE / SEQUENCE / TRIGGER / TYPE — the dispatcher's switch on `DropTargetKind` adds a `Schema` arm.
 
-- **Reserved schemas** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 15150** (`"Cannot drop the schema '<n>'."`) — probe-confirmed. Real SQL Server rejects these even when empty; `dbo` is also unconditionally rejected. Reuses `IsReservedSchemaName` from CreateSchema.
-- **Missing schema, no `IF EXISTS`** → **Msg 15151** (`"Cannot drop the schema '<n>', because it does not exist or you do not have permission."`). With `IF EXISTS`, the miss is silent (same shape as the temp-table / function / procedure variants).
-- **Non-empty schema** → **Msg 3729** (`"Cannot drop schema '<n>' because it is being referenced by object '<obj>'."`). Real SQL Server names the first dependent object the engine encounters in its dependency walk — often a PK / UNIQUE / CHECK constraint name rather than the table itself. The simulator's `FirstSchemaResident` walks `Schema.SchemaObjects()` first (heap tables / views / functions / procedures / sequences / triggers) and falls through to `Schema.TableTypes` (which occupies the separate type namespace); it names the table (or first-found object) rather than a constraint, since auto-named constraints aren't tracked as standalone `SchemaObject`s. Same Msg / wording prefix as the probe; the specific object-name suffix is a minor fidelity gap.
+- **Reserved schemas** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 15150** (`"Cannot drop the schema '<n>'."`) — probe-confirmed.
+  Real SQL Server rejects these even when empty; `dbo` is also unconditionally rejected.
+  Reuses `IsReservedSchemaName` from CreateSchema.
+- **Missing schema, no `IF EXISTS`** → **Msg 15151** (`"Cannot drop the schema '<n>', because it does not exist or you do not have permission."`).
+  With `IF EXISTS`, the miss is silent (same shape as the temp-table / function / procedure variants).
+- **Non-empty schema** → **Msg 3729** (`"Cannot drop schema '<n>' because it is being referenced by object '<obj>'."`).
+  Real SQL Server names the first dependent object the engine encounters in its dependency walk — often a PK / UNIQUE / CHECK constraint name rather than the table itself.
+  The simulator's `FirstSchemaResident` walks `Schema.SchemaObjects()` first (heap tables / views / functions / procedures / sequences / triggers) and falls through to `Schema.TableTypes` (which occupies the separate type namespace); it names the table (or first-found object) rather than a constraint, since auto-named constraints aren't tracked as standalone `SchemaObject`s.
+  Same Msg / wording prefix as the probe; the specific object-name suffix is a minor fidelity gap.
 
 ## ALTER SCHEMA TRANSFER
-`ALTER SCHEMA <dest> TRANSFER [(OBJECT|TYPE)::] <source>.<obj>` moves a single object from one schema to another. Routes through `Simulation.Alter.cs`'s `TryParseAlterSchemaTransfer`. The `Object` and `Type` class prefixes parse via two adjacent `:` operators (the tokenizer accepts `:` as a single-char operator — added with this bundle so the `::` separator decomposes into two tokens for the prefix grammar). Default class is `OBJECT` (the bare form with no prefix).
+`ALTER SCHEMA <dest> TRANSFER [(OBJECT|TYPE)::] <source>.<obj>` moves a single object from one schema to another.
+Routes through `Simulation.Alter.cs`'s `TryParseAlterSchemaTransfer`.
+The `Object` and `Type` class prefixes parse via two adjacent `:` operators (the tokenizer accepts `:` as a single-char operator — added with this bundle so the `::` separator decomposes into two tokens for the prefix grammar).
+Default class is `OBJECT` (the bare form with no prefix).
 
-- **OBJECT class** walks the shared object-name namespace dicts on the source `Schema`: `HeapTables` → `Views` → `Functions` → `Procedures` → `Sequences`, first-hit wins. Triggers fail-fast with **Msg 15347** (`"Cannot transfer an object that is owned by a parent object."`) — triggers belong to their parent's schema and follow the parent automatically. Found-object collision check uses `Schema.HasNameInSharedNamespace` against the destination; collision → **Msg 15530** (`"The object with name \"<n>\" already exists."`). On success, the object's `SchemaId` updates to the destination's id, its `Schema` reference reseats (every concrete `SchemaObject` derivative except `HeapTable` carries a per-instance `Schema` field), and any attached DML triggers (matching `Trigger.Parent` to the moved table / view) co-migrate into the destination's `Triggers` dict via `ReseatAttachedTriggers`.
-- **TYPE class** targets the parallel `Schema.TableTypes` dict (user-defined table types occupy a separate namespace). Same collision / found semantics, distinct factory wording (`CannotFindType` / `ObjectAlreadyExistsInDestination`).
+- **OBJECT class** walks the shared object-name namespace dicts on the source `Schema`: `HeapTables` → `Views` → `Functions` → `Procedures` → `Sequences`, first-hit wins.
+  Triggers fail-fast with **Msg 15347** (`"Cannot transfer an object that is owned by a parent object."`) — triggers belong to their parent's schema and follow the parent automatically.
+  Found-object collision check uses `Schema.HasNameInSharedNamespace` against the destination; collision → **Msg 15530** (`"The object with name \"<n>\" already exists."`).
+  On success, the object's `SchemaId` updates to the destination's id, its `Schema` reference reseats (every concrete `SchemaObject` derivative except `HeapTable` carries a per-instance `Schema` field), and any attached DML triggers (matching `Trigger.Parent` to the moved table / view) co-migrate into the destination's `Triggers` dict via `ReseatAttachedTriggers`.
+- **TYPE class** targets the parallel `Schema.TableTypes` dict (user-defined table types occupy a separate namespace).
+  Same collision / found semantics, distinct factory wording (`CannotFindType` / `ObjectAlreadyExistsInDestination`).
 - **Missing destination schema** → **Msg 15151** alter-schema variant (`"Cannot alter the schema '<n>', …"`).
 - **Missing source object** → **Msg 15151** find-object variant (`"Cannot find the object '<leaf>', …"`); the qualifier doesn't echo into the message (probe-confirmed).
 - **Same-schema transfer** (source schema = destination schema) is a silent no-op — probe-confirmed against real SQL Server.
-- **SchemaId mutability**: `SchemaObject.SchemaId` is a settable `int` (not `readonly`) so the TRANSFER path can reseat objects. Every derived type with a separate `Schema` field (`View`, `Procedure`, `UserDefinedFunction`, `Sequence`, `TableType`, `Trigger`) likewise dropped `readonly`. Apps that read `SchemaId` between transfers see the updated value.
-- **Sch-M acquisition**: every actual move (same-schema fast-path excluded) calls `batch.AcquireStatementLock(obj.SchemaLock, LockMode.SchemaModification)` on the moving object before mutating the source / destination dicts. Statement-scoped — matches the idiom every other DDL site uses (`CREATE` / `ALTER` / `DROP` / `TRUNCATE`). Same-schema transfers skip the lock acquisition along with the mutation.
+- **SchemaId mutability**: `SchemaObject.SchemaId` is a settable `int` (not `readonly`) so the TRANSFER path can reseat objects.
+  Every derived type with a separate `Schema` field (`View`, `Procedure`, `UserDefinedFunction`, `Sequence`, `TableType`, `Trigger`) likewise dropped `readonly`.
+  Apps that read `SchemaId` between transfers see the updated value.
+- **Sch-M acquisition**: every actual move (same-schema fast-path excluded) calls `batch.AcquireStatementLock(obj.SchemaLock, LockMode.SchemaModification)` on the moving object before mutating the source / destination dicts.
+  Statement-scoped — matches the idiom every other DDL site uses (`CREATE` / `ALTER` / `DROP` / `TRUNCATE`).
+  Same-schema transfers skip the lock acquisition along with the mutation.
 
 **Deferred**: `ALTER SCHEMA … TRANSFER` with the `XML SCHEMA COLLECTION::` / `PARTITION FUNCTION::` / other niche class prefixes (the simulator only models OBJECT and TYPE); `ALTER AUTHORIZATION` (no principal model); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
 
 ## Object identifiers + `OBJECT_ID()`
-Every `HeapTable` carries a stable per-database `int ObjectId` assigned at CREATE time from `Database.AllocateObjectId()` (a `Database`-scoped `Interlocked.Increment` counter seeded at 100). DROP-then-recreate yields a fresh id, matching real SQL Server (probe-confirmed 2026-05-11 — counter never reuses values). The counter bypasses transaction rollback: a rolled-back CREATE TABLE still consumed an id, matching the identity-counter rule. System tables (`SystemHeapTables`) carry a sentinel `ObjectId = -1` — they're process-shared, sit outside per-DB id space, and aren't reachable through `OBJECT_ID()` anyway. Backs `OBJECT_ID()` plus `sys.tables` / `sys.objects` / `sys.columns.object_id`.
+Every `HeapTable` carries a stable per-database `int ObjectId` assigned at CREATE time from `Database.AllocateObjectId()` (a `Database`-scoped `Interlocked.Increment` counter seeded at 100).
+DROP-then-recreate yields a fresh id, matching real SQL Server (probe-confirmed 2026-05-11 — counter never reuses values).
+The counter bypasses transaction rollback: a rolled-back CREATE TABLE still consumed an id, matching the identity-counter rule.
+System tables (`SystemHeapTables`) carry a sentinel `ObjectId = -1` — they're process-shared, sit outside per-DB id space, and aren't reachable through `OBJECT_ID()` anyway.
+Backs `OBJECT_ID()` plus `sys.tables` / `sys.objects` / `sys.columns.object_id`.
 
-**`OBJECT_ID(name [, type])`** scalar (`Parser/Expressions/ObjectId.cs`): returns the `int` ObjectId of the named object, or NULL when not found / wrong type / malformed name. The name is a runtime string parsed as a 1–3-part dotted identifier with bracket-quoting (`'[dbo].[foo]'`, `'dbo.foo'`, `'simulated.dbo.foo'` all resolve identically); 4-segment names return NULL (linked-server form unmodeled). The type filter is case-insensitive but whitespace-sensitive — `'U'` and `'u'` match user tables; `' U '`, `'XX'`, `''` all → NULL; other documented codes (`V`/`P`/`F`/`FN`/...) → NULL until those features land. A NULL on any argument propagates NULL.
+**`OBJECT_ID(name [, type])`** scalar (`Parser/Expressions/ObjectId.cs`): returns the `int` ObjectId of the named object, or NULL when not found / wrong type / malformed name.
+The name is a runtime string parsed as a 1–3-part dotted identifier with bracket-quoting (`'[dbo].[foo]'`, `'dbo.foo'`, `'simulated.dbo.foo'` all resolve identically); 4-segment names return NULL (linked-server form unmodeled).
+The type filter is case-insensitive but whitespace-sensitive — `'U'` and `'u'` match user tables; `' U '`, `'XX'`, `''` all → NULL; other documented codes (`V`/`P`/`F`/`FN`/...) → NULL until those features land.
+A NULL on any argument propagates NULL.
 
 - **Runtime-evaluated arguments**: `DECLARE @n nvarchar(100) = 'foo'; SELECT OBJECT_ID(@n)` works — both args are full `Expression`s.
-- **Temp-table divergence**: `OBJECT_ID('#foo')` resolves the session's `#foo` directly because `BatchContext.TryResolveTable` routes `#` leaves to the connection's temp dict regardless of qualifier. Real SQL Server requires the explicit `tempdb..#foo` three-part form (since unqualified resolution targets the current DB, not tempdb). The simulator's existing temp-routing simplification carries through; `OBJECT_ID('tempdb..#foo')` also works (probe-confirmed real behavior).
-- **Bracket-handling fidelity gap**: the runtime-string name parser strips bracket pairs at segment level (`'[dbo].[foo]'` → `dbo`+`foo`) and decodes `]]` → `]` inside brackets — but bracketed segments containing a literal `.` (`'[a.b].[c]'`, the literal-dot case) don't parse correctly (split on `.` happens before bracket-aware tokenization). Rare in practice; revisit if a real app hits it.
-- **Arity**: too-few-args (`OBJECT_ID()`) currently surfaces as Msg 102 (the inner Parse failure path) rather than Msg 174 — same pattern as other built-ins; the simulator doesn't enforce min-args. Too-many-args raises Msg 174 verbatim.
+- **Temp-table divergence**: `OBJECT_ID('#foo')` resolves the session's `#foo` directly because `BatchContext.TryResolveTable` routes `#` leaves to the connection's temp dict regardless of qualifier.
+  Real SQL Server requires the explicit `tempdb..#foo` three-part form (since unqualified resolution targets the current DB, not tempdb).
+  The simulator's existing temp-routing simplification carries through; `OBJECT_ID('tempdb..#foo')` also works (probe-confirmed real behavior).
+- **Bracket-handling fidelity gap**: the runtime-string name parser strips bracket pairs at segment level (`'[dbo].[foo]'` → `dbo`+`foo`) and decodes `]]` → `]` inside brackets — but bracketed segments containing a literal `.` (`'[a.b].[c]'`, the literal-dot case) don't parse correctly (split on `.` happens before bracket-aware tokenization).
+  Rare in practice; revisit if a real app hits it.
+- **Arity**: too-few-args (`OBJECT_ID()`) currently surfaces as Msg 102 (the inner Parse failure path) rather than Msg 174 — same pattern as other built-ins; the simulator doesn't enforce min-args.
+  Too-many-args raises Msg 174 verbatim.
 
 ## The system databases + database ids
 
-Every `Simulation` seeds all four SQL Server system databases — `master`, `tempdb`, `model`, `msdb` — at construction (before any `ImportBacpac` or `CreateDbConnection`), so `USE <systemdb>` (no longer Msg 911), three-part `master.sys.*` reads, `master.dbo.<proc>` calls (e.g. `xp_msver`), and SSMS's connect-time `has_dbaccess` / `msdb.dbo.*` probes all resolve without an import. All four are excluded from the initial-database fallback in `SimulatedDbConnection.ResolveInitialDatabase` (via the `Simulation.SystemDatabaseNames` set), so a fresh connection with no user database still lazily seeds and lands on `simulated`; a fresh connection with imported databases picks the alphabetically-first *user* database. The `#temp` routing is unaffected — `#foo` lives in the connection's `TempTables`, never in the seeded `tempdb` `Database`.
+Every `Simulation` seeds all four SQL Server system databases — `master`, `tempdb`, `model`, `msdb` — at construction (before any `ImportBacpac` or `CreateDbConnection`), so `USE <systemdb>` (no longer Msg 911), three-part `master.sys.*` reads, `master.dbo.<proc>` calls (e.g. `xp_msver`), and SSMS's connect-time `has_dbaccess` / `msdb.dbo.*` probes all resolve without an import.
+All four are excluded from the initial-database fallback in `SimulatedDbConnection.ResolveInitialDatabase` (via the `Simulation.SystemDatabaseNames` set), so a fresh connection with no user database still lazily seeds and lands on `simulated`; a fresh connection with imported databases picks the alphabetically-first *user* database.
+The `#temp` routing is unaffected — `#foo` lives in the connection's `TempTables`, never in the seeded `tempdb` `Database`.
 
-Database ids are a **fixed reserved map: master = 1, tempdb = 2, model = 3, msdb = 4; user databases take 5, 6, … in case-insensitive name order.** The single sources of truth are `Simulation.SystemDatabaseIds` (the name↔id map + seed list) and `DbId.DatabasesWithIds(simulation)` (which layers user ids on top), consumed by `DB_ID` / `DB_NAME`, `OBJECT_NAME(id, db_id)`, the `sys.databases.database_id` column, and `DBCC SHRINKDATABASE`'s numeric-id form — keep them consistent by routing every id lookup through `DatabasesWithIds`.
+Database ids are a **fixed reserved map: master = 1, tempdb = 2, model = 3, msdb = 4; user databases take 5, 6, … in case-insensitive name order.**
+The single sources of truth are `Simulation.SystemDatabaseIds` (the name↔id map + seed list) and `DbId.DatabasesWithIds(simulation)` (which layers user ids on top), consumed by `DB_ID` / `DB_NAME`, `OBJECT_NAME(id, db_id)`, the `sys.databases.database_id` column, and `DBCC SHRINKDATABASE`'s numeric-id form — keep them consistent by routing every id lookup through `DatabasesWithIds`.
 
-**`msdb.dbo.syspolicy_system_health_state`** is seeded as an empty object (six columns: `health_state_id bigint`, `policy_id int`, `last_run_date datetime`, `target_query_expression_with_id nvarchar(400)`, `target_query_expression nvarchar(max)`, `result bit`, probe-confirmed 2026-07-14) so SSMS's server-level Policy Health feature — which reads `has_dbaccess('msdb')` and then `select … from msdb.dbo.syspolicy_system_health_state` at connect — renders cleanly instead of raising a permission error. It's modeled as a real **VIEW** (`sys.objects.type_desc` = `VIEW`, matching the reference) whose body is a `WHERE 1 = 0` filter yielding zero rows; it's constructed directly on msdb's `dbo` schema at Simulation construction (no `CREATE VIEW` DDL, so no connection is materialized and `simulated` isn't seeded prematurely), and exists only in msdb.
+**`msdb.dbo.syspolicy_system_health_state`** is seeded as an empty object (six columns: `health_state_id bigint`, `policy_id int`, `last_run_date datetime`, `target_query_expression_with_id nvarchar(400)`, `target_query_expression nvarchar(max)`, `result bit`, probe-confirmed 2026-07-14) so SSMS's server-level Policy Health feature — which reads `has_dbaccess('msdb')` and then `select … from msdb.dbo.syspolicy_system_health_state` at connect — renders cleanly instead of raising a permission error.
+It's modeled as a real **VIEW** (`sys.objects.type_desc` = `VIEW`, matching the reference) whose body is a `WHERE 1 = 0` filter yielding zero rows; it's constructed directly on msdb's `dbo` schema at Simulation construction (no `CREATE VIEW` DDL, so no connection is materialized and `simulated` isn't seeded prematurely), and exists only in msdb.
 
 Two sibling msdb Policy objects are seeded the same way (directly on msdb's `dbo` schema at construction, so no connection is materialized), because SSMS's Object-Explorer database-node preamble reads all three on the enumeration connection — a Msg 195/208 on any of them aborted the tree build before the Databases folder enumerated (it showed empty with no surfaced error):
 
-- **`msdb.dbo.syspolicy_configuration`** — a **VIEW** projecting four probe-confirmed rows (2026-07-14): `Enabled` = `1`, `HistoryRetentionInDays` = `0`, `LogOnSuccess` = `0`, `PurgeHistoryJobGuid` = a binary GUID. Two columns: `name` + `current_value`. SSMS's PolicyStore setup reads `(SELECT current_value FROM msdb.dbo.syspolicy_configuration WHERE name = '…')` for the three integer rows and casts each to `bit` / `int`. On the real server `current_value` is `sql_variant` (int base for the three named rows, `binary` for the GUID); the simulator doesn't model sql_variant, and a single column can't hold both an int and a binary GUID, so **`current_value` is surfaced as `nvarchar`** — the integer rows stay CAST-compatible with the `bit` / `int` targets SSMS applies, and the GUID row (never cast by SSMS) carries the hex text. Values copied verbatim from the reference.
-- **`msdb.dbo.fn_syspolicy_is_automation_enabled()`** — a scalar **FUNCTION** returning `bit` `1` (probe-confirmed 2026-07-14; consistent with `syspolicy_configuration`'s `Enabled = 1`). Constructed directly as a `ScalarFunction` with body `return cast(1 as bit)`. Callable three-part as `msdb.dbo.fn_syspolicy_is_automation_enabled()` from any current database (function resolution routes 3-part names cross-DB). SSMS's PolicyHealth query is `case when 1 = msdb.dbo.fn_syspolicy_is_automation_enabled() and exists (select * from msdb.dbo.syspolicy_system_health_state where target_query_expression_with_id like 'Server%') then 1 else 0 end`; since the health-state view is empty the result is `0` regardless, but the function must resolve without error.
+- **`msdb.dbo.syspolicy_configuration`** — a **VIEW** projecting four probe-confirmed rows (2026-07-14): `Enabled` = `1`, `HistoryRetentionInDays` = `0`, `LogOnSuccess` = `0`, `PurgeHistoryJobGuid` = a binary GUID.
+  Two columns: `name` + `current_value`.
+  SSMS's PolicyStore setup reads `(SELECT current_value FROM msdb.dbo.syspolicy_configuration WHERE name = '…')` for the three integer rows and casts each to `bit` / `int`.
+  On the real server `current_value` is `sql_variant` (int base for the three named rows, `binary` for the GUID); the simulator doesn't model sql_variant, and a single column can't hold both an int and a binary GUID, so **`current_value` is surfaced as `nvarchar`** — the integer rows stay CAST-compatible with the `bit` / `int` targets SSMS applies, and the GUID row (never cast by SSMS) carries the hex text.
+  Values copied verbatim from the reference.
+- **`msdb.dbo.fn_syspolicy_is_automation_enabled()`** — a scalar **FUNCTION** returning `bit` `1` (probe-confirmed 2026-07-14; consistent with `syspolicy_configuration`'s `Enabled = 1`).
+  Constructed directly as a `ScalarFunction` with body `return cast(1 as bit)`.
+  Callable three-part as `msdb.dbo.fn_syspolicy_is_automation_enabled()` from any current database (function resolution routes 3-part names cross-DB).
+  SSMS's PolicyHealth query is `case when 1 = msdb.dbo.fn_syspolicy_is_automation_enabled() and exists (select * from msdb.dbo.syspolicy_system_health_state where target_query_expression_with_id like 'Server%') then 1 else 0 end`; since the health-state view is empty the result is `0` regardless, but the function must resolve without error.
 
 ## Database name / id scalars
 
-**`DB_ID([name])`** / **`DB_NAME([id])`** (`Parser/Expressions/DatabaseScalarFunctions.cs`): round-trip the connection's view of `Simulation.Databases` by name and id via `DbId.DatabasesWithIds` (master = 1, tempdb = 2, model = 3, msdb = 4, user databases from 5). Zero-arg `DB_ID()` returns the current database's id, zero-arg `DB_NAME()` returns its name. Unknown name / out-of-range id → NULL. NULL arg → NULL. Result types: `DB_ID` → `smallint`; `DB_NAME` → `sysname`.
+**`DB_ID([name])`** / **`DB_NAME([id])`** (`Parser/Expressions/DatabaseScalarFunctions.cs`): round-trip the connection's view of `Simulation.Databases` by name and id via `DbId.DatabasesWithIds` (master = 1, tempdb = 2, model = 3, msdb = 4, user databases from 5).
+Zero-arg `DB_ID()` returns the current database's id, zero-arg `DB_NAME()` returns its name.
+Unknown name / out-of-range id → NULL.
+NULL arg → NULL.
+Result types: `DB_ID` → `smallint`; `DB_NAME` → `sysname`.
 
-**`HAS_DBACCESS('name')`** (same file): int — **accessibility-aware, not existence-based**. `1` for an accessible hosted database (master / tempdb / msdb and every user database — the simulator has no per-login access model, so hosted ⇒ accessible), `0` for `model` (the restricted template database, inaccessible even to a normal login — probe-confirmed 2026-07-14), NULL for unknown / empty / NULL names (case-insensitive lookup; missing argument → Msg 174). So `model` is seeded and resolves through `DB_ID` / `sys.databases` yet `has_dbaccess('model')` reports `0` — the "exists but inaccessible" split. SSMS calls `has_dbaccess('msdb')` at connect to gate its Policy Health / Agent features; the seeded msdb answers `1` and the feature renders. (Prior behavior returned NULL for tempdb/model/msdb because they weren't modeled; the DB_ID/has_dbaccess tension that note flagged is now resolved — `DB_ID` resolves all four system databases, `has_dbaccess` reflects accessibility.)
+**`HAS_DBACCESS('name')`** (same file): int — **accessibility-aware, not existence-based**.
+`1` for an accessible hosted database (master / tempdb / msdb and every user database — the simulator has no per-login access model, so hosted ⇒ accessible), `0` for `model` (the restricted template database, inaccessible even to a normal login — probe-confirmed 2026-07-14), NULL for unknown / empty / NULL names (case-insensitive lookup; missing argument → Msg 174).
+So `model` is seeded and resolves through `DB_ID` / `sys.databases` yet `has_dbaccess('model')` reports `0` — the "exists but inaccessible" split.
+SSMS calls `has_dbaccess('msdb')` at connect to gate its Policy Health / Agent features; the seeded msdb answers `1` and the feature renders.
+(Prior behavior returned NULL for tempdb/model/msdb because they weren't modeled; the DB_ID/has_dbaccess tension that note flagged is now resolved — `DB_ID` resolves all four system databases, `has_dbaccess` reflects accessibility.)
 
 ## Three-part-name reach for metadata scalars
 
 Probe-confirmed against SQL Server 2025 (2026-05-23):
-- **`OBJECT_ID('db.schema.tbl')`** — the name argument's 3-part form routes to the named database through `TryResolveSchema → Simulation.Databases`. Bracketed (`'[db].[schema].[tbl]'`) and `db..tbl` shorthand (substituting `dbo` for the empty middle) both work; missing database returns NULL silently.
+- **`OBJECT_ID('db.schema.tbl')`** — the name argument's 3-part form routes to the named database through `TryResolveSchema → Simulation.Databases`.
+  Bracketed (`'[db].[schema].[tbl]'`) and `db..tbl` shorthand (substituting `dbo` for the empty middle) both work; missing database returns NULL silently.
 - **`OBJECT_NAME(id, db_id)`** — second arg routes by id (see the OBJECT_NAME entry above).
-- **`SCHEMA_ID(name)` / `SCHEMA_NAME(id)`** are strictly leaf-name / current-DB-scoped — real SQL Server returns NULL for any multi-part input. No 3-part-name reach exists.
-- Built-in scalars **cannot** be invoked through a 2- or 3-part call-site name (`claude.sys.OBJECT_ID('...')` raises "cannot find user-defined function" on real SQL Server). The simulator inherits this naturally from its 1-part-only built-in dispatch.
+- **`SCHEMA_ID(name)` / `SCHEMA_NAME(id)`** are strictly leaf-name / current-DB-scoped — real SQL Server returns NULL for any multi-part input.
+  No 3-part-name reach exists.
+- Built-in scalars **cannot** be invoked through a 2- or 3-part call-site name (`claude.sys.OBJECT_ID('...')` raises "cannot find user-defined function" on real SQL Server).
+  The simulator inherits this naturally from its 1-part-only built-in dispatch.
 
 ## Id → name scalars
 
-**`SCHEMA_NAME([id])`** (`Parser/Expressions/SchemaName.cs`): the `int → name` inverse of `SCHEMA_ID`. With an int `schema_id` argument, walks `Database.Schemas.Values` for the matching `Schema.SchemaId` and returns its `Name`. No-arg returns `Database.DefaultSchemaName` (`"dbo"`) — matches real SQL Server's "default schema for the current user" behavior (single-principal simulator). NULL arg / missing id / negative id → NULL. Result type: `sysname` (nvarchar(128)).
+**`SCHEMA_NAME([id])`** (`Parser/Expressions/SchemaName.cs`): the `int → name` inverse of `SCHEMA_ID`.
+With an int `schema_id` argument, walks `Database.Schemas.Values` for the matching `Schema.SchemaId` and returns its `Name`.
+No-arg returns `Database.DefaultSchemaName` (`"dbo"`) — matches real SQL Server's "default schema for the current user" behavior (single-principal simulator).
+NULL arg / missing id / negative id → NULL.
+Result type: `sysname` (nvarchar(128)).
 
-**`OBJECT_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectName.cs`): walks every `Schema.SchemaObjects()` (the shared object-name namespace: heap tables / views / functions / procedures / sequences / triggers) plus `Schema.TableTypes` and returns the matching object's leaf `Name`. The optional `database_id` argument is **load-bearing** (probe-confirmed against SQL Server 2025 — 2026-05-23): without it, the walk is scoped to `BatchContext.CurrentDatabase`; with it, the walk is scoped to the database at that id under `DbId.DatabasesWithIds` (master = 1, user databases from 5 — same scheme as `DB_ID` / `DB_NAME`). Different DBs allocate their own `object_id` namespaces, so the second arg disambiguates id collisions across databases. NULL `object_id` / missing id → NULL; NULL `database_id` / out-of-range `database_id` → NULL. Result type: `sysname`.
+**`OBJECT_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectName.cs`): walks every `Schema.SchemaObjects()` (the shared object-name namespace: heap tables / views / functions / procedures / sequences / triggers) plus `Schema.TableTypes` and returns the matching object's leaf `Name`.
+The optional `database_id` argument is **load-bearing** (probe-confirmed against SQL Server 2025 — 2026-05-23): without it, the walk is scoped to `BatchContext.CurrentDatabase`; with it, the walk is scoped to the database at that id under `DbId.DatabasesWithIds` (master = 1, user databases from 5 — same scheme as `DB_ID` / `DB_NAME`).
+Different DBs allocate their own `object_id` namespaces, so the second arg disambiguates id collisions across databases.
+NULL `object_id` / missing id → NULL; NULL `database_id` / out-of-range `database_id` → NULL.
+Result type: `sysname`.
 
-**`OBJECT_SCHEMA_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectSchemaName.cs`): same lookup walk as `OBJECT_NAME`; returns the owning `Schema.Name` instead of the object leaf. Same NULL / ignored-db_id semantics. Result type: `sysname`.
+**`OBJECT_SCHEMA_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectSchemaName.cs`): same lookup walk as `OBJECT_NAME`; returns the owning `Schema.Name` instead of the object leaf.
+Same NULL / ignored-db_id semantics.
+Result type: `sysname`.
 
-- **TableType / sys.objects gap**: `OBJECT_NAME` and `OBJECT_SCHEMA_NAME` both resolve table-type objects through `Schema.TableTypes` directly, so `SELECT OBJECT_NAME(type_table_object_id) FROM sys.table_types` works. `sys.objects` itself doesn't currently surface TT-rows (separate namespace per the `SchemaObjects()` enumerator's design), so the same lookup via `sys.objects WHERE type = 'TT'` returns empty. Closing the gap is a `BuiltInResources` change, not a scalar change.
+- **TableType / sys.objects gap**: `OBJECT_NAME` and `OBJECT_SCHEMA_NAME` both resolve table-type objects through `Schema.TableTypes` directly, so `SELECT OBJECT_NAME(type_table_object_id) FROM sys.table_types` works.
+  `sys.objects` itself doesn't currently surface TT-rows (separate namespace per the `SchemaObjects()` enumerator's design), so the same lookup via `sys.objects WHERE type = 'TT'` returns empty.
+  Closing the gap is a `BuiltInResources` change, not a scalar change.

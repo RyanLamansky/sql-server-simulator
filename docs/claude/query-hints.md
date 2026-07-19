@@ -1,13 +1,10 @@
 # Query hints — table & OPTION clauses (parse-and-discard)
 
-Parse-and-discard support for SQL Server's hint grammar. The simulator
-doesn't model locking / isolation / planner choices / indexes, so all
-recognized hint shapes are accepted and ignored. The value of shipping
-this is grammar compatibility: applications with `WITH (NOLOCK)` hints
-in their schema / raw SQL no longer trip `Msg 102` on parse.
+Parse-and-discard support for SQL Server's hint grammar.
+The simulator doesn't model locking / isolation / planner choices / indexes, so all recognized hint shapes are accepted and ignored.
+The value of shipping this is grammar compatibility: applications with `WITH (NOLOCK)` hints in their schema / raw SQL no longer trip `Msg 102` on parse.
 
-Implementation lives in
-[`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../../src/SqlServerSimulator/Parser/Selection.Hints.cs).
+Implementation lives in [`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../../src/SqlServerSimulator/Parser/Selection.Hints.cs).
 
 ## Table hints
 
@@ -36,32 +33,18 @@ insert into t with (tablock) (a, b) values (1, 2)
 merge into t with (tablock) as x using s on s.id = x.id …
 ```
 
-The legacy bare-paren `(hint)` form is **FROM / JOIN-RHS only** — INSERT
-treats `(` as the column-list opener (probe-confirmed Msg 207 on the
-would-be hint name), and UPDATE / DELETE / MERGE all raise Msg 102 on
-the bare-paren form. The parser signals this with the
-`allowLegacyParenForm` parameter on `ParseOptionalTableHints` (default
-`true`; INSERT / UPDATE / DELETE / MERGE pass `false`).
+The legacy bare-paren `(hint)` form is **FROM / JOIN-RHS only** — INSERT treats `(` as the column-list opener (probe-confirmed Msg 207 on the would-be hint name), and UPDATE / DELETE / MERGE all raise Msg 102 on the bare-paren form.
+The parser signals this with the `allowLegacyParenForm` parameter on `ParseOptionalTableHints` (default `true`; INSERT / UPDATE / DELETE / MERGE pass `false`).
 
-**MERGE is the odd one out for hint-vs-alias placement** — hint comes
-between the target name and the optional `[AS] alias`, not after.
+**MERGE is the odd one out for hint-vs-alias placement** — hint comes between the target name and the optional `[AS] alias`, not after.
 Real SQL Server rejects alias-then-hint on MERGE target with Msg 156.
 
-**Table-variable targets reject hints entirely** for INSERT / MERGE
-(probe-confirmed Msg 156). The parser short-circuits via
-`BatchContext.IsTableVariableName` before calling
-`ParseOptionalTableHints`; `WITH` after `@t` falls through to the
-default Msg 102 at the dispatch site.
+**Table-variable targets reject hints entirely** for INSERT / MERGE (probe-confirmed Msg 156).
+The parser short-circuits via `BatchContext.IsTableVariableName` before calling `ParseOptionalTableHints`; `WITH` after `@t` falls through to the default Msg 102 at the dispatch site.
 
-**MERGE source supports two shapes**: the parenthesized form
-`USING (VALUES … / SELECT …) AS alias` and the bare-table form
-`USING tbl [AS alias]`. Hints are accepted only on the bare-table form
-(alias-then-hint placement), matching real SQL Server: probe-confirmed
-that `USING (SELECT …) AS s WITH (NOLOCK)` raises Msg 156 (the parser
-treats WITH after the parenthesized source as a CTE prefix, not a hint
-clause). The bare-table form is alias-then-hint with the same commit-
-on-paren semantic real SQL Server applies — a trailing `(x, y)` with
-unknown names raises Msg 321 rather than falling through to Msg 102.
+**MERGE source supports two shapes**: the parenthesized form `USING (VALUES … / SELECT …) AS alias` and the bare-table form `USING tbl [AS alias]`.
+Hints are accepted only on the bare-table form (alias-then-hint placement), matching real SQL Server: probe-confirmed that `USING (SELECT …) AS s WITH (NOLOCK)` raises Msg 156 (the parser treats WITH after the parenthesized source as a CTE prefix, not a hint clause).
+The bare-table form is alias-then-hint with the same commit-on-paren semantic real SQL Server applies — a trailing `(x, y)` with unknown names raises Msg 321 rather than falling through to Msg 102.
 
 Hint-argument shapes recognized:
 
@@ -73,49 +56,35 @@ Hint-argument shapes recognized:
 
 Closed accept-list (case-insensitive, in `TableHintNames`):
 
-`NOLOCK`, `READPAST`, `READUNCOMMITTED`, `READCOMMITTED`,
-`READCOMMITTEDLOCK`, `REPEATABLEREAD`, `SERIALIZABLE`, `SNAPSHOT`,
-`HOLDLOCK`, `UPDLOCK`, `XLOCK`, `TABLOCK`, `TABLOCKX`, `ROWLOCK`,
-`PAGLOCK`, `NOWAIT`, `KEEPIDENTITY`, `KEEPDEFAULTS`, `NOEXPAND`,
-`IGNORE_CONSTRAINTS`, `IGNORE_TRIGGERS`, `FORCESEEK`, `FORCESCAN`,
-`INDEX`, `SPATIAL_WINDOW_MAX_CELLS`, `READONLY`, `REMOTE`.
+`NOLOCK`, `READPAST`, `READUNCOMMITTED`, `READCOMMITTED`, `READCOMMITTEDLOCK`, `REPEATABLEREAD`, `SERIALIZABLE`, `SNAPSHOT`, `HOLDLOCK`, `UPDLOCK`, `XLOCK`, `TABLOCK`, `TABLOCKX`, `ROWLOCK`, `PAGLOCK`, `NOWAIT`, `KEEPIDENTITY`, `KEEPDEFAULTS`, `NOEXPAND`, `IGNORE_CONSTRAINTS`, `IGNORE_TRIGGERS`, `FORCESEEK`, `FORCESCAN`, `INDEX`, `SPATIAL_WINDOW_MAX_CELLS`, `READONLY`, `REMOTE`.
 
-Unknown hint name → **Msg 321** verbatim: `"<name>" is not a recognized
-table hints option.` (probe-confirmed against SQL Server 2025).
+Unknown hint name → **Msg 321** verbatim: `"<name>" is not a recognized table hints option.` (probe-confirmed against SQL Server 2025).
 
-`NOEXPAND` (`FROM <indexed_view> WITH (NOEXPAND)` — forces the optimizer to use
-the view's own index instead of expanding it) parses and discards: the
-simulator always expands an indexed view, so results are identical. See
-[`indexes.md`](indexes.md) for indexed views.
+`NOEXPAND` (`FROM <indexed_view> WITH (NOEXPAND)` — forces the optimizer to use the view's own index instead of expanding it) parses and discards: the simulator always expands an indexed view, so results are identical.
+See [`indexes.md`](indexes.md) for indexed views.
 
 ### Legacy `(hint)` form disambiguation
 
-The legacy `FROM t (nolock)` form omits `WITH` and is FROM / JOIN-RHS
-only. After parsing a base-table name + optional alias,
-`ParseOptionalTableHints` peeks one token past `(`:
+The legacy `FROM t (nolock)` form omits `WITH` and is FROM / JOIN-RHS only.
+After parsing a base-table name + optional alias, `ParseOptionalTableHints` peeks one token past `(`:
 
 - First inner token in `TableHintNames` → consume as hint clause.
 - First inner token anything else → restore cursor; caller continues.
 
-This is safe because a base-table FROM source has no column-alias list
-(only derived tables do, and those don't pass through this code path).
+This is safe because a base-table FROM source has no column-alias list (only derived tables do, and those don't pass through this code path).
 The disambiguation is structural: peek + restore, not pattern matching.
 
-DML callers (INSERT / UPDATE / DELETE / MERGE) pass
-`allowLegacyParenForm: false`, which skips the entire peek-and-restore
-branch — a `(` after the target is always either a column list (INSERT)
-or a syntax error (UPDATE / DELETE / MERGE).
+DML callers (INSERT / UPDATE / DELETE / MERGE) pass `allowLegacyParenForm: false`, which skips the entire peek-and-restore branch — a `(` after the target is always either a column list (INSERT) or a syntax error (UPDATE / DELETE / MERGE).
 
 ### Skip-balanced-parens for arguments
 
-`INDEX(IX_foo(c1, c2))` and `OPTIMIZE FOR (@p UNKNOWN)` carry nested
-parens. `SkipBalancedParens` walks tokens until depth returns to 0;
-contents are discarded.
+`INDEX(IX_foo(c1, c2))` and `OPTIMIZE FOR (@p UNKNOWN)` carry nested parens.
+`SkipBalancedParens` walks tokens until depth returns to 0; contents are discarded.
 
 ## OPTION clause
 
-Statement-level hints in `OPTION (hint [, …])`. Position: after the
-trailing ORDER BY / OFFSET / FETCH on the outermost SELECT.
+Statement-level hints in `OPTION (hint [, …])`.
+Position: after the trailing ORDER BY / OFFSET / FETCH on the outermost SELECT.
 
 ```sql
 select 1 option (recompile)
@@ -125,151 +94,82 @@ select * from t order by id option (use hint('FORCE_LEGACY_CARDINALITY_ESTIMATIO
 
 First-word accept-list (case-insensitive, in `OptionHintFirstWords`):
 
-`RECOMPILE`, `MAXRECURSION`, `MAXDOP`, `FAST`, `LOOP`, `HASH`, `MERGE`,
-`FORCE`, `KEEPFIXED`, `KEEP`, `ROBUST`, `OPTIMIZE`, `USE`, `EXPAND`,
-`IGNORE_NONCLUSTERED_COLUMNSTORE_INDEX`, `NO_PERFORMANCE_SPOOL`,
-`QUERYTRACEON`, `TABLE`, `PARAMETERIZATION`, `ORDER`, `CONCAT`.
+`RECOMPILE`, `MAXRECURSION`, `MAXDOP`, `FAST`, `LOOP`, `HASH`, `MERGE`, `FORCE`, `KEEPFIXED`, `KEEP`, `ROBUST`, `OPTIMIZE`, `USE`, `EXPAND`, `IGNORE_NONCLUSTERED_COLUMNSTORE_INDEX`, `NO_PERFORMANCE_SPOOL`, `QUERYTRACEON`, `TABLE`, `PARAMETERIZATION`, `ORDER`, `CONCAT`.
 
-Multi-word hints (`LOOP JOIN`, `FORCE ORDER`, `KEEPFIXED PLAN`,
-`OPTIMIZE FOR UNKNOWN`, `HASH GROUP`, `CONCAT UNION`, etc.) are accepted
-via first-word match + skip-tokens-to-comma-or-paren. The trailing
-words / numeric arguments / parenthesized payloads aren't validated
-beyond bracket balancing.
+Multi-word hints (`LOOP JOIN`, `FORCE ORDER`, `KEEPFIXED PLAN`, `OPTIMIZE FOR UNKNOWN`, `HASH GROUP`, `CONCAT UNION`, etc.) are accepted via first-word match + skip-tokens-to-comma-or-paren.
+The trailing words / numeric arguments / parenthesized payloads aren't validated beyond bracket balancing.
 
 ### `USE HINT('name' [, 'name'] …)` — the one name-validated OPTION hint
 
-Every DacFx reverse-engineering query (`sqlpackage /Action:Export`) ends
-with `OPTION (USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'))`. Unlike
-the rest of the OPTION grammar (parse-and-discard, no argument check),
-`USE HINT` is the one hint whose string argument SQL Server validates by
-name, so the simulator does too (`ConsumeUseHint` in `Selection.Hints.cs`):
+Every DacFx reverse-engineering query (`sqlpackage /Action:Export`) ends with `OPTION (USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'))`.
+Unlike the rest of the OPTION grammar (parse-and-discard, no argument check), `USE HINT` is the one hint whose string argument SQL Server validates by name, so the simulator does too (`ConsumeUseHint` in `Selection.Hints.cs`):
 
 - Each argument must be a **non-null string literal** (`'…'` or `N'…'`).
-  A non-string argument or empty parens raises the generic **Msg 102**
-  (probe-confirmed: `USE HINT()` → `Incorrect syntax near ')'`,
-  `USE HINT(123)` → `near '123'`).
-- Each name is matched **case-insensitively** against `ValidUseHintNames`
-  — the contents of `sys.dm_exec_valid_use_hints` on SQL Server 2025 (35
-  names, probed 2026-07-16). An unknown name raises **Msg 10715**
-  (`'<name>' is not a valid hint.`, class 15) — distinct from the generic
-  OPTION-clause Msg 102. Real accepts a lowercase argument.
-- Combines with other OPTION hints in either order
-  (`OPTION (MAXDOP 1, USE HINT('…'))` and the reverse both parse).
-- `USE PLAN N'…'` shares the `USE` first-word but is **not** `USE HINT`
-  — the parser peeks the second word and only intercepts `HINT`,
-  leaving `USE PLAN` (and any other `USE`-prefixed hint) on the generic
-  parse-and-discard skip.
+  A non-string argument or empty parens raises the generic **Msg 102** (probe-confirmed: `USE HINT()` → `Incorrect syntax near ')'`, `USE HINT(123)` → `near '123'`).
+- Each name is matched **case-insensitively** against `ValidUseHintNames` — the contents of `sys.dm_exec_valid_use_hints` on SQL Server 2025 (35 names, probed 2026-07-16).
+  An unknown name raises **Msg 10715** (`'<name>' is not a valid hint.`, class 15) — distinct from the generic OPTION-clause Msg 102.
+  Real accepts a lowercase argument.
+- Combines with other OPTION hints in either order (`OPTION (MAXDOP 1, USE HINT('…'))` and the reverse both parse).
+- `USE PLAN N'…'` shares the `USE` first-word but is **not** `USE HINT` — the parser peeks the second word and only intercepts `HINT`, leaving `USE PLAN` (and any other `USE`-prefixed hint) on the generic parse-and-discard skip.
 
-The valid-hints list is version-specific and grows across releases — an
-app targeting a hint added after SQL Server 2025 would need a refresh in
-`ValidUseHintNames`, the same trust-region trade-off the table-hint
-accept-list carries. Tests: `QueryHintTests.Option_UseHint_*`.
+The valid-hints list is version-specific and grows across releases — an app targeting a hint added after SQL Server 2025 would need a refresh in `ValidUseHintNames`, the same trust-region trade-off the table-hint accept-list carries.
+Tests: `QueryHintTests.Option_UseHint_*`.
 
-Unknown first-word → **Msg 102** generic syntax error
-(`Incorrect syntax near '<name>'`). Probe-confirmed surprise: SQL
-Server's OPTION clause has no dedicated unknown-hint code — `BANANA`
-inside `OPTION (...)` raises the same generic syntax error as any other
-parse failure, unlike table hints' dedicated Msg 321.
+Unknown first-word → **Msg 102** generic syntax error (`Incorrect syntax near '<name>'`).
+Probe-confirmed surprise: SQL Server's OPTION clause has no dedicated unknown-hint code — `BANANA` inside `OPTION (...)` raises the same generic syntax error as any other parse failure, unlike table hints' dedicated Msg 321.
 
 ### `MAXRECURSION` retains runtime effect
 
-The only OPTION hint with observable simulator behavior is
-`MAXRECURSION N`. Its argument is strict-parsed (integer literal in
-0–32767) and applied to every in-scope `CteBinding.MaxRecursion`. The
-recursive-CTE executor reads the per-binding cap; `MAXRECURSION 0`
-disables the cap. Every other recognized OPTION hint is a pure no-op.
+The only OPTION hint with observable simulator behavior is `MAXRECURSION N`.
+Its argument is strict-parsed (integer literal in 0–32767) and applied to every in-scope `CteBinding.MaxRecursion`.
+The recursive-CTE executor reads the per-binding cap; `MAXRECURSION 0` disables the cap.
+Every other recognized OPTION hint is a pure no-op.
 
 ## Enforced rejections
 
-- **Conflict detection** — `Msg 1047` ("Conflicting locking hints
-  specified.") fires when `NOLOCK` / `READUNCOMMITTED` appears in the
-  same hint list as any of `XLOCK` / `UPDLOCK` / `HOLDLOCK` /
-  `SERIALIZABLE` / `REPEATABLEREAD` / `TABLOCKX`. The wording is fixed
-  regardless of which pair conflicted (probe-confirmed). Raised at
-  parse-time inside `ValidateHintCombinations`.
-- **DML-target rejections** — `Msg 1065` ("The NOLOCK and
-  READUNCOMMITTED lock hints are not allowed for target tables of
-  INSERT, UPDATE, DELETE or MERGE statements.") for `NOLOCK` /
-  `READUNCOMMITTED` on any DML target; `Msg 1069` ("Index hints are
-  only allowed in a FROM or OPTION clause.") for `INDEX(…)` /
-  `FORCESEEK` / `FORCESCAN` on the same. Both probe-confirmed verbatim.
-  Raised inside `ValidateDmlTargetHints` at every INSERT / UPDATE /
-  DELETE / MERGE target site. **Order matters**: Msg 1069 fires before
-  any per-index validation, so `UPDATE t WITH (INDEX(name))` always
-  raises 1069 — never reaches Msg 308.
-- **Per-table index existence** — `Msg 307` ("Index ID N on table
-  '<schema>.<table>' (specified in the FROM clause) does not exist.")
-  for an out-of-range `INDEX(N)` id; `Msg 308` ("Index '<name>' on
-  table '<schema>.<table>' …") for an unknown `INDEX(name)` /
-  `INDEX = name`. Validation rule for the integer form: `N == 0` is
-  always valid (the "heap scan" reference, accepted even on clustered
-  tables); `N >= 1` is valid iff `N <= KeyConstraints.Count +
-  Indexes.Count`. Name form matches case-insensitively against
-  `HeapTable.KeyConstraints[].Name` (PRIMARY KEY / UNIQUE) plus
-  `HeapTable.Indexes[].Name` (CREATE INDEX). Wired only into the
-  FROM-source / JOIN-RHS heap-table path (`ValidateIndexHintArguments`
-  in `Selection.Hints.cs`); arguments are captured at parse time into
-  `TableHintInfo.IndexArguments` via the dedicated
-  `ConsumeIndexHintArguments` walker (handles both `INDEX(arg [, …])`
-  and `INDEX = arg` forms; negative integer arg raises Msg 102 at
-  parse, matching probe). Multi-arg `INDEX(bad, good)` raises Msg 308
-  on the first failing argument and skips the rest.
+- **Conflict detection** — `Msg 1047` ("Conflicting locking hints specified.") fires when `NOLOCK` / `READUNCOMMITTED` appears in the same hint list as any of `XLOCK` / `UPDLOCK` / `HOLDLOCK` / `SERIALIZABLE` / `REPEATABLEREAD` / `TABLOCKX`.
+  The wording is fixed regardless of which pair conflicted (probe-confirmed).
+  Raised at parse-time inside `ValidateHintCombinations`.
+- **DML-target rejections** — `Msg 1065` ("The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.") for `NOLOCK` / `READUNCOMMITTED` on any DML target; `Msg 1069` ("Index hints are only allowed in a FROM or OPTION clause.") for `INDEX(…)` / `FORCESEEK` / `FORCESCAN` on the same.
+  Both probe-confirmed verbatim.
+  Raised inside `ValidateDmlTargetHints` at every INSERT / UPDATE / DELETE / MERGE target site.
+  **Order matters**: Msg 1069 fires before any per-index validation, so `UPDATE t WITH (INDEX(name))` always raises 1069 — never reaches Msg 308.
+- **Per-table index existence** — `Msg 307` ("Index ID N on table '<schema>.<table>' (specified in the FROM clause) does not exist.") for an out-of-range `INDEX(N)` id; `Msg 308` ("Index '<name>' on table '<schema>.<table>' …") for an unknown `INDEX(name)` / `INDEX = name`.
+  Validation rule for the integer form: `N == 0` is always valid (the "heap scan" reference, accepted even on clustered tables); `N >= 1` is valid iff `N <= KeyConstraints.Count + Indexes.Count`.
+  Name form matches case-insensitively against `HeapTable.KeyConstraints[].Name` (PRIMARY KEY / UNIQUE) plus `HeapTable.Indexes[].Name` (CREATE INDEX).
+  Wired only into the FROM-source / JOIN-RHS heap-table path (`ValidateIndexHintArguments` in `Selection.Hints.cs`); arguments are captured at parse time into `TableHintInfo.IndexArguments` via the dedicated `ConsumeIndexHintArguments` walker (handles both `INDEX(arg [, …])` and `INDEX = arg` forms; negative integer arg raises Msg 102 at parse, matching probe).
+  Multi-arg `INDEX(bad, good)` raises Msg 308 on the first failing argument and skips the rest.
 
 ## Not enforced
 
-- **`FORCESEEK(index_name(col_list))` nested-form index-name
-  validation** — the simulator skip-parses the nested syntax via
-  `SkipBalancedParens` rather than capturing the leading name, so
-  `FORCESEEK(bad_name(c))` parses silently where real SQL Server
-  raises Msg 308. The common bare `FORCESEEK` ships unaffected.
-- **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server
-  when planner can't honor the directive; the simulator has no planner
-  state to conflict over.
-- **`INDEX = (value-list)` equals-form** — probe-confirmed that real
-  SQL Server raises `Msg 102` on the equals-with-multiple-values form
-  anyway (the docs notwithstanding), so the simulator's "= takes one
-  literal" rule matches by parsing as well.
+- **`FORCESEEK(index_name(col_list))` nested-form index-name validation** — the simulator skip-parses the nested syntax via `SkipBalancedParens` rather than capturing the leading name, so `FORCESEEK(bad_name(c))` parses silently where real SQL Server raises Msg 308.
+  The common bare `FORCESEEK` ships unaffected.
+- **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server when planner can't honor the directive; the simulator has no planner state to conflict over.
+- **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
-`FROM t NOLOCK` without parens is *not* a deprecated hint shape — it
-parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server
-and the simulator. `nolock` / `readpast` / etc. aren't reserved
-keywords, so they're valid bare aliases via the standard
-`ConsumeOptionalAlias` `Name`-token path. The hint-vs-alias question
-here has only one answer (alias), no divergence.
+`FROM t NOLOCK` without parens is *not* a deprecated hint shape — it parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server and the simulator.
+`nolock` / `readpast` / etc. aren't reserved keywords, so they're valid bare aliases via the standard `ConsumeOptionalAlias` `Name`-token path.
+The hint-vs-alias question here has only one answer (alias), no divergence.
 
 ## Probe artifacts
 
-Captured 2026-05-14 against SQL Server 2025 from `/tmp/hint-probe/` and
-`/tmp/insert-hints/` (both deleted after their bundles landed). Notable
-findings:
+Captured 2026-05-14 against SQL Server 2025 from `/tmp/hint-probe/` and `/tmp/insert-hints/` (both deleted after their bundles landed).
+Notable findings:
 
-- `Msg 321` for unknown table hint, with surrounding double-quotes on
-  the offending name.
+- `Msg 321` for unknown table hint, with surrounding double-quotes on the offending name.
 - `Msg 102` for unknown OPTION hint — no dedicated code.
-- `Msg 1047` for conflicting locking hints — fixed wording ("Conflicting
-  locking hints specified.") regardless of which pair conflicted.
+- `Msg 1047` for conflicting locking hints — fixed wording ("Conflicting locking hints specified.") regardless of which pair conflicted.
 - `Msg 1065` for `NOLOCK` / `READUNCOMMITTED` on any DML target.
-- `Msg 1069` for `INDEX(…)` / `FORCESEEK` / `FORCESCAN` on any DML
-  target — fires *before* per-index validation, so unknown-name on a
-  DML target surfaces as 1069 not 308.
-- `Msg 307` for out-of-range `INDEX(N)` id — the suffix `(specified in
-  the FROM clause)` is hard-coded in the wording even though the hint
-  can appear on JOIN-RHS too.
-- `Msg 308` for unknown `INDEX(name)` / `INDEX = name`, including
-  PRIMARY KEY and UNIQUE constraint names which both qualify as valid
-  arguments. Case-insensitive lookup. Schema-qualified table reference
-  surfaces in the message as `'<schema>.<leaf>'`.
-- `INDEX(0)` is always valid — accepted on heap-only tables and on
-  PK-tables alike, even though sys.indexes only synthesizes a HEAP row
-  (index_id=0) for heap tables.
-- `INDEX(-1)` raises generic Msg 102 — negative integer literal isn't
-  in the hint-argument grammar.
-- Legacy `(hint)` form without `WITH` works on **FROM / JOIN-RHS only** —
-  rejected on every DML target.
-- MERGE target uses **hint-then-alias** placement; alias-then-hint
-  raises Msg 156 there. Every other site is alias-then-hint.
-- `INSERT t (TABLOCK) …` raises Msg 207 (the paren is always a column
-  list); the legacy form is structurally unreachable on INSERT.
+- `Msg 1069` for `INDEX(…)` / `FORCESEEK` / `FORCESCAN` on any DML target — fires *before* per-index validation, so unknown-name on a DML target surfaces as 1069 not 308.
+- `Msg 307` for out-of-range `INDEX(N)` id — the suffix `(specified in the FROM clause)` is hard-coded in the wording even though the hint can appear on JOIN-RHS too.
+- `Msg 308` for unknown `INDEX(name)` / `INDEX = name`, including PRIMARY KEY and UNIQUE constraint names which both qualify as valid arguments.
+  Case-insensitive lookup.
+  Schema-qualified table reference surfaces in the message as `'<schema>.<leaf>'`.
+- `INDEX(0)` is always valid — accepted on heap-only tables and on PK-tables alike, even though sys.indexes only synthesizes a HEAP row (index_id=0) for heap tables.
+- `INDEX(-1)` raises generic Msg 102 — negative integer literal isn't in the hint-argument grammar.
+- Legacy `(hint)` form without `WITH` works on **FROM / JOIN-RHS only** — rejected on every DML target.
+- MERGE target uses **hint-then-alias** placement; alias-then-hint raises Msg 156 there.
+  Every other site is alias-then-hint.
+- `INSERT t (TABLOCK) …` raises Msg 207 (the paren is always a column list); the legacy form is structurally unreachable on INSERT.
 - INSERT / MERGE on a `@t` target rejects `WITH` outright (Msg 156).
-- The "bare `FROM t NOLOCK` without parens" shape isn't a hint at all —
-  hint-naming identifiers aren't reserved, so it parses as bare-alias.
+- The "bare `FROM t NOLOCK` without parens" shape isn't a hint at all — hint-naming identifiers aren't reserved, so it parses as bare-alias.

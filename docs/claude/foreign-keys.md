@@ -1,6 +1,7 @@
 # Foreign Keys
 
-`FOREIGN KEY` constraints ship: inline + table-level grammar with optional `[CONSTRAINT name]`, full `ON DELETE` / `ON UPDATE` action set (`NO ACTION` / `CASCADE` / `SET NULL` / `SET DEFAULT`), runtime enforcement on `INSERT` / `UPDATE` / `DELETE` / `MERGE`, cascade chains, `DROP TABLE` protection, and the `sys.foreign_keys` + `sys.foreign_key_columns` catalog surface. Probe-confirmed against SQL Server 2025 on 2026-05-13.
+`FOREIGN KEY` constraints ship: inline + table-level grammar with optional `[CONSTRAINT name]`, full `ON DELETE` / `ON UPDATE` action set (`NO ACTION` / `CASCADE` / `SET NULL` / `SET DEFAULT`), runtime enforcement on `INSERT` / `UPDATE` / `DELETE` / `MERGE`, cascade chains, `DROP TABLE` protection, and the `sys.foreign_keys` + `sys.foreign_key_columns` catalog surface.
+Probe-confirmed against SQL Server 2025 on 2026-05-13.
 
 ## Grammar
 
@@ -42,35 +43,48 @@ Action variants:
 - `OutgoingForeignKeys` — populated on the child (referring) side as each `CREATE TABLE` finishes.
 - `IncomingForeignKeys` — populated on the parent (referenced) side at the same time.
 
-`ForeignKey` itself is in `Storage/ForeignKey.cs`: name, object id, both tables, child + referenced full-ordinal arrays, the two `ReferentialAction` values, and an `IsSystemNamed` flag. Full ordinals (not storage ordinals) because the enforcement loop materializes whole rows.
+`ForeignKey` itself is in `Storage/ForeignKey.cs`: name, object id, both tables, child + referenced full-ordinal arrays, the two `ReferentialAction` values, and an `IsSystemNamed` flag.
+Full ordinals (not storage ordinals) because the enforcement loop materializes whole rows.
 
-The two lists wire up symmetrically during the CREATE pass via `Simulation.ResolveForeignKeys`. Self-referencing FKs are supported (the parent table is already in its schema dict by the time the FK resolves).
+The two lists wire up symmetrically during the CREATE pass via `Simulation.ResolveForeignKeys`.
+Self-referencing FKs are supported (the parent table is already in its schema dict by the time the FK resolves).
 
 ## Validation at CREATE
 
 1. **Referenced table must exist** — `MultiPartName` lookup against the live schema dict; missing → Msg 208.
-2. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`. Mismatch → Msg 1776.
-3. **Cascade-cycle / multiple-path check** — when the new FK declares any non-NO_ACTION action, the resolver walks the existing FK graph (plus the FKs already queued in this same `CREATE TABLE` statement) looking for either a self-reference or a path from `newFk.ReferencedTable` back to `newFk.ChildTable`. Either condition → Msg 1785.
+2. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
+   Mismatch → Msg 1776.
+3. **Cascade-cycle / multiple-path check** — when the new FK declares any non-NO_ACTION action, the resolver walks the existing FK graph (plus the FKs already queued in this same `CREATE TABLE` statement) looking for either a self-reference or a path from `newFk.ReferencedTable` back to `newFk.ChildTable`.
+   Either condition → Msg 1785.
 
-The validation runs across the full pending FK list *before* mutating either table's `OutgoingForeignKeys` / `IncomingForeignKeys`. A failure unwinds the partial `CREATE TABLE` by removing the new table from its dict.
+The validation runs across the full pending FK list *before* mutating either table's `OutgoingForeignKeys` / `IncomingForeignKeys`.
+A failure unwinds the partial `CREATE TABLE` by removing the new table from its dict.
 
 ## Enforcement
 
 ### Child side (INSERT / UPDATE / MERGE-INSERT / MERGE-UPDATE)
 
-After per-row check + key validation, `EnforceOutgoingForeignKeys` walks `table.OutgoingForeignKeys`. For each FK:
+After per-row check + key validation, `EnforceOutgoingForeignKeys` walks `table.OutgoingForeignKeys`.
+For each FK:
 
 - A NULL in any child FK column **skips the check** (probe-confirmed — applies to partial NULL in composite FKs too).
-- A non-NULL tuple that doesn't match any row of the parent on the FK's referenced columns → Msg 547 with the FK name and the parent's qualified table reference. Single-column FK appends `, column 'X'`; composite FK omits the column phrase. Self-referencing FK substitutes `FOREIGN KEY SAME TABLE` for `FOREIGN KEY`.
+- A non-NULL tuple that doesn't match any row of the parent on the FK's referenced columns → Msg 547 with the FK name and the parent's qualified table reference.
+  Single-column FK appends `, column 'X'`; composite FK omits the column phrase.
+  Self-referencing FK substitutes `FOREIGN KEY SAME TABLE` for `FOREIGN KEY`.
 
-`ReferencedRowExists` **seeks** the parent rather than scanning it: the referenced columns are always a PK/UNIQUE key, so it probes the parent's per-`Heap` [`HeapSeekCache`](indexes.md) on those columns (the parent's own index, incrementally maintained) and verifies each candidate against live bytes — there's no residual WHERE to discard the cache's stale-entry false-positives, so the verify is mandatory. Bulk child inserts against a large parent drop from O(children × parent) to one parent-index build plus O(1) per insert (measured ~67× faster for 2 000 inserts against a 20 000-row parent, and the ratio grows with parent size). A computed (non-stored) referenced column falls back to the full scan. The full→storage ordinal map is `HeapTable.StorageOrdinals[fullOrdinal]`.
+`ReferencedRowExists` **seeks** the parent rather than scanning it: the referenced columns are always a PK/UNIQUE key, so it probes the parent's per-`Heap` [`HeapSeekCache`](indexes.md) on those columns (the parent's own index, incrementally maintained) and verifies each candidate against live bytes — there's no residual WHERE to discard the cache's stale-entry false-positives, so the verify is mandatory.
+Bulk child inserts against a large parent drop from O(children × parent) to one parent-index build plus O(1) per insert (measured ~67× faster for 2 000 inserts against a 20 000-row parent, and the ratio grows with parent size).
+A computed (non-stored) referenced column falls back to the full scan.
+The full→storage ordinal map is `HeapTable.StorageOrdinals[fullOrdinal]`.
 
 ### Parent side (DELETE / UPDATE / MERGE-DELETE / MERGE-UPDATE)
 
-After parent-side mutations, `EnforceIncomingForeignKeys` (for DELETE) and `EnforceIncomingFkOnUpdate` (for UPDATE) walk `table.IncomingForeignKeys`. For each FK:
+After parent-side mutations, `EnforceIncomingForeignKeys` (for DELETE) and `EnforceIncomingFkOnUpdate` (for UPDATE) walk `table.IncomingForeignKeys`.
+For each FK:
 
 - **UPDATE-side filter**: rows whose referenced-column tuple didn't change are skipped (a non-PK update on the parent is a no-op for the FK).
-- For each parent row whose values were affected, find the child rows whose FK tuple matches the parent's old value via `MatchChildRowsToParents`: it **seeks** the child's `HeapSeekCache` on the FK columns once per affected parent key (verifying each candidate against live bytes, de-duplicating by address), falling back to a single full child scan only when an FK column isn't stored. Unlike real SQL Server — where an un-indexed FK child column forces a table scan on every parent delete (the classic "always index your FKs" pitfall) — the simulator builds the FK-column index on first touch and amortizes it, so cascades stay fast regardless of declared indexes (a performance divergence, not an observable-behavior one; the result set is identical).
+- For each parent row whose values were affected, find the child rows whose FK tuple matches the parent's old value via `MatchChildRowsToParents`: it **seeks** the child's `HeapSeekCache` on the FK columns once per affected parent key (verifying each candidate against live bytes, de-duplicating by address), falling back to a single full child scan only when an FK column isn't stored.
+  Unlike real SQL Server — where an un-indexed FK child column forces a table scan on every parent delete (the classic "always index your FKs" pitfall) — the simulator builds the FK-column index on first touch and amortizes it, so cascades stay fast regardless of declared indexes (a performance divergence, not an observable-behavior one; the result set is identical).
 - If matches exist, dispatch on the FK's `DeleteAction` (for DELETE) or `UpdateAction` (for UPDATE):
 
 | Action | Behavior |
@@ -81,11 +95,13 @@ After parent-side mutations, `EnforceIncomingForeignKeys` (for DELETE) and `Enfo
 | `SET NULL` | Rewrite each child row's FK columns to NULL. |
 | `SET DEFAULT` | Rewrite each child row's FK columns to each column's `DEFAULT` expression (NULL if no default). |
 
-Statement-level atomicity continues to apply: a Msg 547 raised mid-cascade unwinds via the undo log, leaving the entire statement's mutations reverted. Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupportedException`.
+Statement-level atomicity continues to apply: a Msg 547 raised mid-cascade unwinds via the undo log, leaving the entire statement's mutations reverted.
+Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupportedException`.
 
 ## DROP TABLE protection
 
-A table with `IncomingForeignKeys.Count > 0` cannot be dropped — Msg 3726 (`Could not drop object '<name>' because it is referenced by a FOREIGN KEY constraint.`). Drop the child first, or drop the FK via `ALTER TABLE … DROP CONSTRAINT` (deferred).
+A table with `IncomingForeignKeys.Count > 0` cannot be dropped — Msg 3726 (`Could not drop object '<name>' because it is referenced by a FOREIGN KEY constraint.`).
+Drop the child first, or drop the FK via `ALTER TABLE … DROP CONSTRAINT` (deferred).
 
 On a successful `DROP TABLE`, the dropped table's `OutgoingForeignKeys` are detached from each parent's `IncomingForeignKeys` list so subsequent DROPs on the parent see the up-to-date reference count.
 
@@ -93,7 +109,8 @@ On a successful `DROP TABLE`, the dropped table's `OutgoingForeignKeys` are deta
 
 ### `sys.objects`
 
-Each FK emits a `'F '` / `FOREIGN_KEY_CONSTRAINT` row interleaved after its child table's row (matching the probe-confirmed `sys.objects` shape). `parent_object_id` is the child table's id.
+Each FK emits a `'F '` / `FOREIGN_KEY_CONSTRAINT` row interleaved after its child table's row (matching the probe-confirmed `sys.objects` shape).
+`parent_object_id` is the child table's id.
 
 ### `sys.foreign_keys` — 22 columns
 
@@ -119,7 +136,8 @@ Each FK emits a `'F '` / `FOREIGN_KEY_CONSTRAINT` row interleaved after its chil
 
 ### `sys.foreign_key_columns` — 6 columns
 
-One row per (FK, column-pair). Composite FKs emit one row per participating column with `constraint_column_id` starting at 1.
+One row per (FK, column-pair).
+Composite FKs emit one row per participating column with `constraint_column_id` starting at 1.
 
 | Column | Source |
 |--------|--------|
@@ -132,7 +150,8 @@ One row per (FK, column-pair). Composite FKs emit one row per participating colu
 
 ### `OBJECT_ID(name, 'F')`
 
-Not modeled. The simulator's `OBJECT_ID` only recognizes `U` / `FN` / `IF` / `TF` / `V` / `P` filters today; adding `'F'` is straightforward but no application probed uses it.
+Not modeled.
+The simulator's `OBJECT_ID` only recognizes `U` / `FN` / `IF` / `TF` / `V` / `P` filters today; adding `'F'` is straightforward but no application probed uses it.
 
 ## Auto-generated FK name
 
@@ -145,14 +164,21 @@ The 8-hex suffix is deterministic across runs (FNV-1a over table name + column n
 
 ## EF Core integration
 
-`HasOne` / `WithMany` / `HasForeignKey` end-to-end. EF Core's SqlServer provider emits inline + table-level FK shapes during `EnsureCreated`, but `EnsureCreated` itself runs through `sys.extended_properties` which the simulator doesn't model — so the canonical pattern is to **bootstrap tables with raw `CREATE TABLE` containing the FK**, then exercise the LINQ surface against the schema (same convention as `EFCoreHiLo`). Once tables exist:
+`HasOne` / `WithMany` / `HasForeignKey` end-to-end.
+EF Core's SqlServer provider emits inline + table-level FK shapes during `EnsureCreated`, but `EnsureCreated` itself runs through `sys.extended_properties` which the simulator doesn't model — so the canonical pattern is to **bootstrap tables with raw `CREATE TABLE` containing the FK**, then exercise the LINQ surface against the schema (same convention as `EFCoreHiLo`).
+Once tables exist:
 
 - Child INSERT through `SaveChanges` validates the FK; violations surface as `DbUpdateException` wrapping the simulator's Msg 547.
 - `OnDelete(DeleteBehavior.Cascade)` matches the SQL `ON DELETE CASCADE` clause — server-side cascade applies through raw SQL DELETE on the connection.
 
 ## Fidelity gaps
 
-- **`key_index_id` in `sys.foreign_keys`** — Always reports `1`. Real SQL Server reports the index id on the parent table that backs the FK's referenced columns; the simulator has no index storage, so 1 is the canonical "the FK is backed by the parent's PK / first UQ" answer.
-- **Composite FK that references a multi-column UNIQUE where the column order differs from the FK column order** — accepted by `ReferencedColumnsFormKey`'s set-equality check; real SQL Server matches the column order as declared. Probe didn't surface this case; the simulator's matching rule is slightly looser.
-- **`OBJECT_ID(name, 'F')`** — Returns NULL. The handful of `F`-filter callers in the wild can use `select object_id from sys.foreign_keys where name = …` instead.
-- **`SET DEFAULT` when the column has no `DEFAULT` clause** — Real SQL Server raises Msg 1789 at CREATE TABLE if the FK column's `SET DEFAULT` would resolve to NULL on a NOT NULL column. The simulator defers the check to runtime, where the resulting NULL fails Msg 515 instead. Same end state (the statement fails); different error code.
+- **`key_index_id` in `sys.foreign_keys`** — Always reports `1`.
+  Real SQL Server reports the index id on the parent table that backs the FK's referenced columns; the simulator has no index storage, so 1 is the canonical "the FK is backed by the parent's PK / first UQ" answer.
+- **Composite FK that references a multi-column UNIQUE where the column order differs from the FK column order** — accepted by `ReferencedColumnsFormKey`'s set-equality check; real SQL Server matches the column order as declared.
+  Probe didn't surface this case; the simulator's matching rule is slightly looser.
+- **`OBJECT_ID(name, 'F')`** — Returns NULL.
+  The handful of `F`-filter callers in the wild can use `select object_id from sys.foreign_keys where name = …` instead.
+- **`SET DEFAULT` when the column has no `DEFAULT` clause** — Real SQL Server raises Msg 1789 at CREATE TABLE if the FK column's `SET DEFAULT` would resolve to NULL on a NOT NULL column.
+  The simulator defers the check to runtime, where the resulting NULL fails Msg 515 instead.
+  Same end state (the statement fails); different error code.
